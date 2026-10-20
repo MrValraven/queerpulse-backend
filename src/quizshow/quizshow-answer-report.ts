@@ -11,8 +11,10 @@ interface AnswerReportRow {
   id: string;
   session_id: string;
   question_id: string;
-  event_id: string;
-  event_slug: string;
+  event_id: string | null;
+  event_slug: string | null;
+  quiz_id: string;
+  owner_user_id: string | null;
   text: string | null;
   received_at: Date;
   hidden_at: Date | null;
@@ -71,8 +73,8 @@ function findSnapshotQuestion(
  * Reads one Pulse Live answer for a report and returns the snapshot kept as
  * evidence. Returns `null` (the caller answers 404) when the answer is gone,
  * when the reporter wrote it, or when the reporter may not file: an organiser
- * of the event may always file; a player files only when they were
- * eligible for the question (not removed, joined at or before it opened) and
+ * of the event, or the owner of the game, may always file; a player files
+ * only when they were eligible for the question (not removed, joined at or before it opened) and
  * saw the answer after the reveal (never hidden, or hidden after it).
  */
 export async function captureQuizshowAnswerForReport(
@@ -89,11 +91,12 @@ export async function captureQuizshowAnswerForReport(
             "author"."user_id" AS "author_user_id",
             "session"."event_id", "session"."question_log",
             "session"."quiz_snapshot", "event"."slug" AS "event_slug",
-            ("event"."host_id" = $2 OR EXISTS (
+            "quiz"."id" AS "quiz_id", "quiz"."owner_user_id",
+            (("event"."host_id" = $2 OR EXISTS (
                SELECT 1 FROM "event_cohosts" "cohost"
                WHERE "cohost"."event_id" = "event"."id"
                  AND "cohost"."user_id" = $2
-            )) AS "is_organiser",
+            )) OR "quiz"."owner_user_id" = $2) IS TRUE AS "is_organiser",
             (SELECT "reporter"."joined_at" FROM "quizshow_players" "reporter"
              WHERE "reporter"."session_id" = "session"."id"
                AND "reporter"."user_id" = $2
@@ -101,7 +104,8 @@ export async function captureQuizshowAnswerForReport(
      FROM "quizshow_answers" "answer"
      JOIN "quizshow_players" "author" ON "author"."id" = "answer"."player_id"
      JOIN "quizshow_sessions" "session" ON "session"."id" = "answer"."session_id"
-     JOIN "events" "event" ON "event"."id" = "session"."event_id"
+     JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "session"."quiz_id"
+     LEFT JOIN "events" "event" ON "event"."id" = "session"."event_id"
      WHERE "answer"."id" = $1`,
     [answerId, reporterId],
   );
@@ -128,6 +132,8 @@ export async function captureQuizshowAnswerForReport(
     sessionId: row.session_id,
     eventId: row.event_id,
     eventSlug: row.event_slug,
+    // A game answer names its game; an event answer leaves this null.
+    gameId: row.owner_user_id ? row.quiz_id : null,
     roundKind: question.roundKind,
     questionPrompt: question.questionPrompt,
     text: row.text,

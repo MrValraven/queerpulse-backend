@@ -45,6 +45,7 @@ export type SubprofileKind =
   | 'game_designer'
   | 'artist_3d'
   | 'printmaker'
+  | 'architect'
   // page
   | 'journalist'
   | 'poet'
@@ -285,7 +286,10 @@ export type SubprofileSection =
   | 'wanna_dos'
   | 'guest_spots'
   | 'flash_days'
-  | 'shop';
+  | 'shop'
+  // Architect (+2). 'projects' is reused from above.
+  | 'built_work'
+  | 'competitions';
 
 // kind -> ordered content sections (excludes the universal 'links')
 export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
@@ -340,6 +344,7 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   game_designer: ['games', 'jams'],
   artist_3d: ['models', 'clients'],
   printmaker: ['editions', 'workshops'],
+  architect: ['built_work', 'projects', 'competitions'],
   // page
   journalist: ['reporting', 'bylines'],
   poet: ['poems', 'readings'],

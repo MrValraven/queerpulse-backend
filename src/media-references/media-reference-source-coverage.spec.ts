@@ -393,7 +393,9 @@ describe('Pulse Live question images', () => {
     const { dataSource, query } = dataSourceReturning([
       {
         media_ref: imageKey,
-        event_id: 'event-1',
+        quiz_id: 'quiz-1',
+        quiz_title: null,
+        quiz_event_id: 'event-1',
         event_title: 'Quiz night',
         event_slug: 'quiz-night',
       },
@@ -426,13 +428,17 @@ describe('Pulse Live question images', () => {
     const { dataSource } = dataSourceReturning([
       {
         media_ref: imageKey,
-        event_id: 'event-1',
+        quiz_id: 'quiz-1',
+        quiz_title: null,
+        quiz_event_id: 'event-1',
         event_title: 'First quiz night',
         event_slug: 'first-quiz-night',
       },
       {
         media_ref: `/files/${imageKey}`,
-        event_id: 'event-2',
+        quiz_id: 'quiz-2',
+        quiz_title: null,
+        quiz_event_id: 'event-2',
         event_title: 'Second quiz night',
         event_slug: 'second-quiz-night',
       },
@@ -455,13 +461,17 @@ describe('Pulse Live question images', () => {
     const { dataSource } = dataSourceReturning([
       {
         media_ref: imageKey,
-        event_id: 'event-1',
+        quiz_id: 'quiz-1',
+        quiz_title: null,
+        quiz_event_id: 'event-1',
         event_title: 'Quiz night',
         event_slug: 'quiz-night',
       },
       {
         media_ref: `/files/${imageKey}`,
-        event_id: 'event-1',
+        quiz_id: 'quiz-1',
+        quiz_title: null,
+        quiz_event_id: 'event-1',
         event_title: 'Quiz night',
         event_slug: 'quiz-night',
       },
@@ -492,6 +502,162 @@ describe('Pulse Live question images', () => {
     expect(sql).toContain(
       `"session"."status" IN ('lobby', 'running', 'paused')`,
     );
+  });
+
+  it('links a game question image to the game with its title', async () => {
+    const gameOwnerId = '3f1a2b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b';
+    const imageKey = `work/${gameOwnerId}/7c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f.jpg`;
+    const { dataSource, query } = dataSourceReturning([
+      {
+        media_ref: imageKey,
+        quiz_id: 'quiz-9',
+        quiz_title: 'Friday trivia',
+        quiz_event_id: null,
+        quiz_owner_user_id: gameOwnerId,
+        event_title: null,
+        event_slug: null,
+      },
+    ]);
+
+    const resolved = await questionSource!.resolve(
+      dataSource,
+      new Set([imageKey]),
+      [imageKey, `/files/${imageKey}`],
+    );
+
+    expect(resolved).toEqual([
+      [
+        imageKey,
+        {
+          type: 'quizshow-game-question',
+          entityId: 'quiz-9',
+          label: 'Friday trivia',
+          slug: '',
+        },
+      ],
+    ]);
+    const [firstCall] = query.mock.calls as Array<[string, unknown[]]>;
+    expect(String(firstCall?.[0])).toContain(
+      '"quiz"."owner_user_id" AS "quiz_owner_user_id"',
+    );
+  });
+
+  it("hides another member's game title from an uploader's media", async () => {
+    const coHostId = '4a2b3c5d-6e7f-4a81-9b0c-1d2e3f4a5b6c';
+    const gameOwnerId = '3f1a2b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b';
+    const imageKey = `work/${coHostId}/8d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a.jpg`;
+    const ownerlessKey = 'work-image/u1/ownerless.jpg';
+    const { dataSource } = dataSourceReturning([
+      {
+        media_ref: imageKey,
+        quiz_id: 'quiz-9',
+        quiz_title: 'Private game title',
+        quiz_event_id: null,
+        quiz_owner_user_id: gameOwnerId,
+        event_title: null,
+        event_slug: null,
+      },
+      {
+        media_ref: ownerlessKey,
+        quiz_id: 'quiz-9',
+        quiz_title: 'Private game title',
+        quiz_event_id: null,
+        quiz_owner_user_id: gameOwnerId,
+        event_title: null,
+        event_slug: null,
+      },
+    ]);
+
+    const resolved = await questionSource!.resolve(
+      dataSource,
+      new Set([imageKey, ownerlessKey]),
+      [imageKey, ownerlessKey],
+    );
+
+    expect(resolved).toEqual([
+      [
+        imageKey,
+        {
+          type: 'quizshow-game-question',
+          entityId: 'quiz-9',
+          label: '',
+          slug: '',
+        },
+      ],
+      [
+        ownerlessKey,
+        {
+          type: 'quizshow-game-question',
+          entityId: 'quiz-9',
+          label: '',
+          slug: '',
+        },
+      ],
+    ]);
+  });
+
+  it('names an image of an open game session once per game', async () => {
+    const imageKey = 'work-image/u1/open-game.jpg';
+    const gameRow = {
+      quiz_id: 'quiz-9',
+      quiz_title: 'Friday trivia',
+      quiz_event_id: null,
+      event_title: null,
+      event_slug: null,
+    };
+    const { dataSource } = dataSourceReturning([
+      { media_ref: imageKey, ...gameRow },
+      { media_ref: `/files/${imageKey}`, ...gameRow },
+    ]);
+
+    const resolved = await questionSource!.resolve(
+      dataSource,
+      new Set([imageKey]),
+      [imageKey, `/files/${imageKey}`],
+    );
+
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.[1].entityId).toBe('quiz-9');
+  });
+
+  it('keeps an event question image on the event', async () => {
+    const imageKey = 'work-image/u1/event.jpg';
+    const { dataSource } = dataSourceReturning([
+      {
+        media_ref: imageKey,
+        quiz_id: 'quiz-1',
+        quiz_title: 'Quiz night quiz',
+        quiz_event_id: 'event-1',
+        event_title: 'Quiz night',
+        event_slug: 'quiz-night',
+      },
+    ]);
+
+    const resolved = await questionSource!.resolve(
+      dataSource,
+      new Set([imageKey]),
+      [imageKey, `/files/${imageKey}`],
+    );
+
+    expect(resolved[0]?.[1]).toEqual({
+      type: 'quizshow-question',
+      entityId: 'event-1',
+      label: 'Quiz night',
+      slug: 'quiz-night',
+    });
+  });
+
+  it('joins events with a left join', async () => {
+    const { dataSource, query } = dataSourceReturning([]);
+
+    await questionSource!.resolve(
+      dataSource,
+      new Set(['work-image/u1/a.jpg']),
+      ['work-image/u1/a.jpg'],
+    );
+
+    const [firstCall] = query.mock.calls as Array<[string, unknown[]]>;
+    expect(String(firstCall?.[0])).toContain('LEFT JOIN "events"');
   });
 
   it('runs no query for an empty candidate set', async () => {

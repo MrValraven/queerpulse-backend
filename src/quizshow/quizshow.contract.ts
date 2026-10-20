@@ -100,6 +100,7 @@ export const QUIZSHOW_STARTER_PACK_KEYS = [
   'portuguese_queer_culture',
   'eurovision',
   'drag_herstory',
+  'lisbon_queer_icons',
 ] as const;
 export type QuizshowStarterPackKey =
   (typeof QUIZSHOW_STARTER_PACK_KEYS)[number];
@@ -130,6 +131,10 @@ export const QUIZSHOW_ERROR_CODES = [
   'quizshow_organiser_running',
   'quizshow_session_full',
   'quizshow_results_not_found',
+  'quizshow_game_not_found',
+  'quizshow_game_limit_reached',
+  'quizshow_lobby_rate_limited',
+  'quizshow_game_adults_rounds_need_switch',
   // socket
   'quizshow_session_not_found',
   'quizshow_already_attached',
@@ -160,6 +165,7 @@ export const QUIZSHOW_ERROR_CODES = [
   'quizshow_player_not_found',
   'quizshow_answer_not_found',
   'quizshow_rate_limited',
+  'quizshow_adult_consent_required',
   // existing, reused as is
   'ACCOUNT_RESTRICTED',
 ] as const;
@@ -388,17 +394,57 @@ export interface QuizshowQuizProblem {
   language: QuizshowLanguage | null;
 }
 
+/** Whether a quiz belongs to an event or stands alone as a game of one member. */
+export type QuizshowScopeKind = 'event' | 'game';
+
+export const QUIZSHOW_GAMES_PER_MEMBER_MAX = 50;
+export const QUIZSHOW_LOBBY_OPENS_PER_HOUR_MAX = 10;
+
+/** The import body: a starter pack, an event the caller organises, or a game the caller owns. */
+export type QuizshowImportInput =
+  | { from: 'pack'; packKey: QuizshowStarterPackKey }
+  | { from: 'event'; eventSlug: string }
+  | { from: 'game'; gameId: string };
+
+export interface QuizshowGameSummary {
+  id: string;
+  title: string;
+  roundCount: number;
+  questionCount: number;
+  isAdultsOnly: boolean;
+  liveSession: QuizshowLiveSessionRef | null;
+  hasResults: boolean;
+  updatedAt: string;
+}
+export interface QuizshowGameListResponse {
+  games: QuizshowGameSummary[]; // newest updatedAt first
+  limit: number; // QUIZSHOW_GAMES_PER_MEMBER_MAX
+}
+export interface QuizshowCreateGameInput {
+  title: string; // 1..120 after trim
+  source: QuizshowImportInput | null; // null = blank game
+}
+/** PUT body: the quiz input plus the game's 18+ switch. */
+export type QuizshowGameInput = QuizshowQuizInput & { isAdultsOnly: boolean };
+/** `isAdultsEvent` mirrors `isAdultsOnly`, so the builder's adults-label gate reads one field for both kinds. */
+export interface QuizshowGameResponse extends QuizshowQuizResponse {
+  gameId: string;
+  isAdultsOnly: boolean;
+}
+
 export interface QuizshowImportSource {
-  eventSlug: string;
-  eventTitle: string;
-  startAt: string;
+  kind: QuizshowScopeKind;
+  eventSlug: string | null; // event sources
+  eventTitle: string | null;
+  startAt: string | null;
+  gameId: string | null; // game sources
   quizTitle: string;
   roundCount: number;
   questionCount: number;
   hasAdultsRounds: boolean;
   /** Same `seriesId` as `:slug`. The empty state's "Copy from the last event in
    *  this series" picks the first item with this flag and `startAt` before the event. */
-  isSameSeries: boolean;
+  isSameSeries: boolean; // always false for game sources
 }
 
 export interface QuizshowStarterPackCard {
@@ -420,10 +466,19 @@ export interface QuizshowOpenSessionInput {
   shouldReplaceResults: boolean;
 }
 
+export interface QuizshowJoinHost {
+  name: string; // the owner's member display name
+  avatarUrl: string | null;
+  memberSlug: string; // the frontend links /members/:slug
+}
 export interface QuizshowJoinResponse {
   sessionId: string;
-  eventSlug: string;
-  eventTitle: string;
+  kind: QuizshowScopeKind;
+  eventSlug: string | null; // event games
+  eventTitle: string | null;
+  quizTitle: string;
+  isAdultsOnly: boolean; // event: formatDetails.isAdultsOnly; game: is_adults_only
+  host: QuizshowJoinHost | null; // game only; null for event games
   status: 'lobby' | 'running' | 'paused';
   /** The caller already has a player row in this session (reconnect, second device). */
   isRejoin: boolean;
@@ -822,8 +877,11 @@ export interface QuizshowSessionEnd {
 
 export interface QuizshowStateBase {
   sessionId: string;
-  eventSlug: string;
-  eventTitle: string;
+  eventSlug: string | null;
+  eventTitle: string | null;
+  kind: QuizshowScopeKind;
+  gameId: string | null;
+  isAdultsOnly: boolean;
   joinCode: string;
   quizTitle: string;
   languages: QuizshowLanguageMode;
@@ -882,8 +940,9 @@ export interface QuizshowAnswerSnapshotEvidence {
   type: typeof QUIZSHOW_ANSWER_SNAPSHOT_TYPE;
   answerId: string;
   sessionId: string;
-  eventId: string;
-  eventSlug: string;
+  eventId: string | null;
+  eventSlug: string | null;
+  gameId: string | null;
   roundKind: QuizshowRoundKind;
   questionPrompt: QuizshowText;
   text: string;
@@ -892,5 +951,22 @@ export interface QuizshowAnswerSnapshotEvidence {
   authorUserId: string;
   receivedAt: string;
   wasHidden: boolean;
+  capturedAt: string;
+}
+
+export const QUIZSHOW_GAME_SNAPSHOT_TYPE = 'quizshow-game-snapshot';
+export interface QuizshowGameSnapshotEvidence {
+  type: typeof QUIZSHOW_GAME_SNAPSHOT_TYPE;
+  sessionId: string;
+  gameId: string;
+  quizTitle: string;
+  /** Server side only, for staff tooling. */
+  ownerUserId: string;
+  /** Every question the session had shown when the report was filed, in play order; never an unshown one. */
+  shownQuestions: {
+    roundKind: QuizshowRoundKind;
+    prompt: QuizshowText;
+    options: QuizshowText[];
+  }[];
   capturedAt: string;
 }

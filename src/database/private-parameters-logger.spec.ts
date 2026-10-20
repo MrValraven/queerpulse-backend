@@ -88,6 +88,27 @@ describe('touchesPrivateParameterTable', () => {
     ).toBe(false);
   });
 
+  it('leaves out the parameters of queries on the quiz, round, question and session tables', () => {
+    expect(
+      touchesPrivateParameterTable(
+        'SELECT * FROM "quizshow_quizzes" WHERE "title" = $1',
+      ),
+    ).toBe(true);
+    expect(
+      touchesPrivateParameterTable('UPDATE quizshow_rounds SET "title" = $1'),
+    ).toBe(true);
+    expect(
+      touchesPrivateParameterTable(
+        'INSERT INTO "quizshow_questions" ("prompt") VALUES ($1)',
+      ),
+    ).toBe(true);
+    expect(
+      touchesPrivateParameterTable(
+        'SELECT * FROM "quizshow_sessions" WHERE "id" = $1',
+      ),
+    ).toBe(true);
+  });
+
   it('names the draft and quiz show tables', () => {
     expect([...PRIVATE_PARAMETER_TABLES]).toEqual([
       'creator_drafts',
@@ -97,6 +118,10 @@ describe('touchesPrivateParameterTable', () => {
       'quizshow_votes',
       'quizshow_players',
       'quizshow_teams',
+      'quizshow_quizzes',
+      'quizshow_rounds',
+      'quizshow_questions',
+      'quizshow_sessions',
     ]);
   });
 });

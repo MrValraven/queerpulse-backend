@@ -12,6 +12,12 @@ describe('isQuizshowRequestUrl', () => {
     expect(isQuizshowRequestUrl('/quizshow/packs?x=1')).toBe(true);
   });
 
+  it('treats the game routes as Pulse Live', () => {
+    expect(isQuizshowRequestUrl('/v1/quizshow/games/abc/import')).toBe(true);
+    expect(isQuizshowRequestUrl('/quizshow/games')).toBe(true);
+    expect(isQuizshowRequestUrl('/admin/quizshow/sessions/x/end')).toBe(false);
+  });
+
   it('leaves other event routes alone', () => {
     expect(isQuizshowRequestUrl('/events/x')).toBe(false);
     expect(isQuizshowRequestUrl('/events/quizshow-night')).toBe(false);

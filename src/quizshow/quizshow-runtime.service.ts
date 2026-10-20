@@ -263,12 +263,42 @@ export class QuizshowRuntimeService
     const storedSessionIds =
       await this.persistence.findOpenSessionIdsForEvents(eventIds);
     const loadedSessionIds = [...this.liveStates.values()]
-      .filter((state) => eventIdSet.has(state.eventId))
+      .filter(
+        (state) => state.eventId !== null && eventIdSet.has(state.eventId),
+      )
       .map((state) => state.sessionId);
-    for (const sessionId of new Set([
-      ...storedSessionIds,
-      ...loadedSessionIds,
-    ])) {
+    await this.abandonSessionIds(
+      new Set([...storedSessionIds, ...loadedSessionIds]),
+      now,
+    );
+  }
+
+  /** The games were deleted or their owner left: every open session of theirs ends with no results. */
+  async abandonSessionsOfGames(gameIds: string[], now: number): Promise<void> {
+    if (gameIds.length === 0) return;
+    const gameIdSet = new Set(gameIds);
+    const storedSessionIds =
+      await this.persistence.findOpenSessionIdsForGames(gameIds);
+    const loadedSessionIds = [...this.liveStates.values()]
+      .filter((state) => state.gameId !== null && gameIdSet.has(state.gameId))
+      .map((state) => state.sessionId);
+    await this.abandonSessionIds(
+      new Set([...storedSessionIds, ...loadedSessionIds]),
+      now,
+    );
+  }
+
+  /** The owner's account is going away: every open session of every game they own ends. */
+  async abandonSessionsOfOwner(userId: string, now: number): Promise<void> {
+    const gameIds = await this.persistence.findGameIdsOfOwner(userId);
+    await this.abandonSessionsOfGames(gameIds, now);
+  }
+
+  private async abandonSessionIds(
+    sessionIds: Iterable<string>,
+    now: number,
+  ): Promise<void> {
+    for (const sessionId of sessionIds) {
       try {
         await this.abandonSession(sessionId, now, abandonNow, true);
       } catch (error: unknown) {

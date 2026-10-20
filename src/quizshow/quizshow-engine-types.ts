@@ -13,6 +13,7 @@ import type {
   QuizshowPodiumEntry,
   QuizshowQuestionType,
   QuizshowRoundKind,
+  QuizshowScopeKind,
   QuizshowScoresScope,
   QuizshowSessionStatus,
   QuizshowTeamColorKey,
@@ -120,9 +121,19 @@ export interface QuizshowLastTransition {
 
 export interface QuizshowLiveState {
   sessionId: string;
-  eventId: string;
-  eventSlug: string;
-  eventTitle: string;
+  /** Null for a game session. */
+  eventId: string | null;
+  /** Null for a game session. */
+  eventSlug: string | null;
+  /** Null for a game session. */
+  eventTitle: string | null;
+  /** `'event'` for a quiz on an event, `'game'` for a game a member owns. */
+  kind: QuizshowScopeKind;
+  /** The game id for a game session; null for an event session. */
+  gameId: string | null;
+  /** The scope's 18+ flag, or true when the session snapshot holds an adults round. */
+  isAdultsOnly: boolean;
+  /** The event host, or the game owner. */
   hostUserId: string | null;
   openedByUserId: string | null;
   joinCode: string;
@@ -154,6 +165,12 @@ export interface QuizshowLiveState {
   /** In memory only; false after a restart. */
   isScreenMuted: boolean;
 }
+
+/** The scope fields access checks and persistence read off a live session. */
+export type QuizshowScopeSource = Pick<
+  QuizshowLiveState,
+  'kind' | 'eventId' | 'gameId' | 'hostUserId'
+>;
 
 export type QuizshowPersistOperation =
   | { type: 'insert_player'; player: QuizshowLivePlayer }

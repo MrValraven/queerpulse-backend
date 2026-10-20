@@ -9,6 +9,7 @@ import {
 } from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
+import { findGaplessAfterTrackId } from './studio-gapless';
 import { StudioOwnershipService } from './studio-ownership.service';
 import {
   isStudioPreviewToken,
@@ -150,7 +151,11 @@ export class StudioPreviewsService {
       track.audioContentType,
       track.durationSeconds,
     );
-    return toStudioStream(signedStream, track);
+    return toStudioStream(
+      signedStream,
+      track,
+      await findGaplessAfterTrackId(this.tracks, release, track),
+    );
   }
 
   /** The release behind a token, while it is a draft, scheduled or

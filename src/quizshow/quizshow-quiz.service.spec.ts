@@ -1,4 +1,4 @@
-import { QueryFailedError, type DataSource } from 'typeorm';
+import { QueryFailedError, type DataSource, type EntityManager } from 'typeorm';
 import { setImageUrlBase } from '../common/image-url';
 import { QuizshowQuestionRecord } from './entities/quizshow-question.entity';
 import { QuizshowQuizRecord } from './entities/quizshow-quiz.entity';
@@ -11,9 +11,13 @@ import type { QuizshowImportDto } from './dto/quizshow-import.dto';
 import type {
   QuizshowQuestionInput,
   QuizshowRoundInput,
+  QuizshowStarterPackQuiz,
 } from './quizshow.contract';
 
 const USER_ID = 'user-1';
+const OTHER_USER_ID = 'user-2';
+const GAME_ID = '00000000-0000-4000-8000-0000000000b1';
+const OTHER_GAME_ID = '00000000-0000-4000-8000-0000000000b2';
 const EVENT_ID = 'event-1';
 const SLUG = 'drag-bingo';
 const STORED_UPDATED_AT = new Date('2026-10-19T10:00:00.000Z');
@@ -73,6 +77,17 @@ function quizInput(
   } as unknown as QuizshowQuizInputDto;
 }
 
+function gameShape(
+  rounds: QuizshowRoundInput[] = [round()],
+): QuizshowStarterPackQuiz {
+  return {
+    title: 'Game night',
+    languages: 'both',
+    screenLanguage: 'en',
+    rounds,
+  };
+}
+
 interface FakeStore {
   quizzes: QuizshowQuizRecord[];
   rounds: QuizshowRoundRecord[];
@@ -87,6 +102,15 @@ function build(options: { isAdultsEvent?: boolean } = {}) {
     assertOrganiser: jest.fn().mockResolvedValue(undefined),
     assertNotCohostPlaying: jest.fn().mockResolvedValue(undefined),
     isAdultsEvent: jest.fn().mockReturnValue(options.isAdultsEvent === true),
+    // Mirrors Task 12: a game the caller owns, else game not found.
+    loadOwnedGame: jest.fn((gameId: string, userId: string) => {
+      const ownedGame = store.quizzes.find(
+        (quiz) => quiz.id === gameId && quiz.ownerUserId === userId,
+      );
+      return ownedGame
+        ? Promise.resolve(ownedGame)
+        : Promise.reject(quizshowError('quizshow_game_not_found'));
+    }),
   };
   const insertQuizFailure: {
     error: Error | null;
@@ -97,7 +121,12 @@ function build(options: { isAdultsEvent?: boolean } = {}) {
       const where = query.where as Record<string, string>;
       if (entity === QuizshowQuizRecord) {
         return Promise.resolve(
-          store.quizzes.find((quiz) => quiz.eventId === where.eventId) ?? null,
+          store.quizzes.find((quiz) =>
+            Object.entries(where).every(
+              ([column, value]) =>
+                (quiz as unknown as Record<string, unknown>)[column] === value,
+            ),
+          ) ?? null,
         );
       }
       return Promise.resolve(null);
@@ -180,6 +209,7 @@ function build(options: { isAdultsEvent?: boolean } = {}) {
     ] as object[],
     organisedEvent: [] as object[],
     importSources: [] as object[],
+    gameSources: [] as object[],
   };
   const dataSource = {
     manager,
@@ -193,6 +223,9 @@ function build(options: { isAdultsEvent?: boolean } = {}) {
       }
       if (sql.includes('AS "event_id"')) {
         return Promise.resolve(queryResults.organisedEvent);
+      }
+      if (sql.includes('"quiz"."owner_user_id" = $1')) {
+        return Promise.resolve(queryResults.gameSources);
       }
       return Promise.resolve(queryResults.importSources);
     }),
@@ -221,6 +254,8 @@ function seedStoredQuiz(
   store.quizzes.push({
     id: 'quiz-1',
     eventId: EVENT_ID,
+    ownerUserId: null,
+    isAdultsOnly: false,
     title: 'Stored',
     languages: 'both',
     screenLanguage: 'en',
@@ -255,6 +290,65 @@ function seedStoredQuiz(
     timeLimitSeconds: null,
     points: 1000,
   });
+}
+
+function seedStoredGame(
+  store: FakeStore,
+  game: {
+    id: string;
+    ownerUserId: string;
+    isAdultsOnly?: boolean;
+    contentLabel?: QuizshowRoundInput['contentLabel'];
+  },
+): void {
+  const roundId = `${game.id}-round`;
+  store.quizzes.push({
+    id: game.id,
+    eventId: null,
+    ownerUserId: game.ownerUserId,
+    isAdultsOnly: game.isAdultsOnly === true,
+    title: 'Stored game',
+    languages: 'both',
+    screenLanguage: 'en',
+    starterPackKey: 'pride_history',
+    createdByUserId: game.ownerUserId,
+    updatedByUserId: game.ownerUserId,
+    createdAt: STORED_UPDATED_AT,
+    updatedAt: STORED_UPDATED_AT,
+  });
+  store.rounds.push({
+    id: roundId,
+    quizId: game.id,
+    position: 0,
+    kind: 'quiz',
+    titleEn: 'Game round',
+    titlePt: 'Ronda do jogo',
+    contentLabel: game.contentLabel ?? 'none',
+    settings: round().settings,
+  });
+  store.questions.push({
+    id: `${game.id}-question`,
+    roundId,
+    position: 0,
+    type: 'multiple_choice',
+    promptEn: 'Which one?',
+    promptPt: 'Qual?',
+    mediaRef: null,
+    options: multipleChoiceQuestion().options,
+    answer: { correctIndex: 0 },
+    acceptedAnswers: [],
+    timeLimitSeconds: null,
+    points: 1000,
+  });
+}
+
+function codeOfThrow(action: () => void): unknown {
+  try {
+    action();
+  } catch (error) {
+    return quizshowCodeOf(error);
+  }
+  return null;
 }
 
 async function codeOfRejection(promise: Promise<unknown>): Promise<unknown> {
@@ -360,6 +454,8 @@ describe('QuizshowQuizService', () => {
       store.quizzes.push({
         id: 'quiz-winner',
         eventId: EVENT_ID,
+        ownerUserId: null,
+        isAdultsOnly: false,
         title: 'Winner',
         languages: 'both',
         screenLanguage: 'en',
@@ -563,5 +659,340 @@ describe('QuizshowQuizService', () => {
       expect(JSON.stringify(card)).not.toContain('"questions"');
       expect(card.questionCount).toBeGreaterThan(0);
     }
+  });
+
+  it('imports a game the caller owns into an event', async () => {
+    const { service, store, access } = build();
+    seedStoredGame(store, { id: GAME_ID, ownerUserId: USER_ID });
+
+    const response = await service.importQuiz(SLUG, USER_ID, {
+      from: 'game',
+      gameId: GAME_ID,
+    });
+
+    expect(access.loadOwnedGame).toHaveBeenCalledWith(GAME_ID, USER_ID);
+    const eventQuiz = store.quizzes.find((quiz) => quiz.eventId === EVENT_ID);
+    expect(eventQuiz?.title).toBe('Stored game');
+    expect(eventQuiz?.starterPackKey).toBe('pride_history');
+    expect(eventQuiz?.ownerUserId).toBeUndefined();
+    expect(response.quiz?.title).toBe('Stored game');
+    expect(response.quiz?.rounds).toHaveLength(1);
+    expect(response.quiz?.rounds[0]?.title.en).toBe('Game round');
+    expect(store.quizzes.find((quiz) => quiz.id === GAME_ID)?.title).toBe(
+      'Stored game',
+    );
+  });
+
+  it("refuses another member's game as an import source with source not found", async () => {
+    const { service, store } = build();
+    seedStoredGame(store, { id: GAME_ID, ownerUserId: OTHER_USER_ID });
+
+    const error = await codeOfRejection(
+      service.importQuiz(SLUG, USER_ID, { from: 'game', gameId: GAME_ID }),
+    );
+
+    expect(quizshowCodeOf(error)).toBe('quizshow_import_source_not_found');
+    expect(store.quizzes.some((quiz) => quiz.eventId === EVENT_ID)).toBe(false);
+  });
+
+  it('refuses a game as its own import source without reading it', async () => {
+    const { service, store, access } = build();
+    seedStoredGame(store, { id: GAME_ID, ownerUserId: USER_ID });
+
+    const error = await codeOfRejection(
+      service.resolveImportShape({ from: 'game', gameId: GAME_ID }, USER_ID, {
+        eventSlug: null,
+        gameId: GAME_ID,
+      }),
+    );
+
+    expect(quizshowCodeOf(error)).toBe('quizshow_import_source_not_found');
+    expect(access.loadOwnedGame).not.toHaveBeenCalled();
+  });
+
+  it('refuses an adults round from a game source into a non-18+ event with the event code', async () => {
+    const { service, store } = build({ isAdultsEvent: false });
+    seedStoredGame(store, {
+      id: GAME_ID,
+      ownerUserId: USER_ID,
+      isAdultsOnly: true,
+      contentLabel: 'adults',
+    });
+
+    const error = await codeOfRejection(
+      service.importQuiz(SLUG, USER_ID, { from: 'game', gameId: GAME_ID }),
+    );
+
+    expect(quizshowCodeOf(error)).toBe(
+      'quizshow_adults_round_needs_adults_event',
+    );
+    expect(store.quizzes.some((quiz) => quiz.eventId === EVENT_ID)).toBe(false);
+  });
+
+  it("lists the caller's own games after the events in the event import sources", async () => {
+    const { service, queryResults, queries } = build();
+    queryResults.importSources = [
+      {
+        event_slug: 'last-bingo',
+        event_title: 'Last bingo',
+        start_at: new Date('2026-10-01T20:00:00.000Z'),
+        quiz_title: 'Event quiz',
+        round_count: 3,
+        question_count: 15,
+        has_adults_rounds: false,
+        is_same_series: true,
+      },
+    ];
+    queryResults.gameSources = [
+      {
+        game_id: GAME_ID,
+        quiz_title: 'Game quiz',
+        round_count: 2,
+        question_count: 6,
+        has_adults_rounds: true,
+      },
+    ];
+
+    const result = await service.listImportSources(SLUG, USER_ID);
+
+    expect(result.items.map((item) => item.kind)).toEqual(['event', 'game']);
+    expect(result.items[0]).toMatchObject({
+      kind: 'event',
+      eventSlug: 'last-bingo',
+      gameId: null,
+      isSameSeries: true,
+    });
+    expect(result.items[1]).toEqual({
+      kind: 'game',
+      eventSlug: null,
+      eventTitle: null,
+      startAt: null,
+      gameId: GAME_ID,
+      quizTitle: 'Game quiz',
+      roundCount: 2,
+      questionCount: 6,
+      hasAdultsRounds: true,
+      isSameSeries: false,
+    });
+    const gamesQuery = queries.find((entry) =>
+      entry.sql.includes('"quiz"."owner_user_id" = $1'),
+    );
+    expect(gamesQuery?.parameters).toEqual([USER_ID, null, 50]);
+    expect(gamesQuery?.sql).toContain('ORDER BY "quiz"."updated_at" DESC');
+  });
+
+  it('lists other games and organised events for a game and leaves the game itself out', async () => {
+    const { service, queryResults, queries, access } = build();
+    queryResults.importSources = [
+      {
+        event_slug: 'last-bingo',
+        event_title: 'Last bingo',
+        start_at: '2026-10-01T20:00:00.000Z',
+        quiz_title: 'Event quiz',
+        round_count: 3,
+        question_count: 15,
+        has_adults_rounds: false,
+        is_same_series: false,
+      },
+    ];
+    queryResults.gameSources = [
+      {
+        game_id: OTHER_GAME_ID,
+        quiz_title: 'Other game',
+        round_count: 1,
+        question_count: 4,
+        has_adults_rounds: false,
+      },
+    ];
+
+    const items = await service.listGameImportSources(GAME_ID, USER_ID);
+
+    expect(items.map((item) => item.eventSlug ?? item.gameId)).toEqual([
+      'last-bingo',
+      OTHER_GAME_ID,
+    ]);
+    const eventsQuery = queries.find((entry) =>
+      entry.sql.includes('ORDER BY "event"."start_at" DESC'),
+    );
+    expect(eventsQuery?.parameters).toEqual([null, USER_ID, null, 50]);
+    expect(eventsQuery?.sql).toContain(
+      '($1::text IS NULL OR "event"."slug" <> $1)',
+    );
+    const gamesQuery = queries.find((entry) =>
+      entry.sql.includes('"quiz"."owner_user_id" = $1'),
+    );
+    expect(gamesQuery?.parameters).toEqual([USER_ID, GAME_ID, 50]);
+    expect(gamesQuery?.sql).toContain(
+      '($2::uuid IS NULL OR "quiz"."id" <> $2::uuid)',
+    );
+    expect(access.loadViewableEvent).not.toHaveBeenCalled();
+  });
+
+  it('writes a game target by id with its 18+ switch', async () => {
+    const { service, store, manager } = build();
+    seedStoredGame(store, { id: GAME_ID, ownerUserId: USER_ID });
+
+    const quizId = await service.writeQuiz({
+      target: { kind: 'game', gameId: GAME_ID, isAdultsOnly: true },
+      userId: USER_ID,
+      shape: gameShape([round({ contentLabel: 'adults' })]),
+      starterPackKey: null,
+      expectedUpdatedAt: STORED_UPDATED_AT.toISOString(),
+    });
+
+    expect(quizId).toBe(GAME_ID);
+    expect(manager.findOne).toHaveBeenCalledWith(QuizshowQuizRecord, {
+      where: { id: GAME_ID },
+      lock: { mode: 'for_no_key_update' },
+    });
+    expect(store.quizzes).toHaveLength(1);
+    expect(store.quizzes[0]).toMatchObject({
+      id: GAME_ID,
+      eventId: null,
+      ownerUserId: USER_ID,
+      isAdultsOnly: true,
+      title: 'Game night',
+      updatedByUserId: USER_ID,
+    });
+    expect(store.rounds.map((stored) => stored.contentLabel)).toEqual([
+      'adults',
+    ]);
+    expect(store.rounds[0]?.quizId).toBe(GAME_ID);
+  });
+
+  it('refuses an adults round for a game target whose switch is off with the game code', () => {
+    const { service } = build({ isAdultsEvent: true });
+    const adultsShape = gameShape([round({ contentLabel: 'adults' })]);
+
+    expect(
+      codeOfThrow(() =>
+        service.assertShapeAllowed(
+          { kind: 'game', gameId: GAME_ID, isAdultsOnly: false },
+          adultsShape,
+        ),
+      ),
+    ).toBe('quizshow_game_adults_rounds_need_switch');
+    expect(
+      codeOfThrow(() =>
+        service.assertShapeAllowed(
+          { kind: 'new_game', ownerUserId: USER_ID, isAdultsOnly: false },
+          adultsShape,
+        ),
+      ),
+    ).toBe('quizshow_game_adults_rounds_need_switch');
+    expect(
+      codeOfThrow(() =>
+        service.assertShapeAllowed(
+          { kind: 'game', gameId: GAME_ID, isAdultsOnly: true },
+          adultsShape,
+        ),
+      ),
+    ).toBeNull();
+  });
+
+  it('creates a new game row with its owner inside the given transaction and returns its id', async () => {
+    const { service, store, manager, dataSource } = build();
+    const passedInsert = jest.fn((entity: unknown, rows: object | object[]) =>
+      manager.insert(entity, rows),
+    );
+    const passedManager = { ...manager, insert: passedInsert };
+
+    const quizId = await service.writeQuiz(
+      {
+        target: { kind: 'new_game', ownerUserId: USER_ID, isAdultsOnly: true },
+        userId: USER_ID,
+        shape: gameShape([round({ contentLabel: 'adults' })]),
+        starterPackKey: null,
+        expectedUpdatedAt: undefined,
+      },
+      passedManager as unknown as EntityManager,
+    );
+
+    expect(quizId).toBe('quiz-new');
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(passedInsert).toHaveBeenCalledWith(
+      QuizshowQuizRecord,
+      expect.objectContaining({
+        ownerUserId: USER_ID,
+        eventId: null,
+        createdByUserId: USER_ID,
+        isAdultsOnly: true,
+        title: 'Game night',
+      }),
+    );
+    expect(passedInsert).toHaveBeenCalledWith(
+      QuizshowRoundRecord,
+      expect.any(Array),
+    );
+    expect(store.rounds[0]?.quizId).toBe('quiz-new');
+    expect(manager.findOne).not.toHaveBeenCalled();
+  });
+
+  it('answers game not found when a game target row is gone', async () => {
+    const { service, manager } = build();
+
+    const error = await codeOfRejection(
+      service.writeQuiz({
+        target: { kind: 'game', gameId: GAME_ID, isAdultsOnly: false },
+        userId: USER_ID,
+        shape: gameShape(),
+        starterPackKey: null,
+        expectedUpdatedAt: undefined,
+      }),
+    );
+
+    expect(quizshowCodeOf(error)).toBe('quizshow_game_not_found');
+    expect(manager.insert).not.toHaveBeenCalled();
+    expect(manager.update).not.toHaveBeenCalled();
+  });
+
+  it('builds a game response whose isAdultsEvent mirrors isAdultsOnly', async () => {
+    const { service, store, queryResults, queries, access } = build();
+    seedStoredGame(store, {
+      id: GAME_ID,
+      ownerUserId: USER_ID,
+      isAdultsOnly: true,
+    });
+    seedStoredGame(store, {
+      id: OTHER_GAME_ID,
+      ownerUserId: USER_ID,
+      isAdultsOnly: false,
+    });
+    queryResults.state = [
+      {
+        session_id: 'session-1',
+        join_code: 'ABC123',
+        status: 'lobby',
+        play_mode: 'solo',
+        started_at: new Date('2026-10-20T19:00:00.000Z'),
+        player_count: 4,
+        has_results: true,
+      },
+    ];
+
+    const adultsResponse = await service.buildGameResponse(GAME_ID);
+    const switchOffResponse = await service.buildGameResponse(OTHER_GAME_ID);
+
+    expect(adultsResponse.gameId).toBe(GAME_ID);
+    expect(adultsResponse.isAdultsOnly).toBe(true);
+    expect(adultsResponse.isAdultsEvent).toBe(true);
+    expect(adultsResponse.quiz?.title).toBe('Stored game');
+    expect(adultsResponse.liveSession).toEqual({
+      sessionId: 'session-1',
+      joinCode: 'ABC123',
+      status: 'lobby',
+      playMode: 'solo',
+      playerCount: 4,
+      startedAt: '2026-10-20T19:00:00.000Z',
+    });
+    expect(adultsResponse.hasResults).toBe(true);
+    expect(switchOffResponse.isAdultsOnly).toBe(false);
+    expect(switchOffResponse.isAdultsEvent).toBe(false);
+    expect(access.isAdultsEvent).not.toHaveBeenCalled();
+    const stateQuery = queries.find((entry) =>
+      entry.sql.includes('"open_session"'),
+    );
+    expect(stateQuery?.sql).toContain('"session"."quiz_id" = $1');
+    expect(stateQuery?.parameters).toEqual([GAME_ID]);
   });
 });

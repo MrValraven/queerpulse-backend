@@ -377,6 +377,15 @@ export class ReportSubjectResolverService {
       // `QUIZSHOW_ANSWER_SQL`.
       case ReportSubjectType.QuizshowAnswer:
         return this.queryByUuid(QUIZSHOW_ANSWER_SQL, subjectIds);
+
+      // Pulse Live: one game session, keyed by the session uuid. The filed
+      // snapshot is the weaker source and the live game wins. See
+      // `QUIZSHOW_GAME_SQL` and `QUIZSHOW_GAME_SNAPSHOT_SQL`.
+      case ReportSubjectType.QuizshowGame:
+        return this.mergeSources([
+          await this.queryByUuid(QUIZSHOW_GAME_SNAPSHOT_SQL, subjectIds),
+          await this.queryByUuid(QUIZSHOW_GAME_SQL, subjectIds),
+        ]);
     }
   }
 
@@ -1007,6 +1016,41 @@ const QUIZSHOW_ANSWER_SQL = `
   FROM quizshow_answers a
   JOIN quizshow_players p ON p.id = a.player_id
   WHERE a.id = ANY($1::uuid[])
+`;
+
+/**
+ * Pulse Live: one game session. The author is the game owner and the excerpt
+ * is the game title. A game with no owner (account erased) stays unresolved.
+ */
+const QUIZSHOW_GAME_SQL = `
+  SELECT s.id::text AS key,
+         q.owner_user_id AS author_user_id,
+         NULLIF(btrim(q.title), '') AS excerpt,
+         NULL::uuid AS community_id
+  FROM quizshow_sessions s
+  JOIN quizshow_quizzes q ON q.id = s.quiz_id
+  WHERE s.id = ANY($1::uuid[])
+    AND q.owner_user_id IS NOT NULL
+`;
+
+/**
+ * Pulse Live: the owner and title captured in the report's evidence when it
+ * was filed, which keeps the facts once the game is deleted. Server snapshots
+ * are trusted because the create-report DTO admits only `url` and
+ * `screenshot` client evidence. One row per subject, from the oldest report.
+ */
+const QUIZSHOW_GAME_SNAPSHOT_SQL = `
+  SELECT DISTINCT ON (r.subject_id)
+         r.subject_id AS key,
+         (entry ->> 'ownerUserId')::uuid AS author_user_id,
+         entry ->> 'quizTitle' AS excerpt,
+         NULL::uuid AS community_id
+  FROM reports r
+  CROSS JOIN LATERAL jsonb_array_elements(r.evidence) AS entry
+  WHERE r.subject_type = 'quizshow_game'
+    AND r.subject_id = ANY($1::text[])
+    AND entry ->> 'type' = 'quizshow-game-snapshot'
+  ORDER BY r.subject_id, r.created_at ASC
 `;
 
 /**

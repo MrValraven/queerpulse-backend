@@ -48,6 +48,11 @@ const TWO_HOURS_MS = 7_200_000;
 const SESSION_ID = 'session-1';
 const UNLOADED_SESSION_ID = 'session-2';
 const EVENT_ID = 'event-1';
+const GAME_ID = 'game-1';
+const OTHER_GAME_ID = 'game-2';
+const GAME_SESSION_ID = 'session-game-1';
+const OTHER_GAME_SESSION_ID = 'session-game-2';
+const OWNER_USER_ID = 'owner-user';
 const HOST_USER_ID = 'host-user';
 const READ_PHASE_MS = 4000;
 const OPEN_PHASE_WITH_GRACE_MS = 20_500;
@@ -75,6 +80,8 @@ interface FakePersistence {
   isOpenSessionIdle: jest.Mock<Promise<boolean>, [string, Date]>;
   markAbandoned: jest.Mock<Promise<void>, [string, Date]>;
   findOpenSessionIdsForEvents: jest.Mock<Promise<string[]>, [string[]]>;
+  findOpenSessionIdsForGames: jest.Mock<Promise<string[]>, [string[]]>;
+  findGameIdsOfOwner: jest.Mock<Promise<string[]>, [string]>;
 }
 
 interface Harness {
@@ -174,6 +181,9 @@ function lobbyState(
     eventId: EVENT_ID,
     eventSlug: 'pride-night',
     eventTitle: 'Pride night',
+    kind: 'event',
+    gameId: null,
+    isAdultsOnly: false,
     hostUserId: HOST_USER_ID,
     openedByUserId: HOST_USER_ID,
     joinCode: 'ABC234',
@@ -221,6 +231,12 @@ function fakePersistence(
     findOpenSessionIdsForEvents: jest.fn<Promise<string[]>, [string[]]>(() =>
       Promise.resolve([]),
     ),
+    findOpenSessionIdsForGames: jest.fn<Promise<string[]>, [string[]]>(() =>
+      Promise.resolve([]),
+    ),
+    findGameIdsOfOwner: jest.fn<Promise<string[]>, [string]>(() =>
+      Promise.resolve([]),
+    ),
   };
 }
 
@@ -256,6 +272,76 @@ function createHarness(rounds: QuizshowSnapshotRound[]): Harness {
   const records: NamespaceRecord[] = [];
   runtime.bindNamespace(fakeNamespace(records));
   return { runtime, persistence, records, state, random };
+}
+
+function gameLobbyState(
+  rounds: QuizshowSnapshotRound[],
+  sessionId: string,
+  gameId: string,
+): QuizshowLiveState {
+  return {
+    ...lobbyState(rounds, sessionId),
+    kind: 'game',
+    gameId,
+    eventId: null,
+    eventSlug: null,
+    eventTitle: null,
+  };
+}
+
+function createGameHarness(gameSessions: ReadonlyArray<[string, string]>): {
+  runtime: QuizshowRuntimeService;
+  persistence: FakePersistence;
+  states: QuizshowLiveState[];
+  random: QuizshowRandom;
+} {
+  const rounds = [quizRound('round-1', ['question-1'])];
+  const states = gameSessions.map(([sessionId, gameId]) =>
+    gameLobbyState(rounds, sessionId, gameId),
+  );
+  const persistence = fakePersistence(
+    new Map(states.map((state) => [state.sessionId, state])),
+  );
+  const random = deterministicRandom();
+  const runtime = new QuizshowRuntimeService(
+    persistence as unknown as QuizshowPersistenceService,
+    random,
+  );
+  runtime.bindNamespace(fakeNamespace([]));
+  return { runtime, persistence, states, random };
+}
+
+function gameStateAt(
+  states: readonly QuizshowLiveState[],
+  index: number,
+): QuizshowLiveState {
+  const state = states[index];
+  if (!state) throw new Error(`No game state at index ${index}`);
+  return state;
+}
+
+async function loadGameSession(
+  runtime: QuizshowRuntimeService,
+  random: QuizshowRandom,
+  sessionId: string,
+): Promise<void> {
+  const outcome = await runtime.execute(sessionId, (state, now) =>
+    joinLobby(
+      state,
+      {
+        userId: 'user-alex',
+        isCohostPlayer: false,
+        avatarUrl: null,
+        screenName: 'Alex',
+        isAvatarShown: false,
+        hasExtraTime: false,
+        team: null,
+      },
+      now,
+      random,
+    ),
+  );
+  if (outcome === null || !outcome.ok) throw new Error('Join refused');
 }
 
 function roleRoom(role: QuizshowRoleRoom): string {
@@ -1146,6 +1232,95 @@ describe('QuizshowRuntimeService', () => {
     expect(harness.persistence.markAbandoned).toHaveBeenCalledWith(
       UNLOADED_SESSION_ID,
       new Date(cancelledAt),
+    );
+  });
+
+  it('leaves a game session open when an event is cancelled', async () => {
+    const game = createGameHarness([[GAME_SESSION_ID, GAME_ID]]);
+    await loadGameSession(game.runtime, game.random, GAME_SESSION_ID);
+
+    await game.runtime.abandonSessionsOfEvents([EVENT_ID], START + 5000);
+
+    expect(gameStateAt(game.states, 0).eventId).toBeNull();
+    expect(gameStateAt(game.states, 0).status).toBe('lobby');
+    expect(game.persistence.markAbandoned).not.toHaveBeenCalled();
+  });
+
+  it('abandons the stored and the loaded open sessions of a game once each', async () => {
+    const game = createGameHarness([
+      [GAME_SESSION_ID, GAME_ID],
+      [OTHER_GAME_SESSION_ID, OTHER_GAME_ID],
+    ]);
+    await loadGameSession(game.runtime, game.random, GAME_SESSION_ID);
+    await loadGameSession(game.runtime, game.random, OTHER_GAME_SESSION_ID);
+    game.persistence.findOpenSessionIdsForGames.mockResolvedValue([
+      GAME_SESSION_ID,
+      UNLOADED_SESSION_ID,
+    ]);
+    const deletedAt = START + 5000;
+
+    await game.runtime.abandonSessionsOfGames([GAME_ID], deletedAt);
+
+    expect(game.persistence.findOpenSessionIdsForGames).toHaveBeenCalledWith([
+      GAME_ID,
+    ]);
+    expect(gameStateAt(game.states, 0).status).toBe('abandoned');
+    expect(gameStateAt(game.states, 1).status).toBe('lobby');
+    expect(game.persistence.markAbandoned).toHaveBeenCalledTimes(1);
+    expect(game.persistence.markAbandoned).toHaveBeenCalledWith(
+      UNLOADED_SESSION_ID,
+      new Date(deletedAt),
+    );
+  });
+
+  it('abandons every open game session of an owner', async () => {
+    const game = createGameHarness([
+      [GAME_SESSION_ID, GAME_ID],
+      [OTHER_GAME_SESSION_ID, OTHER_GAME_ID],
+    ]);
+    await loadGameSession(game.runtime, game.random, GAME_SESSION_ID);
+    await loadGameSession(game.runtime, game.random, OTHER_GAME_SESSION_ID);
+    game.persistence.findGameIdsOfOwner.mockResolvedValue([
+      GAME_ID,
+      OTHER_GAME_ID,
+    ]);
+
+    await game.runtime.abandonSessionsOfOwner(OWNER_USER_ID, START + 5000);
+
+    expect(game.persistence.findGameIdsOfOwner).toHaveBeenCalledWith(
+      OWNER_USER_ID,
+    );
+    expect(game.persistence.findOpenSessionIdsForGames).toHaveBeenCalledWith([
+      GAME_ID,
+      OTHER_GAME_ID,
+    ]);
+    expect(gameStateAt(game.states, 0).status).toBe('abandoned');
+    expect(gameStateAt(game.states, 1).status).toBe('abandoned');
+  });
+
+  it('logs a failed abandon with its code and keeps going', async () => {
+    const game = createGameHarness([[GAME_SESSION_ID, GAME_ID]]);
+    const errorSpy = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    game.persistence.findOpenSessionIdsForGames.mockResolvedValue([
+      UNLOADED_SESSION_ID,
+      GAME_SESSION_ID,
+    ]);
+    game.persistence.isOpenSessionIdle.mockResolvedValue(false);
+    game.persistence.markAbandoned.mockRejectedValueOnce(
+      Object.assign(new Error('write failed'), { code: '40001' }),
+    );
+
+    await game.runtime.abandonSessionsOfGames([GAME_ID], START + 5000);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      `Pulse Live session ${UNLOADED_SESSION_ID} could not be abandoned: 40001`,
+    );
+    expect(game.persistence.markAbandoned).toHaveBeenCalledTimes(2);
+    expect(game.persistence.markAbandoned).toHaveBeenLastCalledWith(
+      GAME_SESSION_ID,
+      new Date(START + 5000),
     );
   });
 });

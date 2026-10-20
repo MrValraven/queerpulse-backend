@@ -61,6 +61,7 @@ export enum SubprofileKind {
   GameDesigner = 'game_designer',
   Artist3d = 'artist_3d',
   Printmaker = 'printmaker',
+  Architect = 'architect',
   // page
   Journalist = 'journalist',
   Poet = 'poet',

@@ -421,6 +421,21 @@ describe('Studio response mappers', () => {
     expect(bare.isPreview).toBe(false);
   });
 
+  it('reads play without gaps for every viewer and false when unset', () => {
+    const gapless = toStudioReleaseResponse(
+      release({ isGapless: true }),
+      persona(),
+      [],
+      { isOwner: false, isStaff: false },
+    );
+    expect(gapless.isGapless).toBe(true);
+    const bare = toStudioReleaseResponse(release(), persona(), [], {
+      isOwner: false,
+      isStaff: false,
+    });
+    expect(bare.isGapless).toBe(false);
+  });
+
   it('puts the publish time on an owner card for a scheduled release', () => {
     const card = toStudioOwnerReleaseCard(
       release({
@@ -550,6 +565,7 @@ describe('Studio response mappers', () => {
       waveformPeaks: PEAKS,
       loudnessLufs: -7.8,
       peakDb: -0.1,
+      gaplessAfterTrackId: null,
     });
     expect(
       toStudioStream(signedStream, {
@@ -562,7 +578,20 @@ describe('Studio response mappers', () => {
       waveformPeaks: null,
       loudnessLufs: null,
       peakDb: null,
+      gaplessAfterTrackId: null,
     });
+  });
+
+  it('names the track a stream follows without a gap', () => {
+    const stream = toStudioStream(
+      {
+        url: 'https://bucket.example/stream',
+        expiresAt: '2026-10-13T12:15:00.000Z',
+      },
+      { waveformPeaks: null, loudnessLufs: null, peakDb: null },
+      'track-before',
+    );
+    expect(stream.gaplessAfterTrackId).toBe('track-before');
   });
 });
 

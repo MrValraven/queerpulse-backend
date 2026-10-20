@@ -16,7 +16,9 @@ type QuizshowPurgeTable = 'quizshow_votes' | 'quizshow_answers';
  * and everything else cascade). Players, teams and results of finished
  * sessions stay for as long as the session keeps its results.
  *
- * The daily sweep also abandons idle open sessions through the runtime.
+ * The daily sweep also abandons idle open sessions through the runtime and
+ * drops lobby opens older than a day: the rate limit only reads the last
+ * hour, and a member who never opens another lobby never prunes their own.
  * Single-replica job like every neighbouring cron; both steps catch and log
  * the count or the error code, and never throw, because an escaping rejection
  * from a scheduled handler becomes an unhandledRejection. Logs carry counts
@@ -37,6 +39,43 @@ export class QuizshowRetentionService {
   async runDailySweep(): Promise<void> {
     await this.abandonIdleSessions();
     await this.purgeExpiredPlays();
+    await this.sweepLobbyOpens();
+  }
+
+  /** Lobby opens older than a day, in batches; logs the count only. */
+  async sweepLobbyOpens(): Promise<void> {
+    try {
+      const batchSize = this.config.get<number>('retention.batchSize', 1000);
+      const maxBatches = this.config.get<number>(
+        'retention.maxBatchesPerRun',
+        50,
+      );
+      const cutoff = new Date(Date.now() - MILLISECONDS_PER_DAY);
+      const lobbyOpensDeleted = await this.deleteInBatches(
+        `WITH "deleted" AS (
+           DELETE FROM "quizshow_lobby_opens"
+           WHERE "id" IN (
+             SELECT "id" FROM "quizshow_lobby_opens"
+             WHERE "opened_at" < $1
+             LIMIT $2
+           )
+           RETURNING 1
+         )
+         SELECT count(*)::int AS deleted_count FROM "deleted"`,
+        cutoff,
+        batchSize,
+        maxBatches,
+      );
+      if (lobbyOpensDeleted > 0) {
+        this.logger.log(
+          `Pulse Live retention removed ${lobbyOpensDeleted} lobby open(s)`,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        `Pulse Live lobby opens sweep failed: ${quizshowWriteFailureCode(error)}`,
+      );
+    }
   }
 
   async abandonIdleSessions(): Promise<void> {

@@ -1,5 +1,6 @@
 import { getMetadataArgsStorage } from 'typeorm';
 import { QuizshowAnswerRecord } from './quizshow-answer.entity';
+import { QuizshowLobbyOpenRecord } from './quizshow-lobby-open.entity';
 import { QuizshowPlayerRecord } from './quizshow-player.entity';
 import { QuizshowQuestionRecord } from './quizshow-question.entity';
 import { QuizshowQuizRecord } from './quizshow-quiz.entity';
@@ -19,6 +20,7 @@ const ENTITY_CLASSES = [
   QuizshowAnswerRecord,
   QuizshowVoteRecord,
   QuizshowResultRecord,
+  QuizshowLobbyOpenRecord,
 ];
 
 const quizshowColumns = () =>
@@ -27,7 +29,7 @@ const quizshowColumns = () =>
   );
 
 describe('quizshow entities', () => {
-  it('maps nine tables', () => {
+  it('maps ten tables', () => {
     const tableNames = getMetadataArgsStorage()
       .tables.filter((table) =>
         ENTITY_CLASSES.includes(
@@ -39,6 +41,7 @@ describe('quizshow entities', () => {
     expect(tableNames).toEqual(
       [
         'quizshow_answers',
+        'quizshow_lobby_opens',
         'quizshow_players',
         'quizshow_questions',
         'quizshow_quizzes',
@@ -104,5 +107,106 @@ describe('quizshow entities', () => {
         'quizshow_team_color_key',
       ].sort(),
     );
+  });
+
+  it('lets a quiz belong to an event or an owner', () => {
+    const storage = getMetadataArgsStorage();
+    const quizColumns = storage.columns.filter(
+      (column) => column.target === QuizshowQuizRecord,
+    );
+    const columnOf = (propertyName: string) =>
+      quizColumns.find((column) => column.propertyName === propertyName);
+    expect(columnOf('eventId')?.options.nullable).toBe(true);
+    expect(columnOf('ownerUserId')?.options.nullable).toBe(true);
+    expect(columnOf('isAdultsOnly')?.options.type).toBe('boolean');
+    expect(columnOf('isAdultsOnly')?.options.default).toBe(false);
+
+    const checkNames = storage.checks
+      .filter((check) => check.target === QuizshowQuizRecord)
+      .map((check) => check.name);
+    expect(checkNames).toContain('CHK_quizshow_quizzes_scope');
+
+    const ownerRelation = storage.relations.find(
+      (relation) =>
+        relation.target === QuizshowQuizRecord &&
+        relation.propertyName === 'owner',
+    );
+    expect(ownerRelation?.options.onDelete).toBe('CASCADE');
+    expect(ownerRelation?.options.nullable).toBe(true);
+    const ownerJoin = storage.joinColumns.find(
+      (join) =>
+        join.target === QuizshowQuizRecord && join.propertyName === 'owner',
+    );
+    expect(ownerJoin?.name).toBe('owner_user_id');
+    expect(ownerJoin?.foreignKeyConstraintName).toBe(
+      'FK_quizshow_quizzes_owner',
+    );
+
+    const ownerIndex = storage.indices.find(
+      (index) => index.name === 'IDX_quizshow_quizzes_owner_user_id',
+    );
+    expect(ownerIndex?.target).toBe(QuizshowQuizRecord);
+    expect(ownerIndex?.columns).toEqual(['ownerUserId']);
+  });
+
+  it('declares the per-quiz open session index and the opener index', () => {
+    const storage = getMetadataArgsStorage();
+    const sessionIndexOf = (name: string) =>
+      storage.indices.find(
+        (index) =>
+          index.target === QuizshowSessionRecord && index.name === name,
+      );
+    const openQuizIndex = sessionIndexOf('UQ_quizshow_sessions_open_quiz');
+    expect(openQuizIndex?.unique).toBe(true);
+    expect(openQuizIndex?.columns).toEqual(['quizId']);
+    expect(openQuizIndex?.where).toBe(
+      `"status" IN ('lobby','running','paused')`,
+    );
+    const openerIndex = sessionIndexOf(
+      'IDX_quizshow_sessions_started_by_started_at',
+    );
+    expect(openerIndex?.columns).toEqual(['startedByUserId', 'startedAt']);
+
+    const sessionEventColumn = storage.columns.find(
+      (column) =>
+        column.target === QuizshowSessionRecord &&
+        column.propertyName === 'eventId',
+    );
+    expect(sessionEventColumn?.options.nullable).toBe(true);
+  });
+
+  it('keys lobby opens to the member only, with the user and time index', () => {
+    const storage = getMetadataArgsStorage();
+    const relations = storage.relations.filter(
+      (relation) => relation.target === QuizshowLobbyOpenRecord,
+    );
+    expect(relations.map((relation) => relation.propertyName)).toEqual([
+      'user',
+    ]);
+    expect(relations[0]?.options.onDelete).toBe('CASCADE');
+    const userJoin = storage.joinColumns.find(
+      (join) =>
+        join.target === QuizshowLobbyOpenRecord && join.propertyName === 'user',
+    );
+    expect(userJoin?.name).toBe('user_id');
+    expect(userJoin?.foreignKeyConstraintName).toBe(
+      'FK_quizshow_lobby_opens_user',
+    );
+    const openerIndex = storage.indices.find(
+      (index) =>
+        index.target === QuizshowLobbyOpenRecord &&
+        index.name === 'IDX_quizshow_lobby_opens_user_opened',
+    );
+    expect(openerIndex?.columns).toEqual(['userId', 'openedAt']);
+  });
+
+  it('declares the plain quiz index on sessions', () => {
+    const quizIndex = getMetadataArgsStorage().indices.find(
+      (index) =>
+        index.target === QuizshowSessionRecord &&
+        index.name === 'IDX_quizshow_sessions_quiz_id',
+    );
+    expect(quizIndex?.columns).toEqual(['quizId']);
+    expect(quizIndex?.unique).toBeFalsy();
   });
 });

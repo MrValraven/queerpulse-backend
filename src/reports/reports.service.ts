@@ -42,7 +42,11 @@ import {
   StudioReleaseStatus,
 } from '../studio/entities/studio-release.entity';
 import { captureQuizshowAnswerForReport } from '../quizshow/quizshow-answer-report';
-import type { QuizshowAnswerSnapshotEvidence } from '../quizshow/quizshow.contract';
+import { captureQuizshowGameForReport } from '../quizshow/quizshow-game-report';
+import type {
+  QuizshowAnswerSnapshotEvidence,
+  QuizshowGameSnapshotEvidence,
+} from '../quizshow/quizshow.contract';
 import { playableTrackSql } from '../studio/studio-playlist-visibility';
 import { studioSafetyError } from '../studio/studio-safety.constants';
 import { SubprofilePost } from '../subprofile-posts/entities/subprofile-post.entity';
@@ -473,6 +477,29 @@ export class ReportsService {
       input = { ...input, subjectId: answerId };
     }
 
+    // Pulse Live game: a game report names a game session by its uuid and
+    // keeps a snapshot of the questions it showed (see
+    // `captureQuizshowGameForReport`). Only a member with a player row in the
+    // session may file; a malformed id never reaches the database.
+    let reportedQuizshowGameSnapshot: QuizshowGameSnapshotEvidence | null =
+      null;
+    if (input.subjectType === ReportSubjectType.QuizshowGame) {
+      if (reporterId === null || !UUID_RE.test(input.subjectId)) {
+        throw new NotFoundException('Game not found');
+      }
+      const sessionId = input.subjectId.toLowerCase();
+      reportedQuizshowGameSnapshot = await captureQuizshowGameForReport(
+        this.reports.manager,
+        sessionId,
+        reporterId,
+        new Date(),
+      );
+      if (!reportedQuizshowGameSnapshot) {
+        throw new NotFoundException('Game not found');
+      }
+      input = { ...input, subjectId: sessionId };
+    }
+
     // A member can't report their own message — mirrors the DTO's `canReport`
     // flag (`!isDeleted && !isAuthor` in `MessagingCoreService.toMessageResponses`),
     // which is only a UI convenience unless the server enforces the same rule.
@@ -754,6 +781,7 @@ export class ReportsService {
             reportedGroupSnapshot,
             reportedIdentitySnapshot,
             reportedQuizshowAnswerSnapshot,
+            reportedQuizshowGameSnapshot,
           ),
           severity,
           slaDueAt: slaDueAtFor(severity, now),
@@ -1885,6 +1913,7 @@ export class ReportsService {
     reportedGroupSnapshot: GroupSnapshotEvidence | null,
     reportedIdentitySnapshot: MailboxIdentitySnapshotEvidence | null,
     reportedQuizshowAnswerSnapshot: QuizshowAnswerSnapshotEvidence | null,
+    reportedQuizshowGameSnapshot: QuizshowGameSnapshotEvidence | null,
   ): unknown[] | null {
     const evidence: unknown[] = clientEvidence ? [...clientEvidence] : [];
     if (reportedMessage) {
@@ -1968,6 +1997,10 @@ export class ReportsService {
     // 30-day deletion and a host deleting the results.
     if (reportedQuizshowAnswerSnapshot) {
       evidence.push(reportedQuizshowAnswerSnapshot);
+    }
+    // Pulse Live game snapshot: the shown questions, kept past a game delete.
+    if (reportedQuizshowGameSnapshot) {
+      evidence.push(reportedQuizshowGameSnapshot);
     }
     return evidence.length ? evidence : null;
   }

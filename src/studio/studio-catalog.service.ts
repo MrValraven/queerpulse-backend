@@ -16,6 +16,7 @@ import { StudioReleaseDispute } from './entities/studio-release-dispute.entity';
 import { ownerClaimsForTracks } from './studio-claim-store';
 import { decodeStudioCursor, encodeStudioCursor } from './studio-cursor';
 import { episodeReleasedSql, isDraftEpisode } from './studio-episode-rule';
+import { findGaplessAfterTrackId } from './studio-gapless';
 import {
   StudioAdminReleaseSummary,
   toStudioAdminReleaseSummary,
@@ -712,7 +713,11 @@ export class StudioCatalogService {
       track.audioContentType,
       track.durationSeconds,
     );
-    return toStudioStream(signedStream, track);
+    return toStudioStream(
+      signedStream,
+      track,
+      await findGaplessAfterTrackId(this.tracks, release, track),
+    );
   }
 
   private listenableReleases(

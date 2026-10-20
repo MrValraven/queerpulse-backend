@@ -3,10 +3,12 @@
  * the magazine desk gateway (origin allowlist, cookie or `auth.token`, pinned
  * JWT verify, a handshake bucket on the verified user, live status, lockdown
  * and a live refresh-token family) and checks feature access itself, since
- * the global feature guards cover HTTP only: while Pulse Live is unlaunched,
- * only members holding an early-access grant are admitted, and
- * `session:reauth` checks the grant again, so a revoke drops a live socket at
- * its next reauth. The socket is dropped at the token's `exp` with
+ * the global feature guards cover HTTP only: every active member is admitted
+ * while Pulse Live is launched or in early access, and grants are never read
+ * for playing. Hosting stays gated: a screen or host attach and every host
+ * command check the early-access grant, and `session:reauth` checks it again
+ * for a screen or host socket, so a revoke drops a live host socket at its
+ * next reauth. The socket is dropped at the token's `exp` with
  * `TOKEN_EXPIRED`; `session:reauth` with a socket ticket extends it, as on
  * `/chat`.
  *
@@ -65,9 +67,7 @@ import {
   resolveFrontendOrigins,
 } from '../config/frontend-origins';
 import { FeatureAccessService } from '../early-access/feature-access.service';
-import { Event } from '../events/entities/event.entity';
 import { EventsService } from '../events/events.service';
-import { isEarlyAccessFeature, isFeatureLaunched } from '../launchedFeatures';
 import { PLATFORM_LOCKDOWN_ENABLED } from '../platform-settings/platform-settings.events';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -156,6 +156,7 @@ import {
   type QuizshowSessionStateViewer,
 } from './quizshow-frames';
 import { quizshowWriteFailureCode } from './quizshow-persistence.service';
+import { isQuizshowPlayable } from './quizshow-play-rules';
 import {
   QuizshowRuntimeService,
   type QuizshowExecuteOptions,
@@ -413,7 +414,6 @@ export class QuizshowGateway
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(RefreshToken)
     private readonly refreshTokens: Repository<RefreshToken>,
-    @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(QuizshowSessionRecord)
     private readonly sessions: Repository<QuizshowSessionRecord>,
     private readonly platformSettings: PlatformSettingsService,
@@ -513,7 +513,10 @@ export class QuizshowGateway
         throw new ChatWsException('SESSION_REVOKED', 'Unauthorized');
       }
       const user = await this.loadAdmittableUser(userId);
-      await this.assertFeatureOpenTo(user.id);
+      // Hosting is grant-gated; a player socket is never checked for the grant.
+      if (client.data.role === 'screen' || client.data.role === 'host') {
+        await this.assertFeatureOpenTo(user.id);
+      }
       await this.assertNotLockedOut(user.role);
       await this.assertSessionLive(record.sessionId);
       exp = record.exp;
@@ -617,8 +620,8 @@ export class QuizshowGateway
       );
       return { ok: true, me: toMe(state, existingPlayer.playerId) };
     }
-    const event = await this.events.findOne({ where: { id: state.eventId } });
-    if (event === null) {
+    const scope = await this.access.loadPlayScope(state);
+    if (scope === null) {
       return this.refusal(frame, client, 'quizshow_session_not_found');
     }
     const isRestricted = await this.access.isRestricted(userId);
@@ -626,7 +629,7 @@ export class QuizshowGateway
     try {
       const mayPlay = await this.access.assertMayPlay({
         session: this.sessionAccessOf(state),
-        event,
+        scope,
         userId,
         isRestricted,
         shouldCheckCapacity: true,
@@ -634,6 +637,10 @@ export class QuizshowGateway
       isCohostPlayer = mayPlay.isCohost;
     } catch (error: unknown) {
       return this.refusalFromError(frame, client, error);
+    }
+    // Asked on a first join only: a rejoin returned above.
+    if (state.isAdultsOnly && payload.hasAcceptedAdultContent !== true) {
+      return this.refusal(frame, client, 'quizshow_adult_consent_required');
     }
     const profile = await this.loadProfile(userId);
     const outcome = await this.runtime.execute(sessionId, (liveState, now) =>
@@ -1020,8 +1027,9 @@ export class QuizshowGateway
 
   private async admit(client: QuizshowSocket): Promise<string | null> {
     // Closed to everyone, so refused before any token or database work. In
-    // early access the grant is checked once the user is known.
-    if (!isFeatureLaunched('quizshow') && !isEarlyAccessFeature('quizshow')) {
+    // early access every active member is admitted to play; hosting checks
+    // the grant at attach.
+    if (!isQuizshowPlayable()) {
       this.refuseHandshake(
         client,
         buildChatWsErrorFrame('NOT_FOUND', FEATURE_HIDDEN_MESSAGE),
@@ -1038,7 +1046,6 @@ export class QuizshowGateway
         );
       }
       const user = await this.loadAdmittableUser(claims.sub);
-      await this.assertFeatureOpenTo(user.id);
       await this.assertNotLockedOut(user.role);
       await this.assertSessionLive(claims.sid);
       // The client may have gone while the checks above awaited.
@@ -1082,26 +1089,25 @@ export class QuizshowGateway
     role: 'screen' | 'host',
   ): Promise<QuizshowAck<QuizshowAttachSuccess>> {
     const frame = 'quizshow:attach';
+    // Hosting is grant-gated: a member without the grant learns nothing about the session.
+    if (!(await this.featureAccess.canUseFeature('quizshow', userId))) {
+      return this.refusal(frame, client, 'quizshow_session_not_found');
+    }
     const lookup = await this.loadAttachableState(sessionId);
     if (lookup.state === null) {
       return this.refusal(frame, client, lookup.refusal);
     }
     const state = lookup.state;
-    const event = await this.events.findOne({ where: { id: state.eventId } });
-    if (event === null) {
-      return this.refusal(frame, client, 'quizshow_session_not_found');
-    }
-    let isOrganizer: boolean;
-    try {
-      isOrganizer = await this.eventsService.assertCanView(event, userId);
-    } catch (error: unknown) {
-      if (error instanceof NotFoundException) {
+    if (state.kind === 'game') {
+      // Only the owner runs a game; anyone else gets the not-found refusal.
+      if (state.hostUserId === null || state.hostUserId !== userId) {
         return this.refusal(frame, client, 'quizshow_session_not_found');
       }
-      throw error;
-    }
-    if (!isOrganizer) {
-      return this.refusal(frame, client, 'quizshow_not_organiser');
+    } else {
+      const refusalCode = await this.eventOrganiserRefusal(state, userId);
+      if (refusalCode !== null) {
+        return this.refusal(frame, client, refusalCode);
+      }
     }
     if (isPlayingInSession(state, userId)) {
       return this.refusal(frame, client, 'quizshow_cohost_is_playing');
@@ -1132,6 +1138,31 @@ export class QuizshowGateway
     return this.attachSuccess(client, role);
   }
 
+  /**
+   * Why a member cannot attach as screen or host to an event session, or
+   * null when they organise it: a missing or hidden event is not found, a
+   * viewer who does not organise it is not an organiser.
+   */
+  private async eventOrganiserRefusal(
+    state: QuizshowLiveState,
+    userId: string,
+  ): Promise<QuizshowErrorCode | null> {
+    const scope = await this.access.loadPlayScope(state);
+    if (scope === null || scope.kind !== 'event') {
+      return 'quizshow_session_not_found';
+    }
+    let isOrganizer: boolean;
+    try {
+      isOrganizer = await this.eventsService.assertCanView(scope.event, userId);
+    } catch (error: unknown) {
+      if (error instanceof NotFoundException) {
+        return 'quizshow_session_not_found';
+      }
+      throw error;
+    }
+    return isOrganizer ? null : 'quizshow_not_organiser';
+  }
+
   private async attachPlayer(
     client: QuizshowSocket,
     userId: string,
@@ -1143,15 +1174,15 @@ export class QuizshowGateway
       return this.refusal(frame, client, lookup.refusal);
     }
     const state = lookup.state;
-    const event = await this.events.findOne({ where: { id: state.eventId } });
-    if (event === null) {
+    const scope = await this.access.loadPlayScope(state);
+    if (scope === null) {
       return this.refusal(frame, client, 'quizshow_session_not_found');
     }
     const isRestricted = await this.access.isRestricted(userId);
     try {
       await this.access.assertMayPlay({
         session: this.sessionAccessOf(state),
-        event,
+        scope,
         userId,
         isRestricted,
         shouldCheckCapacity: false,
@@ -1299,7 +1330,6 @@ export class QuizshowGateway
   ): QuizshowMayPlayInput['session'] {
     return {
       id: state.sessionId,
-      eventId: state.eventId,
       startedByUserId: state.openedByUserId,
       attachedOrganiserUserIds: [...state.attachedOrganiserUserIds],
     };
@@ -1373,7 +1403,7 @@ export class QuizshowGateway
     return this.toAck(frame, client, outcome);
   }
 
-  /** Host frames re-check the organiser and the co-host player row on every command. */
+  /** Host frames re-check the grant, the organiser and the co-host player row on every command. */
   private async runHostCommand(
     client: QuizshowSocket,
     frame: string,
@@ -1394,10 +1424,11 @@ export class QuizshowGateway
     if (state === null) {
       return this.refusal(frame, client, 'quizshow_session_finished');
     }
-    const isOrganizer = await this.eventsService.isOrganizer(
-      state.eventId,
-      userId,
-    );
+    // A host whose grant is gone learns nothing about the session.
+    if (!(await this.featureAccess.canUseFeature('quizshow', userId))) {
+      return this.refusal(frame, client, 'quizshow_session_not_found');
+    }
+    const isOrganizer = await this.access.isScopeOrganiser(state, userId);
     if (!isOrganizer) {
       return this.refusal(frame, client, 'quizshow_not_organiser');
     }

@@ -115,10 +115,46 @@ describe('QuizshowRetentionService', () => {
     expect(sessionStatement).toContain(`"status" = 'abandoned'`);
   });
 
+  it('sweeps lobby opens older than a day', async () => {
+    query.mockImplementation((statement: string) => {
+      if (statement.includes('DELETE FROM "quizshow_lobby_opens"')) {
+        return Promise.resolve(
+          statementsContaining('DELETE FROM "quizshow_lobby_opens"').length ===
+            1
+            ? countRow(BATCH_SIZE)
+            : countRow(1),
+        );
+      }
+      return Promise.resolve(countRow(0));
+    });
+    const logSpy = jest.spyOn(
+      (service as unknown as { logger: { log: (message: string) => void } })
+        .logger,
+      'log',
+    );
+
+    await service.runDailySweep();
+
+    const sweepCalls = statementsContaining(
+      'DELETE FROM "quizshow_lobby_opens"',
+    );
+    expect(sweepCalls).toHaveLength(2);
+    const [statement, parameters] = sweepCalls[0] as [string, unknown[]];
+    expect(statement).toContain('"opened_at" < $1');
+    expect(statement).toContain('LIMIT $2');
+    expect(parameters).toEqual([new Date(NOW - DAY_MS), BATCH_SIZE]);
+    expect(logSpy).toHaveBeenCalledWith(
+      'Pulse Live retention removed 3 lobby open(s)',
+    );
+    const lastStatement = (query.mock.calls as [string][]).at(-1)?.[0];
+    expect(lastStatement).toContain('DELETE FROM "quizshow_lobby_opens"');
+  });
+
   it('logs and swallows a failure', async () => {
     query.mockRejectedValue(new Error('connection lost'));
     sweepIdleSessions.mockRejectedValue(new Error('runtime down'));
     await expect(service.purgeExpiredPlays()).resolves.toBeUndefined();
+    await expect(service.sweepLobbyOpens()).resolves.toBeUndefined();
     await expect(service.abandonIdleSessions()).resolves.toBeUndefined();
     await expect(service.runDailySweep()).resolves.toBeUndefined();
   });

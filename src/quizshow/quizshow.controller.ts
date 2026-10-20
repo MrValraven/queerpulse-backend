@@ -37,10 +37,11 @@ import type {
 
 /**
  * Pulse Live routes outside one event: the starter pack cards, and the join
- * code lookup. Join checks the code and the caller's eligibility only; the
- * player row is made by `lobby:join` on the socket.
+ * code lookup. Join is open to every active member, so it carries no feature
+ * tag; the pack cards serve hosting and stay tagged. Join checks the code and
+ * the caller's eligibility only; the player row is made by `lobby:join` on the
+ * socket.
  */
-@Feature('quizshow')
 @ApiTags('Pulse Live')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
@@ -53,6 +54,7 @@ export class QuizshowController {
   ) {}
 
   @Get('packs')
+  @Feature('quizshow')
   @ApiOperation({
     summary: 'The starter pack cards, without questions or answers.',
   })

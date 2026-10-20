@@ -51,6 +51,8 @@ const answerRow = (overrides: Record<string, unknown> = {}) => ({
   },
   is_organiser: false,
   reporter_joined_at: new Date(OPENED_AT - 60000),
+  quiz_id: 'quiz-1',
+  owner_user_id: null,
   ...overrides,
 });
 
@@ -207,6 +209,53 @@ describe('ReportsService: the Pulse Live answer subject', () => {
     };
     expect(created.evidence[0]).toEqual(
       expect.objectContaining({ wasHidden: true }),
+    );
+  });
+
+  it('lets the game owner report an answer in their game', async () => {
+    reports.manager.query.mockResolvedValue([
+      answerRow({
+        event_id: null,
+        event_slug: null,
+        quiz_id: 'game-1',
+        owner_user_id: 'owner-1',
+        is_organiser: true,
+        reporter_joined_at: null,
+        question_log: [
+          { questionId: QUESTION_ID, openedAt: OPENED_AT, revealedAt: null },
+        ],
+      }),
+    ]);
+    await fileAgainst(ANSWER_ID, 'owner-1');
+    const sql = reports.manager.query.mock.calls[0][0] as string;
+    expect(sql).toContain(
+      'JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "session"."quiz_id"',
+    );
+    expect(sql).toContain('LEFT JOIN "events" "event"');
+    expect(sql).toContain('"quiz"."owner_user_id" = $2');
+    expect(reports.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('fills gameId and leaves the event fields null for a game answer', async () => {
+    reports.manager.query.mockResolvedValue([
+      answerRow({
+        event_id: null,
+        event_slug: null,
+        quiz_id: 'game-1',
+        owner_user_id: 'owner-1',
+      }),
+    ]);
+    await fileAgainst(ANSWER_ID);
+    const created = reports.create.mock.calls[0][0] as {
+      evidence: Array<Record<string, unknown>>;
+    };
+    expect(created.evidence[0]).toEqual(
+      expect.objectContaining({
+        type: QUIZSHOW_ANSWER_SNAPSHOT_TYPE,
+        eventId: null,
+        eventSlug: null,
+        gameId: 'game-1',
+      }),
     );
   });
 });

@@ -33,7 +33,7 @@ import { IsQuizshowClassValid } from './quizshow-quiz-input.dto';
 const PHASE_ID_PATTERN = /^\d{1,12}$/;
 const ROUND_INDEX_MAX = 9;
 
-function trimString({ value }: { value: unknown }): unknown {
+export function trimString({ value }: { value: unknown }): unknown {
   return typeof value === 'string' ? value.trim() : value;
 }
 
@@ -94,6 +94,10 @@ export class QuizshowLobbyJoinPayload {
 
   @IsBoolean()
   hasExtraTime!: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  hasAcceptedAdultContent?: boolean;
 
   @IsDefined()
   @ValidateIf((_payload, value: unknown) => value !== null)

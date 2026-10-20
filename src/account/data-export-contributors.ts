@@ -61,7 +61,10 @@ import {
 } from './data-export-contributors-safety';
 import { MORE_EXPORT_CONTRIBUTORS } from './data-export-contributors-more';
 import { CreatorDraftsExportContributor } from './data-export-contributors-creator-drafts';
-import { QuizshowPlaysExportContributor } from './data-export-contributors-quizshow';
+import {
+  QuizshowGamesExportContributor,
+  QuizshowPlaysExportContributor,
+} from './data-export-contributors-quizshow';
 import { PersonaPostsExportContributor } from './data-export-contributors-persona-posts';
 import {
   StudioCopyrightClaimsExportContributor,
@@ -1112,5 +1115,7 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   CreatorDraftsExportContributor,
   // Pulse Live: the sessions the member played, with their own answers and votes.
   QuizshowPlaysExportContributor,
+  // Pulse Live: the games the member owns, with their questions
+  QuizshowGamesExportContributor,
   MediaExportContributor,
 ] as const;

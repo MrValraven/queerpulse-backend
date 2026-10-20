@@ -37,7 +37,8 @@ export type MediaReferenceType =
   | 'sticker' // Sticker.storageKey
   | 'studio-cover' // StudioRelease.coverKey
   | 'persona-post' // SubprofilePost.imageKey
-  | 'quizshow-question'; // QuizshowQuestion.mediaRef and an open session's quiz snapshot
+  | 'quizshow-question' // QuizshowQuestion.mediaRef and an open session's quiz snapshot, for an event quiz
+  | 'quizshow-game-question'; // the same image in a member's game (a quiz with no event); entityId is the game id
 
 export interface MediaReference {
   type: MediaReferenceType;

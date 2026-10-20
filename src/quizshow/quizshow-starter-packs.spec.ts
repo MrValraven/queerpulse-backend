@@ -3,7 +3,9 @@ import {
   QUIZSHOW_LIMITS,
   QUIZSHOW_STARTER_PACK_KEYS,
   type QuizshowQuestionType,
+  type QuizshowStarterPack,
   type QuizshowStarterPackCard,
+  type QuizshowStarterPackKey,
   type QuizshowText,
 } from './quizshow.contract';
 import {
@@ -55,14 +57,85 @@ function isFilled(text: QuizshowText): boolean {
   return text.en.trim().length > 0 && text.pt.trim().length > 0;
 }
 
+/** The four original packs, which share one three round, fifteen question shape. */
+const CLASSIC_PACK_KEYS: readonly QuizshowStarterPackKey[] = [
+  'pride_history',
+  'portuguese_queer_culture',
+  'eurovision',
+  'drag_herstory',
+];
+
+/** The pack for `key`, throwing when the catalog has none. */
+function packWithKey(key: QuizshowStarterPackKey): QuizshowStarterPack {
+  const pack = starterPackByKey(key);
+  if (pack === null) {
+    throw new Error(`Expected a starter pack for ${key}`);
+  }
+  return pack;
+}
+
+function questionCountOf(pack: QuizshowStarterPack): number {
+  return pack.quiz.rounds.reduce(
+    (runningTotal, round) => runningTotal + round.questions.length,
+    0,
+  );
+}
+
+/** The round and question guarantees every pack keeps, whatever its shape. */
+function expectSharedQuestionGuarantees(pack: QuizshowStarterPack): void {
+  for (const round of pack.quiz.rounds) {
+    expect(round.contentLabel).toBe('none');
+    expect(round.settings).toEqual({
+      timeLimitSeconds: 20,
+      isSpeedBonusOn: true,
+      isJokerAllowed: true,
+      writeSeconds: 60,
+      voteSeconds: 30,
+    });
+    for (const question of round.questions) {
+      expect(question.points).toBe(1000);
+      expect(question.timeLimitSeconds).toBeNull();
+      if (question.type === 'multiple_choice') {
+        expect(question.options.map((option) => option.id)).toEqual([
+          'a',
+          'b',
+          'c',
+          'd',
+        ]);
+      }
+      if (question.type === 'order') {
+        expect(question.options.map((option) => option.id)).toEqual([
+          'a',
+          'b',
+          'c',
+          'd',
+        ]);
+      }
+      if (question.type === 'type_answer') {
+        expect(question.acceptedAnswers.length).toBeLessThanOrEqual(3);
+      }
+      if (round.kind === 'drag_name') {
+        expect(question.answer).toBeNull();
+      }
+    }
+  }
+}
+
 describe('Pulse Live starter packs', () => {
-  it('lists the four packs in key order', () => {
+  it('lists the packs in key order', () => {
     expect(QUIZSHOW_STARTER_PACKS.map((pack) => pack.key)).toEqual([
       ...QUIZSHOW_STARTER_PACK_KEYS,
     ]);
   });
 
-  it('gives every pack three rounds, fifteen questions and one party round', () => {
+  it('keeps every pack bilingual on the shared settings, points and option ids', () => {
+    for (const pack of QUIZSHOW_STARTER_PACKS) {
+      expect(pack.quiz.languages).toBe('both');
+      expectSharedQuestionGuarantees(pack);
+    }
+  });
+
+  it('gives every classic pack three rounds, fifteen questions and one party round', () => {
     const quizRoundOneTypes: QuizshowQuestionType[] = [
       'multiple_choice',
       'multiple_choice',
@@ -79,16 +152,11 @@ describe('Pulse Live starter packs', () => {
       'closest_number',
       'closest_number',
     ];
-    for (const pack of QUIZSHOW_STARTER_PACKS) {
+    for (const key of CLASSIC_PACK_KEYS) {
+      const pack = packWithKey(key);
       const rounds = pack.quiz.rounds;
-      expect(pack.quiz.languages).toBe('both');
       expect(rounds).toHaveLength(3);
-      expect(
-        rounds.reduce(
-          (runningTotal, round) => runningTotal + round.questions.length,
-          0,
-        ),
-      ).toBe(15);
+      expect(questionCountOf(pack)).toBe(15);
       expect(
         rounds.filter((round) => isPartyRoundKind(round.kind)),
       ).toHaveLength(1);
@@ -107,42 +175,6 @@ describe('Pulse Live starter packs', () => {
         pack.key === 'drag_herstory' ? 'drag_name' : 'lie_detector',
       );
       expect(roundThree.questions).toHaveLength(3);
-      for (const round of rounds) {
-        expect(round.contentLabel).toBe('none');
-        expect(round.settings).toEqual({
-          timeLimitSeconds: 20,
-          isSpeedBonusOn: true,
-          isJokerAllowed: true,
-          writeSeconds: 60,
-          voteSeconds: 30,
-        });
-        for (const question of round.questions) {
-          expect(question.points).toBe(1000);
-          expect(question.timeLimitSeconds).toBeNull();
-          if (question.type === 'multiple_choice') {
-            expect(question.options.map((option) => option.id)).toEqual([
-              'a',
-              'b',
-              'c',
-              'd',
-            ]);
-          }
-          if (question.type === 'order') {
-            expect(question.options.map((option) => option.id)).toEqual([
-              'a',
-              'b',
-              'c',
-              'd',
-            ]);
-          }
-          if (question.type === 'type_answer') {
-            expect(question.acceptedAnswers.length).toBeLessThanOrEqual(3);
-          }
-          if (round.kind === 'drag_name') {
-            expect(question.answer).toBeNull();
-          }
-        }
-      }
     }
     expect(
       starterPackByKey('portuguese_queer_culture')?.quiz.screenLanguage,
@@ -150,6 +182,54 @@ describe('Pulse Live starter packs', () => {
     for (const key of ['pride_history', 'eurovision', 'drag_herstory']) {
       expect(starterPackByKey(key)?.quiz.screenLanguage).toBe('en');
     }
+  });
+
+  it('gives the Lisbon pack three quiz rounds and a closing lie detector round on a Portuguese screen', () => {
+    const pack = packWithKey('lisbon_queer_icons');
+    const rounds = pack.quiz.rounds;
+    const expectedQuestionTypesByRound: QuizshowQuestionType[][] = [
+      [
+        'multiple_choice',
+        'multiple_choice',
+        'multiple_choice',
+        'multiple_choice',
+        'true_false',
+        'true_false',
+      ],
+      [
+        'multiple_choice',
+        'multiple_choice',
+        'multiple_choice',
+        'true_false',
+        'true_false',
+        'type_answer',
+        'type_answer',
+      ],
+      [
+        'type_answer',
+        'order',
+        'order',
+        'order',
+        'closest_number',
+        'closest_number',
+      ],
+      ['prompt', 'prompt', 'prompt', 'prompt'],
+    ];
+    expect(rounds.map((round) => round.kind)).toEqual([
+      'quiz',
+      'quiz',
+      'quiz',
+      'lie_detector',
+    ]);
+    expect(
+      rounds.map((round) => round.questions.map((question) => question.type)),
+    ).toEqual(expectedQuestionTypesByRound);
+    expect(questionCountOf(pack)).toBe(23);
+    expect(rounds.filter((round) => isPartyRoundKind(round.kind))).toHaveLength(
+      1,
+    );
+    expect(isPartyRoundKind(itemAt(rounds, rounds.length - 1).kind)).toBe(true);
+    expect(pack.quiz.screenLanguage).toBe('pt');
   });
 
   it('passes the structural and the completeness checks', () => {
@@ -249,8 +329,8 @@ describe('Pulse Live starter packs', () => {
       expect(card.description).toEqual(pack.description);
       expect(card.languages).toBe('both');
       expect(card.hasAdultsRounds).toBe(false);
-      expect(card.questionCount).toBe(15);
-      expect(card.roundCount).toBe(3);
+      expect(card.questionCount).toBe(questionCountOf(pack));
+      expect(card.roundCount).toBe(pack.quiz.rounds.length);
     }
   });
 

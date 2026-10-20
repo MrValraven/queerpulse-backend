@@ -31,6 +31,7 @@ import type {
   QuizshowPersistOperation,
   QuizshowQuestionLogEntry,
 } from './quizshow-engine-types';
+import { isAdultsOnlySession } from './quizshow-play-rules';
 import { isPartyRoundKind } from './quizshow-quiz-validation';
 import {
   competitionRanks,
@@ -70,7 +71,9 @@ interface SqlStatement {
 
 interface SessionRow {
   id: string;
-  event_id: string;
+  quiz_id: string;
+  /** Null for a game session. */
+  event_id: string | null;
   status: QuizshowSessionStatus;
   join_code: string;
   play_mode: QuizshowPlayMode;
@@ -83,11 +86,15 @@ interface SessionRow {
   last_host_command_at: Date | string;
   paused_at: Date | string | null;
   attached_organiser_user_ids: string[] | null;
-  event_slug: string;
-  event_title: string;
+  quiz_owner_user_id: string | null;
+  quiz_is_adults_only: boolean;
+  /** The event columns read null for a game session (left join). */
+  event_slug: string | null;
+  event_title: string | null;
   event_host_id: string | null;
   event_series_id: string | null;
   event_series_index: number | null;
+  event_is_adults_only: boolean | null;
 }
 
 interface PlayerRow {
@@ -368,6 +375,7 @@ export class QuizshowPersistenceService {
   ): Promise<QuizshowLiveState | null> {
     const sessionRows: SessionRow[] = await this.dataSource.query(
       `SELECT "session"."id" AS "id",
+              "session"."quiz_id" AS "quiz_id",
               "session"."event_id" AS "event_id",
               "session"."status" AS "status",
               "session"."join_code" AS "join_code",
@@ -381,19 +389,27 @@ export class QuizshowPersistenceService {
               "session"."last_host_command_at" AS "last_host_command_at",
               "session"."paused_at" AS "paused_at",
               to_jsonb("session"."attached_organiser_user_ids") AS "attached_organiser_user_ids",
+              "quiz"."owner_user_id" AS "quiz_owner_user_id",
+              "quiz"."is_adults_only" AS "quiz_is_adults_only",
               "event"."slug" AS "event_slug",
               "event"."title" AS "event_title",
               "event"."host_id" AS "event_host_id",
               "event"."series_id" AS "event_series_id",
-              "event"."series_index" AS "event_series_index"
+              "event"."series_index" AS "event_series_index",
+              ("event"."format_details" ->> 'isAdultsOnly') = 'true' AS "event_is_adults_only"
        FROM "quizshow_sessions" "session"
-       INNER JOIN "events" "event" ON "event"."id" = "session"."event_id"
+       INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "session"."quiz_id"
+       LEFT JOIN "events" "event" ON "event"."id" = "session"."event_id"
        WHERE "session"."id" = $1
          AND "session"."status" IN ${OPEN_STATUSES_SQL}`,
       [sessionId],
     );
     const sessionRow = sessionRows[0];
     if (sessionRow === undefined) return null;
+    // A game session has no event row; an event session whose event row is
+    // gone loads as null, as it did with the inner join.
+    const isGameSession = sessionRow.event_id === null;
+    if (!isGameSession && sessionRow.event_slug === null) return null;
 
     const [playerRows, teamRows, nextEvent] = await Promise.all([
       this.dataSource.query<PlayerRow[]>(
@@ -431,10 +447,12 @@ export class QuizshowPersistenceService {
          ORDER BY "team"."created_at" ASC, "team"."id" ASC`,
         [sessionId],
       ),
-      this.loadNextEvent(
-        sessionRow.event_series_id,
-        sessionRow.event_series_index,
-      ),
+      isGameSession
+        ? Promise.resolve(null)
+        : this.loadNextEvent(
+            sessionRow.event_series_id,
+            sessionRow.event_series_index,
+          ),
     ]);
 
     const snapshot = sessionRow.quiz_snapshot;
@@ -522,12 +540,21 @@ export class QuizshowPersistenceService {
     }
     const questionLog = sessionRow.question_log ?? [];
 
+    const isScopeAdultsOnly = isGameSession
+      ? sessionRow.quiz_is_adults_only === true
+      : sessionRow.event_is_adults_only === true;
+
     const state: QuizshowLiveState = {
       sessionId: sessionRow.id,
       eventId: sessionRow.event_id,
-      eventSlug: sessionRow.event_slug,
-      eventTitle: sessionRow.event_title,
-      hostUserId: sessionRow.event_host_id,
+      eventSlug: isGameSession ? null : sessionRow.event_slug,
+      eventTitle: isGameSession ? null : sessionRow.event_title,
+      kind: isGameSession ? 'game' : 'event',
+      gameId: isGameSession ? sessionRow.quiz_id : null,
+      isAdultsOnly: isAdultsOnlySession(isScopeAdultsOnly, snapshot),
+      hostUserId: isGameSession
+        ? sessionRow.quiz_owner_user_id
+        : sessionRow.event_host_id,
       openedByUserId: sessionRow.started_by_user_id,
       joinCode: sessionRow.join_code,
       playMode: sessionRow.play_mode,
@@ -756,6 +783,28 @@ export class QuizshowPersistenceService {
        WHERE "session"."event_id" = ANY($1::uuid[])
          AND "session"."status" IN ${OPEN_STATUSES_SQL}`,
       [eventIds],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /** The lobby, running and paused sessions of these games (quiz ids). */
+  async findOpenSessionIdsForGames(gameIds: string[]): Promise<string[]> {
+    if (gameIds.length === 0) return [];
+    const rows: IdRow[] = await this.dataSource.query(
+      `SELECT "session"."id" AS "id"
+       FROM "quizshow_sessions" "session"
+       WHERE "session"."quiz_id" = ANY($1::uuid[])
+         AND "session"."status" IN ${OPEN_STATUSES_SQL}`,
+      [gameIds],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /** The ids of every game the member owns. */
+  async findGameIdsOfOwner(userId: string): Promise<string[]> {
+    const rows: IdRow[] = await this.dataSource.query(
+      `SELECT "quiz"."id" AS "id" FROM "quizshow_quizzes" "quiz" WHERE "quiz"."owner_user_id" = $1`,
+      [userId],
     );
     return rows.map((row) => row.id);
   }

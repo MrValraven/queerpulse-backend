@@ -189,6 +189,16 @@ export enum ReportSubjectType {
   //
   // Backed by `AddQuizshowReportSubject1836000000000`.
   QuizshowAnswer = 'quizshow_answer',
+
+  // Pulse Live. ONE game session (`quizshow_sessions` row of a game with no
+  // event), addressed by the session uuid. Resolved by
+  // `ReportSubjectResolverService` to the game owner, with the game title as
+  // the excerpt. Staff act on the account and through the admin Pulse Live
+  // routes, so this subject stays out of
+  // `ModerationService.CONTENT_TAKEDOWN_SUBJECT_TYPES`.
+  //
+  // Backed by `AddQuizshowReportSubject1836000000000`.
+  QuizshowGame = 'quizshow_game',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

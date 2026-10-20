@@ -43,6 +43,7 @@ import { Sticker } from '../stickers/entities/sticker.entity';
 import { StudioRelease } from '../studio/entities/studio-release.entity';
 import { SubprofilePost } from '../subprofile-posts/entities/subprofile-post.entity';
 import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
+import { storageKeyOwnerId } from '../storage/storage-key';
 
 // Re-exported so every existing importer of `toBareKey` from this module
 // (and the coverage spec) keeps working unchanged. The implementation now
@@ -909,28 +910,37 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
 ];
 
 // --- Pulse Live question images: a SPECIAL source over raw SQL. A question
-// row holds its image in `quizshow_questions.media_ref`, three joins away
-// from the event that names it (question, round, quiz, event), so the
-// reference links to the event's Live game tab through the event's slug and
-// is labelled with the event's title. Two places count as in use:
+// row holds its image in `quizshow_questions.media_ref`, a few joins away
+// from the owner that names it. A question image belongs to an event's quiz
+// or to a member's game (a quiz with no event). An event quiz links to the
+// event's Live game tab through the event's slug and is labelled with the
+// event's title; a game links through its id and is labelled with its title
+// only when the game owner uploaded the image. A game imported from an event
+// keeps question images a co-host uploaded, and that co-host's My Media shows
+// the game with a blank label so another member's game title stays private.
+// Two places count as in use:
 // - every quiz question that references the key. An event import copies the
 //   source quiz with its keys unchanged, so one key can sit in the quizzes of
-//   many events and each of them is its own reference;
+//   many events and games, and each of them is its own reference;
 // - the frozen `quiz_snapshot` of an OPEN session (lobby, running or paused).
 //   A host may edit the quiz during a live game while the screen still shows
 //   the snapshot, so the image stays in use until the game ends. At most one
-//   session per event is open, so the jsonb walk reads a handful of rows.
-// The two halves are one UNION so a live game lists its event once.
+//   session per quiz is open, so the jsonb walk reads a handful of rows.
+// The two halves are one UNION so a live game lists its owner once. The events
+// join is a LEFT JOIN because a game has no event.
 const QUIZSHOW_QUESTION_MEDIA_SQL = `
   SELECT
     "referenced"."media_ref" AS "media_ref",
-    "event"."id" AS "event_id",
+    "quiz"."id" AS "quiz_id",
+    "quiz"."title" AS "quiz_title",
+    "quiz"."event_id" AS "quiz_event_id",
+    "quiz"."owner_user_id" AS "quiz_owner_user_id",
     "event"."title" AS "event_title",
     "event"."slug" AS "event_slug"
   FROM (
     SELECT
       "question"."media_ref"::text AS "media_ref",
-      "quiz"."event_id" AS "event_id"
+      "quiz"."id" AS "quiz_id"
     FROM "quizshow_questions" "question"
     INNER JOIN "quizshow_rounds" "round" ON "round"."id" = "question"."round_id"
     INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "round"."quiz_id"
@@ -938,21 +948,38 @@ const QUIZSHOW_QUESTION_MEDIA_SQL = `
     UNION
     SELECT
       "snapshot_question"."value"->>'mediaRef' AS "media_ref",
-      "session"."event_id" AS "event_id"
+      "session"."quiz_id" AS "quiz_id"
     FROM "quizshow_sessions" "session"
     CROSS JOIN LATERAL jsonb_array_elements("session"."quiz_snapshot"->'rounds') AS "snapshot_round"
     CROSS JOIN LATERAL jsonb_array_elements("snapshot_round"."value"->'questions') AS "snapshot_question"
     WHERE "session"."status" IN ('lobby', 'running', 'paused')
       AND "snapshot_question"."value"->>'mediaRef' = ANY($1::text[])
   ) AS "referenced"
-  INNER JOIN "events" "event" ON "event"."id" = "referenced"."event_id"
+  INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "referenced"."quiz_id"
+  LEFT JOIN "events" "event" ON "event"."id" = "quiz"."event_id"
 `;
 
 interface QuizshowQuestionMediaRow {
   media_ref: string;
-  event_id: string;
+  quiz_id: string;
+  quiz_title: string | null;
+  quiz_event_id: string | null;
+  quiz_owner_user_id: string | null;
   event_title: string | null;
   event_slug: string | null;
+}
+
+/** True when the key's uploader is the game owner; a key with no uploader segment reads as someone else's. */
+function isUploadedByGameOwner(
+  bareKey: string,
+  ownerUserId: string | null,
+): boolean {
+  const uploaderUserId = storageKeyOwnerId(bareKey);
+  return (
+    uploaderUserId !== null &&
+    ownerUserId !== null &&
+    uploaderUserId.toLowerCase() === ownerUserId.toLowerCase()
+  );
 }
 
 const QUIZSHOW_QUESTION_SOURCE: MediaReferenceSource = {
@@ -964,26 +991,37 @@ const QUIZSHOW_QUESTION_SOURCE: MediaReferenceSource = {
       QUIZSHOW_QUESTION_MEDIA_SQL,
       [candidateStoredForms],
     );
-    // One reference per key per event: the bare and the `/files/` form of a
+    // One reference per key per owner: the bare and the `/files/` form of a
     // key in the same quiz, or a question in the quiz and the open session's
-    // snapshot, name the same event once.
-    const seenKeyAndEvent = new Set<string>();
+    // snapshot, name the same event or game once.
+    const seenKeyAndOwner = new Set<string>();
     const pairs: Array<[string, MediaReference]> = [];
     for (const row of rows) {
       const bareKey = toBareKey(String(row.media_ref));
       if (!candidateBareKeys.has(bareKey)) continue;
-      // A uuid holds no colon, so the first colon ends the event id.
-      const dedupeKey = `${row.event_id}:${bareKey}`;
-      if (seenKeyAndEvent.has(dedupeKey)) continue;
-      seenKeyAndEvent.add(dedupeKey);
+      const isEventQuiz = row.quiz_event_id !== null;
+      const entityId = isEventQuiz ? row.quiz_event_id! : row.quiz_id;
+      // A uuid holds no colon, so the first colon ends the owner id.
+      const dedupeKey = `${entityId}:${bareKey}`;
+      if (seenKeyAndOwner.has(dedupeKey)) continue;
+      seenKeyAndOwner.add(dedupeKey);
       pairs.push([
         bareKey,
-        {
-          type: 'quizshow-question',
-          entityId: row.event_id,
-          label: row.event_title ?? '',
-          slug: row.event_slug ?? '',
-        },
+        isEventQuiz
+          ? {
+              type: 'quizshow-question',
+              entityId,
+              label: row.event_title ?? '',
+              slug: row.event_slug ?? '',
+            }
+          : {
+              type: 'quizshow-game-question',
+              entityId,
+              label: isUploadedByGameOwner(bareKey, row.quiz_owner_user_id)
+                ? (row.quiz_title ?? '')
+                : '',
+              slug: '',
+            },
       ]);
     }
     return pairs;

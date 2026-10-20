@@ -531,6 +531,17 @@ describe('StudioReleasesService', () => {
       ).toBeNull();
     });
 
+    it('stores play without gaps and turns it off again', async () => {
+      await service.update(USER_ID, RELEASE_ID, { isGapless: true });
+      expect((manager.save.mock.calls[0]![0] as StudioRelease).isGapless).toBe(
+        true,
+      );
+      await service.update(USER_ID, RELEASE_ID, { isGapless: false });
+      expect((manager.save.mock.calls[1]![0] as StudioRelease).isGapless).toBe(
+        false,
+      );
+    });
+
     it('stamps the rights confirmation once', async () => {
       const firstStamp = new Date('2026-10-01T00:00:00.000Z');
       release = draftRelease({ rightsConfirmedAt: firstStamp });

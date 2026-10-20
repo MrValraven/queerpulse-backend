@@ -1,7 +1,9 @@
 import {
+  QUIZSHOW_GAMES_PER_MEMBER_MAX,
   QUIZSHOW_JOIN_CODE_ALPHABET,
   QUIZSHOW_JOIN_CODE_PATTERN,
   QUIZSHOW_LIMITS,
+  QUIZSHOW_LOBBY_OPENS_PER_HOUR_MAX,
   QUIZSHOW_OPEN_SESSION_STATUSES,
   QUIZSHOW_STARTER_PACK_KEYS,
   QUIZSHOW_TEAM_COLOR_KEYS,
@@ -25,13 +27,14 @@ describe('Pulse Live contract vocabulary', () => {
     expect(QUIZSHOW_JOIN_CODE_ALPHABET).toHaveLength(31);
   });
 
-  it('names eight team colour keys, four starter packs and four timed phases', () => {
+  it('names eight team colour keys, five starter packs and four timed phases', () => {
     expect(QUIZSHOW_TEAM_COLOR_KEYS).toHaveLength(8);
     expect(QUIZSHOW_STARTER_PACK_KEYS).toEqual([
       'pride_history',
       'portuguese_queer_culture',
       'eurovision',
       'drag_herstory',
+      'lisbon_queer_icons',
     ]);
     expect(QUIZSHOW_TIMED_PHASES).toEqual(['read', 'open', 'write', 'vote']);
     expect(QUIZSHOW_OPEN_SESSION_STATUSES).toEqual([
@@ -94,5 +97,10 @@ describe('Pulse Live contract vocabulary', () => {
     expect(QUIZSHOW_LIMITS.pointsValues).toEqual([500, 1000, 2000]);
     expect(QUIZSHOW_LIMITS.optionIdPattern.test('a1b2')).toBe(true);
     expect(QUIZSHOW_LIMITS.optionIdPattern.test('A1')).toBe(false);
+  });
+
+  it('caps games at 50 per member and lobby opens at 10 an hour', () => {
+    expect(QUIZSHOW_GAMES_PER_MEMBER_MAX).toBe(50);
+    expect(QUIZSHOW_LOBBY_OPENS_PER_HOUR_MAX).toBe(10);
   });
 });

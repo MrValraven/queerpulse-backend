@@ -55,6 +55,10 @@ const REST_ROWS: Array<[QuizshowErrorCode, number]> = [
   ['quizshow_organiser_running', 409],
   ['quizshow_session_full', 409],
   ['quizshow_results_not_found', 404],
+  ['quizshow_game_not_found', 404],
+  ['quizshow_game_limit_reached', 403],
+  ['quizshow_lobby_rate_limited', 429],
+  ['quizshow_game_adults_rounds_need_switch', 403],
 ];
 
 describe('quizshow errors', () => {
@@ -84,6 +88,7 @@ describe('quizshow errors', () => {
       'quizshow_stale_phase',
       'quizshow_phase_closed',
       'quizshow_rate_limited',
+      'quizshow_adult_consent_required',
     ] as const) {
       expect(QUIZSHOW_ERRORS[code].status).toBeNull();
     }
@@ -123,6 +128,12 @@ describe('quizshow errors', () => {
     expect(
       quizshowAckFailure('quizshow_stale_phase', cursorFixture),
     ).toHaveProperty('cursor', cursorFixture);
+  });
+
+  it('names the quiz to copy from when an import source is missing', () => {
+    expect(QUIZSHOW_ERRORS.quizshow_import_source_not_found.message).toBe(
+      'The quiz to copy from was not found.',
+    );
   });
 
   it('says the Lie Detector refusal in the words of the spec', () => {

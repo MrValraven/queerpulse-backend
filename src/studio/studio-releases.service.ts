@@ -150,6 +150,9 @@ export class StudioReleasesService {
       if (body.buyUrl !== undefined) {
         release.buyUrl = body.buyUrl || null;
       }
+      if (body.isGapless !== undefined) {
+        release.isGapless = body.isGapless;
+      }
       await manager.save(release);
     });
     return this.catalog.getRelease(userId, releaseId);

@@ -175,6 +175,17 @@ export interface FeedItem extends FeedItemSignals {
    *  `MagazineFrontService` uses). For a `gathering`, the event's cover
    *  photo. Null when none is set. */
   imageUrl?: string | null;
+  /**
+   * `gathering` only: when the event happens, so the card can show the
+   * event's own date and time. `startsAt` and `endsAt` are ISO instants
+   * (`endsAt` is null when the host set no end); `timezone` is the IANA zone
+   * the host scheduled it in, which the card formats the wall clock in. The
+   * feed does not filter past events, so `startsAt` can be in the past.
+   * Undefined on every other item type.
+   */
+  startsAt?: string;
+  endsAt?: string | null;
+  timezone?: string;
   /** The language of the row the card is actually showing, so a Portuguese
    *  reader served the English original can be told so. */
   locale?: string;
@@ -418,6 +429,9 @@ export function eventToFeedItem(
     link: `/gatherings/${event.slug}`,
     actor: toAuthorSummary(host),
     imageUrl: toImageUrl(event.coverImageUrl),
+    startsAt: event.startAt.toISOString(),
+    endsAt: event.endAt ? event.endAt.toISOString() : null,
+    timezone: event.timezone,
     studioLink: null,
   };
 }

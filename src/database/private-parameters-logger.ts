@@ -5,7 +5,9 @@ import { AdvancedConsoleLogger, type QueryRunner } from 'typeorm';
  * wizard drafts and the member drafts table (`draft`, from
  * drafts/entities/draft.entity.ts) carry the whole draft payload, and the quiz
  * show tables carry
- * players' answers, votes and team names. A failed or slow query on any of
+ * players' answers, votes and team names, and the quiz, round, question and
+ * session tables carry game titles and question text. A failed or slow query
+ * on any of
  * them logs its SQL text, its error and its timing as usual, with the
  * parameters left out.
  */
@@ -17,6 +19,10 @@ export const PRIVATE_PARAMETER_TABLES = [
   'quizshow_votes',
   'quizshow_players',
   'quizshow_teams',
+  'quizshow_quizzes',
+  'quizshow_rounds',
+  'quizshow_questions',
+  'quizshow_sessions',
 ] as const;
 
 /**

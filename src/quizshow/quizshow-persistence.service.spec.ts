@@ -206,6 +206,9 @@ function lobbyState(): QuizshowLiveState {
     eventId: 'event-1',
     eventSlug: 'pride-night',
     eventTitle: 'Pride night',
+    kind: 'event',
+    gameId: null,
+    isAdultsOnly: false,
     hostUserId: 'host-user',
     openedByUserId: 'host-user',
     joinCode: 'ABC234',
@@ -254,6 +257,7 @@ function liveTeam(teamId: string): QuizshowLiveTeam {
 function sessionRow(overrides: Record<string, unknown>) {
   return {
     id: SESSION_ID,
+    quiz_id: 'quiz-1',
     event_id: 'event-1',
     status: 'running',
     join_code: 'ABC234',
@@ -279,14 +283,41 @@ function sessionRow(overrides: Record<string, unknown>) {
     last_host_command_at: new Date(40_000),
     paused_at: null,
     attached_organiser_user_ids: ['cohost-user'],
+    quiz_owner_user_id: null,
+    quiz_is_adults_only: false,
     event_slug: 'pride-night',
     event_title: 'Pride night',
     event_host_id: 'host-user',
     event_series_id: null,
     event_series_index: null,
+    event_is_adults_only: null,
     ...overrides,
   };
 }
+
+/** A game session row: no event, so the left join reads every event column null. */
+function gameSessionRow(overrides: Record<string, unknown>) {
+  return sessionRow({
+    quiz_id: 'game-1',
+    event_id: null,
+    started_by_user_id: 'owner-user',
+    attached_organiser_user_ids: [],
+    quiz_owner_user_id: 'owner-user',
+    quiz_is_adults_only: false,
+    event_slug: null,
+    event_title: null,
+    event_host_id: null,
+    event_series_id: null,
+    event_series_index: null,
+    event_is_adults_only: null,
+    ...overrides,
+  });
+}
+
+const ADULTS_SNAPSHOT: QuizshowSessionSnapshot = {
+  ...SNAPSHOT,
+  rounds: [{ ...QUIZ_ROUND, contentLabel: 'adults' }, LIE_ROUND],
+};
 
 function playerRow(overrides: Record<string, unknown>) {
   return {
@@ -2046,5 +2077,209 @@ describe('QuizshowPersistenceService', () => {
       `"session"."status" IN ('lobby', 'running', 'paused')`,
     );
     expect(idleQuery?.sql).not.toContain('ORDER BY');
+  });
+
+  it('loads a game session with no event, the owner as host and no next event', async () => {
+    const { service, recordedQueries } = buildService(
+      loadResponder({
+        // Series values a game row never carries, to prove the game kind
+        // alone skips the next event read.
+        session: [
+          gameSessionRow({
+            event_series_id: 'series-1',
+            event_series_index: 2,
+          }),
+        ],
+        nextEvents: [
+          {
+            slug: 'next-pride',
+            title: 'Next pride',
+            start_at: new Date('2026-11-01T20:00:00.000Z'),
+          },
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state).not.toBeNull();
+    expect(state?.kind).toBe('game');
+    expect(state?.gameId).toBe('game-1');
+    expect(state?.hostUserId).toBe('owner-user');
+    expect(state?.openedByUserId).toBe('owner-user');
+    expect(state?.eventId).toBeNull();
+    expect(state?.eventSlug).toBeNull();
+    expect(state?.eventTitle).toBeNull();
+    expect(state?.nextEvent).toBeNull();
+    expect(state?.isAdultsOnly).toBe(false);
+    expect(
+      recordedQueries.some((query) =>
+        query.sql.includes('FROM "events" "next_event"'),
+      ),
+    ).toBe(false);
+  });
+
+  it('selects the session through the quiz with a left join on events', async () => {
+    const { service, recordedQueries } = buildService(
+      loadResponder({ session: [gameSessionRow({})] }),
+    );
+
+    await service.loadLiveState(SESSION_ID, RANDOM);
+
+    const sessionQuery = recordedQueries.find((query) =>
+      query.sql.includes('FROM "quizshow_sessions" "session"'),
+    );
+    const sql = sessionQuery?.sql ?? '';
+    expect(sessionQuery?.params).toEqual([SESSION_ID]);
+    expect(sql).toContain(
+      'INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "session"."quiz_id"',
+    );
+    expect(sql).toContain(
+      'LEFT JOIN "events" "event" ON "event"."id" = "session"."event_id"',
+    );
+    expect(sql).not.toContain('INNER JOIN "events"');
+    expect(sql).toContain('"session"."quiz_id" AS "quiz_id"');
+    expect(sql).toContain('"quiz"."owner_user_id" AS "quiz_owner_user_id"');
+    expect(sql).toContain('"quiz"."is_adults_only" AS "quiz_is_adults_only"');
+    expect(sql).toContain(
+      `AND "session"."status" IN ('lobby', 'running', 'paused')`,
+    );
+  });
+
+  it('reads isAdultsOnly for an event from formatDetails', async () => {
+    const adultsEvent = buildService(
+      loadResponder({
+        session: [sessionRow({ event_is_adults_only: true })],
+      }),
+    );
+    const plainEvent = buildService(
+      loadResponder({
+        session: [sessionRow({ event_is_adults_only: null })],
+      }),
+    );
+
+    const adultsState = await adultsEvent.service.loadLiveState(
+      SESSION_ID,
+      RANDOM,
+    );
+    const plainState = await plainEvent.service.loadLiveState(
+      SESSION_ID,
+      RANDOM,
+    );
+
+    expect(adultsState?.isAdultsOnly).toBe(true);
+    expect(plainState?.isAdultsOnly).toBe(false);
+    expect(adultsEvent.recordedQueries[0]?.sql).toContain(
+      `("event"."format_details" ->> 'isAdultsOnly') = 'true' AS "event_is_adults_only"`,
+    );
+  });
+
+  it('keeps a game 18+ after its switch went off while the snapshot holds an adults round', async () => {
+    const switchedOffWithAdultsRound = buildService(
+      loadResponder({
+        session: [
+          gameSessionRow({
+            quiz_is_adults_only: false,
+            quiz_snapshot: ADULTS_SNAPSHOT,
+          }),
+        ],
+      }),
+    );
+    const switchedOnWithoutAdultsRound = buildService(
+      loadResponder({
+        session: [gameSessionRow({ quiz_is_adults_only: true })],
+      }),
+    );
+    const switchedOffWithoutAdultsRound = buildService(
+      loadResponder({
+        session: [gameSessionRow({ quiz_is_adults_only: false })],
+      }),
+    );
+
+    const keptState = await switchedOffWithAdultsRound.service.loadLiveState(
+      SESSION_ID,
+      RANDOM,
+    );
+    const switchedOnState =
+      await switchedOnWithoutAdultsRound.service.loadLiveState(
+        SESSION_ID,
+        RANDOM,
+      );
+    const plainState =
+      await switchedOffWithoutAdultsRound.service.loadLiveState(
+        SESSION_ID,
+        RANDOM,
+      );
+
+    expect(keptState?.kind).toBe('game');
+    expect(keptState?.isAdultsOnly).toBe(true);
+    expect(switchedOnState?.isAdultsOnly).toBe(true);
+    expect(plainState?.isAdultsOnly).toBe(false);
+  });
+
+  it('loads an event session exactly as before', async () => {
+    const { service } = buildService(
+      loadResponder({
+        session: [sessionRow({ quiz_owner_user_id: null })],
+      }),
+    );
+    const goneEvent = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            event_slug: null,
+            event_title: null,
+            event_host_id: null,
+          }),
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.kind).toBe('event');
+    expect(state?.gameId).toBeNull();
+    expect(state?.eventId).toBe('event-1');
+    expect(state?.eventSlug).toBe('pride-night');
+    expect(state?.eventTitle).toBe('Pride night');
+    expect(state?.hostUserId).toBe('host-user');
+    expect(state?.openedByUserId).toBe('cohost-user');
+    expect(state?.isAdultsOnly).toBe(false);
+    expect(state?.nextEvent).toBeNull();
+    await expect(
+      goneEvent.service.loadLiveState(SESSION_ID, RANDOM),
+    ).resolves.toBeNull();
+    expect(goneEvent.recordedQueries).toHaveLength(1);
+  });
+
+  it('finds the open sessions of games and the games of an owner', async () => {
+    const sessionFinder = buildService(() => [{ id: 'session-game' }]);
+    const gameFinder = buildService(() => [{ id: 'game-1' }, { id: 'game-2' }]);
+    const emptyFinder = buildService();
+
+    await expect(
+      sessionFinder.service.findOpenSessionIdsForGames(['game-1', 'game-2']),
+    ).resolves.toEqual(['session-game']);
+    await expect(
+      gameFinder.service.findGameIdsOfOwner('owner-user'),
+    ).resolves.toEqual(['game-1', 'game-2']);
+    await expect(
+      emptyFinder.service.findOpenSessionIdsForGames([]),
+    ).resolves.toEqual([]);
+
+    expect(emptyFinder.dataSource.query).not.toHaveBeenCalled();
+    const [sessionQuery] = sessionFinder.recordedQueries;
+    expect(sessionQuery?.params).toEqual([['game-1', 'game-2']]);
+    expect(sessionQuery?.sql).toContain(
+      '"session"."quiz_id" = ANY($1::uuid[])',
+    );
+    expect(sessionQuery?.sql).toContain(
+      `"session"."status" IN ('lobby', 'running', 'paused')`,
+    );
+    const [gameQuery] = gameFinder.recordedQueries;
+    expect(gameQuery?.params).toEqual(['owner-user']);
+    expect(gameQuery?.sql).toContain(
+      'SELECT "quiz"."id" AS "id" FROM "quizshow_quizzes" "quiz" WHERE "quiz"."owner_user_id" = $1',
+    );
   });
 });

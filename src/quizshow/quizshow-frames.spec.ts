@@ -8,6 +8,7 @@ import type {
   QuizshowPodiumEntry,
   QuizshowRoundKind,
   QuizshowScoresScope,
+  QuizshowStateBase,
   QuizshowText,
 } from './quizshow.contract';
 import {
@@ -262,6 +263,9 @@ function lobbyState(playMode: QuizshowPlayMode = 'solo'): QuizshowLiveState {
     eventId: 'event-pride-night',
     eventSlug: 'pride-night',
     eventTitle: 'Pride night',
+    kind: 'event',
+    gameId: null,
+    isAdultsOnly: false,
     hostUserId: HOST_USER_ID,
     openedByUserId: OPENER_USER_ID,
     joinCode: 'ABC234',
@@ -273,6 +277,35 @@ function lobbyState(playMode: QuizshowPlayMode = 'solo'): QuizshowLiveState {
     nextEvent: null,
     startedAt: 1_000,
   });
+}
+
+const GAME_ID = 'game-1';
+
+/** A frozen copy of the state moved to an 18+ game a member owns: no event, no next event. */
+function asGameSession(state: QuizshowLiveState): QuizshowLiveState {
+  const gameState = structuredClone(state);
+  gameState.kind = 'game';
+  gameState.gameId = GAME_ID;
+  gameState.eventId = null;
+  gameState.eventSlug = null;
+  gameState.eventTitle = null;
+  gameState.isAdultsOnly = true;
+  gameState.nextEvent = null;
+  return gameState;
+}
+
+function sessionStatesForEveryRole(
+  state: QuizshowLiveState,
+): Array<{ role: string; frame: QuizshowStateBase }> {
+  return [
+    {
+      role: 'screen',
+      frame: buildSessionState(state, { role: 'screen' }),
+    },
+    { role: 'host', frame: buildSessionState(state, { role: 'host' }) },
+    { role: 'player before joining', frame: playerState(state, null) },
+    { role: 'joined player', frame: playerState(state, ANA) },
+  ];
 }
 
 function livePlayer(
@@ -1685,6 +1718,80 @@ describe('quizshow frames', () => {
     expect(anaAfterRestart.myVote).toBeNull();
     expect(playerState(recoveryState, DANI).isEligibleForQuestion).toBe(true);
     expect(playerState(recoveryState, null).isEligibleForQuestion).toBe(false);
+  });
+
+  it('carries kind, game id and the 18+ flag for a game session with null event fields', () => {
+    const steps = playSession();
+    for (const label of ['lobby', 'multiple choice open', 'podium', 'ended']) {
+      const gameState = asGameSession(stepState(steps, label));
+      for (const { role, frame } of sessionStatesForEveryRole(gameState)) {
+        expect({
+          label,
+          role,
+          kind: frame.kind,
+          gameId: frame.gameId,
+          isAdultsOnly: frame.isAdultsOnly,
+          eventSlug: frame.eventSlug,
+          eventTitle: frame.eventTitle,
+        }).toEqual({
+          label,
+          role,
+          kind: 'game',
+          gameId: GAME_ID,
+          isAdultsOnly: true,
+          eventSlug: null,
+          eventTitle: null,
+        });
+      }
+    }
+  });
+
+  it('sends a null next event when a game ends', () => {
+    const steps = playSession();
+    const endedGameState = asGameSession(stepState(steps, 'ended'));
+    expect(endedGameState.cursor.phase).toBe('ended');
+
+    const gameEnd = buildSessionEnd(endedGameState);
+    expect(gameEnd.status).toBe('finished');
+    expect(gameEnd.hasResults).toBe(true);
+    expect(gameEnd.nextEvent).toBeNull();
+    for (const { role, frame } of sessionStatesForEveryRole(endedGameState)) {
+      expect({ role, nextEvent: frame.nextEvent }).toEqual({
+        role,
+        nextEvent: null,
+      });
+    }
+  });
+
+  it("keeps an event session's frames as before", () => {
+    const steps = playSession();
+    for (const label of ['lobby', 'multiple choice open', 'ended']) {
+      const eventState = stepState(steps, label);
+      for (const { role, frame } of sessionStatesForEveryRole(eventState)) {
+        expect({
+          label,
+          role,
+          kind: frame.kind,
+          gameId: frame.gameId,
+          isAdultsOnly: frame.isAdultsOnly,
+          eventSlug: frame.eventSlug,
+          eventTitle: frame.eventTitle,
+        }).toEqual({
+          label,
+          role,
+          kind: 'event',
+          gameId: null,
+          isAdultsOnly: false,
+          eventSlug: 'pride-night',
+          eventTitle: 'Pride night',
+        });
+      }
+    }
+    const endedState = stepState(steps, 'ended');
+    expect(buildSessionEnd(endedState).nextEvent).toEqual(NEXT_EVENT);
+    expect(buildSessionState(endedState, { role: 'host' }).nextEvent).toEqual(
+      NEXT_EVENT,
+    );
   });
 
   it('names the rooms', () => {

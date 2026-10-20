@@ -156,6 +156,8 @@ export const EXPORT_CSV_CATEGORIES = [
   'creatorDrafts',
   // Pulse Live: the sessions the member played, with their own answers and votes.
   'quizshowPlays',
+  // Pulse Live: the games the member owns, with their questions
+  'quizshowGames',
 ] as const;
 
 /**

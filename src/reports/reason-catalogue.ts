@@ -512,6 +512,17 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
+  // Pulse Live game: the title, rounds and questions of one game session.
+  [ReportSubjectType.QuizshowGame]: [
+    'hate_speech',
+    'harassment',
+    'discrimination',
+    'outing',
+    'doxxing',
+    'untagged_explicit',
+    'spam',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

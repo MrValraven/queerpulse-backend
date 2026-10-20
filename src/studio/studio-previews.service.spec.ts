@@ -1,5 +1,5 @@
 import { HttpException, NotFoundException } from '@nestjs/common';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, LessThan, Repository } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { StorageService } from '../storage/storage.service';
 import {
@@ -53,7 +53,7 @@ describe('StudioPreviewsService', () => {
   let lockedRelease: Partial<StudioRelease>;
   let manager: { save: jest.Mock };
   let releases: { createQueryBuilder: jest.Mock };
-  let tracks: { findOne: jest.Mock };
+  let tracks: { findOne: jest.Mock; find: jest.Mock };
   let ownership: { lockReleaseForWrite: jest.Mock };
   let catalog: { getReleaseAsPreview: jest.Mock };
   let blockFilter: { excludeBlocked: jest.Mock };
@@ -87,6 +87,7 @@ describe('StudioPreviewsService', () => {
         loudnessLufs: -14.2,
         peakDb: -1.3,
       }),
+      find: jest.fn().mockResolvedValue([]),
     };
     ownership = {
       lockReleaseForWrite: jest.fn(() =>
@@ -324,6 +325,7 @@ describe('StudioPreviewsService', () => {
         waveformPeaks: [0, 128, 255],
         loudnessLufs: -14.2,
         peakDb: -1.3,
+        gaplessAfterTrackId: null,
       });
       expect(tracks.findOne).toHaveBeenCalledWith({
         where: { id: TRACK_ID, releaseId: RELEASE_ID },
@@ -332,6 +334,49 @@ describe('StudioPreviewsService', () => {
         AUDIO_KEY,
         'audio/mpeg',
         200,
+      );
+      expect(tracks.find).not.toHaveBeenCalled();
+    });
+
+    it('names the earlier playable track on a gapless release', async () => {
+      releases.createQueryBuilder.mockReturnValue(
+        previewQueryBuilder({
+          id: RELEASE_ID,
+          status: StudioReleaseStatus.Draft,
+          isGapless: true,
+        }),
+      );
+      tracks.findOne.mockResolvedValueOnce({
+        id: TRACK_ID,
+        releaseId: RELEASE_ID,
+        position: 3,
+        audioKey: AUDIO_KEY,
+        audioContentType: 'audio/mpeg',
+        durationSeconds: 200,
+      });
+      tracks.find.mockResolvedValueOnce([
+        {
+          id: 'track-without-audio',
+          position: 2,
+          audioKey: null,
+          durationSeconds: null,
+          withheldAt: null,
+        },
+        {
+          id: 'track-before',
+          position: 1,
+          audioKey: AUDIO_KEY,
+          durationSeconds: 180,
+          withheldAt: null,
+        },
+      ]);
+      const stream = await service.getPreviewStream(USER_ID, TOKEN, TRACK_ID);
+      expect(stream.gaplessAfterTrackId).toBe('track-before');
+      expect(tracks.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { releaseId: RELEASE_ID, position: LessThan(3) },
+          order: { position: 'DESC' },
+        }),
       );
     });
 

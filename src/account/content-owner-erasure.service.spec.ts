@@ -1,6 +1,7 @@
 import { FindOperator, FindOptionsWhere, In } from 'typeorm';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { EVENT_CANCELLED } from '../events/event.events';
+import { QUIZSHOW_OWNER_ERASING } from '../quizshow/quizshow-owner-erasure.events';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
 
@@ -76,7 +77,10 @@ describe('ContentOwnerErasureService gatherings', () => {
     const notifications = {
       createForRecipients: jest.fn().mockResolvedValue([]),
     };
-    const eventEmitter = { emit: jest.fn().mockReturnValue(true) };
+    const eventEmitter = {
+      emit: jest.fn().mockReturnValue(true),
+      emitAsync: jest.fn().mockResolvedValue([]),
+    };
     const service = new ContentOwnerErasureService(
       events as never,
       cohosts as never,
@@ -341,6 +345,10 @@ describe('ContentOwnerErasureService forum threads', () => {
     const dataSource = {
       query: jest.fn().mockResolvedValue([[{ id: 'thread-1' }], 1]),
     };
+    const eventEmitter = {
+      emit: jest.fn().mockReturnValue(true),
+      emitAsync: jest.fn().mockResolvedValue([]),
+    };
     const service = new ContentOwnerErasureService(
       emptyFind as never,
       emptyFind as never,
@@ -352,9 +360,9 @@ describe('ContentOwnerErasureService forum threads', () => {
       noOpUpdate as never,
       { createForRecipients: jest.fn() } as never,
       dataSource as never,
-      { emit: jest.fn().mockReturnValue(true) } as never,
+      eventEmitter as never,
     );
-    return { service, dataSource };
+    return { service, dataSource, eventEmitter };
   };
 
   const statements = (dataSource: { query: jest.Mock }) =>
@@ -487,6 +495,39 @@ describe('ContentOwnerErasureService forum threads', () => {
       'UPDATE "topic_post" SET "author_na',
       'UPDATE "quizshow_sessions" SET "at',
     ]);
+  });
+
+  it("ends the member's Pulse Live games before the account goes", async () => {
+    const { service, dataSource, eventEmitter } = build();
+    const callOrder: string[] = [];
+    eventEmitter.emitAsync.mockImplementation(async () => {
+      callOrder.push('emit-start');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      callOrder.push('emit-end');
+      return [];
+    });
+    dataSource.query.mockImplementation((sql: string) => {
+      if (sql.startsWith('UPDATE "quizshow_sessions"')) {
+        callOrder.push('detach');
+      }
+      return Promise.resolve([[], 0]);
+    });
+    await service.eraseFor(ERASED_USER_ID);
+    expect(eventEmitter.emitAsync).toHaveBeenCalledWith(
+      QUIZSHOW_OWNER_ERASING,
+      { userId: ERASED_USER_ID },
+    );
+    expect(callOrder).toEqual(['emit-start', 'emit-end', 'detach']);
+  });
+
+  it('keeps erasing when the Pulse Live games step fails', async () => {
+    const { service, dataSource, eventEmitter } = build();
+    eventEmitter.emitAsync.mockRejectedValue(new Error('listener failed'));
+    await expect(service.eraseFor(ERASED_USER_ID)).resolves.toBeUndefined();
+    const detach = statements(dataSource).find(({ sql }) =>
+      sql.startsWith('UPDATE "quizshow_sessions"'),
+    );
+    expect(detach?.parameters).toEqual([ERASED_USER_ID]);
   });
 
   it('removes the erased member from every Pulse Live session they attached to', async () => {

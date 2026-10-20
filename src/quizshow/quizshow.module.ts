@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { FeatureAccessModule } from '../early-access/feature-access.module';
+import { ModerationModule } from '../moderation/moderation.module';
 import { Event } from '../events/entities/event.entity';
 import { EventBan } from '../events/entities/event-ban.entity';
 import { EventsModule } from '../events/events.module';
@@ -21,9 +22,12 @@ import { QuizshowRoundRecord } from './entities/quizshow-round.entity';
 import { QuizshowSessionRecord } from './entities/quizshow-session.entity';
 import { QuizshowTeamRecord } from './entities/quizshow-team.entity';
 import { QuizshowVoteRecord } from './entities/quizshow-vote.entity';
+import { AdminQuizshowController } from './admin-quizshow.controller';
 import { QuizshowAccessService } from './quizshow-access.service';
 import { QuizshowEventController } from './quizshow-event.controller';
 import { QuizshowEventLifecycleListener } from './quizshow-event-lifecycle.listener';
+import { QuizshowGamesController } from './quizshow-games.controller';
+import { QuizshowGamesService } from './quizshow-games.service';
 import { QuizshowGuestPushService } from './quizshow-guest-push.service';
 import { QuizshowPersistenceService } from './quizshow-persistence.service';
 import { QuizshowQuizService } from './quizshow-quiz.service';
@@ -32,15 +36,19 @@ import { QuizshowRuntimeService } from './quizshow-runtime.service';
 import { QuizshowSessionsService } from './quizshow-sessions.service';
 import { QuizshowController } from './quizshow.controller';
 import { QuizshowGateway } from './quizshow.gateway';
+import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
 
 /**
- * Pulse Live (`quizshow`): live quiz and party games on events.
+ * Pulse Live (`quizshow`): live quiz and party games on events, and games
+ * without an event that a member owns. Join is open to every active member
+ * before launch; hosting stays behind the feature gate.
  *
  * Module edges: `QuizshowModule` imports `EventsModule`; `EventsModule` and
  * `ReportsModule` reach quizshow through dependency-free helpers and one
  * event, so no cycle. The other imports (`SocialModule`, `PushModule`,
- * `NotificationsModule`, `PlatformSettingsModule`, `FeatureAccessModule`)
- * reach nothing that imports this module. Nothing is exported.
+ * `NotificationsModule`, `PlatformSettingsModule`, `FeatureAccessModule`,
+ * `ModerationModule`) reach nothing that imports this module. Nothing is
+ * exported.
  */
 @Module({
   imports: [
@@ -54,6 +62,8 @@ import { QuizshowGateway } from './quizshow.gateway';
       QuizshowAnswerRecord,
       QuizshowVoteRecord,
       QuizshowResultRecord,
+      // The lobby rate limit's ledger; it outlives the games it counts.
+      QuizshowLobbyOpenRecord,
       Event,
       EventBan,
       User,
@@ -78,15 +88,25 @@ import { QuizshowGateway } from './quizshow.gateway';
     // `PlatformSettingsService`: the socket handshake applies the
     // platform-lockdown rule, as `ChatGateway` does.
     PlatformSettingsModule,
-    // `FeatureAccessService`: while Pulse Live is in early access, the socket
-    // handshake, `session:reauth` and the guest push admit grant holders only.
+    // `FeatureAccessService`: the socket handshake admits every active member
+    // while Pulse Live is launched or in early access; host and screen roles,
+    // `session:reauth` of those roles and the guest push need the grant.
     // Entity-only, so no cycle.
     FeatureAccessModule,
+    // `ModAuditService`: staff ending or deleting a reported game write a
+    // moderation audit row. `ModerationModule` never imports this module.
+    ModerationModule,
   ],
-  controllers: [QuizshowEventController, QuizshowController],
+  controllers: [
+    QuizshowEventController,
+    QuizshowGamesController,
+    AdminQuizshowController,
+    QuizshowController,
+  ],
   providers: [
     QuizshowAccessService,
     QuizshowQuizService,
+    QuizshowGamesService,
     QuizshowSessionsService,
     QuizshowGuestPushService,
     QuizshowPersistenceService,

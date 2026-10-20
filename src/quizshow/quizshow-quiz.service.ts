@@ -9,7 +9,15 @@ import { QuizshowRoundRecord } from './entities/quizshow-round.entity';
 import { QuizshowAccessService } from './quizshow-access.service';
 import { QuizshowImportDto } from './dto/quizshow-import.dto';
 import { QuizshowQuizInputDto } from './dto/quizshow-quiz-input.dto';
-import { quizshowError, quizshowErrorWithDetails } from './quizshow-errors';
+import {
+  quizshowCodeOf,
+  quizshowError,
+  quizshowErrorWithDetails,
+} from './quizshow-errors';
+import {
+  listOrganisedEventSources,
+  listOwnedGameSources,
+} from './quizshow-import-sources';
 import {
   buildRoundRows,
   toQuizShape,
@@ -26,17 +34,74 @@ import {
   starterPackByKey,
   toStarterPackCard,
 } from './quizshow-starter-packs';
-import {
-  QUIZSHOW_LIMITS,
-  type QuizshowImportSource,
-  type QuizshowLiveSessionRef,
-  type QuizshowQuiz,
-  type QuizshowQuizResponse,
-  type QuizshowStarterPackCard,
-  type QuizshowStarterPackKey,
+import type {
+  QuizshowGameResponse,
+  QuizshowImportSource,
+  QuizshowLiveSessionRef,
+  QuizshowQuiz,
+  QuizshowQuizResponse,
+  QuizshowStarterPackCard,
+  QuizshowStarterPackKey,
+  QuizshowStarterPackQuiz,
 } from './quizshow.contract';
 
 const QUIZ_EVENT_UNIQUE_CONSTRAINT = 'UQ_quizshow_quizzes_event_id';
+
+/** Where a quiz write lands: an event's quiz, a stored game, or a game created now. */
+export type QuizshowQuizTarget =
+  | { kind: 'event'; event: Event }
+  | { kind: 'game'; gameId: string; isAdultsOnly: boolean }
+  | { kind: 'new_game'; ownerUserId: string; isAdultsOnly: boolean };
+
+export interface QuizshowQuizWriteInput {
+  target: QuizshowQuizTarget;
+  userId: string;
+  shape: QuizshowStarterPackQuiz;
+  starterPackKey: QuizshowStarterPackKey | null;
+  /** undefined skips the stale check (imports and new games). */
+  expectedUpdatedAt: string | null | undefined;
+}
+
+export interface QuizshowImportedShape {
+  shape: QuizshowStarterPackQuiz;
+  starterPackKey: QuizshowStarterPackKey | null;
+}
+
+/** $1 game quiz id: the open session with its player count, and whether kept results exist. */
+const GAME_RESPONSE_STATE_SQL = `
+  SELECT
+    "open_session"."id" AS "session_id",
+    "open_session"."join_code" AS "join_code",
+    "open_session"."status" AS "status",
+    "open_session"."play_mode" AS "play_mode",
+    "open_session"."started_at" AS "started_at",
+    "open_session"."player_count" AS "player_count",
+    EXISTS (
+      SELECT 1
+      FROM "quizshow_results" "result"
+      INNER JOIN "quizshow_sessions" "kept_session" ON "kept_session"."id" = "result"."session_id"
+      WHERE "kept_session"."quiz_id" = $1
+        AND "kept_session"."results_kept" = true
+    ) AS "has_results"
+  FROM (SELECT 1) AS "anchor"
+  LEFT JOIN LATERAL (
+    SELECT
+      "session"."id",
+      "session"."join_code",
+      "session"."status",
+      "session"."play_mode",
+      "session"."started_at",
+      (
+        SELECT COUNT(*)::int FROM "quizshow_players" "player"
+        WHERE "player"."session_id" = "session"."id"
+          AND "player"."removed_at" IS NULL
+      ) AS "player_count"
+    FROM "quizshow_sessions" "session"
+    WHERE "session"."quiz_id" = $1
+      AND "session"."status" IN ('lobby', 'running', 'paused')
+    LIMIT 1
+  ) AS "open_session" ON true
+`;
 
 /** $1 event id: the open session with its player count, and whether kept results exist. */
 const QUIZ_RESPONSE_STATE_SQL = `
@@ -88,43 +153,6 @@ const ORGANISED_EVENT_BY_SLUG_SQL = `
     )
 `;
 
-/** $1 current slug, $2 caller id, $3 current series id (nullable), $4 limit. */
-const IMPORT_SOURCES_SQL = `
-  SELECT
-    "event"."slug" AS "event_slug",
-    "event"."title" AS "event_title",
-    "event"."start_at" AS "start_at",
-    "quiz"."title" AS "quiz_title",
-    (
-      SELECT COUNT(*)::int FROM "quizshow_rounds" "round"
-      WHERE "round"."quiz_id" = "quiz"."id"
-    ) AS "round_count",
-    (
-      SELECT COUNT(*)::int
-      FROM "quizshow_questions" "question"
-      INNER JOIN "quizshow_rounds" "round" ON "round"."id" = "question"."round_id"
-      WHERE "round"."quiz_id" = "quiz"."id"
-    ) AS "question_count",
-    EXISTS (
-      SELECT 1 FROM "quizshow_rounds" "round"
-      WHERE "round"."quiz_id" = "quiz"."id"
-        AND "round"."content_label" = 'adults'
-    ) AS "has_adults_rounds",
-    COALESCE($3::uuid IS NOT NULL AND "event"."series_id" = $3::uuid, false) AS "is_same_series"
-  FROM "events" "event"
-  INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."event_id" = "event"."id"
-  WHERE "event"."slug" <> $1
-    AND (
-      "event"."host_id" = $2
-      OR EXISTS (
-        SELECT 1 FROM "event_cohosts" "cohost"
-        WHERE "cohost"."event_id" = "event"."id" AND "cohost"."user_id" = $2
-      )
-    )
-  ORDER BY "event"."start_at" DESC, "event"."id"
-  LIMIT $4
-`;
-
 interface QuizResponseStateRow {
   session_id: string | null;
   join_code: string | null;
@@ -133,26 +161,6 @@ interface QuizResponseStateRow {
   started_at: Date | string | null;
   player_count: number | null;
   has_results: boolean;
-}
-
-interface ImportSourceRow {
-  event_slug: string;
-  event_title: string;
-  start_at: Date | string;
-  quiz_title: string;
-  round_count: number;
-  question_count: number;
-  has_adults_rounds: boolean;
-  is_same_series: boolean;
-}
-
-interface QuizWriteInput {
-  event: Event;
-  userId: string;
-  shape: QuizshowQuizShape & { screenLanguage: QuizshowQuiz['screenLanguage'] };
-  starterPackKey: QuizshowStarterPackKey | null;
-  /** undefined skips the stale check (imports). */
-  expectedUpdatedAt: string | null | undefined;
 }
 
 function isEventUniqueViolation(error: unknown): boolean {
@@ -169,11 +177,32 @@ function toIsoString(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
 }
 
+function toLiveSessionRef(
+  state: QuizResponseStateRow | undefined,
+): QuizshowLiveSessionRef | null {
+  return state?.session_id &&
+    state.join_code &&
+    state.status &&
+    state.play_mode &&
+    state.started_at
+    ? {
+        sessionId: state.session_id,
+        joinCode: state.join_code,
+        status: state.status,
+        playMode: state.play_mode,
+        playerCount: state.player_count ?? 0,
+        startedAt: toIsoString(state.started_at),
+      }
+    : null;
+}
+
 /**
  * Quiz authoring for an event: read, save (a full replace guarded by
- * `expectedUpdatedAt`), and import from a starter pack or another event of
- * the same organiser. Every route but the pack list needs an organiser who is
- * not playing an open session as a co-host.
+ * `expectedUpdatedAt`), and import from a starter pack, another event of the
+ * same organiser or a game the caller owns. Every event route but the pack
+ * list needs an organiser who is not playing an open session as a co-host.
+ * The games service reuses the write, the import resolution, the 18+ rule and
+ * the response builder for games.
  */
 @Injectable()
 export class QuizshowQuizService {
@@ -194,8 +223,9 @@ export class QuizshowQuizService {
   ): Promise<QuizshowQuizResponse> {
     const event = await this.loadOrganisedEvent(slug, userId);
     // Sound because IsQuizshowAnswerForType fixes each answer's shape and structuralProblems rejects the rest.
-    const inputShape = input as unknown as QuizWriteInput['shape'];
-    this.assertShapeAllowed(event, inputShape);
+    const inputShape = input as unknown as QuizshowStarterPackQuiz;
+    const target: QuizshowQuizTarget = { kind: 'event', event };
+    this.assertShapeAllowed(target, inputShape);
     const storedQuiz = await this.loadQuiz(event.id);
     const storedMediaRefs = (storedQuiz?.rounds ?? []).flatMap((round) =>
       round.questions.map((question) => question.mediaRef),
@@ -210,7 +240,7 @@ export class QuizshowQuizService {
       }
     }
     await this.writeQuiz({
-      event,
+      target,
       userId,
       shape: inputShape,
       starterPackKey: storedQuiz?.starterPackKey ?? null,
@@ -225,30 +255,15 @@ export class QuizshowQuizService {
     input: QuizshowImportDto,
   ): Promise<QuizshowQuizResponse> {
     const event = await this.loadOrganisedEvent(slug, userId);
-    let shape: QuizshowQuizShape & {
-      screenLanguage: QuizshowQuiz['screenLanguage'];
-    };
-    let starterPackKey: QuizshowStarterPackKey | null;
-    if (input.from === 'pack') {
-      const pack =
-        input.packKey === undefined ? null : starterPackByKey(input.packKey);
-      if (!pack) throw quizshowError('quizshow_pack_not_found');
-      shape = pack.quiz;
-      starterPackKey = pack.key;
-    } else {
-      if (input.eventSlug === slug) {
-        throw quizshowError('quizshow_import_same_event');
-      }
-      const sourceQuiz = await this.loadOrganisedSourceQuiz(
-        input.eventSlug,
-        userId,
-      );
-      shape = toQuizShape(sourceQuiz);
-      starterPackKey = sourceQuiz.starterPackKey;
-    }
-    this.assertShapeAllowed(event, shape);
+    const { shape, starterPackKey } = await this.resolveImportShape(
+      input,
+      userId,
+      { eventSlug: slug, gameId: null },
+    );
+    const target: QuizshowQuizTarget = { kind: 'event', event };
+    this.assertShapeAllowed(target, shape);
     await this.writeQuiz({
-      event,
+      target,
       userId,
       shape,
       starterPackKey,
@@ -257,26 +272,104 @@ export class QuizshowQuizService {
     return this.buildResponse(event);
   }
 
+  /** Events the caller organises with a quiz, newest first, then the caller's games. */
   async listImportSources(
     slug: string,
     userId: string,
   ): Promise<{ items: QuizshowImportSource[] }> {
     const event = await this.loadOrganisedEvent(slug, userId);
-    const rows: ImportSourceRow[] = await this.dataSource.query(
-      IMPORT_SOURCES_SQL,
-      [slug, userId, event.seriesId ?? null, QUIZSHOW_LIMITS.importSourcesMax],
+    const eventSources = await listOrganisedEventSources(this.dataSource, {
+      userId,
+      excludeEventSlug: slug,
+      seriesId: event.seriesId ?? null,
+    });
+    const gameSources = await listOwnedGameSources(this.dataSource, {
+      userId,
+      excludeGameId: null,
+    });
+    return { items: [...eventSources, ...gameSources] };
+  }
+
+  /** For a game: the events the caller organises with a quiz, then the caller's other games. */
+  async listGameImportSources(
+    gameId: string,
+    userId: string,
+  ): Promise<QuizshowImportSource[]> {
+    const eventSources = await listOrganisedEventSources(this.dataSource, {
+      userId,
+      excludeEventSlug: null,
+      seriesId: null,
+    });
+    const gameSources = await listOwnedGameSources(this.dataSource, {
+      userId,
+      excludeGameId: gameId,
+    });
+    return [...eventSources, ...gameSources];
+  }
+
+  /**
+   * The quiz an import copies: a starter pack, an event the caller organises
+   * (never the excluded event), or a game the caller owns (never the excluded
+   * game). Another member's game reads as a missing source.
+   */
+  async resolveImportShape(
+    input: QuizshowImportDto,
+    userId: string,
+    exclusion: { eventSlug: string | null; gameId: string | null },
+  ): Promise<QuizshowImportedShape> {
+    if (input.from === 'pack') {
+      const pack =
+        input.packKey === undefined ? null : starterPackByKey(input.packKey);
+      if (!pack) throw quizshowError('quizshow_pack_not_found');
+      return { shape: pack.quiz, starterPackKey: pack.key };
+    }
+    if (input.from === 'event') {
+      if (
+        exclusion.eventSlug !== null &&
+        input.eventSlug === exclusion.eventSlug
+      ) {
+        throw quizshowError('quizshow_import_same_event');
+      }
+      const sourceQuiz = await this.loadOrganisedSourceQuiz(
+        input.eventSlug,
+        userId,
+      );
+      return {
+        shape: toQuizShape(sourceQuiz),
+        starterPackKey: sourceQuiz.starterPackKey,
+      };
+    }
+    const sourceQuiz = await this.loadOwnedSourceQuiz(
+      input.gameId,
+      userId,
+      exclusion.gameId,
     );
     return {
-      items: rows.map((row) => ({
-        eventSlug: row.event_slug,
-        eventTitle: row.event_title,
-        startAt: toIsoString(row.start_at),
-        quizTitle: row.quiz_title,
-        roundCount: row.round_count,
-        questionCount: row.question_count,
-        hasAdultsRounds: row.has_adults_rounds,
-        isSameSeries: row.is_same_series,
-      })),
+      shape: toQuizShape(sourceQuiz),
+      starterPackKey: sourceQuiz.starterPackKey,
+    };
+  }
+
+  /** The response of a game's builder; `isAdultsEvent` mirrors the game's 18+ switch. */
+  async buildGameResponse(gameId: string): Promise<QuizshowGameResponse> {
+    const record = await this.dataSource.manager.findOne(QuizshowQuizRecord, {
+      where: { id: gameId },
+    });
+    if (!record || record.ownerUserId === null) {
+      throw quizshowError('quizshow_game_not_found');
+    }
+    const [quiz, state] = await Promise.all([
+      this.assembleQuiz(record, this.dataSource.manager),
+      this.readGameResponseState(gameId),
+    ]);
+    return {
+      gameId,
+      isAdultsOnly: record.isAdultsOnly,
+      quiz,
+      problems: completenessProblems(quiz),
+      isAdultsEvent: record.isAdultsOnly,
+      liveSession: toLiveSessionRef(state),
+      hasResults: state?.has_results === true,
     };
   }
 
@@ -293,7 +386,26 @@ export class QuizshowQuizService {
     const quiz = await entityManager.findOne(QuizshowQuizRecord, {
       where: { eventId },
     });
-    if (!quiz) return null;
+    return quiz ? this.assembleQuiz(quiz, entityManager) : null;
+  }
+
+  /** A stored quiz by its own id (a game's id is its quiz id), or null. */
+  async loadQuizById(
+    quizId: string,
+    manager?: EntityManager,
+  ): Promise<QuizshowQuiz | null> {
+    const entityManager = manager ?? this.dataSource.manager;
+    const quiz = await entityManager.findOne(QuizshowQuizRecord, {
+      where: { id: quizId },
+    });
+    return quiz ? this.assembleQuiz(quiz, entityManager) : null;
+  }
+
+  /** A quiz row with its rounds and questions in position order. */
+  private async assembleQuiz(
+    quiz: QuizshowQuizRecord,
+    entityManager: EntityManager,
+  ): Promise<QuizshowQuiz> {
     const rounds = await entityManager.find(QuizshowRoundRecord, {
       where: { quizId: quiz.id },
       order: { position: 'ASC' },
@@ -340,74 +452,161 @@ export class QuizshowQuizService {
     return sourceQuiz;
   }
 
-  /** Structural problems and the 18+ rule. */
-  private assertShapeAllowed(event: Event, shape: QuizshowQuizShape): void {
+  /** A game of the caller other than the excluded one; every miss reads as a missing source. */
+  private async loadOwnedSourceQuiz(
+    sourceGameId: string | undefined,
+    userId: string,
+    excludedGameId: string | null,
+  ): Promise<QuizshowQuiz> {
+    if (sourceGameId === undefined || sourceGameId === excludedGameId) {
+      throw quizshowError('quizshow_import_source_not_found');
+    }
+    let sourceGame: QuizshowQuizRecord;
+    try {
+      sourceGame = await this.access.loadOwnedGame(sourceGameId, userId);
+    } catch (error) {
+      if (quizshowCodeOf(error) === 'quizshow_game_not_found') {
+        throw quizshowError('quizshow_import_source_not_found');
+      }
+      throw error;
+    }
+    const sourceQuiz = await this.loadQuizById(sourceGame.id);
+    if (!sourceQuiz) throw quizshowError('quizshow_import_source_not_found');
+    return sourceQuiz;
+  }
+
+  /**
+   * Structural problems and the 18+ rule: an event needs its 18+ flag
+   * (the event code), a game needs its 18+ switch (the game code).
+   */
+  assertShapeAllowed(
+    target: QuizshowQuizTarget,
+    shape: QuizshowQuizShape,
+  ): void {
     const problems = structuralProblems(shape);
     if (problems.length > 0) {
       throw quizshowErrorWithDetails('quizshow_quiz_invalid', { problems });
     }
-    if (hasAdultsRound(shape) && !this.access.isAdultsEvent(event)) {
-      throw quizshowError('quizshow_adults_round_needs_adults_event');
+    if (!hasAdultsRound(shape)) return;
+    if (target.kind === 'event') {
+      if (!this.access.isAdultsEvent(target.event)) {
+        throw quizshowError('quizshow_adults_round_needs_adults_event');
+      }
+      return;
+    }
+    if (!target.isAdultsOnly) {
+      throw quizshowError('quizshow_game_adults_rounds_need_switch');
     }
   }
 
-  private async writeQuiz(input: QuizWriteInput): Promise<void> {
+  /**
+   * Replaces the target's quiz with the shape and returns the quiz id. With a
+   * manager the write joins that transaction; without one it opens its own,
+   * and a racing first save of an event answers as a stale quiz.
+   */
+  async writeQuiz(
+    input: QuizshowQuizWriteInput,
+    manager?: EntityManager,
+  ): Promise<string> {
+    if (manager) return this.writeQuizRows(input, manager);
     try {
-      await this.dataSource.transaction(async (manager) => {
-        const stored = await manager.findOne(QuizshowQuizRecord, {
-          where: { eventId: input.event.id },
-          lock: { mode: 'for_no_key_update' },
-        });
-        if (input.expectedUpdatedAt !== undefined) {
-          const storedUpdatedAt = stored
-            ? stored.updatedAt.toISOString()
-            : null;
-          if (storedUpdatedAt !== input.expectedUpdatedAt) {
-            throw quizshowErrorWithDetails('quizshow_quiz_changed', {
-              updatedAt: storedUpdatedAt,
-            });
-          }
-        }
-        const quizColumns = {
-          title: input.shape.title,
-          languages: input.shape.languages,
-          screenLanguage: input.shape.screenLanguage,
-          starterPackKey: input.starterPackKey,
-          updatedByUserId: input.userId,
-          updatedAt: new Date(),
-        };
-        let quizId: string;
-        if (stored) {
-          quizId = stored.id;
-          await manager.update(QuizshowQuizRecord, { id: quizId }, quizColumns);
-          await manager.delete(QuizshowRoundRecord, { quizId });
-        } else {
-          const insertResult = await manager.insert(QuizshowQuizRecord, {
-            ...quizColumns,
-            eventId: input.event.id,
-            createdByUserId: input.userId,
-          });
-          quizId = (insertResult.identifiers[0] as { id: string }).id;
-        }
-        const rows = buildRoundRows(quizId, input.shape.rounds);
-        if (rows.rounds.length > 0) {
-          await manager.insert(QuizshowRoundRecord, rows.rounds);
-        }
-        if (rows.questions.length > 0) {
-          // The jsonb answer is a plain object; TypeORM's deep partial cannot map its union.
-          await manager.insert(
-            QuizshowQuestionRecord,
-            rows.questions as QueryDeepPartialEntity<QuizshowQuestionRecord>[],
-          );
-        }
-      });
+      return await this.dataSource.transaction((transactionManager) =>
+        this.writeQuizRows(input, transactionManager),
+      );
     } catch (error) {
-      if (!isEventUniqueViolation(error)) throw error;
-      const winningQuiz = await this.loadQuiz(input.event.id);
+      if (input.target.kind !== 'event' || !isEventUniqueViolation(error)) {
+        throw error;
+      }
+      const winningQuiz = await this.loadQuiz(input.target.event.id);
       throw quizshowErrorWithDetails('quizshow_quiz_changed', {
         updatedAt: winningQuiz?.updatedAt ?? null,
       });
     }
+  }
+
+  private async lockStoredQuiz(
+    target: QuizshowQuizTarget,
+    manager: EntityManager,
+  ): Promise<QuizshowQuizRecord | null> {
+    if (target.kind === 'new_game') return null;
+    if (target.kind === 'event') {
+      return manager.findOne(QuizshowQuizRecord, {
+        where: { eventId: target.event.id },
+        lock: { mode: 'for_no_key_update' },
+      });
+    }
+    const storedGame = await manager.findOne(QuizshowQuizRecord, {
+      where: { id: target.gameId },
+      lock: { mode: 'for_no_key_update' },
+    });
+    if (!storedGame) throw quizshowError('quizshow_game_not_found');
+    return storedGame;
+  }
+
+  private async writeQuizRows(
+    input: QuizshowQuizWriteInput,
+    manager: EntityManager,
+  ): Promise<string> {
+    const { target } = input;
+    const stored = await this.lockStoredQuiz(target, manager);
+    if (input.expectedUpdatedAt !== undefined) {
+      const storedUpdatedAt = stored ? stored.updatedAt.toISOString() : null;
+      if (storedUpdatedAt !== input.expectedUpdatedAt) {
+        throw quizshowErrorWithDetails('quizshow_quiz_changed', {
+          updatedAt: storedUpdatedAt,
+        });
+      }
+    }
+    const quizColumns = {
+      title: input.shape.title,
+      languages: input.shape.languages,
+      screenLanguage: input.shape.screenLanguage,
+      starterPackKey: input.starterPackKey,
+      updatedByUserId: input.userId,
+      updatedAt: new Date(),
+      ...(target.kind === 'event' ? {} : { isAdultsOnly: target.isAdultsOnly }),
+    };
+    let quizId: string;
+    if (stored) {
+      quizId = stored.id;
+      await manager.update(QuizshowQuizRecord, { id: quizId }, quizColumns);
+      await manager.delete(QuizshowRoundRecord, { quizId });
+    } else {
+      const scopeColumns =
+        target.kind === 'event'
+          ? { eventId: target.event.id }
+          : target.kind === 'new_game'
+            ? { eventId: null, ownerUserId: target.ownerUserId }
+            : {};
+      const insertResult = await manager.insert(QuizshowQuizRecord, {
+        ...quizColumns,
+        ...scopeColumns,
+        createdByUserId: input.userId,
+      });
+      quizId = (insertResult.identifiers[0] as { id: string }).id;
+    }
+    const rows = buildRoundRows(quizId, input.shape.rounds);
+    if (rows.rounds.length > 0) {
+      await manager.insert(QuizshowRoundRecord, rows.rounds);
+    }
+    if (rows.questions.length > 0) {
+      // The jsonb answer is a plain object; TypeORM's deep partial cannot map its union.
+      await manager.insert(
+        QuizshowQuestionRecord,
+        rows.questions as QueryDeepPartialEntity<QuizshowQuestionRecord>[],
+      );
+    }
+    return quizId;
+  }
+
+  private async readGameResponseState(
+    gameId: string,
+  ): Promise<QuizResponseStateRow | undefined> {
+    const rows: QuizResponseStateRow[] = await this.dataSource.query(
+      GAME_RESPONSE_STATE_SQL,
+      [gameId],
+    );
+    return rows[0];
   }
 
   private async readResponseState(
@@ -425,26 +624,11 @@ export class QuizshowQuizService {
       this.loadQuiz(event.id),
       this.readResponseState(event.id),
     ]);
-    const liveSession: QuizshowLiveSessionRef | null =
-      state?.session_id &&
-      state.join_code &&
-      state.status &&
-      state.play_mode &&
-      state.started_at
-        ? {
-            sessionId: state.session_id,
-            joinCode: state.join_code,
-            status: state.status,
-            playMode: state.play_mode,
-            playerCount: state.player_count ?? 0,
-            startedAt: toIsoString(state.started_at),
-          }
-        : null;
     return {
       quiz,
       problems: quiz ? completenessProblems(quiz) : [],
       isAdultsEvent: this.access.isAdultsEvent(event),
-      liveSession,
+      liveSession: toLiveSessionRef(state),
       hasResults: state?.has_results === true,
     };
   }

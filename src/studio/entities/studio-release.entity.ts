@@ -217,6 +217,15 @@ export class StudioRelease {
   @Column({ type: 'varchar', length: 1000, nullable: true })
   buyUrl!: string | null;
 
+  /**
+   * Studio listening: "Play without gaps". The player runs consecutive
+   * playable tracks of this release straight into each other and crossfades
+   * everywhere else (`findGaplessAfterTrackId` in `studio-gapless.ts`).
+   * Migration `1836900000000-AddStudioReleaseIsGapless`.
+   */
+  @Column({ type: 'boolean', default: false })
+  isGapless!: boolean;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

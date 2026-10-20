@@ -236,6 +236,8 @@ export interface StudioReleaseResponse extends StudioReleaseCard {
   /** Studio v3. */
   publishAt: string | null;
   buyUrl: string | null;
+  /** Studio listening: "Play without gaps", the same for every viewer. */
+  isGapless: boolean;
   supportLinks: StudioSupportLink[];
   version: number;
   versions: StudioReleaseVersionResponse[];
@@ -325,6 +327,9 @@ export interface StudioStream {
   /** One decimal each; both null until measured. */
   loudnessLufs: number | null;
   peakDb: number | null;
+  /** Studio listening: on a gapless release, the nearest earlier playable
+   *  track this one follows without a crossfade; null everywhere else. */
+  gaplessAfterTrackId: string | null;
 }
 
 export interface StudioReleaseStats {
@@ -468,10 +473,12 @@ export function toStudioOwnerTrackSummary(
   };
 }
 
-/** The stream body: the signed link and what the upload measured. */
+/** The stream body: the signed link, what the upload measured and the
+ *  track this one plays straight after (`findGaplessAfterTrackId`). */
 export function toStudioStream(
   signedStream: { url: string; expiresAt: string },
   track: StudioTrackMeasurements,
+  gaplessAfterTrackId: string | null = null,
 ): StudioStream {
   return {
     url: signedStream.url,
@@ -479,6 +486,7 @@ export function toStudioStream(
     waveformPeaks: track.waveformPeaks ?? null,
     loudnessLufs: track.loudnessLufs ?? null,
     peakDb: track.peakDb ?? null,
+    gaplessAfterTrackId,
   };
 }
 
@@ -719,6 +727,7 @@ export function toStudioReleaseResponse(
     personaCredits,
     publishAt: release.publishAt ? release.publishAt.toISOString() : null,
     buyUrl: release.buyUrl ?? null,
+    isGapless: release.isGapless ?? false,
     supportLinks: extras.supportLinks,
     version: latestVersion?.version ?? 1,
     versions: extras.versions.map(toStudioReleaseVersionResponse),

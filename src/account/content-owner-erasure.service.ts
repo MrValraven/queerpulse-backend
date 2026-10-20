@@ -24,6 +24,10 @@ import { Job, JobStatus } from '../jobs/entities/job.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
+  QUIZSHOW_OWNER_ERASING,
+  type QuizshowOwnerErasingEvent,
+} from '../quizshow/quizshow-owner-erasure.events';
+import {
   OpportunityStatus,
   VolunteerOpportunity,
 } from '../volunteering/entities/volunteer-opportunity.entity';
@@ -172,6 +176,9 @@ export class ContentOwnerErasureService {
     );
     await this.runIsolated('topic post bylines', () =>
       this.scrubTopicPostBylines(userId),
+    );
+    await this.runIsolated('Pulse Live games', () =>
+      this.endQuizshowGames(userId),
     );
     await this.runIsolated('Pulse Live attached organisers', () =>
       this.detachFromQuizshowSessions(userId),
@@ -733,5 +740,17 @@ export class ContentOwnerErasureService {
         WHERE $1::uuid = ANY("attached_organiser_user_ids")`,
       [userId],
     );
+  }
+
+  /**
+   * The owner's games cascade with the account, so their open sessions end
+   * first and players see the game end. Pulse Live listens for this signal
+   * and ends each open session as abandoned; the emit is awaited so the
+   * sessions are closed before the account goes.
+   */
+  private async endQuizshowGames(userId: string): Promise<void> {
+    await this.eventEmitter.emitAsync(QUIZSHOW_OWNER_ERASING, {
+      userId,
+    } satisfies QuizshowOwnerErasingEvent);
   }
 }

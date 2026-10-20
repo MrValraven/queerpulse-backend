@@ -1,7 +1,9 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
@@ -17,26 +19,46 @@ import {
 } from '../quizshow.contract';
 
 /**
- * The quiz an event host builds for Pulse Live: one per event.
- * Retention: the quiz lives until its event goes (FK cascade). Author columns
- * are set null when an account goes. `updatedAt` is a plain column the
+ * The quiz of an event, or a game owned by a member, for Pulse Live: exactly
+ * one of `eventId` and `ownerUserId` is set. An event has one quiz.
+ * Retention: the quiz lives until its event goes (FK cascade), or until its
+ * owner's account goes (FK cascade). Author columns are set null when an
+ * account goes. `updatedAt` is a plain column the
  * service sets, so the new value is returned as `updatedAt` before commit.
  */
 @Entity('quizshow_quizzes')
 @Unique('UQ_quizshow_quizzes_event_id', ['eventId'])
+@Check(
+  'CHK_quizshow_quizzes_scope',
+  'num_nonnulls("event_id", "owner_user_id") = 1',
+)
+@Index('IDX_quizshow_quizzes_owner_user_id', ['ownerUserId'])
 export class QuizshowQuizRecord {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ type: 'uuid' })
-  eventId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  eventId!: string | null;
 
-  @ManyToOne(() => Event, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Event, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({
     name: 'event_id',
     foreignKeyConstraintName: 'FK_quizshow_quizzes_event',
   })
-  event?: Event;
+  event?: Event | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  ownerUserId!: string | null;
+
+  @ManyToOne(() => User, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({
+    name: 'owner_user_id',
+    foreignKeyConstraintName: 'FK_quizshow_quizzes_owner',
+  })
+  owner?: User | null;
+
+  @Column({ type: 'boolean', default: false })
+  isAdultsOnly!: boolean;
 
   @Column({ type: 'varchar', length: 120 })
   title!: string;

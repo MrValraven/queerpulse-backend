@@ -1,9 +1,15 @@
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { VALIDATION_PIPE_OPTIONS } from '../../common/validation-pipe.options';
+import {
+  QuizshowCreateGameDto,
+  QuizshowGameInputDto,
+  QuizshowOpenGameSessionDto,
+} from './quizshow-game.dto';
 import { QuizshowImportDto } from './quizshow-import.dto';
 import { QuizshowOpenSessionDto } from './quizshow-open-session.dto';
 import { QuizshowQuizInputDto } from './quizshow-quiz-input.dto';
+import { QuizshowStaffActionDto } from './quizshow-staff-action.dto';
 import {
   QuizshowAnswerSubmitPayload,
   QuizshowLobbyJoinPayload,
@@ -311,5 +317,162 @@ describe('quizshow request bodies', () => {
       hasExtraTime: false,
     });
     expect(errorCount).toBeGreaterThan(0);
+  });
+
+  it('accepts a game import and refuses one with a packKey or a malformed gameId', async () => {
+    const valid = await validateBody(QuizshowImportDto, {
+      from: 'game',
+      gameId: sampleUuid,
+    });
+    expect(valid.errorCount).toBe(0);
+    const withPackKey = await validateBody(QuizshowImportDto, {
+      from: 'game',
+      gameId: sampleUuid,
+      packKey: 'eurovision',
+    });
+    expect(withPackKey.errorCount).toBeGreaterThan(0);
+    const malformed = await validateBody(QuizshowImportDto, {
+      from: 'game',
+      gameId: 'not-a-uuid',
+    });
+    expect(malformed.errorCount).toBeGreaterThan(0);
+    const missing = await validateBody(QuizshowImportDto, { from: 'game' });
+    expect(missing.errorCount).toBeGreaterThan(0);
+  });
+
+  it('trims a staff reason and refuses a blank one, one over 500 or a malformed reportId', async () => {
+    const trimmed = await validateBody(QuizshowStaffActionDto, {
+      reason: '  Hateful questions  ',
+      reportId: '00000000-0000-4000-8000-0000000000e1',
+    });
+    expect(trimmed.errorCount).toBe(0);
+    expect(trimmed.instance.reason).toBe('Hateful questions');
+    const withoutReport = await validateBody(QuizshowStaffActionDto, {
+      reason: 'Spam',
+    });
+    expect(withoutReport.errorCount).toBe(0);
+    const blank = await validateBody(QuizshowStaffActionDto, {
+      reason: '   ',
+    });
+    expect(blank.errorCount).toBeGreaterThan(0);
+    const missing = await validateBody(QuizshowStaffActionDto, {});
+    expect(missing.errorCount).toBeGreaterThan(0);
+    const atLimit = await validateBody(QuizshowStaffActionDto, {
+      reason: 'x'.repeat(500),
+    });
+    expect(atLimit.errorCount).toBe(0);
+    const tooLong = await validateBody(QuizshowStaffActionDto, {
+      reason: 'x'.repeat(501),
+    });
+    expect(tooLong.errorCount).toBeGreaterThan(0);
+    const malformedReport = await validateBody(QuizshowStaffActionDto, {
+      reason: 'Spam',
+      reportId: 'report-1',
+    });
+    expect(malformedReport.errorCount).toBeGreaterThan(0);
+  });
+
+  it('trims a create title and refuses a blank one or one over 120', async () => {
+    const trimmed = await validateBody(QuizshowCreateGameDto, {
+      title: '  Friday night  ',
+      source: null,
+    });
+    expect(trimmed.errorCount).toBe(0);
+    expect(trimmed.instance.title).toBe('Friday night');
+    const blank = await validateBody(QuizshowCreateGameDto, {
+      title: '   ',
+      source: null,
+    });
+    expect(blank.errorCount).toBeGreaterThan(0);
+    const tooLong = await validateBody(QuizshowCreateGameDto, {
+      title: 'x'.repeat(121),
+      source: null,
+    });
+    expect(tooLong.errorCount).toBeGreaterThan(0);
+    const atLimit = await validateBody(QuizshowCreateGameDto, {
+      title: 'x'.repeat(120),
+      source: null,
+    });
+    expect(atLimit.errorCount).toBe(0);
+  });
+
+  it('accepts a null source and a pack source on create and refuses a source of an unknown kind', async () => {
+    const nullSource = await validateBody(QuizshowCreateGameDto, {
+      title: 'Game',
+      source: null,
+    });
+    expect(nullSource.errorCount).toBe(0);
+    const packSource = await validateBody(QuizshowCreateGameDto, {
+      title: 'Game',
+      source: { from: 'pack', packKey: 'eurovision' },
+    });
+    expect(packSource.errorCount).toBe(0);
+    const unknownKind = await validateBody(QuizshowCreateGameDto, {
+      title: 'Game',
+      source: { from: 'magazine' },
+    });
+    expect(unknownKind.errorCount).toBeGreaterThan(0);
+    const missingSource = await validateBody(QuizshowCreateGameDto, {
+      title: 'Game',
+    });
+    expect(missingSource.errorCount).toBeGreaterThan(0);
+  });
+
+  it('requires isAdultsOnly on a game PUT and refuses a blank title there', async () => {
+    const valid = await validateBody(
+      QuizshowGameInputDto,
+      buildQuiz({ title: 'Game', isAdultsOnly: false }),
+    );
+    expect(valid.errorCount).toBe(0);
+    const missingSwitch = await validateBody(
+      QuizshowGameInputDto,
+      buildQuiz({ title: 'Game' }),
+    );
+    expect(missingSwitch.errorCount).toBeGreaterThan(0);
+    const blankTitle = await validateBody(
+      QuizshowGameInputDto,
+      buildQuiz({ title: '  ', isAdultsOnly: true }),
+    );
+    expect(blankTitle.errorCount).toBeGreaterThan(0);
+  });
+
+  it('refuses notifyGuests true on a game session open', async () => {
+    const baseBody = {
+      playMode: 'solo',
+      maxTeamSize: null,
+      isReviewOn: true,
+      shouldReplaceResults: false,
+    };
+    const accepted = await validateBody(QuizshowOpenGameSessionDto, {
+      ...baseBody,
+      notifyGuests: false,
+    });
+    expect(accepted.errorCount).toBe(0);
+    const refused = await validateBody(QuizshowOpenGameSessionDto, {
+      ...baseBody,
+      notifyGuests: true,
+    });
+    expect(refused.errorCount).toBeGreaterThan(0);
+  });
+
+  it('accepts lobby:join with and without hasAcceptedAdultContent and refuses a non-boolean', async () => {
+    const lobbyBody = {
+      screenName: 'Sam',
+      isAvatarShown: true,
+      hasExtraTime: false,
+      team: null,
+    };
+    const without = await validateBody(QuizshowLobbyJoinPayload, lobbyBody);
+    expect(without.errorCount).toBe(0);
+    const withConsent = await validateBody(QuizshowLobbyJoinPayload, {
+      ...lobbyBody,
+      hasAcceptedAdultContent: true,
+    });
+    expect(withConsent.errorCount).toBe(0);
+    const nonBoolean = await validateBody(QuizshowLobbyJoinPayload, {
+      ...lobbyBody,
+      hasAcceptedAdultContent: 'yes',
+    });
+    expect(nonBoolean.errorCount).toBeGreaterThan(0);
   });
 });

@@ -141,4 +141,18 @@ describe('Studio release bodies', () => {
       ]);
     }
   });
+
+  // Studio listening: "Play without gaps" is a plain switch.
+  it('accepts true and false for isGapless and refuses null and a string', async () => {
+    for (const isGapless of [true, false]) {
+      expect(await errorsFor(UpdateStudioReleaseDto, { isGapless })).toEqual(
+        [],
+      );
+    }
+    for (const isGapless of [null, 'yes']) {
+      expect(await errorsFor(UpdateStudioReleaseDto, { isGapless })).toEqual([
+        'isGapless',
+      ]);
+    }
+  });
 });

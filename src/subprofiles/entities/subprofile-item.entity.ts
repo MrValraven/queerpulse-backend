@@ -260,6 +260,9 @@ export enum SubprofileSection {
   GuestSpots = 'guest_spots',
   FlashDays = 'flash_days',
   Shop = 'shop',
+  // Architect (+2)
+  BuiltWork = 'built_work',
+  Competitions = 'competitions',
 }
 
 @Entity('subprofile_items')

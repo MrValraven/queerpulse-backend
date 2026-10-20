@@ -1,5 +1,5 @@
 import { HttpException, NotFoundException } from '@nestjs/common';
-import { In, Repository } from 'typeorm';
+import { In, LessThan, Repository } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { StorageService } from '../storage/storage.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
@@ -1073,11 +1073,49 @@ describe('StudioCatalogService', () => {
         waveformPeaks: null,
         loudnessLufs: null,
         peakDb: null,
+        gaplessAfterTrackId: null,
       });
       expect(storage.createPresignedAudioStream).toHaveBeenCalledWith(
         AUDIO_KEY,
         'audio/mpeg',
         200,
+      );
+    });
+
+    it('names the nearest earlier playable track on a gapless release', async () => {
+      ownership.isPersonaMember.mockResolvedValue(true);
+      tracks.findOne.mockResolvedValue({ ...trackRow(AUDIO_KEY), position: 4 });
+      releases.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({
+          one: {
+            ...releaseRow(1, StudioReleaseStatus.Draft),
+            isGapless: true,
+          },
+        }),
+      );
+      tracks.find.mockResolvedValueOnce([
+        {
+          id: 'withheld-track',
+          position: 3,
+          audioKey: AUDIO_KEY,
+          durationSeconds: 200,
+          withheldAt: new Date('2026-10-14T10:00:00.000Z'),
+        },
+        {
+          id: 'previous-track',
+          position: 2,
+          audioKey: AUDIO_KEY,
+          durationSeconds: 200,
+          withheldAt: null,
+        },
+      ]);
+      const stream = await service.getStream(VIEWER_ID, TRACK_ID);
+      expect(stream.gaplessAfterTrackId).toBe('previous-track');
+      expect(tracks.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { releaseId: releaseRow(1).id, position: LessThan(4) },
+          order: { position: 'DESC' },
+        }),
       );
     });
 

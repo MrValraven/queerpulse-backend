@@ -19,6 +19,7 @@ import type { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import type { QuizshowAnswerPayloadDto } from './dto/quizshow-socket-payloads';
 import type { QuizshowPlayerRecord } from './entities/quizshow-player.entity';
+import type { QuizshowQuizRecord } from './entities/quizshow-quiz.entity';
 import type { QuizshowSessionRecord } from './entities/quizshow-session.entity';
 import { QuizshowAccessService } from './quizshow-access.service';
 import type {
@@ -49,6 +50,8 @@ const COHOST_USER_ID = 'cohost-user';
 const PLAYER_USER_ID = 'player-user';
 const OUTSIDER_USER_ID = 'outsider-user';
 const STRANGER_USER_ID = 'stranger-user';
+const GAME_ID = '44444444-4444-4444-8444-444444444444';
+const OWNER_USER_ID = 'owner-user';
 const BLOCKED_WORD = BLOCKED_TERMS[0] ?? 'blocked';
 const START = Date.UTC(2026, 9, 19, 20, 0, 0);
 const OPEN_STATUSES = new Set(['lobby', 'running', 'paused']);
@@ -93,6 +96,9 @@ interface Harness {
     isOpenSessionIdle: jest.Mock;
   };
   eventsService: { isOrganizer: jest.Mock; assertCanView: jest.Mock };
+  /** The events repository the access service reads. */
+  events: { findOne: jest.Mock };
+  blockFilter: { isBlockedEitherWay: jest.Mock };
   profiles: { findOne: jest.Mock };
   refreshTokens: { exists: jest.Mock };
   jwt: { verifyAsync: jest.Mock };
@@ -144,14 +150,37 @@ function typedQuestion(questionId: string): QuizshowSnapshotQuestion {
   };
 }
 
-function lobbyState(): QuizshowLiveState {
+interface HarnessOptions {
+  /** `'game'` builds a session of a game owned by OWNER_USER_ID with no event. */
+  kind?: 'event' | 'game';
+  isAdultsOnly?: boolean;
+}
+
+function lobbyState(options: HarnessOptions = {}): QuizshowLiveState {
+  const isGame = options.kind === 'game';
+  const scopeFields = isGame
+    ? {
+        eventId: null,
+        eventSlug: null,
+        eventTitle: null,
+        kind: 'game' as const,
+        gameId: GAME_ID,
+        hostUserId: OWNER_USER_ID,
+        openedByUserId: OWNER_USER_ID,
+      }
+    : {
+        eventId: EVENT_ID,
+        eventSlug: 'pride-night',
+        eventTitle: 'Pride night',
+        kind: 'event' as const,
+        gameId: null,
+        hostUserId: HOST_USER_ID,
+        openedByUserId: HOST_USER_ID,
+      };
   return createLobbyState({
     sessionId: SESSION_ID,
-    eventId: EVENT_ID,
-    eventSlug: 'pride-night',
-    eventTitle: 'Pride night',
-    hostUserId: HOST_USER_ID,
-    openedByUserId: HOST_USER_ID,
+    ...scopeFields,
+    isAdultsOnly: options.isAdultsOnly ?? false,
     joinCode: 'ABC234',
     playMode: 'solo',
     maxTeamSize: null,
@@ -186,8 +215,8 @@ function lobbyState(): QuizshowLiveState {
   });
 }
 
-function createHarness(): Harness {
-  const state = lobbyState();
+function createHarness(options: HarnessOptions = {}): Harness {
+  const state = lobbyState(options);
   const persistence = {
     loadLiveState: jest.fn((sessionId: string) =>
       Promise.resolve(
@@ -288,6 +317,9 @@ function createHarness(): Harness {
       Promise.resolve(userId !== null && !ungrantedUserIds.has(userId)),
     ),
   };
+  const blockFilter = {
+    isBlockedEitherWay: jest.fn(() => Promise.resolve(false)),
+  };
   const access = new QuizshowAccessService(
     events as unknown as Repository<Event>,
     {
@@ -303,9 +335,13 @@ function createHarness(): Harness {
       exists: jest.fn(() => Promise.resolve(false)),
     } as unknown as Repository<QuizshowPlayerRecord>,
     eventsService as unknown as EventsService,
+    blockFilter as unknown as BlockFilterService,
     {
-      isBlockedEitherWay: jest.fn(() => Promise.resolve(false)),
-    } as unknown as BlockFilterService,
+      findOne: jest.fn(() => Promise.resolve(null)),
+    } as unknown as Repository<QuizshowQuizRecord>,
+    {
+      findOne: jest.fn(() => Promise.resolve(null)),
+    } as unknown as Repository<Profile>,
   );
   const gateway = new QuizshowGateway(
     jwt as unknown as JwtService,
@@ -316,7 +352,6 @@ function createHarness(): Harness {
     users as unknown as Repository<User>,
     profiles as unknown as Repository<Profile>,
     refreshTokens as unknown as Repository<RefreshToken>,
-    events as unknown as Repository<Event>,
     sessionRows as unknown as Repository<QuizshowSessionRecord>,
     platformSettings as unknown as PlatformSettingsService,
     featureAccess as unknown as FeatureAccessService,
@@ -333,6 +368,8 @@ function createHarness(): Harness {
     hiddenFromUserIds,
     persistence,
     eventsService,
+    events,
+    blockFilter,
     profiles,
     refreshTokens,
     jwt,
@@ -405,17 +442,36 @@ function attach(
   });
 }
 
+/** `hasAcceptedAdultContent` is sent only when given, so a call without it omits the field. */
 function joinLobby(
   harness: Harness,
   client: FakeClient,
   screenName = 'Robin',
+  hasAcceptedAdultContent?: boolean,
 ): Promise<QuizshowAck<{ me: QuizshowMe }>> {
   return harness.gateway.handleLobbyJoin(asClient(client), {
     screenName,
     isAvatarShown: false,
     hasExtraTime: false,
     team: null,
+    ...(hasAcceptedAdultContent === undefined
+      ? {}
+      : { hasAcceptedAdultContent }),
   });
+}
+
+/**
+ * Marks a connected socket as attached in the given role without the attach
+ * checks, standing for a socket whose attach the gateway would refuse, so
+ * the frame's own check is the one that answers.
+ */
+function forgeAttachedSocket(
+  client: FakeClient,
+  role: QuizshowAttachRole,
+): void {
+  client.data.sessionId = SESSION_ID;
+  client.data.role = role;
+  client.data.playerId = null;
 }
 
 function submitAnswer(
@@ -486,7 +542,14 @@ describe('QuizshowGateway', () => {
     jest.restoreAllMocks();
   });
 
-  it('refuses every handshake with NOT_FOUND while Pulse Live is hidden from everyone', async () => {
+  /** Swaps the event lobby of `beforeEach` for a session built from `options`. */
+  function replaceHarness(options: HarnessOptions): void {
+    harness.runtime.onModuleDestroy();
+    harness.gateway.onModuleDestroy();
+    harness = createHarness(options);
+  }
+
+  it('refuses the handshake while Pulse Live is neither launched nor in early access', async () => {
     jest.spyOn(launchedFeatures, 'isFeatureLaunched').mockReturnValue(false);
     jest.spyOn(launchedFeatures, 'isEarlyAccessFeature').mockReturnValue(false);
     const memberClient = await connect(harness, 'socket-1', PLAYER_USER_ID);
@@ -518,25 +581,60 @@ describe('QuizshowGateway', () => {
         .mockReturnValue(true);
     });
 
-    it('refuses a member without a grant with NOT_FOUND once the token is verified', async () => {
+    it('admits a member without the grant to the handshake and the player attach', async () => {
       harness.ungrantedUserIds.add(PLAYER_USER_ID);
       const client = await connect(harness, 'socket-1', PLAYER_USER_ID);
 
       expect(harness.jwt.verifyAsync).toHaveBeenCalled();
-      expect(harness.featureAccess.canUseFeature).toHaveBeenCalledWith(
-        'quizshow',
-        PLAYER_USER_ID,
-      );
-      expect(client.emit).toHaveBeenCalledWith('exception', {
-        status: 'error',
-        code: 'NOT_FOUND',
-        message: 'This feature is not available yet.',
+      expect(client.disconnect).not.toHaveBeenCalled();
+      expect(clientEmits(client, 'exception')).toHaveLength(0);
+      expect(client.data.userId).toBe(PLAYER_USER_ID);
+
+      expect(await attach(harness, client, 'player')).toMatchObject({
+        ok: true,
+        role: 'player',
       });
-      expect(client.disconnect).toHaveBeenCalledWith(true);
-      expect(client.data.userId).toBeUndefined();
-      await expect(attach(harness, client, 'player')).rejects.toThrow(
-        ChatWsException,
+      const joinAck = await joinLobby(harness, client);
+      expect(joinAck.ok).toBe(true);
+      expect(client.data.role).toBe('player');
+      // Grants are never read for playing.
+      expect(harness.featureAccess.canUseFeature).not.toHaveBeenCalled();
+    });
+
+    it('refuses a host attach and a host command from a member without the grant', async () => {
+      harness.ungrantedUserIds.add(COHOST_USER_ID);
+      const cohostLaptop = await connect(
+        harness,
+        'socket-cohost',
+        COHOST_USER_ID,
       );
+      expect(codeOf(await attach(harness, cohostLaptop, 'host'))).toBe(
+        'quizshow_session_not_found',
+      );
+      expect(codeOf(await attach(harness, cohostLaptop, 'screen'))).toBe(
+        'quizshow_session_not_found',
+      );
+      expect(cohostLaptop.data.role).toBeUndefined();
+      expect(cohostLaptop.join).not.toHaveBeenCalled();
+      expect(harness.state.attachedOrganiserUserIds.has(COHOST_USER_ID)).toBe(
+        false,
+      );
+
+      await joinedPlayer(harness, 'socket-player', PLAYER_USER_ID);
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      harness.ungrantedUserIds.add(HOST_USER_ID);
+      expect(codeOf(await setScreenMuted(harness, hostRemote, true))).toBe(
+        'quizshow_session_not_found',
+      );
+      expect(
+        codeOf(
+          await harness.gateway.handleHostStart(asClient(hostRemote), {
+            phaseId: '0',
+          }),
+        ),
+      ).toBe('quizshow_session_not_found');
+      expect(harness.state.isScreenMuted).toBe(false);
+      expect(harness.state.cursor.phase).toBe('lobby');
     });
 
     it('admits grant holders as host, big screen and player', async () => {
@@ -558,27 +656,48 @@ describe('QuizshowGateway', () => {
       expect(player.disconnect).not.toHaveBeenCalled();
     });
 
-    it('drops a live socket at its next reauth once the grant is revoked', async () => {
-      const client = await connect(harness, 'socket-1', PLAYER_USER_ID);
-      expect(client.data.userId).toBe(PLAYER_USER_ID);
-
+    it('refuses session:reauth for a host socket whose grant is gone and keeps a player socket', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
       harness.ungrantedUserIds.add(PLAYER_USER_ID);
-      const { ticket } = socketTicketService.mint(
+      const { client: player } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+
+      harness.ungrantedUserIds.add(HOST_USER_ID);
+      const hostTicket = socketTicketService.mint(
+        HOST_USER_ID,
+        `family-${HOST_USER_ID}`,
+        UserStatus.Active,
+        15 * 60_000,
+      );
+      const refused = await harness.gateway.handleReauth(asClient(hostRemote), {
+        ticket: hostTicket.ticket,
+      });
+      expect(refused).toEqual({ ok: false, code: 'NOT_FOUND' });
+      expect(hostRemote.emit).toHaveBeenCalledWith(
+        'exception',
+        expect.objectContaining({ code: 'TOKEN_EXPIRED' }),
+      );
+      expect(hostRemote.disconnect).toHaveBeenCalledWith(true);
+
+      const playerTicket = socketTicketService.mint(
         PLAYER_USER_ID,
         `family-${PLAYER_USER_ID}`,
         UserStatus.Active,
         15 * 60_000,
       );
-      const refused = await harness.gateway.handleReauth(asClient(client), {
-        ticket,
+      const extended = await harness.gateway.handleReauth(asClient(player), {
+        ticket: playerTicket.ticket,
       });
-
-      expect(refused).toEqual({ ok: false, code: 'NOT_FOUND' });
-      expect(client.emit).toHaveBeenCalledWith(
-        'exception',
-        expect.objectContaining({ code: 'TOKEN_EXPIRED' }),
-      );
-      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(extended).toMatchObject({ ok: true });
+      expect(player.disconnect).not.toHaveBeenCalled();
+      expect(
+        harness.featureAccess.canUseFeature.mock.calls.some(
+          (call: unknown[]) => call[1] === PLAYER_USER_ID,
+        ),
+      ).toBe(false);
     });
   });
 
@@ -598,10 +717,8 @@ describe('QuizshowGateway', () => {
 
     expect(client.disconnect).not.toHaveBeenCalled();
     expect(client.data.userId).toBe(PLAYER_USER_ID);
-    expect(harness.featureAccess.canUseFeature).toHaveBeenCalledWith(
-      'quizshow',
-      PLAYER_USER_ID,
-    );
+    // The handshake never reads a grant: hosting checks it at attach.
+    expect(harness.featureAccess.canUseFeature).not.toHaveBeenCalled();
     expect(harness.refreshTokens.exists).toHaveBeenCalledWith({
       where: expect.objectContaining({
         familyId: `family-${PLAYER_USER_ID}`,
@@ -1263,5 +1380,235 @@ describe('QuizshowGateway', () => {
     ]) {
       expect(loggedTexts.some((text) => text.includes(secret))).toBe(false);
     }
+  });
+
+  describe('a game session', () => {
+    beforeEach(() => {
+      replaceHarness({ kind: 'game' });
+    });
+
+    it('attaches the owner of a game as host and screen and refuses another member with session not found', async () => {
+      const ownerRemote = await attachedHost(
+        harness,
+        'socket-owner-remote',
+        OWNER_USER_ID,
+      );
+      expect(ownerRemote.data.role).toBe('host');
+      const ownerScreen = await connect(
+        harness,
+        'socket-owner-screen',
+        OWNER_USER_ID,
+      );
+      expect(await attach(harness, ownerScreen, 'screen')).toMatchObject({
+        ok: true,
+        role: 'screen',
+      });
+
+      // An event organiser and any other member hold no role in a game.
+      const otherMembers = [
+        ['socket-event-host', HOST_USER_ID],
+        ['socket-outsider', OUTSIDER_USER_ID],
+      ] as const;
+      for (const [socketId, userId] of otherMembers) {
+        const client = await connect(harness, socketId, userId);
+        expect(codeOf(await attach(harness, client, 'host'))).toBe(
+          'quizshow_session_not_found',
+        );
+        expect(codeOf(await attach(harness, client, 'screen'))).toBe(
+          'quizshow_session_not_found',
+        );
+        expect(client.data.role).toBeUndefined();
+        expect(client.join).not.toHaveBeenCalled();
+      }
+      expect([...harness.state.attachedOrganiserUserIds]).toEqual([
+        OWNER_USER_ID,
+      ]);
+      expect(harness.eventsService.assertCanView).not.toHaveBeenCalled();
+    });
+
+    it('runs host commands of a game for the owner only', async () => {
+      await joinedPlayer(harness, 'socket-player', PLAYER_USER_ID);
+      const ownerRemote = await attachedHost(
+        harness,
+        'socket-owner',
+        OWNER_USER_ID,
+      );
+      expect(
+        await harness.gateway.handleHostStart(asClient(ownerRemote), {
+          phaseId: '0',
+        }),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(harness.state.cursor.phase).toBe('round_intro');
+      const introPhaseId = harness.state.cursor.phaseId;
+
+      // An event organiser on a host socket the attach would have refused.
+      const otherRemote = await connect(harness, 'socket-other', HOST_USER_ID);
+      forgeAttachedSocket(otherRemote, 'host');
+      expect(codeOf(await hostNext(harness, otherRemote, introPhaseId))).toBe(
+        'quizshow_not_organiser',
+      );
+      expect(codeOf(await setScreenMuted(harness, otherRemote, true))).toBe(
+        'quizshow_not_organiser',
+      );
+      expect(harness.state.cursor.phaseId).toBe(introPhaseId);
+      expect(harness.state.isScreenMuted).toBe(false);
+      expect(harness.eventsService.isOrganizer).not.toHaveBeenCalled();
+
+      expect(await hostNext(harness, ownerRemote, introPhaseId)).toEqual({
+        ok: true,
+        isNoop: false,
+      });
+      expect(harness.state.cursor.phase).toBe('read');
+    });
+
+    it('refuses lobby:join from the game owner', async () => {
+      const ownerPhone = await connect(
+        harness,
+        'socket-owner-phone',
+        OWNER_USER_ID,
+      );
+      expect(codeOf(await attach(harness, ownerPhone, 'player'))).toBe(
+        'quizshow_organiser_running',
+      );
+      expect(ownerPhone.data.role).toBeUndefined();
+
+      // A player socket the attach would have refused: the join checks again.
+      forgeAttachedSocket(ownerPhone, 'player');
+      expect(codeOf(await joinLobby(harness, ownerPhone))).toBe(
+        'quizshow_organiser_running',
+      );
+      expect(harness.state.players.size).toBe(0);
+      expect(ownerPhone.data.playerId).toBeNull();
+    });
+
+    it('refuses lobby:join between a player and an owner who blocked each other with banned from event', async () => {
+      const phone = await connect(harness, 'socket-phone', PLAYER_USER_ID);
+      expect(await attach(harness, phone, 'player')).toMatchObject({
+        ok: true,
+      });
+
+      // The block lands while the player waits in the lobby.
+      harness.blockFilter.isBlockedEitherWay.mockImplementation(
+        (ownerUserId: string, userId: string) =>
+          Promise.resolve(
+            ownerUserId === OWNER_USER_ID && userId === PLAYER_USER_ID,
+          ),
+      );
+      expect(codeOf(await joinLobby(harness, phone))).toBe(
+        'quizshow_banned_from_event',
+      );
+      expect(harness.state.players.size).toBe(0);
+      expect(harness.blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+        OWNER_USER_ID,
+        PLAYER_USER_ID,
+      );
+
+      const tablet = await connect(harness, 'socket-tablet', PLAYER_USER_ID);
+      expect(codeOf(await attach(harness, tablet, 'player'))).toBe(
+        'quizshow_banned_from_event',
+      );
+
+      // A member with no block plays on.
+      await joinedPlayer(harness, 'socket-outsider', OUTSIDER_USER_ID);
+      expect(harness.state.players.size).toBe(1);
+    });
+
+    it('never calls the events repository for a game session with no event', async () => {
+      expect(harness.state.eventId).toBeNull();
+      const ownerRemote = await attachedHost(
+        harness,
+        'socket-owner',
+        OWNER_USER_ID,
+      );
+      const ownerScreen = await connect(
+        harness,
+        'socket-owner-screen',
+        OWNER_USER_ID,
+      );
+      await attach(harness, ownerScreen, 'screen');
+      await joinedPlayer(harness, 'socket-player', PLAYER_USER_ID);
+      expect(await setScreenMuted(harness, ownerRemote, true)).toEqual({
+        ok: true,
+        isNoop: false,
+      });
+      const stranger = await connect(
+        harness,
+        'socket-stranger',
+        STRANGER_USER_ID,
+      );
+      expect(codeOf(await attach(harness, stranger, 'host'))).toBe(
+        'quizshow_session_not_found',
+      );
+
+      expect(harness.events.findOne).not.toHaveBeenCalled();
+      expect(harness.eventsService.isOrganizer).not.toHaveBeenCalled();
+      expect(harness.eventsService.assertCanView).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('an 18+ session', () => {
+    it('refuses a first lobby:join to an 18+ session without consent and accepts it with consent', async () => {
+      replaceHarness({ kind: 'game', isAdultsOnly: true });
+      const phone = await connect(harness, 'socket-phone', PLAYER_USER_ID);
+      expect(await attach(harness, phone, 'player')).toMatchObject({
+        ok: true,
+      });
+
+      expect(codeOf(await joinLobby(harness, phone))).toBe(
+        'quizshow_adult_consent_required',
+      );
+      expect(codeOf(await joinLobby(harness, phone, 'Robin', false))).toBe(
+        'quizshow_adult_consent_required',
+      );
+      expect(harness.state.players.size).toBe(0);
+      expect(phone.data.playerId).toBeNull();
+
+      const accepted = await joinLobby(harness, phone, 'Robin', true);
+      expect(accepted.ok).toBe(true);
+      expect(harness.state.players.size).toBe(1);
+    });
+
+    it('lets a joined player rejoin an 18+ session without the consent field', async () => {
+      replaceHarness({ kind: 'game', isAdultsOnly: true });
+      const phone = await connect(harness, 'socket-phone', PLAYER_USER_ID);
+      await attach(harness, phone, 'player');
+      const firstJoin = await joinLobby(harness, phone, 'Robin', true);
+      if (!firstJoin.ok) {
+        throw new Error(`lobby:join refused with ${firstJoin.code}`);
+      }
+      const { playerId } = firstJoin.me;
+
+      expect(await joinLobby(harness, phone)).toMatchObject({
+        ok: true,
+        me: { playerId },
+      });
+
+      const laptop = await connect(harness, 'socket-laptop', PLAYER_USER_ID);
+      expect(await attach(harness, laptop, 'player')).toMatchObject({
+        ok: true,
+      });
+      expect(await joinLobby(harness, laptop)).toMatchObject({
+        ok: true,
+        me: { playerId },
+      });
+      expect(harness.state.players.size).toBe(1);
+    });
+
+    it('asks consent for an 18+ event game', async () => {
+      replaceHarness({ kind: 'event', isAdultsOnly: true });
+      const phone = await connect(harness, 'socket-phone', PLAYER_USER_ID);
+      expect(await attach(harness, phone, 'player')).toMatchObject({
+        ok: true,
+      });
+
+      expect(codeOf(await joinLobby(harness, phone))).toBe(
+        'quizshow_adult_consent_required',
+      );
+      expect(harness.state.players.size).toBe(0);
+
+      const accepted = await joinLobby(harness, phone, 'Robin', true);
+      expect(accepted.ok).toBe(true);
+      expect(harness.state.players.size).toBe(1);
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { Transform } from 'class-transformer';
 import {
   Equals,
+  IsBoolean,
   IsDateString,
   IsIn,
   IsOptional,
@@ -83,4 +84,10 @@ export class UpdateStudioReleaseDto {
   @IsSafeUrl()
   @Matches(/^https:\/\//i, { message: 'buyUrl must be an https link' })
   buyUrl?: string | null;
+
+  /** Studio listening: "Play without gaps" on the release step; null is
+   *  refused. */
+  @ValidateIf(isPresentValue)
+  @IsBoolean()
+  isGapless?: boolean;
 }

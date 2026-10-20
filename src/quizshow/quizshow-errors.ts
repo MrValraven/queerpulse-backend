@@ -61,7 +61,7 @@ export const QUIZSHOW_ERRORS: Readonly<
   },
   quizshow_import_source_not_found: {
     status: HttpStatus.NOT_FOUND,
-    message: 'The event to copy a quiz from was not found.',
+    message: 'The quiz to copy from was not found.',
   },
   quizshow_import_same_event: {
     status: HttpStatus.UNPROCESSABLE_ENTITY,
@@ -118,6 +118,22 @@ export const QUIZSHOW_ERRORS: Readonly<
   quizshow_results_not_found: {
     status: HttpStatus.NOT_FOUND,
     message: 'No results are kept for this event.',
+  },
+  quizshow_game_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This game was not found.',
+  },
+  quizshow_game_limit_reached: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'This member already keeps the most games allowed.',
+  },
+  quizshow_lobby_rate_limited: {
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    message: 'Too many live games were opened in the last hour.',
+  },
+  quizshow_game_adults_rounds_need_switch: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'A round for adults needs the game marked 18+.',
   },
   // socket
   quizshow_session_not_found: {
@@ -231,6 +247,10 @@ export const QUIZSHOW_ERRORS: Readonly<
   quizshow_rate_limited: {
     status: null,
     message: 'Too many requests, slow down for the event.',
+  },
+  quizshow_adult_consent_required: {
+    status: null,
+    message: 'This game holds 18+ content and needs a confirmation to join.',
   },
   // existing, reused as is
   ACCOUNT_RESTRICTED: {
