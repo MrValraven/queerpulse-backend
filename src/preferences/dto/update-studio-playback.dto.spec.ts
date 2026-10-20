@@ -52,4 +52,21 @@ describe('UpdateStudioPlaybackDto', () => {
       await failingFields({ hideExplicit: 'true', crossfadeSeconds: '6' }),
     ).toEqual(['crossfadeSeconds', 'hideExplicit']);
   });
+
+  // Studio safety and moderation: "Ask before warned tracks".
+  it('takes the ask-first switch alone or with the others', async () => {
+    expect(await failingFields({ askBeforeWarnings: false })).toEqual([]);
+    expect(
+      await failingFields({ askBeforeWarnings: true, crossfadeSeconds: 4 }),
+    ).toEqual([]);
+  });
+
+  it('refuses null and a string for the ask-first switch', async () => {
+    expect(await failingFields({ askBeforeWarnings: null })).toEqual([
+      'askBeforeWarnings',
+    ]);
+    expect(await failingFields({ askBeforeWarnings: 'false' })).toEqual([
+      'askBeforeWarnings',
+    ]);
+  });
 });

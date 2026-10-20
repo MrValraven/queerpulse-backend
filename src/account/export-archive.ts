@@ -146,6 +146,16 @@ export const EXPORT_CSV_CATEGORIES = [
   // they wrote.
   'studioReleaseReminders',
   'personaPosts',
+  // Collaborative playlists: one row per editor seat, then one row per
+  // track added to another member's playlist.
+  'studioPlaylistSeats',
+  'studioPlaylistAdditions',
+  // Studio safety and moderation: the copyright claims the member filed.
+  'studioCopyrightClaims',
+  // Creator drafts: the member's own event, listing edit and community wizard drafts.
+  'creatorDrafts',
+  // Pulse Live: the sessions the member played, with their own answers and votes.
+  'quizshowPlays',
 ] as const;
 
 /**

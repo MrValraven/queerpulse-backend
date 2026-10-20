@@ -204,6 +204,7 @@ export class MemberPreferencesExportContributor implements DataExportContributio
       studioAutoplayNext: preferences.studioAutoplayNext,
       studioHideExplicit: preferences.studioHideExplicit,
       studioCrossfadeSeconds: preferences.studioCrossfadeSeconds,
+      studioAskBeforeWarnings: preferences.studioAskBeforeWarnings,
       updatedAt: preferences.updatedAt.toISOString(),
     };
   }

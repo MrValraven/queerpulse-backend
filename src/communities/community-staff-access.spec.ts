@@ -13,6 +13,7 @@ import {
 import {
   resolveMemberCommunity,
   resolveMemberCommunityInterior,
+  resolveOwnerLevelCommunity,
   resolveStaffCommunity,
 } from './community-staff-access';
 
@@ -51,6 +52,7 @@ describe('community-staff-access', () => {
     parentId: null,
     allowsSubcommunities: false,
     archivedWithParent: false,
+    givingIntro: null,
     rulesVersion: 1,
     welcomeMessage: null,
     nowReading: null,
@@ -226,6 +228,90 @@ describe('community-staff-access', () => {
           'user-1',
         ),
       ).rejects.toBeInstanceOf(NotFoundException);
+      expect(communities.findOne).toHaveBeenCalledWith({
+        where: { slug: 'queer-devs', archivedAt: IsNull() },
+      });
+      expect(members.findOne).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveOwnerLevelCommunity', () => {
+    const resolveAs = (userId: string) =>
+      resolveOwnerLevelCommunity(
+        communities as never,
+        members as never,
+        'queer-devs',
+        userId,
+      );
+
+    it.each([RosterRole.Owner, RosterRole.CoOwner])(
+      'admits the community %s',
+      async (role) => {
+        communities.findOne.mockResolvedValue(LIVE_COMMUNITY);
+        members.findOne.mockResolvedValue({ ...MEMBERSHIP, role });
+
+        const access = await resolveAs('user-1');
+
+        expect(access.role).toBe(role);
+        expect(access.community).toBe(LIVE_COMMUNITY);
+      },
+    );
+
+    it('refuses a moderator', async () => {
+      communities.findOne.mockResolvedValue(LIVE_COMMUNITY);
+      members.findOne.mockResolvedValue({
+        ...MEMBERSHIP,
+        role: RosterRole.Mod,
+      });
+
+      const refusal = resolveAs('user-1');
+
+      await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(refusal).rejects.toThrow(
+        'Only the community owner or a co-owner can do that',
+      );
+    });
+
+    it('refuses a plain member', async () => {
+      communities.findOne.mockResolvedValue(LIVE_COMMUNITY);
+      members.findOne.mockResolvedValue(MEMBERSHIP);
+
+      const refusal = resolveAs('user-1');
+
+      await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(refusal).rejects.toThrow(
+        'Only the community owner or a co-owner can do that',
+      );
+    });
+
+    it('refuses a non-member of a public community with 403', async () => {
+      communities.findOne.mockResolvedValue(LIVE_COMMUNITY);
+      members.findOne.mockResolvedValue(null);
+
+      const refusal = resolveAs('stranger-1');
+
+      await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(refusal).rejects.toThrow('Only roster members can do that');
+    });
+
+    it('404s a non-member of a private community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...LIVE_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(resolveAs('stranger-1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('404s an archived community', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(resolveAs('user-1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
       expect(communities.findOne).toHaveBeenCalledWith({
         where: { slug: 'queer-devs', archivedAt: IsNull() },
       });

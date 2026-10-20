@@ -1,8 +1,11 @@
 import { ClassConstructor, plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { AddStudioPlaylistEditorsDto } from './add-studio-playlist-editors.dto';
 import { AddStudioPlaylistTracksDto } from './add-studio-playlist-tracks.dto';
 import { CreateStudioPlaylistDto } from './create-studio-playlist.dto';
+import { ListStudioPlaylistEditorCandidatesQuery } from './list-studio-playlist-editor-candidates.query';
 import { ReorderStudioPlaylistEntriesDto } from './reorder-studio-playlist-entries.dto';
+import { RespondStudioPlaylistEditorInviteDto } from './respond-studio-playlist-editor-invite.dto';
 import { UpdateStudioPlaylistDto } from './update-studio-playlist.dto';
 
 const TRACK_ID = 'f1000000-0000-4000-8000-000000000001';
@@ -121,5 +124,83 @@ describe('Studio playlist bodies', () => {
         entryIds: Array.from({ length: 501 }, () => TRACK_ID),
       }),
     ).toEqual(['entryIds']);
+  });
+});
+
+describe('Studio playlist editor bodies', () => {
+  it('takes one to ten unique member slugs', async () => {
+    expect(
+      await errorsFor(AddStudioPlaylistEditorsDto, {
+        memberSlugs: ['ana-silva', 'bea-costa'],
+      }),
+    ).toEqual([]);
+    expect(
+      await errorsFor(AddStudioPlaylistEditorsDto, { memberSlugs: [] }),
+    ).toEqual(['memberSlugs']);
+    expect(
+      await errorsFor(AddStudioPlaylistEditorsDto, {
+        memberSlugs: Array.from(
+          { length: 11 },
+          (_unused, index) => `m-${index}`,
+        ),
+      }),
+    ).toEqual(['memberSlugs']);
+    expect(
+      await errorsFor(AddStudioPlaylistEditorsDto, {
+        memberSlugs: ['ana-silva', 'ana-silva'],
+      }),
+    ).toEqual(['memberSlugs']);
+  });
+
+  it('refuses a blank slug, one of 121 characters, and anything but strings', async () => {
+    for (const memberSlugs of [[''], ['x'.repeat(121)], [42], 'ana-silva']) {
+      expect(
+        await errorsFor(AddStudioPlaylistEditorsDto, { memberSlugs }),
+      ).toEqual(['memberSlugs']);
+    }
+  });
+
+  it('takes accept or decline and nothing else', async () => {
+    for (const response of ['accept', 'decline']) {
+      expect(
+        await errorsFor(RespondStudioPlaylistEditorInviteDto, { response }),
+      ).toEqual([]);
+    }
+    expect(
+      await errorsFor(RespondStudioPlaylistEditorInviteDto, {
+        response: 'maybe',
+      }),
+    ).toEqual(['response']);
+    expect(await errorsFor(RespondStudioPlaylistEditorInviteDto, {})).toEqual([
+      'response',
+    ]);
+  });
+
+  it('trims the candidate search and bounds it at 80 characters', async () => {
+    expect(
+      plainToInstance(ListStudioPlaylistEditorCandidatesQuery, {
+        q: '  Ana  ',
+      }).q,
+    ).toBe('Ana');
+    expect(
+      await errorsFor(ListStudioPlaylistEditorCandidatesQuery, {}),
+    ).toEqual([]);
+    expect(
+      await errorsFor(ListStudioPlaylistEditorCandidatesQuery, {
+        q: 'x'.repeat(81),
+      }),
+    ).toEqual(['q']);
+  });
+
+  it('takes the editor removal confirmation as a boolean on a playlist edit', async () => {
+    expect(
+      await errorsFor(UpdateStudioPlaylistDto, {
+        creditSubprofileId: PERSONA_ID,
+        confirmEditorRemoval: true,
+      }),
+    ).toEqual([]);
+    expect(
+      await errorsFor(UpdateStudioPlaylistDto, { confirmEditorRemoval: 'yes' }),
+    ).toEqual(['confirmEditorRemoval']);
   });
 });

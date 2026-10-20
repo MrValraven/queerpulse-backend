@@ -1,6 +1,6 @@
 import type { Repository } from 'typeorm';
 import type { ModAuditLog } from '../../moderation/entities/mod-audit-log.entity';
-import type { SourceWindow } from '../platform-log.types';
+import { MOD_STAFF_ACTIONS, type SourceWindow } from '../platform-log.types';
 import { ModAuditLogSource } from './mod-audit-log.source';
 
 type QueryBuilderMethod =
@@ -149,5 +149,44 @@ describe('ModAuditLogSource', () => {
     ]);
     const [entry] = await source.fetch(windowWith());
     expect(entry?.actorKind).toBe('system');
+  });
+});
+
+describe('ModAuditLogSource creator draft views', () => {
+  it('files a creator draft view under Staff and access with the kind and no note', async () => {
+    const { source } = sourceWith([
+      {
+        ...ROW,
+        action: 'creator_draft_viewed',
+        target_user_id: null,
+        target_name: null,
+        report_id: null,
+        note: '{"v":1,"kind":"listing_edit","draftId":"draft-1","surface":"creator_drafts"}',
+      },
+    ]);
+    const [entry] = await source.fetch(windowWith());
+    expect(entry).toEqual(
+      expect.objectContaining({
+        category: 'staff',
+        kind: 'mod.creator_draft_viewed',
+        targetUserId: null,
+        params: { draftKind: 'listing_edit' },
+        note: null,
+        subject: { label: '', route: '/admin/creator-drafts' },
+      }),
+    );
+  });
+
+  it('keeps an unreadable creator draft note out of the entry', async () => {
+    const { source } = sourceWith([
+      { ...ROW, action: 'creator_draft_viewed', note: 'garbled' },
+    ]);
+    const [entry] = await source.fetch(windowWith());
+    expect(entry?.params).toEqual({});
+    expect(entry?.note).toBeNull();
+  });
+
+  it('lists the action among the staff actions', () => {
+    expect(MOD_STAFF_ACTIONS).toContain('creator_draft_viewed');
   });
 });

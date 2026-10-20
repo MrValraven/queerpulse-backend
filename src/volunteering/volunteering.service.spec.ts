@@ -9,6 +9,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { AccessTier } from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -27,7 +28,11 @@ import {
   SignupStatus,
   VolunteerSignup,
 } from './entities/volunteer-signup.entity';
-import { VolunteeringService } from './volunteering.service';
+import {
+  COMMUNITY_OPPORTUNITIES_LIMIT,
+  OPPORTUNITY_CLOSED_CODE,
+  VolunteeringService,
+} from './volunteering.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
 // results by default (mirrors `companies.service.spec.ts`'s `qbStub`).
@@ -42,6 +47,7 @@ const qbStub = () => {
     'groupBy',
     'addGroupBy',
     'orderBy',
+    'addOrderBy',
     'skip',
     'take',
     'update',
@@ -97,6 +103,8 @@ describe('VolunteeringService', () => {
     refsByIds: jest.Mock;
     ownerOrModCommunityIdsForUser: jest.Mock;
     isOwnerOrMod: jest.Mock;
+    tierRefsByIds: jest.Mock;
+    isMember: jest.Mock;
   };
   let notificationsService: { create: jest.Mock };
   let contentModerationService: { stateFor: jest.Mock };
@@ -184,6 +192,11 @@ describe('VolunteeringService', () => {
       // check. The community-tier tests override these per case.
       ownerOrModCommunityIdsForUser: jest.fn().mockResolvedValue([]),
       isOwnerOrMod: jest.fn().mockResolvedValue(false),
+      // Default: no attributed community resolves a tier ref, so the private
+      // attribution gate passes and the existing tests run unchanged. The
+      // private-attribution cases override both per test.
+      tierRefsByIds: jest.fn().mockResolvedValue(new Map()),
+      isMember: jest.fn().mockResolvedValue(false),
     };
     notificationsService = { create: jest.fn().mockResolvedValue(null) };
     // Default: every subject resolves visible (no takedown row), so the
@@ -1662,6 +1675,431 @@ describe('VolunteeringService', () => {
         ForbiddenException,
       );
       expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('signup / closed opportunities', () => {
+    const closedOpportunity = {
+      id: 'opp-1',
+      slug: 'x',
+      posterId: 'poster-1',
+      communityId: null,
+      spotsTotal: 5,
+      status: OpportunityStatus.Closed,
+    };
+
+    it('refuses a sign-up to a closed opportunity with a 409 carrying the closed code, saving nothing', async () => {
+      managerFindOne.mockResolvedValue(closedOpportunity);
+
+      const attempt = service.signup('x', 'user-1', {});
+
+      await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+      await expect(attempt).rejects.toMatchObject({
+        response: {
+          message: 'This opportunity is closed',
+          code: OPPORTUNITY_CLOSED_CODE,
+        },
+      });
+      expect(OPPORTUNITY_CLOSED_CODE).toBe('OPPORTUNITY_CLOSED');
+      expect(signups.count).not.toHaveBeenCalled();
+      expect(signups.save).not.toHaveBeenCalled();
+      expect(notificationsService.create).not.toHaveBeenCalled();
+    });
+
+    it('still answers 404 for a closed opportunity that is also taken down', async () => {
+      managerFindOne.mockResolvedValue(closedOpportunity);
+      contentModerationService.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(service.signup('x', 'user-1', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(signups.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a declined applicant reapplying to a closed opportunity with the same 409', async () => {
+      managerFindOne.mockResolvedValue(closedOpportunity);
+      signups.findOne.mockResolvedValue({
+        id: 'signup-1',
+        opportunityId: 'opp-1',
+        userId: 'user-1',
+        note: 'old note',
+        status: 'declined',
+        decidedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      await expect(service.signup('x', 'user-1', {})).rejects.toMatchObject({
+        response: { code: OPPORTUNITY_CLOSED_CODE },
+      });
+      expect(signups.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('private community attribution', () => {
+    const tierRefsFor = (accessTier: AccessTier) =>
+      new Map([
+        [
+          'community-1',
+          {
+            id: 'community-1',
+            parentId: null,
+            slug: 'quiet-circle',
+            name: 'Quiet Circle',
+            accessTier,
+            avatarImageUrl: null,
+          },
+        ],
+      ]);
+    const privateTierRefs = () => tierRefsFor(AccessTier.Private);
+
+    const attributedRow = () => ({
+      id: 'opp-1',
+      slug: 'mentor-qyc',
+      org: 'Quiet Circle',
+      partnerId: null,
+      communityId: 'community-1',
+      role: 'Mentor',
+      causes: [OpportunityCause.Youth],
+      commit: OpportunityCommitLevel.Low,
+      time: '2 hrs / week',
+      location: 'Lisbon',
+      skills: [],
+      desc: 'Mentor queer youth.',
+      detail: {
+        why: [],
+        tasks: [],
+        commitments: [],
+        goodFor: [],
+        teamIntro: null,
+      },
+      spotsTotal: 4,
+      applyRole: 'Volunteer Coordinator',
+      posterId: 'poster-1',
+      status: OpportunityStatus.Open,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    it('drops private-attributed opportunities from the public board inside the query', async () => {
+      const qb = qbStub();
+      opportunities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({});
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '"attributed_community"."access_tier" = :privateAccessTier',
+        ),
+        { privateAccessTier: AccessTier.Private },
+      );
+      expect(qb.getManyAndCount).toHaveBeenCalled();
+    });
+
+    it('404s the detail of a private-attributed opportunity for an anonymous reader', async () => {
+      opportunities.findOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+
+      await expect(service.getBySlug('mentor-qyc', null)).rejects.toThrow(
+        'Opportunity not found',
+      );
+      expect(communityMembership.tierRefsByIds).toHaveBeenCalledWith([
+        'community-1',
+      ]);
+      expect(communityMembership.isMember).not.toHaveBeenCalled();
+    });
+
+    it('404s the detail of a private-attributed opportunity for a signed-in member off the roster', async () => {
+      opportunities.findOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+      communityMembership.isMember.mockResolvedValue(false);
+
+      await expect(service.getBySlug('mentor-qyc', 'viewer-1')).rejects.toThrow(
+        'Opportunity not found',
+      );
+      expect(communityMembership.isMember).toHaveBeenCalledWith(
+        'community-1',
+        'viewer-1',
+      );
+    });
+
+    it('serves the detail of a private-attributed opportunity to a roster member', async () => {
+      opportunities.findOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+      communityMembership.isMember.mockResolvedValue(true);
+
+      const detail = await service.getBySlug('mentor-qyc', 'member-1');
+
+      expect(detail.slug).toBe('mentor-qyc');
+    });
+
+    it('serves the detail of a private-attributed opportunity to its poster without a roster lookup', async () => {
+      opportunities.findOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+
+      const detail = await service.getBySlug('mentor-qyc', 'poster-1');
+
+      expect(detail.slug).toBe('mentor-qyc');
+      expect(communityMembership.tierRefsByIds).not.toHaveBeenCalled();
+      expect(communityMembership.isMember).not.toHaveBeenCalled();
+    });
+
+    it('serves the detail of a private-attributed opportunity to platform staff without a tier lookup', async () => {
+      opportunities.findOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+
+      const detail = await service.getBySlug(
+        'mentor-qyc',
+        'moderator-1',
+        'moderator',
+      );
+
+      expect(detail.slug).toBe('mentor-qyc');
+      expect(communityMembership.tierRefsByIds).not.toHaveBeenCalled();
+    });
+
+    it('serves the detail of a public-attributed opportunity to an anonymous reader', async () => {
+      opportunities.findOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(
+        tierRefsFor(AccessTier.Public),
+      );
+
+      const detail = await service.getBySlug('mentor-qyc', null);
+
+      expect(detail.slug).toBe('mentor-qyc');
+      expect(communityMembership.isMember).not.toHaveBeenCalled();
+    });
+
+    it('makes no tier lookup for an opportunity with no community attribution', async () => {
+      opportunities.findOne.mockResolvedValue({
+        ...attributedRow(),
+        communityId: null,
+      });
+
+      await service.getBySlug('mentor-qyc', null);
+
+      expect(communityMembership.tierRefsByIds).not.toHaveBeenCalled();
+    });
+
+    it('404s a sign-up to a private-attributed opportunity from someone off the roster, saving nothing', async () => {
+      managerFindOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+      communityMembership.isMember.mockResolvedValue(false);
+
+      await expect(
+        service.signup('mentor-qyc', 'user-1', {}),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(signups.save).not.toHaveBeenCalled();
+      expect(notificationsService.create).not.toHaveBeenCalled();
+    });
+
+    it('accepts a sign-up to a private-attributed opportunity from a roster member', async () => {
+      managerFindOne.mockResolvedValue(attributedRow());
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+      communityMembership.isMember.mockResolvedValue(true);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+
+      const signup = await service.signup('mentor-qyc', 'user-1', {});
+
+      expect(signup.status).toBe('pending');
+    });
+
+    it('404s an outsider signing up to a closed private-attributed opportunity, checking visibility before the closed state', async () => {
+      managerFindOne.mockResolvedValue({
+        ...attributedRow(),
+        status: OpportunityStatus.Closed,
+      });
+      communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+      communityMembership.isMember.mockResolvedValue(false);
+
+      const attempt = service.signup('mentor-qyc', 'outsider-1', {});
+
+      await expect(attempt).rejects.toBeInstanceOf(NotFoundException);
+      await expect(attempt).rejects.toThrow('Opportunity not found');
+      expect(contentModerationService.stateFor).not.toHaveBeenCalled();
+      expect(signups.save).not.toHaveBeenCalled();
+    });
+
+    it('binds only the private tier in the public board predicate, so request and invite attributions stay listed', async () => {
+      const qb = qbStub();
+      opportunities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({});
+
+      const andWhere = qb.andWhere as jest.Mock;
+      const tierCalls = andWhere.mock.calls.filter(
+        ([clause]) =>
+          typeof clause === 'string' &&
+          clause.includes('"attributed_community"'),
+      );
+      expect(tierCalls).toHaveLength(1);
+      const [clause, parameters] = tierCalls[0] as [string, object];
+      expect(parameters).toEqual({ privateAccessTier: AccessTier.Private });
+      expect(Object.values(parameters)).not.toContain(AccessTier.Request);
+      expect(Object.values(parameters)).not.toContain(AccessTier.Invite);
+      expect(clause).not.toMatch(/\bIN\b/);
+    });
+
+    describe('applicant review routes', () => {
+      it('404s an outsider listing signups of a private-attributed opportunity before the poster check', async () => {
+        opportunities.findOne.mockResolvedValue(attributedRow());
+        communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+        communityMembership.isMember.mockResolvedValue(false);
+
+        await expect(
+          service.listSignups('mentor-qyc', 'outsider-1'),
+        ).rejects.toThrow(NotFoundException);
+        expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+        expect(signups.find).not.toHaveBeenCalled();
+      });
+
+      it('lets the poster list signups of a private-attributed opportunity', async () => {
+        opportunities.findOne.mockResolvedValue(attributedRow());
+        communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+        signups.find.mockResolvedValue([]);
+
+        await expect(
+          service.listSignups('mentor-qyc', 'poster-1'),
+        ).resolves.toEqual([]);
+        expect(communityMembership.tierRefsByIds).not.toHaveBeenCalled();
+      });
+
+      it('404s an outsider deciding a signup on a private-attributed opportunity before the poster check', async () => {
+        opportunities.findOne.mockResolvedValue(attributedRow());
+        communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+        communityMembership.isMember.mockResolvedValue(false);
+
+        await expect(
+          service.decideSignup(
+            'mentor-qyc',
+            'signup-1',
+            'outsider-1',
+            SignupStatus.Accepted,
+          ),
+        ).rejects.toThrow(NotFoundException);
+        expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+        expect(signups.findOne).not.toHaveBeenCalled();
+      });
+
+      it('lets the poster reach the signup lookup when deciding on a private-attributed opportunity', async () => {
+        opportunities.findOne.mockResolvedValue(attributedRow());
+        communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+        signups.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.decideSignup(
+            'mentor-qyc',
+            'signup-1',
+            'poster-1',
+            SignupStatus.Accepted,
+          ),
+        ).rejects.toThrow('Signup not found');
+        expect(communityMembership.tierRefsByIds).not.toHaveBeenCalled();
+      });
+
+      it('404s an outsider confirming a session on a private-attributed opportunity before the poster check', async () => {
+        opportunities.findOne.mockResolvedValue(attributedRow());
+        communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+        communityMembership.isMember.mockResolvedValue(false);
+
+        await expect(
+          service.confirmCompletion('mentor-qyc', 'signup-1', 'outsider-1', {
+            attended: true,
+            hours: 2,
+          }),
+        ).rejects.toThrow(NotFoundException);
+        expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+        expect(signups.findOne).not.toHaveBeenCalled();
+      });
+
+      it('lets the poster reach the signup lookup when confirming a session on a private-attributed opportunity', async () => {
+        opportunities.findOne.mockResolvedValue(attributedRow());
+        communityMembership.tierRefsByIds.mockResolvedValue(privateTierRefs());
+        signups.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.confirmCompletion('mentor-qyc', 'signup-1', 'poster-1', {
+            attended: true,
+            hours: 2,
+          }),
+        ).rejects.toThrow('Signup not found');
+        expect(communityMembership.tierRefsByIds).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('open opportunities by community', () => {
+    const openRow = () => ({
+      id: 'opp-1',
+      slug: 'route-marshal',
+      org: 'Queer Runners Lisboa',
+      partnerId: null,
+      communityId: 'community-1',
+      role: 'Route marshal',
+      causes: [OpportunityCause.Arts],
+      commit: OpportunityCommitLevel.Low,
+      time: 'Sunday morning',
+      location: 'Lisbon',
+      skills: [],
+      desc: 'Help the Sunday run.',
+      spotsTotal: 8,
+      applyRole: 'Run lead',
+      posterId: 'poster-1',
+      status: OpportunityStatus.Open,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    it('pages the newest open opportunities with take(50) and getManyAndCount, returning the total', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount = jest.fn().mockResolvedValue([[openRow()], 7]);
+      opportunities.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.pageOpenByCommunity('community-1');
+
+      expect(COMMUNITY_OPPORTUNITIES_LIMIT).toBe(50);
+      expect(qb.where).toHaveBeenCalledWith('o.community_id = :communityId', {
+        communityId: 'community-1',
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith('o.status = :status', {
+        status: OpportunityStatus.Open,
+      });
+      expect(qb.orderBy).toHaveBeenCalledWith('o.created_at', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('o.id', 'DESC');
+      expect(qb.take).toHaveBeenCalledWith(50);
+      expect(qb.getManyAndCount).toHaveBeenCalled();
+      expect(qb.getMany).not.toHaveBeenCalled();
+      expect(page.total).toBe(7);
+      expect(page.items.map((card) => card.slug)).toEqual(['route-marshal']);
+    });
+
+    it('answers an empty page with no card lookups', async () => {
+      const qb = qbStub();
+      opportunities.createQueryBuilder.mockReturnValue(qb);
+
+      await expect(service.pageOpenByCommunity('community-1')).resolves.toEqual(
+        { items: [], total: 0 },
+      );
+      expect(signups.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('keeps listOpenByCommunity on take(5) and getMany, returning a plain card array', async () => {
+      const qb = qbStub();
+      qb.getMany = jest.fn().mockResolvedValue([openRow()]);
+      opportunities.createQueryBuilder.mockReturnValue(qb);
+
+      const cards = await service.listOpenByCommunity('community-1');
+
+      expect(qb.take).toHaveBeenCalledWith(5);
+      expect(qb.getManyAndCount).not.toHaveBeenCalled();
+      expect(cards.map((card) => card.slug)).toEqual(['route-marshal']);
     });
   });
 });

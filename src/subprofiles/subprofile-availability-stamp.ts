@@ -1,8 +1,10 @@
 import type { Subprofile } from './entities/subprofile.entity';
+import { tattooBooksStatusOf } from './tattoo-books-status';
 
 /** The two places a persona states its capacity: the persona-wide
- *  `availability` column and, on a therapist persona, the status switch kept
- *  in `skinData.therapist.status`. The editor and the owner bar save them
+ *  `availability` column and, on a therapist or tattoo artist persona, the
+ *  status switch kept in `skinData.therapist.status` or
+ *  `skinData.tattoo.status`. The editor and the owner bar save them
  *  together, and either one moving is a status change (PRD-435). */
 type CapacityFields = Pick<Subprofile, 'availability' | 'skinData'>;
 
@@ -20,14 +22,18 @@ function therapistStatusOf(skinData: Subprofile['skinData']): string | null {
   return typeof status === 'string' ? status : null;
 }
 
-/** Did the edit move the persona's availability or its therapist status? */
+/** Did the edit move the persona's availability, its therapist status or its
+ *  tattoo books status? */
 export function hasCapacityChanged(
   committed: CapacityFields,
   edited: CapacityFields,
 ): boolean {
   return (
     (committed.availability ?? null) !== (edited.availability ?? null) ||
-    therapistStatusOf(committed.skinData) !== therapistStatusOf(edited.skinData)
+    therapistStatusOf(committed.skinData) !==
+      therapistStatusOf(edited.skinData) ||
+    tattooBooksStatusOf(committed.skinData) !==
+      tattooBooksStatusOf(edited.skinData)
   );
 }
 

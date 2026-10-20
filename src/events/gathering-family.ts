@@ -61,7 +61,7 @@ export interface FormatDetails {
   /** What to bring, one line, already trimmed and never blank. Eat and make
    *  families. See `stripDisallowedDetails`, which drops a blank one. */
   bring?: string;
-  /** The door checks age. Party family. */
+  /** The door checks age. Party family, and the quiz format of the meet family (Pulse Live adults rounds need it). */
   isAdultsOnly?: boolean;
   /** There is something good to drink that is not alcohol. Party family. */
   isSoberFriendly?: boolean;
@@ -93,13 +93,42 @@ export const FORMAT_DETAIL_KEYS_BY_FAMILY: Readonly<
   [GatheringFamily.Organise]: [],
 };
 
-/** The detail keys this family may store. A gathering with no family stores
- *  none: the bag only ever means something inside a family. */
+/** The format key of the quiz format in the meet family. */
+export const QUIZ_FORMAT_KEY = 'quiz';
+
+/**
+ * Detail keys a single format may store on top of its family's keys. The quiz
+ * format of the meet family takes the 18+ flag because Pulse Live adults
+ * rounds need it; every other meet format stays as it was.
+ */
+export const FORMAT_DETAIL_KEY_EXCEPTIONS: Readonly<
+  Partial<
+    Record<
+      GatheringFamily,
+      Readonly<Record<string, readonly FormatDetailKey[]>>
+    >
+  >
+> = {
+  [GatheringFamily.Meet]: { [QUIZ_FORMAT_KEY]: ['isAdultsOnly'] },
+};
+
+/** The detail keys this family may store, plus the exception keys of the
+ *  given format. A gathering with no family stores none: the bag only ever
+ *  means something inside a family. Family keys come first, no duplicates. */
 export function allowedDetailKeys(
   family: GatheringFamily | null | undefined,
+  eventType?: string | null,
 ): readonly FormatDetailKey[] {
   if (!family) return [];
-  return FORMAT_DETAIL_KEYS_BY_FAMILY[family] ?? [];
+  const familyKeys = FORMAT_DETAIL_KEYS_BY_FAMILY[family] ?? [];
+  const exceptionKeys = eventType
+    ? (FORMAT_DETAIL_KEY_EXCEPTIONS[family]?.[eventType] ?? [])
+    : [];
+  if (exceptionKeys.length === 0) return familyKeys;
+  return [
+    ...familyKeys,
+    ...exceptionKeys.filter((key) => !familyKeys.includes(key)),
+  ];
 }
 
 /**
@@ -125,9 +154,10 @@ export function allowedDetailKeys(
 export function stripDisallowedDetails(
   family: GatheringFamily | null | undefined,
   details: FormatDetails | null | undefined,
+  eventType?: string | null,
 ): FormatDetails | null {
   if (!details) return null;
-  const allowed = allowedDetailKeys(family);
+  const allowed = allowedDetailKeys(family, eventType);
   const kept: FormatDetails = {};
   let hasAnyKey = false;
   for (const key of allowed) {

@@ -16,15 +16,16 @@ import {
 } from '@nestjs/swagger';
 
 /**
- * Whole-graph trust network for admins: every member as a node, every vouch
- * (incl. withdrawn) as an edge, with derived standing + scene. `getGraph`'s
- * `focus` param and the `search` route below exist so an admin can reach a
- * member outside the graph's node cap (ADM-10). Not `@LockdownExempt()` —
- * mirrors AdminMembersController.
+ * Trust network for admins: up to MAX_NODES members around a focus as nodes,
+ * every vouch among them (incl. withdrawn) as an edge, with derived standing,
+ * scene and the platform-wide trust assessment. `getGraph`'s `focus` param and
+ * the `search` route below let an admin reach any member (ADM-10); `summary`
+ * feeds the members page badge. Mirrors AdminMembersController, so this
+ * controller carries no `@LockdownExempt()`.
  */
 @UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
-@ApiTags('Admin — Trust Network')
+@ApiTags('Admin: Trust Network')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
 @ApiForbiddenResponse({ description: 'Requires the admin role.' })
@@ -39,7 +40,17 @@ export class AdminTrustNetworkController {
     return this.service.getGraph(query);
   }
 
-  // Static path, no `:id` route on this controller to collide with.
+  // Static path. This controller declares no `:id` route it could collide with.
+  @ApiOperation({
+    summary: 'Open trust case count and where the trust network opens.',
+  })
+  @ApiOkResponse({ description: 'Open case count and entry member slug.' })
+  @Get('summary')
+  getSummary() {
+    return this.service.getSummary();
+  }
+
+  // Static path. This controller declares no `:id` route it could collide with.
   @ApiOperation({
     summary: 'Search members to locate one outside the graph node cap.',
   })

@@ -43,6 +43,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { findLivePendingInvite } from './community-invite-liveness';
 import { assertCommunityInteriorReadable } from './community-read-gate';
 import { CommunityBan } from './entities/community-ban.entity';
+import { CommunityGivingMethod } from './entities/community-giving-method.entity';
 import {
   CommunityInvite,
   CommunityInviteStatus,
@@ -257,6 +258,9 @@ describe('CommunitiesService', () => {
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  // `buildDetail` counts the community's giving methods for
+  // `givingMethodCount`. Default: none listed.
+  let givingMethods: { count: jest.Mock };
   // Fire-and-forget roster-membership domain events
   // (`COMMUNITY_MEMBER_JOINED` / `COMMUNITY_MEMBER_LEFT`).
   let eventEmitter: { emit: jest.Mock };
@@ -389,6 +393,7 @@ describe('CommunitiesService', () => {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => inviteQbStub()),
     };
+    givingMethods = { count: jest.fn().mockResolvedValue(0) };
     eventEmitter = { emit: jest.fn() };
     // PRD-25. A permanent bar opens a hold for a second owner, co-owner or
     // moderator. The DEFAULT here is "this community has somebody else who
@@ -507,6 +512,10 @@ describe('CommunitiesService', () => {
         },
         { provide: getRepositoryToken(CommunityBan), useValue: bans },
         { provide: getRepositoryToken(CommunityInvite), useValue: invites },
+        {
+          provide: getRepositoryToken(CommunityGivingMethod),
+          useValue: givingMethods,
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
@@ -922,6 +931,34 @@ describe('CommunitiesService', () => {
       members.findOne.mockResolvedValue({ role: RosterRole.Member });
       const detail = await service.getBySlug('p', 'u2');
       expect(detail.myRole).toBe(RosterRole.Member);
+    });
+
+    it('getBySlug reports how many giving methods the community lists', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Public,
+        ownerId: 'owner-1',
+        name: 'Pub',
+        type: CommunityType.Social,
+        tagline: 't',
+        ref: 'QP-C-0001',
+        purpose: 'purpose',
+        whoFor: 'who',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      givingMethods.count.mockResolvedValue(2);
+
+      const detail = await service.getBySlug('p', 'u2');
+
+      expect(detail.givingMethodCount).toBe(2);
+      expect(givingMethods.count).toHaveBeenCalledWith({
+        where: { communityId: 'c1' },
+      });
     });
 
     // The tier gate. A community that is not `public` is closed to anyone off

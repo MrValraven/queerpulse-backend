@@ -55,6 +55,7 @@ describe('CommunityMembershipService', () => {
     parentId: null,
     allowsSubcommunities: false,
     archivedWithParent: false,
+    givingIntro: null,
     rulesVersion: 1,
     welcomeMessage: null,
     nowReading: null,

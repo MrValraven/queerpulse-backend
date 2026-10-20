@@ -71,6 +71,7 @@ import {
 // functions module with no Nest provider and no entity of its own, so importing
 // it here couples the two features by policy only, never by module graph.
 import { isDueForReReview } from '../safe-space-nominations/safe-space-policy';
+import type { ListingTeamMemberPublic } from './listing-team-response';
 
 /**
  * One photo of a listing's ordered gallery as every response carries it.
@@ -684,7 +685,7 @@ export type DirectoryTint = 'coral' | 'jade' | 'plum';
 const DIRECTORY_TINTS: DirectoryTint[] = ['coral', 'jade', 'plum'];
 
 /** Stable per-listing tint so a card keeps the same colour across requests. */
-function tintForSlug(slug: string): DirectoryTint {
+export function tintForSlug(slug: string): DirectoryTint {
   let hash = 0;
   for (const char of slug) {
     hash = (hash + char.charCodeAt(0)) % DIRECTORY_TINTS.length;
@@ -696,7 +697,7 @@ function tintForSlug(slug: string): DirectoryTint {
 }
 
 /** Two-letter avatar initials from the business name (e.g. "Galeria Lume" → "GL"). */
-function initialsForName(name: string): string {
+export function initialsForName(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return '';
   const firstWord = words[0] ?? '';
@@ -1623,6 +1624,12 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * the page can print "Confirmed by the owner on 12 August". `null` only for
    * a listing whose owner has never confirmed and never edited it. */
   detailsConfirmedAt: string | null;
+  /** "Meet the team": the accepted members in the order the business set, at
+   * most 40, always present (`[]` when empty). The anonymous variant carries
+   * open, unlinked personas; an active member also sees network and linked
+   * personas; every signed-in viewer loses personas whose owner has a block
+   * with them either way. */
+  team: ListingTeamMemberPublic[];
 }
 
 export function toDirectoryDetail(
@@ -1663,6 +1670,10 @@ export function toDirectoryDetail(
   /** Whether the listing hosts gatherings, resolved by `DirectoryService`
    * with the same one-query lookup the grid uses. */
   hasHostedGatherings = false,
+  /** The public team, already filtered for the viewer and shaped by
+   * `loadPublicTeam`. Defaulted to `[]` so callers that pass no team keep
+   * rendering an empty block. */
+  team: ListingTeamMemberPublic[] = [],
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   const galleryPhotos = toGalleryView(listing, crops);
@@ -1768,6 +1779,7 @@ export function toDirectoryDetail(
         ? movedToListing
         : null,
     detailsConfirmedAt: listing.detailsConfirmedAt?.toISOString() ?? null,
+    team,
   };
 }
 

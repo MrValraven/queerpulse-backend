@@ -62,6 +62,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     parentId: null,
     allowsSubcommunities: false,
     archivedWithParent: false,
+    givingIntro: null,
     ...overrides,
   };
 }
@@ -374,5 +375,35 @@ describe('toCommunityDetail subcommunity fields', () => {
     expect(dto.inheritedRules).toBeNull();
     expect(dto.allowsSubcommunities).toBe(true);
     expect(dto.subcommunityCount).toBe(4);
+  });
+});
+
+describe('toCommunityDetail giving method count', () => {
+  it('carries the giving method count, defaulting to 0', () => {
+    const community = makeCommunity();
+
+    const defaultedDto = toCommunityDetail(
+      community,
+      EMPTY_STATS,
+      RosterRole.Member,
+      null,
+      null,
+    );
+    const countedDto = toCommunityDetail(
+      community,
+      EMPTY_STATS,
+      RosterRole.Member,
+      null,
+      null,
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      3,
+    );
+
+    expect(defaultedDto.givingMethodCount).toBe(0);
+    expect(countedDto.givingMethodCount).toBe(3);
   });
 });

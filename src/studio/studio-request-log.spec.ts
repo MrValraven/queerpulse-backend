@@ -134,6 +134,36 @@ describe('isStudioListeningRequest', () => {
   it('ignores an undefined url', () => {
     expect(isStudioListeningRequest(undefined)).toBe(false);
   });
+
+  it.each([
+    [`/studio/releases/${trackId}`, 'GET'],
+    [`/studio/releases/${trackId}/`, 'GET'],
+    [`/api/studio/releases/${trackId}?x=1`, 'GET'],
+    [`/Studio/Releases/${trackId}`, 'get'],
+    [`/studio/releases/${trackId}`, 'HEAD'],
+    [`/studio/releases/${trackId}`, undefined],
+    ['https://api.queerpulse.test/studio/releases/not-a-uuid', 'GET'],
+  ])('matches the release read %s with method %s', (url, method) => {
+    expect(isStudioListeningRequest(url, method)).toBe(true);
+  });
+
+  it.each([
+    [`/studio/releases/${trackId}`, 'PATCH'],
+    [`/studio/releases/${trackId}`, 'DELETE'],
+    [`/studio/releases/${trackId}/preview-link`, 'GET'],
+    [`/studio/releases/${trackId}/preview-link`, 'POST'],
+    [`/studio/releases/${trackId}/preview-link`, undefined],
+    [`/studio/releases/${trackId}/schedule`, 'POST'],
+    [`/studio/releases/${trackId}/publish`, 'POST'],
+    [`/studio/releases/${trackId}/tracks`, 'POST'],
+    [`/studio/releases/${trackId}/reminder`, 'PUT'],
+    ['/studio/releases', 'GET'],
+    ['/studio/releases/', 'GET'],
+    ['/studio/releases?genre=house', 'GET'],
+    [`/admin/studio/releases/${trackId}`, 'GET'],
+  ])('logs the release route %s with method %s', (url, method) => {
+    expect(isStudioListeningRequest(url, method)).toBe(false);
+  });
 });
 
 describe('dropStudioListeningUrl', () => {
@@ -177,6 +207,23 @@ describe('dropStudioListeningUrl', () => {
     const staffRequest = { url: `/admin/studio/playlists/${playlistId}` };
     expect(dropStudioListeningUrl(staffRequest)).toBe(false);
     expect(staffRequest.url).toBe(`/admin/studio/playlists/${playlistId}`);
+  });
+
+  it('removes the url of a release read and keeps the url of a release edit', () => {
+    const releaseRead = {
+      url: `https://api.queerpulse.test/studio/releases/${trackId}`,
+      query_string: '',
+      method: 'GET',
+    };
+    expect(dropStudioListeningUrl(releaseRead)).toBe(true);
+    expect(releaseRead).toEqual({ method: 'GET' });
+
+    const releaseEdit = {
+      url: `/studio/releases/${trackId}`,
+      method: 'PATCH',
+    };
+    expect(dropStudioListeningUrl(releaseEdit)).toBe(false);
+    expect(releaseEdit.url).toBe(`/studio/releases/${trackId}`);
   });
 
   it('answers false for an event with no request', () => {

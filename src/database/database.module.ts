@@ -8,6 +8,7 @@ import {
   resolvePostgresSsl,
 } from '../config/database-ssl';
 import type { DatabasePoolConfig } from '../config/database.config';
+import { PrivateParametersLogger } from './private-parameters-logger';
 
 // Mirrors src/data-source.ts: anchored to __dirname (not cwd) and matched on
 // this file's own extension, so the glob resolves under ts-node in dev and
@@ -60,6 +61,10 @@ const migrationsGlob = join(
           // below — so a degrading query is visible in logs before it ever
           // risks the 30s cutoff. Previously unset anywhere in this DataSource.
           logging: ['error', 'warn'],
+          // The same default logger, minus the bound values of any failed or
+          // slow query on a private table (draft payloads, quiz answers); see
+          // private-parameters-logger.ts.
+          logger: new PrivateParametersLogger(['error', 'warn']),
           maxQueryExecutionTime: slowQueryThresholdMillis,
           extra: {
             max: databasePool.max,

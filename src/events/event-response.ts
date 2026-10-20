@@ -6,6 +6,7 @@ import { cropFor } from '../media-crops/crop-response';
 import type { AccessTier } from '../communities/entities/community.entity';
 import type { ListingAccessibilityAnswerMap } from '../listings/listing-accessibility';
 import type { RunByListingRef } from '../listings/listing-run-by.service';
+import type { QuizshowEventDetail } from '../quizshow/quizshow.contract';
 import { Profile } from '../users/entities/profile.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventBan } from './entities/event-ban.entity';
@@ -352,6 +353,10 @@ export interface EventDetail extends EventSummary {
    *  "+N more" number, with no face or name. The FE derives its own "+N more"
    *  from `goingAttendeesPreviewTotal - goingAttendeesPreview.length`. */
   goingAttendeesPreviewTotal: number;
+
+  /** Pulse Live. Null while the feature is hidden; `liveSessionCode` is null
+   *  for barred viewers and idle sessions. Detail only. */
+  quizshow: QuizshowEventDetail | null;
 
   // ── Where it actually is (LOC-04) ────────────────────────────────────────
   /**

@@ -14,6 +14,7 @@ import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { episodeReleasedSql } from './studio-episode-rule';
 import { StudioOwnershipService } from './studio-ownership.service';
+import { notWithheldTrackSql } from './studio-playlist-visibility';
 import {
   StudioPressFeaturedTrack,
   StudioPressKitResponse,
@@ -189,6 +190,8 @@ export class StudioPressKitService {
       .andWhere('"track"."duration_seconds" IS NOT NULL')
       // Studio artist kinds: a draft episode is never featured.
       .andWhere(episodeReleasedSql('track', 'release'))
+      // Studio safety: nor a track a copyright claim holds offline.
+      .andWhere(notWithheldTrackSql('track'))
       .getMany();
     const tracksById = new Map(rows.map((track) => [track.id, track]));
     return featuredTrackIds.flatMap((trackId) => {
@@ -211,6 +214,8 @@ export class StudioPressKitService {
         .andWhere('"track"."duration_seconds" IS NOT NULL')
         // Studio artist kinds: a draft episode is never featured.
         .andWhere(episodeReleasedSql('track', 'release'))
+        // Studio safety: nor a track a copyright claim holds offline.
+        .andWhere(notWithheldTrackSql('track'))
         .orderBy('release.publishedAt', 'DESC')
         .addOrderBy('release.id', 'DESC')
         .addOrderBy('track.position', 'ASC')

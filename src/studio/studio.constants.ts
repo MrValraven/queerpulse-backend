@@ -1,4 +1,28 @@
-import { HttpException, HttpStatus } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  STUDIO_SAFETY_AUDIT_ACTIONS,
+  STUDIO_SAFETY_ERRORS,
+  StudioSafetyErrorCode,
+} from './studio-safety.constants';
+
+// Studio safety and moderation: the vocabulary lives in
+// `studio-safety.constants.ts`; the contract names it here too.
+export {
+  STUDIO_CLAIMANT_ROLES,
+  STUDIO_CLAIM_HOLDING_STATUSES,
+  STUDIO_CLAIM_LIMITS,
+  STUDIO_CLAIM_LIVE_STATUSES,
+  STUDIO_CLAIM_OWNER_VISIBLE_STATUSES,
+  STUDIO_CLAIM_STATUSES,
+  STUDIO_CONTENT_WARNINGS_MAX,
+  STUDIO_CONTENT_WARNING_IDS,
+} from './studio-safety.constants';
+export type { StudioContentWarningId } from './studio-safety.constants';
 
 // The Studio v1 vocabularies, spelled exactly as the wire contract
 // (QUEERPULSE-STUDIO-V1-CONTRACT-2026-10-08.md) and the frontend mirror spell
@@ -90,6 +114,12 @@ export const STUDIO_PLAYLIST_VISIBILITIES = [
 ] as const;
 export type StudioPlaylistVisibilityValue =
   (typeof STUDIO_PLAYLIST_VISIBILITIES)[number];
+
+// Collaborative playlists (QUEERPULSE-STUDIO-COLLAB-PLAYLISTS-CONTRACT-2026-10-14.md):
+// the role a viewer holds on one playlist. `null` on the wire for everyone
+// else.
+export const STUDIO_PLAYLIST_ROLES = ['owner', 'editor', 'invitee'] as const;
+export type StudioPlaylistRole = (typeof STUDIO_PLAYLIST_ROLES)[number];
 
 /** Stats counts from 1 to `STUDIO_STATS_THRESHOLD - 1` are withheld. */
 export const STUDIO_STATS_THRESHOLD = 5;
@@ -296,6 +326,12 @@ export const STUDIO_LIMITS = {
   audioParseTimeoutLongMilliseconds: 180000,
   episodesPerPage: 12,
   episodesPerPageMax: 24,
+  // Collaborative playlists: editors per playlist (invited plus active), the
+  // co-owner candidate list, a member slug and the candidate search.
+  playlistEditorsMax: 10,
+  playlistEditorCandidatesMax: 50,
+  playlistEditorSlugMaxLength: 120,
+  playlistEditorSearchMaxLength: 80,
 } as const;
 
 /** The release types each format offers. */
@@ -468,7 +504,18 @@ export type StudioErrorCode =
   | 'studio_episode_show_not_published'
   | 'studio_episode_already_published'
   | 'studio_episode_order_locked'
-  | 'studio_not_a_podcast';
+  | 'studio_not_a_podcast'
+  | 'studio_playlist_not_found'
+  | 'studio_playlist_entry_not_found'
+  | 'studio_playlist_invite_not_found'
+  | 'studio_playlist_editor_not_found'
+  | 'studio_playlist_owner_only'
+  | 'studio_playlist_editor_source_mismatch'
+  | 'studio_playlist_editor_cap'
+  | 'studio_playlist_invite_unavailable'
+  | 'studio_playlist_credit_change_removes_editors'
+  | 'studio_playlist_editor_ineligible'
+  | StudioSafetyErrorCode;
 
 const STUDIO_ERRORS: Readonly<
   Record<StudioErrorCode, { status: HttpStatus; message: string }>
@@ -719,16 +766,82 @@ const STUDIO_ERRORS: Readonly<
     status: HttpStatus.CONFLICT,
     message: 'Show notes and episodes belong to podcast shows.',
   },
+  // Collaborative playlists. The 404 says nothing about why, so a private
+  // playlist and a missing one read the same.
+  studio_playlist_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This playlist is not available.',
+  },
+  studio_playlist_entry_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This track is already off the playlist.',
+  },
+  studio_playlist_invite_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This invitation is no longer open.',
+  },
+  studio_playlist_editor_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This editor is not on this playlist.',
+  },
+  studio_playlist_owner_only: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'Only the owner of this playlist can do this.',
+  },
+  studio_playlist_editor_source_mismatch: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'Playlists shown as a persona take its co-owners as editors, and playlists shown as you take invited connections.',
+  },
+  studio_playlist_editor_cap: {
+    status: HttpStatus.CONFLICT,
+    message: 'A playlist can have up to 10 editors, invitations included.',
+  },
+  studio_playlist_invite_unavailable: {
+    status: HttpStatus.CONFLICT,
+    message: 'This invitation can no longer be accepted.',
+  },
+  studio_playlist_credit_change_removes_editors: {
+    status: HttpStatus.CONFLICT,
+    message: 'Changing who this playlist shows as removes some editors.',
+  },
+  studio_playlist_editor_ineligible: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'Some of these members cannot edit this playlist.',
+  },
+  // Studio safety and moderation: the 14 refusals, one source of truth.
+  ...STUDIO_SAFETY_ERRORS,
 };
 
 export const STUDIO_ERROR_CODES = Object.keys(
   STUDIO_ERRORS,
 ) as StudioErrorCode[];
 
-/** The one way Studio refuses a request: `{ statusCode, code, message }`. */
+/** The one way Studio refuses a request: `{ statusCode, code, message }`.
+ *  A 404 code comes back as a `NotFoundException` and a 403 code as a
+ *  `ForbiddenException`, so a caller that tests the class keeps working
+ *  when a bare exception gains a code. */
 export function studioError(code: StudioErrorCode): HttpException {
+  return studioErrorWithDetails(code, {});
+}
+
+/** `studioError` with extra body fields, for the refusals that name members
+ *  (`studio_playlist_editor_ineligible` carries `memberSlugs`,
+ *  `studio_playlist_credit_change_removes_editors` carries `editors`). The
+ *  code, the status and the message always win over a detail of that name. */
+export function studioErrorWithDetails(
+  code: StudioErrorCode,
+  details: Record<string, unknown>,
+): HttpException {
   const { status, message } = STUDIO_ERRORS[code];
-  return new HttpException({ statusCode: status, code, message }, status);
+  const body = { ...details, statusCode: status, code, message };
+  if (status === HttpStatus.NOT_FOUND) {
+    return new NotFoundException(body);
+  }
+  if (status === HttpStatus.FORBIDDEN) {
+    return new ForbiddenException(body);
+  }
+  return new HttpException(body, status);
 }
 
 /** `mod_audit_logs.action` values the Studio staff routes write. */
@@ -739,4 +852,6 @@ export const STUDIO_AUDIT_ACTIONS = {
   releaseRestored: 'studio_release_restored',
   disputeUpheld: 'studio_release_dispute_upheld',
   disputeRejected: 'studio_release_dispute_rejected',
+  // Studio safety and moderation.
+  ...STUDIO_SAFETY_AUDIT_ACTIONS,
 } as const;

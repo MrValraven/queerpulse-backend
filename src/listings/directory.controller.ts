@@ -296,9 +296,13 @@ export class DirectoryController {
     @CurrentUser() user: CurrentUserData | undefined,
     @Param('slug') slug: string,
   ) {
+    // The viewer id reaches the `team` block alone, which drops personas
+    // whose owner has a block with this caller. An anonymous caller passes
+    // `null`, so the CDN-cached variant names no viewer.
     return this.directoryService.getDirectoryBySlug(
       slug,
       user?.status === UserStatus.Active,
+      user?.userId ?? null,
     );
   }
 

@@ -21,6 +21,8 @@ const radioRow = {
   release_id: 'f5000000-0000-4000-8000-000000000021',
   release_title: 'Lisbon at four',
   cover_key: null,
+  content_warnings: ['police'],
+  staff_content_warnings: ['medical'],
   artist_id: 'f5000000-0000-4000-8000-000000000031',
   artist_handle: 'night-shift',
   artist_display_name: 'Night Shift',
@@ -55,6 +57,7 @@ describe('StudioRadioService', () => {
           releaseId: 'f5000000-0000-4000-8000-000000000021',
           releaseTitle: 'Lisbon at four',
           coverUrl: null,
+          contentWarnings: ['medical', 'police'],
           artist: {
             id: 'f5000000-0000-4000-8000-000000000031',
             handle: 'night-shift',
@@ -113,5 +116,24 @@ describe('StudioRadioService', () => {
     for (const filterColumn of ['genre', 'mood'] as const) {
       expect(radioSql(filterColumn)).toContain(`"release"."type" <> 'podcast'`);
     }
+  });
+
+  // Studio safety: the player gate reads the warnings on a radio item, and
+  // a withheld track never joins the queue.
+  it('selects both warning lists and plays no withheld track', () => {
+    const sql = radioSql('genre');
+    expect(sql).toContain('"track"."content_warnings" AS "content_warnings"');
+    expect(sql).toContain(
+      '"track"."staff_content_warnings" AS "staff_content_warnings"',
+    );
+    expect(sql).toContain('"track"."withheld_at" IS NULL');
+  });
+
+  it('reads a row with no warning columns as no warnings', async () => {
+    query.mockResolvedValue([
+      { ...radioRow, content_warnings: null, staff_content_warnings: null },
+    ]);
+    const radio = await service.getRadio(VIEWER_ID, { mood: 'calm' });
+    expect(radio.items[0]?.contentWarnings).toEqual([]);
   });
 });

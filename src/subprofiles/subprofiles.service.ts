@@ -77,6 +77,27 @@ import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { isSectionAllowed } from './subprofile-kinds';
 import { availabilityUpdatedAtAfterSave } from './subprofile-availability-stamp';
+import { assertValidTattooSkinData } from './tattoo-skin-data-validation';
+import { availabilityAfterTattooSync } from './tattoo-books-status';
+import { assertValidTattooItems } from './tattoo-item-validation';
+import {
+  assertClientConsentForNewImages,
+  storedImageSet,
+  structuredForRestoredSnapshot,
+} from './tattoo-body-photo-consent';
+import {
+  isTattooBodyPhotoSection,
+  isTattooItemSection,
+} from './tattoo-artist-vocab';
+import { listItemImageRefs, mapItemImageRefs } from './subprofile-item-images';
+import {
+  flashDayEventSlugOf,
+  type FlashDayEventRef,
+} from './flash-day-event-links';
+import {
+  flashDayEventNotEligible,
+  flashDayEventUnlinkedPersona,
+} from './tattoo-artist-errors';
 import {
   carryIdentityBlocksToPersona,
   issueFreshPersonaId,
@@ -241,6 +262,30 @@ export function canonicalize(value: unknown): unknown {
 // this file.
 export function canonicalStringify(value: unknown): string {
   return JSON.stringify(canonicalize(value));
+}
+
+/**
+ * Tattoo contract "Flash day event links": `structured` with
+ * `flashDay.eventSlug` set to `eventSlug`, or with that key dropped when
+ * `eventSlug` is null. A `structured` without `flashDay` comes back as it is.
+ */
+function structuredWithFlashDayEventSlug(
+  structured: ItemStructured | null,
+  eventSlug: string | null,
+): ItemStructured | null {
+  const flashDay = structured?.flashDay;
+  if (!structured || !flashDay) {
+    return structured;
+  }
+  const flashDayWithoutEventSlug = { ...flashDay };
+  delete flashDayWithoutEventSlug.eventSlug;
+  return {
+    ...structured,
+    flashDay:
+      eventSlug === null
+        ? flashDayWithoutEventSlug
+        : { ...flashDayWithoutEventSlug, eventSlug },
+  };
 }
 
 /**
@@ -607,12 +652,13 @@ export class SubprofilesService {
     expectedEditVersion?: number,
   ): Promise<number> {
     return this.dataSource.transaction(async (manager) => {
-      const advancedEditVersion = await this.lockAndAdvanceEditVersion(
-        manager,
-        subprofileId,
-        userId,
-        expectedEditVersion,
-      );
+      const { advancedEditVersion, lockedSubprofile } =
+        await this.lockAndAdvanceEditVersionWithRow(
+          manager,
+          subprofileId,
+          userId,
+          expectedEditVersion,
+        );
       const item = await manager.findOne(SubprofileItem, {
         where: { id: itemId, subprofileId },
       });
@@ -625,31 +671,73 @@ export class SubprofilesService {
       if (!revision) {
         throw new NotFoundException('Revision not found');
       }
+      // Tattoo contract "Body-photo consent rule": the images this section
+      // stores, read under the lock before the snapshot lands, decide
+      // whether a restored body photo keeps its consent flags.
+      const storedSectionImages = isTattooBodyPhotoSection(item.section)
+        ? storedImageSet(
+            await manager.find(SubprofileItem, {
+              where: { subprofileId, section: item.section },
+            }),
+          )
+        : new Set<string>();
       // Snapshot the item's CURRENT (pre-restore) content first.
       await this.recordItemRevision(manager, item);
-      const imageBeforeRestore = item.imageUrl;
+      const imagesBeforeRestore = listItemImageRefs(item);
       // Apply ONLY the editable fields from the stored snapshot.
       // `editableSnapshot` is the allowlist: it never reads or writes
       // `id`/`subprofileId`/`position`/`createdAt`, so those identity and
       // bookkeeping columns on `item` are left untouched by the restore.
+      // Each snapshot passed the tattoo item whitelist when it was saved, or
+      // predates the tattoo keys, so the restore applies it as stored.
       Object.assign(
         item,
         editableSnapshot(revision.snapshot as unknown as EditableItemContent),
       );
+      // A restored body photo whose image this section no longer stores,
+      // saved without client consent, comes back blurred with consent false.
+      item.structured = structuredForRestoredSnapshot(
+        item.section,
+        item,
+        storedSectionImages,
+      );
+      // Tattoo contract "Flash day event links": a restored link survives
+      // only on a linked persona and only to an event that is still
+      // eligible; any other link is dropped from the restored item.
+      if (item.section === SubprofileSection.FlashDays) {
+        const restoredEventSlug = flashDayEventSlugOf(item.structured);
+        const isRestoredEventSlugKept =
+          restoredEventSlug !== null &&
+          lockedSubprofile.linkVisibility !==
+            SubprofileLinkVisibility.Unlinked &&
+          (
+            await this.affiliationEligibility.eligibleFlashDayEventSlugs(
+              lockedSubprofile,
+              [restoredEventSlug],
+            )
+          ).has(restoredEventSlug);
+        item.structured = structuredWithFlashDayEventSlug(
+          item.structured,
+          isRestoredEventSlugKept ? restoredEventSlug : null,
+        );
+      }
       // T17: an unlink leaves stored revisions as they are, so a revision
       // restored onto an unlinked persona may hold a member upload, or a
       // key the persona showed while linked. Either gets a fresh
-      // persona-scoped copy here; the image the item already shows stays.
+      // persona-scoped copy here; the images the item already shows stay.
+      // Tattoo contract "Nested item images": the cover-up before photo and
+      // the session photos are rehomed with `imageUrl`.
       const rehomedImages = await this.personaImageKeys.rehomeForPersonaWrite(
         manager,
         subprofileId,
-        [item.imageUrl],
-        { shouldRefreshOwnKeys: true, keepValues: [imageBeforeRestore] },
+        listItemImageRefs(item),
+        { shouldRefreshOwnKeys: true, keepValues: imagesBeforeRestore },
       );
-      item.imageUrl = PersonaImageKeysService.applyRehome(
-        rehomedImages,
-        item.imageUrl,
+      const rehomedItem = mapItemImageRefs(item, (imageRef) =>
+        PersonaImageKeysService.applyRehome(rehomedImages, imageRef),
       );
+      item.imageUrl = rehomedItem.imageUrl ?? null;
+      item.structured = rehomedItem.structured ?? null;
       await manager.save(item);
       return advancedEditVersion;
     });
@@ -689,6 +777,7 @@ export class SubprofilesService {
     const orderedSps = sortByMemberPosition(sps, memberPositionsBySubprofileId);
     const subprofileIds = orderedSps.map((sp) => sp.id);
     const itemsById = await this.publicRead.loadItemsFor(subprofileIds);
+    const allItems = [...itemsById.values()].flat();
     const [
       socialLinksById,
       endorsementCountsById,
@@ -702,19 +791,27 @@ export class SubprofilesService {
       // the viewer here, mirroring `ownerDTO`.
       followerCountsById,
       affiliationsById,
+      // Tattoo contract "Flash day event links": ONE resolution for every
+      // flash day item across the whole list, the owner as the viewer.
+      linkedEventsByItemId,
     ] = await Promise.all([
       this.publicRead.loadSocialLinksFor(subprofileIds),
       this.endorsementsService.loadEndorsementCountsFor(subprofileIds),
       this.membership.loadMemberCountsFor(subprofileIds),
       this.followersService.loadFollowerCountsFor(subprofileIds),
       this.publicRead.resolveAffiliationsFor(userId, subprofileIds),
+      this.affiliationEligibility.resolveFlashDayEvents(
+        userId,
+        orderedSps,
+        allItems,
+      ),
     ]);
     // Owner viewing their own personas: resolve ALL items' collaborator
     // handles across every subprofile in ONE batched call, shared by every
     // mapper invocation below (no per-persona resolution).
     const collaboratorsByHandle = await this.publicRead.resolveCollaboratorsFor(
       userId,
-      [...itemsById.values()].flat(),
+      allItems,
     );
     // ONE batched crop lookup for every persona's avatar/cover + every item
     // image in the whole list — never a per-persona/per-item query.
@@ -735,6 +832,7 @@ export class SubprofilesService {
         // The caller's own rank for this persona, so the dashboard's
         // `position` agrees with the order the list came back in.
         memberPositionsBySubprofileId.get(sp.id),
+        linkedEventsByItemId,
       ),
     );
   }
@@ -1025,6 +1123,10 @@ export class SubprofilesService {
       );
     }
     this.assertJsonbSize(rest.skinData, 'skinData');
+    // Tattoo contract, server validation: the nine `tattoo*` skin keys are
+    // checked for any kind before any write, answering 400
+    // TATTOO_SKIN_INVALID with the failing `path`.
+    assertValidTattooSkinData(rest.skinData);
 
     // A slug is the persona's address — it can never be blank. Trim it and
     // reject an empty one up front rather than writing "" into the per-owner
@@ -1414,6 +1516,9 @@ export class SubprofilesService {
     for (const it of items) {
       this.assertJsonbSize(it.structured, 'structured');
     }
+    // Tattoo contract "Per-section rules": the `structured` whitelist runs
+    // before any lookup or write.
+    assertValidTattooItems(sectionEnum, items);
 
     // Collaboration credits: normalize + dedup each item's handle list and
     // cap it, then resolve every handle in the WHOLE section payload in ONE
@@ -1447,6 +1552,31 @@ export class SubprofilesService {
       }
     }
 
+    // Tattoo contract "Flash day event links": a `flash_days` item may link
+    // an event only on a linked persona, and only to an event the
+    // eligibility rule accepts for this persona's owners.
+    const flashDayEventSlugsByItemIndex =
+      sectionEnum === SubprofileSection.FlashDays
+        ? items.map((item) => flashDayEventSlugOf(item.structured))
+        : [];
+    this.assertFlashDayLinksOnLinkedPersona(sp, flashDayEventSlugsByItemIndex);
+    const linkedFlashDayEventSlugs = flashDayEventSlugsByItemIndex.filter(
+      (eventSlug): eventSlug is string => eventSlug !== null,
+    );
+    if (linkedFlashDayEventSlugs.length) {
+      const eligibleEventSlugs =
+        await this.affiliationEligibility.eligibleFlashDayEventSlugs(
+          sp,
+          linkedFlashDayEventSlugs,
+        );
+      const ineligibleItemIndex = flashDayEventSlugsByItemIndex.findIndex(
+        (eventSlug) => eventSlug !== null && !eligibleEventSlugs.has(eventSlug),
+      );
+      if (ineligibleItemIndex !== -1) {
+        throw flashDayEventNotEligible(ineligibleItemIndex);
+      }
+    }
+
     // `subprofile_credit` diff (Personas discovery Phase 5, Decision §3):
     // snapshot the PERSONA-WIDE resolved-member collaborator set BEFORE this
     // write, compare to the set AFTER, and only notify newly-present handles.
@@ -1472,11 +1602,18 @@ export class SubprofilesService {
     sp.editVersion = await this.dataSource.transaction(async (manager) => {
       // ENG-451: the persona row lock and the edit-version precondition come
       // first, before any item row is read or written.
-      const advancedEditVersion = await this.lockAndAdvanceEditVersion(
-        manager,
-        id,
-        userId,
-        expectedEditVersion,
+      const { advancedEditVersion, lockedSubprofile } =
+        await this.lockAndAdvanceEditVersionWithRow(
+          manager,
+          id,
+          userId,
+          expectedEditVersion,
+        );
+      // Tattoo contract "Flash day event links", again under the lock: a
+      // switch to unlinked that committed while this save waited refuses it.
+      this.assertFlashDayLinksOnLinkedPersona(
+        lockedSubprofile,
+        flashDayEventSlugsByItemIndex,
       );
 
       // Protect Your Work (revision history), Task 7: this used to be an
@@ -1512,17 +1649,28 @@ export class SubprofilesService {
         order: { position: 'ASC' },
       });
 
+      // Tattoo contract "Body-photo consent rule": a body-photo item that
+      // brings an image this section does not store needs client consent.
+      // Runs before the upload check, so a new image answers with this code.
+      assertClientConsentForNewImages(sectionEnum, items, existingRows);
+
       // Co-owner upload rule (see `assertNoForeignUploadIntroduced`): a
       // collaborator may keep an item image another collaborator uploaded, but
       // may not introduce a foreign upload this section does not already hold.
       // Runs before the first write in this transaction.
-      const storedItemImages = existingRows.map((row) => row.imageUrl);
+      // Tattoo contract "Nested item images": every image ref an item stores
+      // (cover-up before photo and session photos included) counts here.
+      const storedItemImages = existingRows.flatMap((row) =>
+        listItemImageRefs(row),
+      );
       for (const item of items) {
-        await this.assertNoForeignUploadIntroduced(
-          userId,
-          item.imageUrl,
-          storedItemImages,
-        );
+        for (const imageRef of listItemImageRefs(item)) {
+          await this.assertNoForeignUploadIntroduced(
+            userId,
+            imageRef,
+            storedItemImages,
+          );
+        }
       }
       // T17: decided on the link state under the lock just taken. On an
       // unlinked persona each member upload is copied to a persona-scoped
@@ -1531,42 +1679,53 @@ export class SubprofilesService {
         await this.personaImageKeys.rehomeForPersonaWrite(
           manager,
           id,
-          items.map((it) => it.imageUrl),
+          items.flatMap((item) => listItemImageRefs(item)),
         );
 
       const candidateFieldsByIndex: Omit<SubprofileItem, 'id' | 'createdAt'>[] =
-        items.map((it, index) => ({
-          subprofileId: id,
-          section: sectionEnum,
-          title: it.title,
-          subtitle: it.subtitle ?? null,
-          description: it.description ?? null,
-          url: it.url ?? null,
-          imageUrl:
-            PersonaImageKeysService.applyRehome(
-              rehomedItemImages,
-              it.imageUrl,
-            ) ?? null,
-          date: it.date ?? null,
-          meta: it.meta ?? null,
-          tags: it.tags ?? [],
-          collaborators: normalizedCollaboratorsByItemIndex[index] ?? [],
-          isFeatured:
-            sectionEnum === SubprofileSection.Links
-              ? false
-              : (it.isFeatured ?? false),
-          position: index,
-          // Personas redesign Phase 0 skin fields (design plan "Shared Contract").
-          venue: it.venue ?? null,
-          doors: it.doors ?? null,
-          ticketUrl: it.ticketUrl ?? null,
-          gigState: (it.gigState as GigState | undefined) ?? null,
-          medium: it.medium ?? null,
-          dimensions: it.dimensions ?? null,
-          edition: it.edition ?? null,
-          workState: (it.workState as WorkState | undefined) ?? null,
-          structured: it.structured ?? null,
-        }));
+        items.map((it, index) => {
+          // Tattoo contract "Nested item images": the rehome rewrites nested
+          // refs in `structured` the same way it rewrites `imageUrl`.
+          const rehomedItem = mapItemImageRefs(it, (imageRef) =>
+            PersonaImageKeysService.applyRehome(rehomedItemImages, imageRef),
+          );
+          return {
+            subprofileId: id,
+            section: sectionEnum,
+            title: it.title,
+            subtitle: it.subtitle ?? null,
+            description: it.description ?? null,
+            url: it.url ?? null,
+            imageUrl: rehomedItem.imageUrl ?? null,
+            date: it.date ?? null,
+            meta: it.meta ?? null,
+            tags: it.tags ?? [],
+            collaborators: normalizedCollaboratorsByItemIndex[index] ?? [],
+            isFeatured:
+              sectionEnum === SubprofileSection.Links
+                ? false
+                : (it.isFeatured ?? false),
+            position: index,
+            // Personas redesign Phase 0 skin fields (design plan "Shared Contract").
+            venue: it.venue ?? null,
+            doors: it.doors ?? null,
+            ticketUrl: it.ticketUrl ?? null,
+            gigState: (it.gigState as GigState | undefined) ?? null,
+            medium: it.medium ?? null,
+            dimensions: it.dimensions ?? null,
+            edition: it.edition ?? null,
+            workState: (it.workState as WorkState | undefined) ?? null,
+            // Tattoo contract "Flash day event links": a flash day stores
+            // its event slug trimmed, and a blank slug stores no key.
+            structured:
+              sectionEnum === SubprofileSection.FlashDays
+                ? structuredWithFlashDayEventSlug(
+                    rehomedItem.structured ?? null,
+                    flashDayEventSlugsByItemIndex[index] ?? null,
+                  )
+                : (rehomedItem.structured ?? null),
+          };
+        });
 
       // Pure-reorder detection: compare the MULTISET of canonical editable
       // content (sorted, not position-paired) on both sides. Equal multisets
@@ -1720,9 +1879,12 @@ export class SubprofilesService {
     },
   ): Promise<{ inserted: number; subprofile: SubprofileView }> {
     const sp = await this.getOwned(editorUserId, subprofileId);
+    // Tattoo item sections take no server-side import: their items carry
+    // `structured` keys and body-photo consent an import cannot supply.
     if (
       section === SubprofileSection.Links ||
       section === SubprofileSection.Gallery ||
+      isTattooItemSection(section) ||
       !isSectionAllowed(sp.kind, section)
     ) {
       throw new BadRequestException(
@@ -1755,11 +1917,12 @@ export class SubprofilesService {
       }
       const accepted = candidates.slice(0, room);
       // T17: imported art lands on an unlinked persona under a
-      // persona-scoped key, decided on the locked row.
+      // persona-scoped key, decided on the locked row. Every image ref an
+      // item stores counts (tattoo contract "Nested item images").
       const rehomedImages = await this.personaImageKeys.rehomeForPersonaWrite(
         manager,
         subprofileId,
-        accepted.map((candidate) => candidate.fields.imageUrl),
+        accepted.flatMap((candidate) => listItemImageRefs(candidate.fields)),
       );
       // Make room at the top. Raw snake_case SQL: an aliasless update does
       // not map camelCase properties (see `replaceSection`'s spotlight
@@ -2110,6 +2273,21 @@ export class SubprofilesService {
     return this.affiliationEligibility.listOptions(userId, subprofile.userId);
   }
 
+  // The flash day event picker's choices (tattoo contract "Flash day event
+  // links"): the published public events the REQUESTING owner may link,
+  // empty on an unlinked persona. Gated by `getOwned` (404 for no persona,
+  // 403 for a non-owner) like every other owner read.
+  async listFlashDayEventOptions(
+    userId: string,
+    id: string,
+  ): Promise<FlashDayEventRef[]> {
+    const subprofile = await this.getOwned(userId, id);
+    return this.affiliationEligibility.listFlashDayEventOptions(
+      userId,
+      subprofile,
+    );
+  }
+
   async publish(userId: string, id: string): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
     const items = await this.items.find({ where: { subprofileId: id } });
@@ -2165,6 +2343,13 @@ export class SubprofilesService {
     const memberCount =
       (await this.membership.loadMemberCountsFor([sp.id])).get(sp.id) ?? 1;
     const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
+    // Tattoo contract "Flash day event links", the publisher as the viewer.
+    const linkedEventsByItemId =
+      await this.affiliationEligibility.resolveFlashDayEvents(
+        userId,
+        [sp],
+        items,
+      );
 
     // Claim the handle in the global registry AND flip to published in ONE
     // transaction, for both link kinds, so a lost race on the name fails
@@ -2241,6 +2426,8 @@ export class SubprofilesService {
       new Map(),
       memberCount,
       crops,
+      undefined,
+      linkedEventsByItemId,
     );
   }
 
@@ -2560,12 +2747,19 @@ export class SubprofilesService {
     const affiliations = affiliationsById.get(sp.id) ?? [];
     const memberCount = memberCountsById.get(sp.id) ?? 1;
     // Owner viewing their own persona: same "viewer = owner" convention as
-    // `resolveAffiliationsFor` above. Depends on `items`, so it follows.
-    const collaboratorsByHandle = await this.publicRead.resolveCollaboratorsFor(
-      sp.userId,
-      items,
-    );
-    const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
+    // `resolveAffiliationsFor` above. These three depend on `items`, so
+    // they follow, batched into one round trip.
+    const [collaboratorsByHandle, crops, linkedEventsByItemId] =
+      await Promise.all([
+        this.publicRead.resolveCollaboratorsFor(sp.userId, items),
+        this.mediaCropService.getMany(imageKeysFor(sp, items)),
+        // Tattoo contract "Flash day event links".
+        this.affiliationEligibility.resolveFlashDayEvents(
+          sp.userId,
+          [sp],
+          items,
+        ),
+      ]);
     return toSubprofileDTO(
       sp,
       items,
@@ -2576,6 +2770,8 @@ export class SubprofilesService {
       collaboratorsByHandle,
       memberCount,
       crops,
+      undefined,
+      linkedEventsByItemId,
     );
   }
 
@@ -2716,6 +2912,14 @@ export class SubprofilesService {
     // save through here, so this is the one place the availability stamp
     // moves. Compared with the locked row, so a stale copy keeps the
     // committed stamp; an owner's explicit confirmation always stamps.
+    // Tattoo contract, books status write: a tattoo persona's stored books
+    // status sets `availability` whatever the PATCH sent. It runs before the
+    // stamp, so the stamp compares the forced value.
+    sp.availability = availabilityAfterTattooSync(
+      sp.kind,
+      sp.skinData,
+      sp.availability,
+    );
     sp.availabilityUpdatedAt = availabilityUpdatedAtAfterSave(
       current,
       sp,
@@ -3090,6 +3294,13 @@ export class SubprofilesService {
       kind: IdentityKind.Subprofile,
       subprofileId,
     });
+    // Tattoo contract "Flash day event links": an unlinked persona links no
+    // event, so every flash day drops its event slug here, ahead of the
+    // re-key. Raw snake_case SQL: the jsonb path delete has no TypeORM form.
+    await manager.query(
+      `UPDATE "subprofile_items" SET "structured" = "structured" #- '{flashDay,eventSlug}' WHERE "subprofile_id" = $1 AND "section" = $2 AND "structured" -> 'flashDay' -> 'eventSlug' IS NOT NULL`,
+      [subprofileId, SubprofileSection.FlashDays],
+    );
   }
 
   /**
@@ -3177,17 +3388,59 @@ export class SubprofilesService {
     editorUserId: string,
     expectedEditVersion: number | undefined,
   ): Promise<number> {
-    const current = await this.lockCurrentSubprofile(manager, subprofileId, {
-      editorUserId,
-      expectedEditVersion,
-    });
-    const advancedEditVersion = current.editVersion + 1;
+    return (
+      await this.lockAndAdvanceEditVersionWithRow(
+        manager,
+        subprofileId,
+        editorUserId,
+        expectedEditVersion,
+      )
+    ).advancedEditVersion;
+  }
+
+  /**
+   * `lockAndAdvanceEditVersion`, also returning the row read under the lock,
+   * for a save that re-checks a persona field (its link state) on the
+   * committed row.
+   */
+  private async lockAndAdvanceEditVersionWithRow(
+    manager: EntityManager,
+    subprofileId: string,
+    editorUserId: string,
+    expectedEditVersion: number | undefined,
+  ): Promise<{ advancedEditVersion: number; lockedSubprofile: Subprofile }> {
+    const lockedSubprofile = await this.lockCurrentSubprofile(
+      manager,
+      subprofileId,
+      { editorUserId, expectedEditVersion },
+    );
+    const advancedEditVersion = lockedSubprofile.editVersion + 1;
     await manager.update(
       Subprofile,
       { id: subprofileId },
       { editVersion: advancedEditVersion },
     );
-    return advancedEditVersion;
+    return { advancedEditVersion, lockedSubprofile };
+  }
+
+  /**
+   * Tattoo contract "Flash day event links": throws 400
+   * `FLASH_DAY_EVENT_UNLINKED_PERSONA` `{ itemIndex }` for the first item
+   * that links an event while the persona is unlinked.
+   */
+  private assertFlashDayLinksOnLinkedPersona(
+    persona: Pick<Subprofile, 'linkVisibility'>,
+    flashDayEventSlugsByItemIndex: readonly (string | null)[],
+  ): void {
+    if (persona.linkVisibility !== SubprofileLinkVisibility.Unlinked) {
+      return;
+    }
+    const linkedItemIndex = flashDayEventSlugsByItemIndex.findIndex(
+      (eventSlug) => eventSlug !== null,
+    );
+    if (linkedItemIndex !== -1) {
+      throw flashDayEventUnlinkedPersona(linkedItemIndex);
+    }
   }
 
   /**

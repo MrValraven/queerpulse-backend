@@ -44,6 +44,12 @@ import {
   StudioTrackMeasurements,
   hasTrackAnalysis,
 } from './studio-track-listening';
+import type { StudioOwnerClaim } from './studio-claim-response';
+import {
+  StudioContentWarningId,
+  effectiveContentWarnings,
+  normalizeContentWarnings,
+} from './studio-safety.constants';
 
 // Wire shapes of the Studio v1 contract. Backend names end in `Response`
 // where the contract name would clash with an entity.
@@ -82,6 +88,12 @@ export interface StudioTrackSummary {
   isDraft: boolean;
   /** The start of the show notes, for an episode row. */
   notesExcerpt: string | null;
+  /** Studio safety: the artist's and our team's warnings together, each
+   *  once, in theme order. */
+  contentWarnings: StudioContentWarningId[];
+  /** Studio safety: true while a copyright claim holds the track offline. A
+   *  listener's row is then redacted (`toWithheldListenerSummary`). */
+  isWithheld: boolean;
 }
 
 /** Studio listening: what the release editor needs to prefill a track and
@@ -93,6 +105,12 @@ export interface StudioOwnerTrackFields {
   peakDb: number | null;
   syncedLyrics: StudioSyncedLyricLine[] | null;
   chapters: StudioChapter[] | null;
+  /** Studio safety: what the artist's PATCH set. */
+  artistContentWarnings: StudioContentWarningId[];
+  /** Studio safety: what our team added; locked chips in the editor. */
+  staffContentWarnings: StudioContentWarningId[];
+  /** Studio safety: our team marked the track explicit. */
+  isExplicitLocked: boolean;
 }
 
 export type StudioOwnerTrackSummary = StudioTrackSummary &
@@ -227,6 +245,9 @@ export interface StudioReleaseResponse extends StudioReleaseCard {
   hasUnnotedChanges: boolean;
   previewToken: string | null;
   previewLinkCreatedAt: string | null;
+  /** Studio safety: owner-visible copyright claims on every track of the
+   *  release, newest accepted first. Owners only; empty for everyone else. */
+  claims: StudioOwnerClaim[];
 }
 
 export interface StudioTrackResponse extends StudioTrackSummary {
@@ -243,6 +264,9 @@ export interface StudioTrackResponse extends StudioTrackSummary {
   notes: string | null;
   /** The credited sources of an edit, a lip-sync mix or a mix. */
   sources: StudioSource[];
+  /** Studio safety: owner-visible copyright claims on this track. Owners
+   *  only; empty for everyone else. */
+  claims: StudioOwnerClaim[];
 }
 
 export interface StudioArtistResponse {
@@ -344,6 +368,46 @@ export function statsForTracks(
   };
 }
 
+/** Studio safety: whether a copyright claim holds the track offline. Reads
+ *  a row loaded before the safety columns as not withheld. */
+export function isWithheldTrack(
+  track: Partial<Pick<StudioTrack, 'withheldAt'>>,
+): boolean {
+  return Boolean(track.withheldAt);
+}
+
+/** Studio safety: a listener's card counts a withheld track (its row stays
+ *  in the tracklist) and leaves its length out (nothing of it plays). */
+export function listenerStatsForTracks(
+  tracks: Pick<StudioTrack, 'audioKey' | 'durationSeconds' | 'withheldAt'>[],
+): StudioReleaseStats {
+  return {
+    trackCount: tracks.length,
+    totalDurationSeconds: tracks
+      .filter((track) => hasPlayableAudio(track) && !isWithheldTrack(track))
+      .reduce((total, track) => total + (track.durationSeconds ?? 0), 0),
+  };
+}
+
+/** Studio safety: a listener's row for a withheld track keeps its id, its
+ *  place and its publish time and drops everything else, the way the 410
+ *  track page names nothing. The frontend reads "Unavailable". */
+export function toWithheldListenerSummary(
+  summary: StudioTrackSummary,
+): StudioTrackSummary {
+  return {
+    ...summary,
+    title: '',
+    durationSeconds: null,
+    isExplicit: false,
+    hasAudio: false,
+    isDraft: false,
+    notesExcerpt: null,
+    contentWarnings: [],
+    isWithheld: true,
+  };
+}
+
 /** A kind changed in the database outside the artist kinds reads as
  *  `STUDIO_FALLBACK_ARTIST_PERSONA_KIND`; the API itself never changes a
  *  persona's kind. */
@@ -380,6 +444,11 @@ export function toStudioTrackSummary(track: StudioTrack): StudioTrackSummary {
     publishedAt: track.publishedAt ? track.publishedAt.toISOString() : null,
     isDraft: false,
     notesExcerpt: toNotesExcerpt(track.notes),
+    contentWarnings: effectiveContentWarnings(
+      track.contentWarnings,
+      track.staffContentWarnings,
+    ),
+    isWithheld: isWithheldTrack(track),
   };
 }
 
@@ -393,6 +462,9 @@ export function toStudioOwnerTrackSummary(
     peakDb: track.peakDb ?? null,
     syncedLyrics: track.syncedLyrics ?? null,
     chapters: track.chapters ?? null,
+    artistContentWarnings: normalizeContentWarnings(track.contentWarnings),
+    staffContentWarnings: normalizeContentWarnings(track.staffContentWarnings),
+    isExplicitLocked: Boolean(track.explicitLockedAt),
   };
 }
 
@@ -481,10 +553,13 @@ export function toListenerTrackSummaries(
     release?.type === StudioReleaseType.Podcast
       ? playableTracks.sort(byEpisodeOrder)
       : playableTracks;
-  return orderedTracks.map((track, index) => ({
-    ...toStudioTrackSummary(track),
-    position: index + 1,
-  }));
+  // Studio safety: a withheld track keeps its row and its number, redacted.
+  return orderedTracks.map((track, index) => {
+    const summary = { ...toStudioTrackSummary(track), position: index + 1 };
+    return isWithheldTrack(track)
+      ? toWithheldListenerSummary(summary)
+      : summary;
+  });
 }
 
 /**
@@ -573,7 +648,9 @@ function latestDispute(
  *  support links, version notes and reminder state.
  *  Studio artist kinds: a podcast show gives listeners its published
  *  episodes, numbered by publish order, and marks the owner's unpublished
- *  ones `isDraft`. */
+ *  ones `isDraft`.
+ *  Studio safety: listeners get a withheld row redacted in place, counted,
+ *  with its length left out; `ownerClaims` reach owners only. */
 export function toStudioReleaseResponse(
   release: StudioRelease,
   persona: StudioArtistPersona,
@@ -582,6 +659,7 @@ export function toStudioReleaseResponse(
   ownerDisputes: readonly StudioReleaseDispute[] = [],
   personaCredits: StudioReleaseCreditSummary[] = [],
   extras: StudioReleaseExtras = EMPTY_RELEASE_EXTRAS,
+  ownerClaims: readonly StudioOwnerClaim[] = [],
 ): StudioReleaseResponse {
   const ownersLatestDispute = viewer.isOwner
     ? latestDispute(ownerDisputes)
@@ -617,7 +695,13 @@ export function toStudioReleaseResponse(
   }
   const latestVersion = extras.versions[0] ?? null;
   return {
-    ...toStudioReleaseCard(release, persona, statsForTracks(countedTracks)),
+    ...toStudioReleaseCard(
+      release,
+      persona,
+      canSeeOwnerFields
+        ? statsForTracks(countedTracks)
+        : listenerStatsForTracks(countedTracks),
+    ),
     description: release.description,
     status: release.status,
     tracks: wireTracks,
@@ -648,6 +732,7 @@ export function toStudioReleaseResponse(
       viewer.isOwner && release.previewLinkCreatedAt
         ? release.previewLinkCreatedAt.toISOString()
         : null,
+    claims: viewer.isOwner ? [...ownerClaims] : [],
   };
 }
 
@@ -658,6 +743,7 @@ export function toStudioTrackResponse(
   releaseCard: StudioReleaseCard,
   personaCredits: StudioPersonaCreditPublic[] = [],
   viewer: Pick<StudioReleaseViewer, 'isOwner'> = { isOwner: false },
+  ownerClaims: readonly StudioOwnerClaim[] = [],
 ): StudioTrackResponse {
   const isEpisode = releaseCard.type === StudioReleaseType.Podcast;
   return {
@@ -672,5 +758,6 @@ export function toStudioTrackResponse(
     personaCredits,
     notes: isEpisode ? (track.notes ?? null) : null,
     sources: track.sources ?? [],
+    claims: viewer.isOwner ? [...ownerClaims] : [],
   };
 }

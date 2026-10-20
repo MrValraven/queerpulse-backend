@@ -10,7 +10,10 @@ import { StudioPage } from './studio-response';
  * keeps `track: null` and carries `unavailableReason: 'withdrawn'` when
  * staff took its release down.
  */
-export interface StudioLikedTrackEntry extends StudioPlaylistEntryResponse {
+export interface StudioLikedTrackEntry extends Omit<
+  StudioPlaylistEntryResponse,
+  'addedBy'
+> {
   /** The liked track's id (`saved_item.subject_id`), always present. */
   trackId: string;
   /** The member's own title snapshot from the save (`saved_item.title`). */

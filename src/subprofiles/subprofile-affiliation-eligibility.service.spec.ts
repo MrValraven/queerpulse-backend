@@ -9,9 +9,17 @@ import {
   EventLineupEntryStatus,
 } from '../events/entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
-import { Event } from '../events/entities/event.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
 import { BlockFilterService } from '../social/block-filter.service';
-import { Subprofile } from './entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileLinkVisibility,
+} from './entities/subprofile.entity';
+import { SubprofileSection } from './entities/subprofile-item.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import {
   eligibilityKey,
@@ -52,7 +60,7 @@ describe('SubprofileAffiliationEligibilityService', () => {
   let eventRsvps: { find: jest.Mock };
   let events: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let communities: { createQueryBuilder: jest.Mock };
-  let blockFilter: { excludeBlocked: jest.Mock };
+  let blockFilter: { excludeBlocked: jest.Mock; blockedUserIds: jest.Mock };
 
   beforeEach(async () => {
     subprofiles = { find: jest.fn().mockResolvedValue([]) };
@@ -66,7 +74,10 @@ describe('SubprofileAffiliationEligibilityService', () => {
       createQueryBuilder: jest.fn(),
     };
     communities = { createQueryBuilder: jest.fn() };
-    blockFilter = { excludeBlocked: jest.fn() };
+    blockFilter = {
+      excludeBlocked: jest.fn(),
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -203,6 +214,25 @@ describe('SubprofileAffiliationEligibilityService', () => {
           }),
         }),
       );
+    });
+
+    it('skips going RSVPs when asked', async () => {
+      eventRsvps.find.mockResolvedValue([
+        { eventId: 'event-1', userId: 'owner-1' },
+      ]);
+
+      const eligibleKeys = await service.eligibleTargetKeys(
+        ['owner-1'],
+        [{ id: 'event-1', hostId: null }],
+        [],
+        { shouldCountGoingRsvps: false },
+      );
+
+      expect(eligibleKeys).toEqual(new Set());
+      expect(eventRsvps.find).not.toHaveBeenCalled();
+      // Co-hosts and the lineup are still read.
+      expect(eventCohosts.find).toHaveBeenCalledTimes(1);
+      expect(eventLineupEntries.find).toHaveBeenCalledTimes(1);
     });
 
     it('runs no query when there are no owners', async () => {
@@ -396,6 +426,419 @@ describe('SubprofileAffiliationEligibilityService', () => {
         [],
       );
       expect(events.createQueryBuilder).not.toHaveBeenCalled();
+    });
+  });
+
+  // A published public event row carrying every column the flash day ref
+  // reads, plus the private door details the ref must leave behind.
+  function makeFlashDayEventRow(overrides: Partial<Event> = {}) {
+    return {
+      id: 'event-1',
+      slug: 'flash-day-arroios',
+      title: 'Flash Day at Arroios',
+      startAt: new Date('2026-11-14T11:00:00.000Z'),
+      endAt: new Date('2026-11-14T19:00:00.000Z'),
+      venue: 'Casa do Bairro',
+      neighbourhood: 'Arroios',
+      isOnline: false,
+      coverImageUrl: null,
+      address: 'Rua Secreta 1',
+      arrivalNotes: 'ring twice',
+      hostId: 'co-owner-2',
+      status: EventStatus.Published,
+      visibility: EventVisibility.Public,
+      ...overrides,
+    };
+  }
+
+  const flashDayArroiosRef = {
+    slug: 'flash-day-arroios',
+    title: 'Flash Day at Arroios',
+    startsAt: '2026-11-14T11:00:00.000Z',
+    endsAt: '2026-11-14T19:00:00.000Z',
+    venue: 'Casa do Bairro',
+    neighbourhood: 'Arroios',
+    isOnline: false,
+    imageUrl: null,
+  };
+
+  describe('listFlashDayEventOptions', () => {
+    it('lists no flash day options for an unlinked persona', async () => {
+      await expect(
+        service.listFlashDayEventOptions('creator-1', {
+          userId: 'creator-1',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        }),
+      ).resolves.toEqual([]);
+      expect(events.find).not.toHaveBeenCalled();
+      expect(events.createQueryBuilder).not.toHaveBeenCalled();
+      expect(eventCohosts.find).not.toHaveBeenCalled();
+    });
+
+    it('lists flash day options without reading RSVPs and from public events only', async () => {
+      const eventQuery = makeQueryBuilderStub([makeFlashDayEventRow()]);
+      events.createQueryBuilder.mockReturnValue(eventQuery);
+      events.find.mockResolvedValue([{ id: 'event-1' }]);
+      eventLineupEntries.find.mockResolvedValue([{ eventId: 'event-2' }]);
+
+      const options = await service.listFlashDayEventOptions('creator-1', {
+        userId: 'creator-1',
+        linkVisibility: SubprofileLinkVisibility.Linked,
+      });
+
+      expect(options).toEqual([flashDayArroiosRef]);
+      expect(JSON.stringify(options)).not.toContain('Rua Secreta 1');
+      expect(JSON.stringify(options)).not.toContain('ring twice');
+      expect(eventRsvps.find).not.toHaveBeenCalled();
+      expect(eventQuery.where).toHaveBeenCalledWith(
+        'event.id IN (:...candidateEventIds)',
+        { candidateEventIds: ['event-1', 'event-2'] },
+      );
+      expect(eventQuery.andWhere).toHaveBeenCalledWith(
+        'event.status = :published',
+        { published: EventStatus.Published },
+      );
+      expect(eventQuery.andWhere).toHaveBeenCalledWith(
+        'event.visibility = :public',
+        { public: EventVisibility.Public },
+      );
+      expect(eventQuery.andWhere).not.toHaveBeenCalledWith(
+        'event.visibility != :inviteOnly',
+        expect.anything(),
+      );
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        eventQuery,
+        'creator-1',
+        '"event"."host_id"',
+      );
+      expect(eventQuery.take).toHaveBeenCalledWith(
+        MAX_AFFILIATION_OPTIONS_PER_TYPE,
+      );
+    });
+
+    it('keeps the "Part of" picker on going RSVPs and the invite-only filter', async () => {
+      communities.createQueryBuilder.mockReturnValue(makeQueryBuilderStub([]));
+      const eventQuery = makeQueryBuilderStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQuery);
+      eventRsvps.find.mockResolvedValue([{ eventId: 'event-1' }]);
+
+      await service.listOptions('creator-1', 'creator-1');
+
+      expect(eventRsvps.find).toHaveBeenCalledWith({
+        where: { userId: 'creator-1', status: RsvpStatus.Going },
+        select: { eventId: true },
+      });
+      expect(eventQuery.andWhere).toHaveBeenCalledWith(
+        'event.visibility != :inviteOnly',
+        { inviteOnly: EventVisibility.InviteOnly },
+      );
+      expect(eventQuery.andWhere).not.toHaveBeenCalledWith(
+        'event.visibility = :public',
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('eligibleFlashDayEventSlugs', () => {
+    const persona = { id: 'persona-1', userId: 'creator-1' };
+
+    beforeEach(() => {
+      jest
+        .spyOn(service, 'ownerIdsFor')
+        .mockResolvedValue(
+          new Map([['persona-1', ['creator-1', 'co-owner-2']]]),
+        );
+    });
+
+    it('counts an event a co-owner hosts as eligible for the persona', async () => {
+      events.find.mockResolvedValue([makeFlashDayEventRow()]);
+
+      const eligibleSlugs = await service.eligibleFlashDayEventSlugs(persona, [
+        ' flash-day-arroios ',
+      ]);
+
+      expect(eligibleSlugs).toEqual(new Set(['flash-day-arroios']));
+      expect(events.find).toHaveBeenCalledTimes(1);
+      expect(events.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { slug: In(['flash-day-arroios']) },
+        }),
+      );
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('creator-1', [
+        'co-owner-2',
+      ]);
+      expect(eventRsvps.find).not.toHaveBeenCalled();
+    });
+
+    it('counts an accepted lineup act among the owners', async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ hostId: 'someone-else' }),
+      ]);
+      eventLineupEntries.find.mockResolvedValue([
+        { eventId: 'event-1', userId: 'creator-1' },
+      ]);
+
+      await expect(
+        service.eligibleFlashDayEventSlugs(persona, ['flash-day-arroios']),
+      ).resolves.toEqual(new Set(['flash-day-arroios']));
+    });
+
+    it("refuses an event the owners only RSVP'd going to", async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ hostId: 'someone-else' }),
+      ]);
+      eventRsvps.find.mockResolvedValue([
+        { eventId: 'event-1', userId: 'creator-1' },
+      ]);
+
+      await expect(
+        service.eligibleFlashDayEventSlugs(persona, ['flash-day-arroios']),
+      ).resolves.toEqual(new Set());
+      expect(eventRsvps.find).not.toHaveBeenCalled();
+    });
+
+    it('refuses a members-only event', async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ visibility: EventVisibility.Members }),
+      ]);
+
+      await expect(
+        service.eligibleFlashDayEventSlugs(persona, ['flash-day-arroios']),
+      ).resolves.toEqual(new Set());
+    });
+
+    it('refuses a cancelled event', async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ status: EventStatus.Cancelled }),
+      ]);
+
+      await expect(
+        service.eligibleFlashDayEventSlugs(persona, ['flash-day-arroios']),
+      ).resolves.toEqual(new Set());
+    });
+
+    it('refuses an unknown slug', async () => {
+      events.find.mockResolvedValue([]);
+
+      await expect(
+        service.eligibleFlashDayEventSlugs(persona, ['no-such-event']),
+      ).resolves.toEqual(new Set());
+    });
+
+    it('refuses an event whose host the persona creator blocked', async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ hostId: 'host-3' }),
+      ]);
+      eventCohosts.find.mockResolvedValue([
+        { eventId: 'event-1', userId: 'creator-1' },
+      ]);
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['host-3']));
+
+      await expect(
+        service.eligibleFlashDayEventSlugs(persona, ['flash-day-arroios']),
+      ).resolves.toEqual(new Set());
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('creator-1', [
+        'host-3',
+      ]);
+    });
+
+    it('runs no query for blank slugs', async () => {
+      await expect(
+        service.eligibleFlashDayEventSlugs(persona, ['', '   ']),
+      ).resolves.toEqual(new Set());
+      expect(events.find).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveFlashDayEvents', () => {
+    const linkedPersona = {
+      id: 'persona-1',
+      userId: 'creator-1',
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    };
+    const flashDayItem = {
+      id: 'item-1',
+      subprofileId: 'persona-1',
+      section: SubprofileSection.FlashDays,
+      structured: { flashDay: { eventSlug: 'flash-day-arroios' } },
+    };
+
+    let ownerIdsForSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      ownerIdsForSpy = jest.spyOn(service, 'ownerIdsFor').mockResolvedValue(
+        new Map([
+          ['persona-1', ['creator-1', 'co-owner-2']],
+          ['persona-2', ['creator-2']],
+        ]),
+      );
+    });
+
+    it('resolves a flash day linked to an event a co-owner hosts', async () => {
+      events.find.mockResolvedValue([makeFlashDayEventRow()]);
+
+      const linkedEventByItemId = await service.resolveFlashDayEvents(
+        'viewer-1',
+        [linkedPersona],
+        [flashDayItem],
+      );
+
+      expect(linkedEventByItemId).toEqual(
+        new Map([['item-1', flashDayArroiosRef]]),
+      );
+      expect(JSON.stringify(linkedEventByItemId.get('item-1'))).not.toContain(
+        'Rua Secreta 1',
+      );
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
+        'co-owner-2',
+      ]);
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('creator-1', [
+        'co-owner-2',
+      ]);
+      expect(eventRsvps.find).not.toHaveBeenCalled();
+    });
+
+    it('drops a linked event that turned members-only', async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ visibility: EventVisibility.Members }),
+      ]);
+
+      const linkedEventByItemId = await service.resolveFlashDayEvents(
+        'viewer-1',
+        [linkedPersona],
+        [flashDayItem],
+      );
+
+      expect(linkedEventByItemId.has('item-1')).toBe(false);
+      expect(linkedEventByItemId.size).toBe(0);
+    });
+
+    it('drops every link of an unlinked persona', async () => {
+      events.find.mockResolvedValue([makeFlashDayEventRow()]);
+
+      const linkedEventByItemId = await service.resolveFlashDayEvents(
+        'viewer-1',
+        [
+          {
+            ...linkedPersona,
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          },
+        ],
+        [flashDayItem],
+      );
+
+      expect(linkedEventByItemId.size).toBe(0);
+      expect(events.find).not.toHaveBeenCalled();
+    });
+
+    it('drops a link whose host blocked the viewer', async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ hostId: 'host-3' }),
+      ]);
+      eventLineupEntries.find.mockResolvedValue([
+        { eventId: 'event-1', userId: 'creator-1' },
+      ]);
+      blockFilter.blockedUserIds.mockImplementation((actorId: string) =>
+        Promise.resolve(
+          actorId === 'viewer-1' ? new Set(['host-3']) : new Set<string>(),
+        ),
+      );
+
+      const linkedEventByItemId = await service.resolveFlashDayEvents(
+        'viewer-1',
+        [linkedPersona],
+        [flashDayItem],
+      );
+
+      expect(linkedEventByItemId.size).toBe(0);
+    });
+
+    it('drops a link no owner hosts, co-hosts or plays', async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow({ hostId: 'someone-else' }),
+      ]);
+      eventRsvps.find.mockResolvedValue([
+        { eventId: 'event-1', userId: 'creator-1' },
+      ]);
+
+      const linkedEventByItemId = await service.resolveFlashDayEvents(
+        'viewer-1',
+        [linkedPersona],
+        [flashDayItem],
+      );
+
+      expect(linkedEventByItemId.size).toBe(0);
+      expect(eventRsvps.find).not.toHaveBeenCalled();
+    });
+
+    it("resolves two personas' flash days with one events query", async () => {
+      events.find.mockResolvedValue([
+        makeFlashDayEventRow(),
+        makeFlashDayEventRow({
+          id: 'event-2',
+          slug: 'flash-day-porto',
+          title: 'Flash Day in Porto',
+          hostId: 'creator-2',
+        }),
+      ]);
+
+      const linkedEventByItemId = await service.resolveFlashDayEvents(
+        'viewer-1',
+        [
+          linkedPersona,
+          {
+            id: 'persona-2',
+            userId: 'creator-2',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          },
+        ],
+        [
+          flashDayItem,
+          {
+            id: 'item-2',
+            subprofileId: 'persona-2',
+            section: SubprofileSection.FlashDays,
+            structured: { flashDay: { eventSlug: 'flash-day-porto' } },
+          },
+          // Another section carrying the same key is no flash day link.
+          {
+            id: 'item-3',
+            subprofileId: 'persona-2',
+            section: SubprofileSection.Gigs,
+            structured: { flashDay: { eventSlug: 'flash-day-arroios' } },
+          },
+        ],
+      );
+
+      expect(events.find).toHaveBeenCalledTimes(1);
+      expect(events.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { slug: In(['flash-day-arroios', 'flash-day-porto']) },
+        }),
+      );
+      expect([...linkedEventByItemId.keys()]).toEqual(['item-1', 'item-2']);
+      expect(linkedEventByItemId.get('item-2')).toEqual(
+        expect.objectContaining({
+          slug: 'flash-day-porto',
+          title: 'Flash Day in Porto',
+        }),
+      );
+      // The viewer plus one lookup per distinct persona creator.
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledTimes(3);
+      expect(ownerIdsForSpy).toHaveBeenCalledTimes(1);
+      expect(eventCohosts.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs no query when no item links an event', async () => {
+      const linkedEventByItemId = await service.resolveFlashDayEvents(
+        'viewer-1',
+        [linkedPersona],
+        [{ ...flashDayItem, structured: { flashDay: { eventSlug: ' ' } } }],
+      );
+
+      expect(linkedEventByItemId.size).toBe(0);
+      expect(events.find).not.toHaveBeenCalled();
+      expect(blockFilter.blockedUserIds).not.toHaveBeenCalled();
     });
   });
 });

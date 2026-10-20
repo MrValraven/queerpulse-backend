@@ -195,6 +195,14 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // passes no `actorId` argument to `create` (see the type's own doc), so a
   // mute never silences this notice.
   [NotificationType.ForumCoAuthorCredit]: 'actorId',
+  // Collaborative playlists. The playlist owner who invited or picked this
+  // member, and the member who answered an invitation, resolved for the
+  // other side's bell. Each emit site passes the same id as the trailing
+  // `actorId` argument, so block and mute apply either way.
+  [NotificationType.StudioPlaylistEditorInvite]: 'actorId',
+  [NotificationType.StudioPlaylistEditorInviteAccepted]: 'actorId',
+  [NotificationType.StudioPlaylistEditorInviteDeclined]: 'actorId',
+  [NotificationType.StudioPlaylistEditorAdded]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -460,6 +468,38 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // takedown reason and the staff reply are owner-only prose read on the
     // release page, so neither rides the bell.
     [NotificationType.StudioReleaseTakenDown]: ['releaseId', 'releaseTitle'],
+    // Studio safety and moderation: the claim id (the claims page link) and
+    // the track title for the claimant; owners also get the track and
+    // release ids (the track page link). Notes, counter-notices and the
+    // claimant never ride the bell.
+    [NotificationType.StudioCopyrightClaimAccepted]: [
+      'claimId',
+      'trackId',
+      'releaseId',
+      'trackTitle',
+    ],
+    [NotificationType.StudioCopyrightClaimDeclined]: ['claimId', 'trackTitle'],
+    [NotificationType.StudioCopyrightClaimCountered]: ['claimId', 'trackTitle'],
+    [NotificationType.StudioCopyrightClaimDecided]: [
+      'claimId',
+      'trackId',
+      'releaseId',
+      'trackTitle',
+      'outcome',
+      'recipientRole',
+    ],
+    [NotificationType.StudioCopyrightClaimWithdrawn]: [
+      'claimId',
+      'trackId',
+      'releaseId',
+      'trackTitle',
+    ],
+    [NotificationType.StudioTrackMarked]: [
+      'trackId',
+      'releaseId',
+      'trackTitle',
+      'change',
+    ],
     [NotificationType.StudioReleaseDisputeDecided]: [
       'releaseId',
       'releaseTitle',
@@ -489,6 +529,26 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'trackTitle',
       'releaseTitle',
       'role',
+    ],
+    // Collaborative playlists: the playlist id (the deep link) and its name,
+    // which the recipient can already open. A pick also names the persona
+    // the playlist shows as, which the recipient co-owns.
+    [NotificationType.StudioPlaylistEditorInvite]: [
+      'playlistId',
+      'playlistName',
+    ],
+    [NotificationType.StudioPlaylistEditorInviteAccepted]: [
+      'playlistId',
+      'playlistName',
+    ],
+    [NotificationType.StudioPlaylistEditorInviteDeclined]: [
+      'playlistId',
+      'playlistName',
+    ],
+    [NotificationType.StudioPlaylistEditorAdded]: [
+      'playlistId',
+      'playlistName',
+      'personaName',
     ],
     [NotificationType.SubprofileInvite]: [
       'subprofileName',
@@ -683,6 +743,33 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.ListingCoManagerInvite]: ['listingName'],
     [NotificationType.ListingCoManagerInviteAccepted]: ['listingName'],
     [NotificationType.ListingCoManagerInviteDeclined]: ['listingName'],
+    // Meet the team. Each payload names no member. The invite carries the
+    // persona id its recipient already co-owns, and the request carries the
+    // listing ref its recipient already manages.
+    [NotificationType.ListingTeamInvite]: [
+      'subprofileId',
+      'personaName',
+      'listingName',
+      'listingSlug',
+      'roleLabel',
+    ],
+    [NotificationType.ListingTeamRequest]: [
+      'listingRef',
+      'listingName',
+      'personaName',
+      'personaHandle',
+    ],
+    // Only the starting side receives it, and that side already holds the
+    // listing ref (listing started) or the persona id (persona started).
+    [NotificationType.ListingTeamAccepted]: [
+      'initiatedBy',
+      'listingName',
+      'listingSlug',
+      'personaName',
+      'personaHandle',
+      'listingRef',
+      'subprofileId',
+    ],
     // The business's own public name, for copy like "an admin has offered you
     // ownership of Lux Cafe". `listingSlug` already rides along in
     // `COMMON_PAYLOAD_KEYS`, which is what the deep link is built from.
@@ -1085,6 +1172,13 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     ],
   };
 
+/** Studio safety: the decided notice reaches the claimant and the owners
+ *  under one type, and only an owner row may carry these. */
+const OWNER_ONLY_DECIDED_KEYS: ReadonlySet<string> = new Set([
+  'trackId',
+  'releaseId',
+]);
+
 /**
  * The client-safe projection of a notification's opaque `payload` jsonb: only
  * the per-type allowlisted keys (plus `COMMON_PAYLOAD_KEYS`) that are actually
@@ -1101,8 +1195,14 @@ export function toClientPayload(
     ...COMMON_PAYLOAD_KEYS,
     ...(PAYLOAD_ALLOWLIST[notification.type] ?? []),
   ]);
+  const isNonOwnerDecidedRow =
+    notification.type === NotificationType.StudioCopyrightClaimDecided &&
+    payload.recipientRole !== 'owner';
   const projected: Record<string, unknown> = {};
   for (const key of allowedKeys) {
+    if (isNonOwnerDecidedRow && OWNER_ONLY_DECIDED_KEYS.has(key)) {
+      continue;
+    }
     if (payload[key] !== undefined) {
       projected[key] = payload[key];
     }

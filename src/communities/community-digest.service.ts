@@ -13,6 +13,11 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from '../reports/entities/report.entity';
+import {
+  findStudioShareLinkMatch,
+  postTextWithoutStudioShareLink,
+  studioShareOrigins,
+} from '../studio/studio-share-link';
 import { isCommunityStaffRole } from './community-staff-access';
 import {
   CommunityDigestEntry,
@@ -521,16 +526,33 @@ export class CommunityDigestService {
     return new Map(rows.map((row) => [row.communityId, Number(row.count)]));
   }
 
+  /**
+   * Studio rich cards: the first Studio link leaves the excerpt before it is
+   * cut, as it leaves the feed summary (`communityPostToFeedItem`), so a
+   * "Share to a community" post reads as its note.
+   */
+  private static excerptText(
+    body: string,
+    studioOrigins: readonly string[],
+  ): string {
+    const studioMatch = findStudioShareLinkMatch(body, studioOrigins);
+    const visibleBody = studioMatch
+      ? postTextWithoutStudioShareLink(body, studioMatch)
+      : body;
+    return truncateCharacters(visibleBody, DIGEST_EXCERPT_LENGTH);
+  }
+
   private static groupExcerpts(
     rows: ExcerptRow[],
   ): Map<string, CommunityDigestExcerpt[]> {
     const grouped = new Map<string, CommunityDigestExcerpt[]>();
+    const studioOrigins = studioShareOrigins();
     for (const row of rows) {
       const excerpts = grouped.get(row.community_id) ?? [];
       excerpts.push({
         postId: row.id,
         kind: row.kind,
-        excerpt: truncateCharacters(row.body, DIGEST_EXCERPT_LENGTH),
+        excerpt: CommunityDigestService.excerptText(row.body, studioOrigins),
         createdAt: row.created_at,
       });
       grouped.set(row.community_id, excerpts);

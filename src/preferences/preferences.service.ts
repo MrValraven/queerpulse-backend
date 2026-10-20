@@ -29,6 +29,7 @@ import {
   DEFAULT_SHARE_PRESENCE,
   DEFAULT_SHARE_READ_RECEIPTS,
   DEFAULT_SHARE_TYPING,
+  DEFAULT_STUDIO_ASK_BEFORE_WARNINGS,
   DEFAULT_STUDIO_AUTOPLAY_NEXT,
   DEFAULT_STUDIO_CROSSFADE_SECONDS,
   DEFAULT_STUDIO_HIDE_EXPLICIT,
@@ -103,6 +104,7 @@ export class PreferencesService {
     row.studioAutoplayNext = DEFAULT_STUDIO_AUTOPLAY_NEXT;
     row.studioHideExplicit = DEFAULT_STUDIO_HIDE_EXPLICIT;
     row.studioCrossfadeSeconds = DEFAULT_STUDIO_CROSSFADE_SECONDS;
+    row.studioAskBeforeWarnings = DEFAULT_STUDIO_ASK_BEFORE_WARNINGS;
     return row;
   }
 
@@ -305,6 +307,9 @@ export class PreferencesService {
     }
     if (dto.crossfadeSeconds !== undefined) {
       row.studioCrossfadeSeconds = dto.crossfadeSeconds;
+    }
+    if (dto.askBeforeWarnings !== undefined) {
+      row.studioAskBeforeWarnings = dto.askBeforeWarnings;
     }
     return toStudioPlaybackDTO(await this.preferences.save(row));
   }

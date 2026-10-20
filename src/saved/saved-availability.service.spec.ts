@@ -4,6 +4,7 @@ import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import {
   creditPersonaCreatorIdSql,
+  notWithheldTrackSql,
   ownerHoldsGrantSql,
   personaCreatorBlockExemptSql,
 } from '../studio/studio-playlist-visibility';
@@ -369,6 +370,22 @@ describe('SavedAvailabilityService', () => {
         .value as Record<string, jest.Mock>;
       expect(predicatesOf(queryBuilder)).toContain(
         episodeReleasedSql('track', 'release'),
+      );
+    });
+
+    // Studio safety: a saved track a copyright claim holds reads unavailable.
+    it('leaves a withheld track unavailable', async () => {
+      await build({ track: [TRACK_ID] });
+
+      await service.availableRefs(
+        [ref(SavedKind.StudioTrack, TRACK_ID)],
+        'viewer-1',
+      );
+
+      const queryBuilder = manager.createQueryBuilder.mock.results[0]!
+        .value as Record<string, jest.Mock>;
+      expect(predicatesOf(queryBuilder)).toContain(
+        notWithheldTrackSql('track'),
       );
     });
 

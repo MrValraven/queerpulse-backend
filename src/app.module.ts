@@ -45,6 +45,10 @@ import {
   isStudioListeningRequest,
   redactStudioPreviewToken,
 } from './studio/studio-request-log';
+import {
+  isCreatorDraftRequest,
+  redactCreatorDraftPath,
+} from './creator-drafts/creator-draft-request-log';
 import { CommunitiesModule } from './communities/communities.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
@@ -119,6 +123,7 @@ import { IntakesModule } from './intakes/intakes.module';
 import { PreferencesModule } from './preferences/preferences.module';
 import { DraftsModule } from './drafts/drafts.module';
 import { ListingDraftsModule } from './listing-drafts/listing-drafts.module';
+import { CreatorDraftsModule } from './creator-drafts/creator-drafts.module';
 import { RecognitionModule } from './recognition/recognition.module';
 import { AffiliationModule } from './affiliation/affiliation.module';
 import { ForumModule } from './forum/forum.module';
@@ -137,6 +142,7 @@ import { ListingsModule } from './listings/listings.module';
 import { SearchModule } from './search/search.module';
 import { GeocodeModule } from './geocode/geocode.module';
 import { MagazineModule } from './magazine/magazine.module';
+import { QuizshowModule } from './quizshow/quizshow.module';
 import { ResourcesModule } from './resources/resources.module';
 import { ContentModule } from './content/content.module';
 import { SubmissionsModule } from './submissions/submissions.module';
@@ -170,9 +176,13 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
       useFactory: (configService: ConfigService) => ({
         pinoHttp: {
           level: configService.get<string>('logging.level'),
-          // Studio records nothing about what a member plays; see the helper.
+          // Studio records nothing about what a member plays, and creator
+          // draft routes name a draft beside a member or an admin; see the
+          // helpers.
           autoLogging: {
-            ignore: (req: IncomingMessage) => isStudioListeningRequest(req.url),
+            ignore: (req: IncomingMessage) =>
+              isStudioListeningRequest(req.url, req.method) ||
+              isCreatorDraftRequest(req.url),
           },
           // Correlate every request with an id (honour an inbound one behind a proxy).
           genReqId: (req: IncomingMessage, res: ServerResponse) => {
@@ -220,9 +230,10 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
             req: (req: IncomingMessage & { id?: unknown }) => ({
               id: req.id,
               method: req.method,
-              // A preview token in the path is a bearer credential too.
+              // A preview token in the path is a bearer credential too, and a
+              // creator draft path names a draft kind, id or listing ref.
               url: redactSensitiveQueryParameters(
-                redactStudioPreviewToken(req.url),
+                redactCreatorDraftPath(redactStudioPreviewToken(req.url)),
               ),
             }),
             res: (res: ServerResponse) => ({ statusCode: res.statusCode }),
@@ -330,6 +341,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     PreferencesModule,
     DraftsModule,
     ListingDraftsModule,
+    CreatorDraftsModule,
     RecognitionModule,
     AffiliationModule,
     ForumModule,
@@ -348,6 +360,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     VerificationModule,
     AffirmingPledgeModule,
     MagazineModule,
+    QuizshowModule,
     ResourcesModule,
     TopicsModule,
     // "Members you might know" (SOC-05). Its controller is

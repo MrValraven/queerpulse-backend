@@ -112,6 +112,7 @@ import {
   toSafeSpaceCard,
   toSafeSpaceDetail,
 } from './listing-response';
+import { loadPublicTeam } from './listing-team-public-team';
 
 /**
  * The owner photo one card should render, out of the page's ONE batched
@@ -983,9 +984,30 @@ export class DirectoryService {
      * safe answer rather than the wider one.
      */
     isActiveMemberViewer = false,
+    /**
+     * The signed-in caller's user id, `null` for an anonymous caller. Only the
+     * `team` block reads it: the team is the one block-aware block on this
+     * page, and it drops each persona whose owner has a block with this caller
+     * either way. Any signed-in caller already gets `private, no-store` from
+     * `AnonymousNoStaleCacheInterceptor`, so the per-viewer answer never
+     * reaches a shared cache. Defaults to `null`, which reads the anonymous team.
+     */
+    viewerUserId: string | null = null,
   ): Promise<DirectoryDetailDTO> {
     const listing = await this.loadLiveOr404(slug);
     this.assertAdultListingReadable(listing, isActiveMemberViewer);
+    // "Meet the team": two queries and one crop lookup, the second query and
+    // the lookup only when the listing has a visible member. It reads nothing
+    // the other loads produce, so it starts now and runs beside them. The
+    // no-op catch keeps a failure here from going unhandled when an earlier
+    // await throws first; the `await` below still surfaces it.
+    const teamPromise = loadPublicTeam(
+      this.dataSource.manager,
+      this.mediaCropService,
+      listing.id,
+      { isActiveMember: isActiveMemberViewer, userId: viewerUserId },
+    );
+    void teamPromise.catch(() => undefined);
     // Bounded: the detail card embeds the review list AND derives its rating
     // aggregate from this same array, so `take` must sit well above any real
     // listing's review count (DEFAULT_LIST_LIMIT is sized for exactly that) to
@@ -1122,6 +1144,7 @@ export class DirectoryService {
     const suspendedBadges = await this.suspendedBadgeListingIds([listing]);
     // The same one-query lookup the grid uses, so a card and its page agree.
     const hostedGatherings = await this.hostedGatheringListingIds([listing]);
+    const team = await teamPromise;
     return toDirectoryDetail(
       listing,
       reviews,
@@ -1136,6 +1159,7 @@ export class DirectoryService {
       questions,
       suspendedBadges.has(listing.id),
       hostedGatherings.has(listing.id),
+      team,
     );
   }
 

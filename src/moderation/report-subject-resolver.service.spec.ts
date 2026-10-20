@@ -860,6 +860,64 @@ describe('ReportSubjectResolverService', () => {
     });
   });
 
+  describe('a Studio track', () => {
+    const TRACK_ID = '9d000000-0000-4000-8000-000000000011';
+
+    it('names the persona creator and quotes the track, release and artist', async () => {
+      const { service, query } = build((sql, keys) =>
+        sql.includes('FROM studio_tracks t')
+          ? [
+              {
+                key: keys[0]!,
+                author_user_id: 'creator-1',
+                excerpt: 'Opening on Lisbon at four by Night Shift',
+                community_id: null,
+              },
+            ]
+          : [],
+      );
+
+      const resolution = await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.StudioTrack,
+          subjectId: TRACK_ID,
+        }),
+      );
+
+      expect(resolution).toEqual({
+        authorUserId: 'creator-1',
+        excerpt: 'Opening on Lisbon at four by Night Shift',
+        communityId: null,
+        isAuthorAmbiguous: false,
+      });
+      expect(askedKeys(query)).toEqual([[TRACK_ID]]);
+    });
+
+    it('sends no non-uuid subject id to Postgres', async () => {
+      const { service, query } = build();
+      await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.StudioTrack,
+          subjectId: 'opening',
+        }),
+      );
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('resolves a track whatever its state, withheld included', async () => {
+      const { service, query } = build();
+      await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.StudioTrack,
+          subjectId: TRACK_ID,
+        }),
+      );
+      const [[trackSql]] = query.mock.calls as [[string, unknown[]]];
+      expect(trackSql).toContain('FROM studio_tracks t');
+      expect(trackSql).not.toMatch(/withheld|status/i);
+    });
+  });
+
   describe('persona posts', () => {
     const POST_ID = '9d000000-0000-4000-8000-0000000000cc';
 

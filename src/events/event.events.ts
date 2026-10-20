@@ -166,3 +166,13 @@ export interface GatheringCheckInFrame {
   memberSlug: string;
   change: 'checked_in' | 'undone';
 }
+
+export const EVENT_CANCELLED = 'event.cancelled';
+
+/**
+ * Fired after a cancel commits, one event for the whole set, so Pulse Live
+ * can end an open session.
+ */
+export interface EventCancelledEvent {
+  eventIds: string[];
+}

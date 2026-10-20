@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { releasePlaylistCreditsOfPersona } from '../studio/studio-playlist-credit-release';
+import { forgetTeamLinksOfPersona } from '../listings/listing-team-unlink';
 import { forgetDiscoveryTiesOfPersona } from '../studio/studio-discovery-unlink';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 
@@ -62,6 +63,9 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * it, as a takedown does), version note dates restart, the press kit forgets its chosen tracks (their ids changed), and
  * persona posts get fresh ids with restarted dates, their open reports
  * moving along. The post quota ledger goes too.
+ *
+ * Meet the team: every team link the persona holds on a business listing is
+ * deleted (`forgetTeamLinksOfPersona`).
  *
  * Three references hold the persona id with no foreign key and are moved
  * here:
@@ -175,13 +179,29 @@ export async function issueFreshPersonaId(
       WHERE "studio_releases"."id" = "remapped"."previous_id"`,
     [freshSubprofileId, ReportSubjectType.StudioRelease],
   );
+  // Studio safety and moderation: each track's fresh id is drawn once in a
+  // MATERIALIZED map, so open `studio_track` reports move to the same id the
+  // track gets (case-blind on the stored subject id). Copyright claims
+  // follow through `ON UPDATE CASCADE` and are severed right after.
   await manager.query(
-    `UPDATE "studio_tracks"
-        SET "id" = gen_random_uuid(),
+    `WITH "track_remap" AS MATERIALIZED (
+       SELECT "id" AS "previous_id", gen_random_uuid() AS "fresh_id"
+         FROM "studio_tracks"
+        WHERE "release_id" IN (
+          SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
+        )
+     ), "moved_track_reports" AS (
+       UPDATE "reports" SET "subject_id" = "track_remap"."fresh_id"::text
+         FROM "track_remap"
+        WHERE "reports"."subject_type" = $2
+          AND lower("reports"."subject_id") = "track_remap"."previous_id"::text
+     )
+     UPDATE "studio_tracks"
+        SET "id" = "track_remap"."fresh_id",
             "created_at" = now(),
             "published_at" = CASE WHEN "studio_tracks"."published_at" IS NULL THEN NULL ELSE now() + make_interval(secs => "episode_order"."publish_rank" / 1000.0) END,
             "followers_notified_at" = CASE WHEN "studio_tracks"."followers_notified_at" IS NULL THEN NULL ELSE now() END
-       FROM (
+       FROM "track_remap", (
          SELECT "ranked_track"."id",
                 row_number() OVER (
                   PARTITION BY "ranked_track"."release_id"
@@ -193,9 +213,23 @@ export async function issueFreshPersonaId(
           )
        ) "episode_order"
       WHERE "episode_order"."id" = "studio_tracks"."id"
+        AND "track_remap"."previous_id" = "studio_tracks"."id"
         AND "studio_tracks"."release_id" IN (
         SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
       )`,
+    [freshSubprofileId, ReportSubjectType.StudioTrack],
+  );
+  // Studio safety and moderation: the claims that followed the tracks are
+  // severed, so the claimant's view and data export serve the title and
+  // artist name kept at filing and never the pseudonymous persona. Staff
+  // and the owners keep the cascaded ids. `updated_at` stays as it was, so
+  // no stamp marks the unlink on the claimant's row.
+  await manager.query(
+    `UPDATE "studio_copyright_claims" SET "is_severed" = true
+      WHERE "is_severed" = false
+        AND "release_id" IN (
+          SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
+        )`,
     [freshSubprofileId],
   );
   // Studio v3: the reminders members set while the persona was named go
@@ -250,6 +284,13 @@ export async function issueFreshPersonaId(
     `DELETE FROM "subprofile_post_quota_entries" WHERE "subprofile_id" = $1`,
     [freshSubprofileId],
   );
+  // Meet the team: every team link of the persona goes, so no business
+  // listing shows the pseudonymous persona at the named persona's workplace.
+  // Unlink locks the persona row first and the foreign key cascade then locks
+  // the team rows, the reverse of approve and accept. In a rare race Postgres
+  // may abort one side with a deadlock; that is acceptable and the member can
+  // retry.
+  await forgetTeamLinksOfPersona(manager, freshSubprofileId);
   return freshSubprofileId;
 }
 

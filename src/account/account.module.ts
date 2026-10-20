@@ -129,6 +129,7 @@ import { LandlordIntroRequest } from '../landlords/entities/landlord-intro-reque
 import { LandlordRecommendation } from '../landlords/entities/landlord-recommendation.entity';
 import { Landlord } from '../landlords/entities/landlord.entity';
 import { ListingDraft } from '../listing-drafts/entities/listing-draft.entity';
+import { CreatorDraft } from '../creator-drafts/entities/creator-draft.entity';
 import { ListingClaim } from '../listings/entities/listing-claim.entity';
 import { ListingCoManager } from '../listings/entities/listing-co-manager.entity';
 import { ListingEditSuggestion } from '../listings/entities/listing-edit-suggestion.entity';
@@ -426,6 +427,8 @@ import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affili
       LandlordRecommendation,
       Landlord,
       ListingDraft,
+      // Creator drafts: `CreatorDraftsExportContributor` reads the member's own rows.
+      CreatorDraft,
       ListingClaim,
       ListingCoManager,
       ListingEditSuggestion,

@@ -228,6 +228,11 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   // roster row; this flag drives Join/Leave and the notification control,
   // which act on the roster row itself.
   isRosterMember: boolean;
+  // How many ways to support this community it lists (`community_giving_methods`),
+  // so the page can decide on the Support tab and sidebar widget without
+  // fetching the values. The values themselves are only served by
+  // `GET /communities/:slug/giving`, behind the post board's read gate.
+  givingMethodCount: number;
 }
 
 /**
@@ -308,6 +313,9 @@ export function toCommunityDetail(
     subcommunityCount: 0,
     isRosterMember: false,
   },
+  // Rows in `community_giving_methods` for this community, counted by
+  // `CommunitiesService.buildDetail` in the same batch as the rest.
+  givingMethodCount: number = 0,
 ): CommunityDetailDTO {
   const { parent, isParentMember, subcommunityCount, isRosterMember } =
     subcommunityContext;
@@ -355,6 +363,7 @@ export function toCommunityDetail(
     allowsSubcommunities: c.allowsSubcommunities,
     subcommunityCount,
     isRosterMember,
+    givingMethodCount,
   };
 }
 

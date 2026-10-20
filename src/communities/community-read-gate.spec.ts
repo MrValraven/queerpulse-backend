@@ -1,8 +1,11 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Repository } from 'typeorm';
-import { assertCommunityInteriorReadable } from './community-read-gate';
+import {
+  assertCommunityBoardReadable,
+  assertCommunityInteriorReadable,
+} from './community-read-gate';
 import { RosterRole } from './entities/community-member.entity';
-import { Community } from './entities/community.entity';
+import { AccessTier, Community } from './entities/community.entity';
 
 const VISIBLE = { hidden: false, removed: false };
 
@@ -95,5 +98,110 @@ describe('assertCommunityInteriorReadable', () => {
     await expect(
       run({ community: LIVE_COMMUNITY, viewerRole: null }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('assertCommunityBoardReadable', () => {
+  let communities: { findOne: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock };
+
+  type BoardCommunity = Pick<
+    Community,
+    'slug' | 'archivedAt' | 'parentId' | 'accessTier'
+  >;
+
+  const PUBLIC_COMMUNITY: BoardCommunity = {
+    ...LIVE_COMMUNITY,
+    accessTier: AccessTier.Public,
+  };
+
+  beforeEach(() => {
+    communities = { findOne: jest.fn().mockResolvedValue(null) };
+    contentModeration = { stateFor: jest.fn().mockResolvedValue(VISIBLE) };
+  });
+
+  const run = (input: {
+    community: BoardCommunity;
+    viewerRole: RosterRole | null;
+  }) =>
+    assertCommunityBoardReadable({
+      ...input,
+      communities: communities as unknown as Repository<Community>,
+      contentModeration: contentModeration,
+    });
+
+  it('serves a public community to a viewer with no role', async () => {
+    await expect(
+      run({ community: PUBLIC_COMMUNITY, viewerRole: null }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('refuses a request-tier non-member with COMMUNITY_MEMBERS_ONLY', async () => {
+    const requestCommunity = {
+      ...PUBLIC_COMMUNITY,
+      accessTier: AccessTier.Request,
+    };
+    const refusal = await run({
+      community: requestCommunity,
+      viewerRole: null,
+    }).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(ForbiddenException);
+    expect((refusal as ForbiddenException).getResponse()).toEqual(
+      expect.objectContaining({ code: 'COMMUNITY_MEMBERS_ONLY' }),
+    );
+  });
+
+  it('refuses an invite-tier non-member with 403', async () => {
+    const inviteCommunity = {
+      ...PUBLIC_COMMUNITY,
+      accessTier: AccessTier.Invite,
+    };
+    await expect(
+      run({ community: inviteCommunity, viewerRole: null }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('404s a private-tier non-member', async () => {
+    const privateCommunity = {
+      ...PUBLIC_COMMUNITY,
+      accessTier: AccessTier.Private,
+    };
+    await expect(
+      run({ community: privateCommunity, viewerRole: null }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('serves a gated community to a plain member', async () => {
+    const inviteCommunity = {
+      ...PUBLIC_COMMUNITY,
+      accessTier: AccessTier.Invite,
+    };
+    await expect(
+      run({ community: inviteCommunity, viewerRole: RosterRole.Member }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('404s a member of a taken-down community but serves its moderator', async () => {
+    contentModeration.stateFor.mockResolvedValue({
+      hidden: true,
+      removed: false,
+    });
+    await expect(
+      run({ community: PUBLIC_COMMUNITY, viewerRole: RosterRole.Member }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(
+      run({ community: PUBLIC_COMMUNITY, viewerRole: RosterRole.Mod }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('404s a public space whose parent is gone to a viewer with no role', async () => {
+    const space = {
+      ...PUBLIC_COMMUNITY,
+      slug: 'queer-devs-parents',
+      parentId: 'c1',
+    };
+    await expect(
+      run({ community: space, viewerRole: null }),
+    ).rejects.toBeInstanceOf(NotFoundException);
   });
 });

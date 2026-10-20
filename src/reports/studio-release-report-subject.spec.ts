@@ -199,6 +199,7 @@ describe('ReportsService: the Studio release subject', () => {
       'impersonation',
       'copyright',
       'discrimination',
+      'untagged_explicit',
       'spam',
       'other',
     ]);

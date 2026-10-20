@@ -1,5 +1,6 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
+import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-log';
 import { isStudioListeningRequest } from '../studio/studio-request-log';
 import { MetricsService } from './metrics.service';
 
@@ -15,14 +16,19 @@ import { MetricsService } from './metrics.service';
  * `unmatched` bucket so a scanner probing random paths can't explode cardinality.
  *
  * Studio track and playlist requests are left out entirely: nothing records
- * what a member plays, aggregate counts included.
+ * what a member plays, aggregate counts included. Creator draft requests are
+ * left out too, so no metric pairs a draft with an admin.
  */
 @Injectable()
 export class HttpMetricsMiddleware implements NestMiddleware {
   constructor(private readonly metrics: MetricsService) {}
 
   use(request: Request, response: Response, next: NextFunction): void {
-    if (isStudioListeningRequest(request.originalUrl ?? request.url)) {
+    const requestUrl = request.originalUrl ?? request.url;
+    if (
+      isStudioListeningRequest(requestUrl, request.method) ||
+      isCreatorDraftRequest(requestUrl)
+    ) {
       next();
       return;
     }

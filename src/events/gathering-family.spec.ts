@@ -122,6 +122,55 @@ describe('gathering family', () => {
     });
   });
 
+  describe('format exceptions', () => {
+    it('keeps the 18+ flag on the quiz format of the meet family', () => {
+      expect(
+        stripDisallowedDetails(
+          GatheringFamily.Meet,
+          { isAdultsOnly: true },
+          'quiz',
+        ),
+      ).toEqual({ isAdultsOnly: true });
+    });
+
+    it('drops the 18+ flag on any other meet format', () => {
+      expect(
+        stripDisallowedDetails(
+          GatheringFamily.Meet,
+          { isAdultsOnly: true },
+          'karaoke',
+        ),
+      ).toBeNull();
+      expect(
+        stripDisallowedDetails(
+          GatheringFamily.Meet,
+          { isAdultsOnly: true },
+          null,
+        ),
+      ).toBeNull();
+    });
+
+    it('keeps the party family as it was', () => {
+      const details = { isAdultsOnly: true, isSoberFriendly: false };
+      expect(stripDisallowedDetails(GatheringFamily.Party, details)).toEqual(
+        details,
+      );
+      expect(
+        stripDisallowedDetails(GatheringFamily.Party, details, 'quiz'),
+      ).toEqual(details);
+      expect(allowedDetailKeys(GatheringFamily.Party, 'quiz')).toEqual([
+        'isAdultsOnly',
+        'isSoberFriendly',
+      ]);
+    });
+
+    it('lists the exception key after the family keys', () => {
+      expect(allowedDetailKeys(GatheringFamily.Meet, 'quiz')).toEqual([
+        'isAdultsOnly',
+      ]);
+    });
+  });
+
   describe('LEGACY_TYPE_BACKFILL', () => {
     it('covers all eight labels the wizard used to store', () => {
       expect(LEGACY_TYPE_BACKFILL.map((row) => row.legacyLabel)).toEqual([

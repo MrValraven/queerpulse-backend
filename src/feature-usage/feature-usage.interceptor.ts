@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { Observable } from 'rxjs';
 import { FEATURE_KEY } from '../common/feature.decorator';
+import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-log';
 import { FeatureKey } from '../launchedFeatures';
 import { isTrackedFeature } from './feature-depth';
 import { FeatureUsageTallyService } from './feature-usage-tally.service';
@@ -27,6 +28,8 @@ import { FeatureUsageTallyService } from './feature-usage-tally.service';
  * repo's convention is that guarded admin CRUD gets its own `Admin*Controller`
  * (see CLAUDE.md), which makes the controller class name a reliable signal for
  * "this is a staff surface" without reading anything from the request.
+ *
+ * The creator draft routes carry `@Feature` tags and count nothing.
  *
  * Keys in `UNTRACKED_FEATURES` (`feature-depth.ts`) are never counted: Go
  * together allows no analytics of any of its actions.
@@ -56,7 +59,19 @@ export class FeatureUsageInterceptor implements NestInterceptor {
 
     const isStaffSurface = context.getClass().name.startsWith('Admin');
 
-    if (featureKey && !isStaffSurface && isTrackedFeature(featureKey)) {
+    const draftRequest = context
+      .switchToHttp()
+      .getRequest<{ originalUrl?: string; url?: string }>();
+    const isCreatorDraftSurface = isCreatorDraftRequest(
+      draftRequest.originalUrl ?? draftRequest.url,
+    );
+
+    if (
+      featureKey &&
+      !isStaffSurface &&
+      !isCreatorDraftSurface &&
+      isTrackedFeature(featureKey)
+    ) {
       this.tally.record(featureKey);
     }
 

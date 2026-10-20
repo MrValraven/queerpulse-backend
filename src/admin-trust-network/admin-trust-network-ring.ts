@@ -1,56 +1,68 @@
 import type { Standing } from './admin-trust-network-response';
 
-/** One graph node's ring-detection inputs — the subset of `TrustNodeDTO`
- *  `detectRingSlugs` actually reads. */
+/** One graph node's ring-detection inputs: the subset of `TrustNodeDTO` that
+ *  `detectRings` reads. */
 export interface RingCandidateNode {
-  /** The graph node key (`TrustNodeDTO.id`/`slug`) — matches
-   *  `TrustEdgeDTO.from`/`to`. */
+  /** The node key, matching `RingCandidateEdge.from`/`to`. The graph passes
+   *  the profile slug (`TrustNodeDTO.id`); the trust assessment passes the
+   *  account's userId. */
   id: string;
   verified: boolean;
   standing: Standing;
 }
 
-/** One vouch edge's ring-detection inputs — the subset of `TrustEdgeDTO`
- *  `detectRingSlugs` actually reads. */
+/** One vouch edge's ring-detection inputs: the subset of `TrustEdgeDTO` that
+ *  `detectRings` reads. */
 export interface RingCandidateEdge {
   from: string;
   to: string;
   withdrawn: boolean;
 }
 
+/** Decides which nodes may belong to a ring at all. */
+export type RingCandidatePredicate = (node: RingCandidateNode) => boolean;
+
+/** The original candidate pool: every unverified account. */
+export const isUnverifiedRingCandidate: RingCandidatePredicate = (node) =>
+  !node.verified;
+
 /**
  * ADM-23: real ring/cluster detection, replacing the `standing === 'flagged'`
  * heuristic the ring visual used to key off. `standing === 'flagged'` means
- * "suspended, frozen, or carrying 2+ open reports" (`standingFor`, above) —
- * a real signal, but not the same thing as "part of a closed self-vouching
- * loop", and it is left untouched here for its own purpose.
+ * "suspended, frozen, or carrying 2+ open reports" (`standingFor`). That is a
+ * real signal with its own purpose, and this detector leaves it untouched.
  *
- * A ring is a strongly-connected component (size >= 3) of NEW/UNVERIFIED
- * accounts among ACTIVE vouch edges: everyone in it can reach everyone else
- * in it and be reached back — a closed loop with no way out that isn't
- * itself a member. Size 2 (a plain reciprocal/mutual vouch) is excluded on
- * purpose: two accounts vouching for each other is normal and already has
- * its own `mutual` edge flag — a ring is specifically the seed fixture's
- * "N accounts vouching only for each other" shape, length >= 3.
+ * A ring is a strongly-connected component (size >= 3) of candidate accounts
+ * among ACTIVE vouch edges: everyone in it can reach everyone else in it and
+ * be reached back, so it forms a closed loop whose only exits lead back to
+ * its own members. Size 2 (a plain reciprocal vouch) is excluded on purpose:
+ * two accounts vouching for each other is normal and already has its own
+ * `mutual` edge flag. A ring is specifically the seed fixture's "N accounts
+ * vouching only for each other" shape, length >= 3.
  *
- * The whole loop is disqualified — nobody in it is marked `inRing` — the
+ * The whole loop is disqualified (nobody in it counts as a ring member) the
  * moment ANY member has an active inbound vouch from a node OUTSIDE the loop
- * that is itself verified or trusted-standing: real outside vindication
+ * that is itself verified or trusted-standing. Real outside vindication
  * breaks the "closed loop with no outside trust" premise for the WHOLE
- * cluster, not just the one vouched-for member.
+ * cluster, beyond the one vouched-for member.
  *
- * Tarjan's strongly-connected-components algorithm over the small
- * (`MAX_NODES`-capped, sparse) candidate subgraph — no graph library, and
- * mirrors the plain-BFS style the frontend's `trustGraphModel.ts`
- * (`shortestPath`/`isIsolated`) already uses for graph queries this size.
+ * `isCandidate` picks the pool. It defaults to every unverified account. The
+ * platform-wide trust assessment narrows it to unverified accounts that are
+ * neither exempt (system, staff, founder) nor inactive (suspended or
+ * deactivated).
+ *
+ * Returns one `Set` of node ids per ring. Tarjan's strongly-connected-
+ * components algorithm, iterative so a long candidate chain on a
+ * platform-wide graph cannot exhaust the call stack.
  */
-export function detectRingSlugs(
+export function detectRings(
   nodes: RingCandidateNode[],
   edges: RingCandidateEdge[],
-): Set<string> {
+  isCandidate: RingCandidatePredicate = isUnverifiedRingCandidate,
+): Set<string>[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const candidateIds = new Set(
-    nodes.filter((node) => !node.verified).map((node) => node.id),
+    nodes.filter((node) => isCandidate(node)).map((node) => node.id),
   );
 
   // Out-edges restricted to the candidate pool (feeds SCC discovery) and the
@@ -76,7 +88,7 @@ export function detectRingSlugs(
     candidateOutEdgesByNode,
   );
 
-  const ringSlugs = new Set<string>();
+  const rings: Set<string>[] = [];
   for (const component of stronglyConnectedComponents) {
     if (component.size < 3) continue;
     const hasOutsideTrustedInbound = [...component].some((memberId) => {
@@ -89,16 +101,38 @@ export function detectRingSlugs(
       });
     });
     if (hasOutsideTrustedInbound) continue;
-    for (const memberId of component) ringSlugs.add(memberId);
+    rings.push(component);
+  }
+  return rings;
+}
+
+/**
+ * The graph's per-node `inRing` flag: every node id in any ring, over the
+ * original unverified candidate pool. Kept as a thin wrapper so `getGraph`
+ * and its spec keep their exact behaviour.
+ */
+export function detectRingSlugs(
+  nodes: RingCandidateNode[],
+  edges: RingCandidateEdge[],
+): Set<string> {
+  const ringSlugs = new Set<string>();
+  for (const ring of detectRings(nodes, edges)) {
+    for (const memberId of ring) ringSlugs.add(memberId);
   }
   return ringSlugs;
 }
 
+/** One pending node on the explicit Tarjan call stack: the node and the
+ *  position of the next out-neighbour to visit. */
+interface TarjanFrame {
+  nodeId: string;
+  nextNeighborIndex: number;
+}
+
 /**
- * Tarjan's strongly-connected-components — every node id ends up in exactly
- * one returned `Set`. Recursive: safe here because the candidate pool is
- * `MAX_NODES`-capped and vouch graphs are sparse, so recursion depth stays
- * far below any real stack limit.
+ * Tarjan's strongly-connected-components: every node id ends up in exactly
+ * one returned `Set`. Runs on an explicit frame stack, so depth is bounded by
+ * heap memory and a long chain of candidates is safe.
  */
 function tarjanStronglyConnectedComponents(
   nodeIds: Set<string>,
@@ -111,43 +145,66 @@ function tarjanStronglyConnectedComponents(
   const stack: string[] = [];
   const components: Set<string>[] = [];
 
-  function strongConnect(nodeId: string): void {
+  function visit(nodeId: string, callStack: TarjanFrame[]): void {
     indexById.set(nodeId, nextIndex);
     lowlinkById.set(nodeId, nextIndex);
     nextIndex += 1;
     stack.push(nodeId);
     onStack.add(nodeId);
+    callStack.push({ nodeId, nextNeighborIndex: 0 });
+  }
 
-    for (const neighborId of outEdgesByNode.get(nodeId) ?? []) {
-      if (!indexById.has(neighborId)) {
-        strongConnect(neighborId);
+  for (const startId of nodeIds) {
+    if (indexById.has(startId)) continue;
+    const callStack: TarjanFrame[] = [];
+    visit(startId, callStack);
+
+    while (callStack.length > 0) {
+      const frame = callStack[callStack.length - 1]!;
+      const neighbors = outEdgesByNode.get(frame.nodeId) ?? [];
+
+      if (frame.nextNeighborIndex < neighbors.length) {
+        const neighborId = neighbors[frame.nextNeighborIndex]!;
+        frame.nextNeighborIndex += 1;
+        if (!indexById.has(neighborId)) {
+          visit(neighborId, callStack);
+        } else if (onStack.has(neighborId)) {
+          lowlinkById.set(
+            frame.nodeId,
+            Math.min(
+              lowlinkById.get(frame.nodeId)!,
+              indexById.get(neighborId)!,
+            ),
+          );
+        }
+        continue;
+      }
+
+      // Every neighbour done: close the frame, emit a component when this
+      // node is its root, then fold its lowlink into the caller's.
+      callStack.pop();
+      if (lowlinkById.get(frame.nodeId) === indexById.get(frame.nodeId)) {
+        const component = new Set<string>();
+        let memberId: string | undefined;
+        do {
+          memberId = stack.pop();
+          if (memberId === undefined) break;
+          onStack.delete(memberId);
+          component.add(memberId);
+        } while (memberId !== frame.nodeId);
+        components.push(component);
+      }
+      const parentFrame = callStack[callStack.length - 1];
+      if (parentFrame) {
         lowlinkById.set(
-          nodeId,
-          Math.min(lowlinkById.get(nodeId)!, lowlinkById.get(neighborId)!),
-        );
-      } else if (onStack.has(neighborId)) {
-        lowlinkById.set(
-          nodeId,
-          Math.min(lowlinkById.get(nodeId)!, indexById.get(neighborId)!),
+          parentFrame.nodeId,
+          Math.min(
+            lowlinkById.get(parentFrame.nodeId)!,
+            lowlinkById.get(frame.nodeId)!,
+          ),
         );
       }
     }
-
-    if (lowlinkById.get(nodeId) === indexById.get(nodeId)) {
-      const component = new Set<string>();
-      let memberId: string | undefined;
-      do {
-        memberId = stack.pop();
-        if (memberId === undefined) break;
-        onStack.delete(memberId);
-        component.add(memberId);
-      } while (memberId !== nodeId);
-      components.push(component);
-    }
-  }
-
-  for (const nodeId of nodeIds) {
-    if (!indexById.has(nodeId)) strongConnect(nodeId);
   }
   return components;
 }

@@ -129,7 +129,7 @@ export class RsvpQuestionsDto {
 
 export class CreateEventDto {
   @IsString() @MinLength(1) @MaxLength(200) title!: string;
-  @IsString() @MinLength(1) @MaxLength(10000) description!: string;
+  @IsString() @MinLength(1) @MaxLength(1200) description!: string;
   @IsISO8601() startAt!: string;
   @IsOptional() @IsISO8601() endAt?: string;
   @IsTimeZone() timezone!: string;

@@ -319,6 +319,111 @@ describe('PersonaImageKeysService (T17)', () => {
       ).toBe(false);
     });
 
+    describe('nested item images', () => {
+      const BEFORE_KEY = `work/${OWNER_ID}/${FILE_A}.jpg`;
+      const SESSION_ONE_KEY = `work/${OWNER_ID}/${FILE_B}.jpg`;
+      const SESSION_TWO_KEY = `work/${OWNER_ID}/${FILE_C}.jpg`;
+      const COVER_UP_ROW_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+      const IN_PROGRESS_ROW_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+      const stageNestedRows = (rows: { id: string; structured: unknown }[]) => {
+        manager.query.mockImplementation((sql: string) =>
+          Promise.resolve(
+            sql.includes('SELECT "id", "structured" FROM "subprofile_items"')
+              ? rows
+              : [],
+          ),
+        );
+      };
+
+      it('moves a cover-up before photo and every session photo to fresh keys on unlink', async () => {
+        stageNestedRows([
+          {
+            id: COVER_UP_ROW_ID,
+            structured: {
+              coverUp: { type: 'cover_up', beforeImageUrl: BEFORE_KEY },
+            },
+          },
+          {
+            id: IN_PROGRESS_ROW_ID,
+            structured: {
+              sessions: [
+                { imageUrl: SESSION_ONE_KEY },
+                { imageUrl: SESSION_TWO_KEY },
+              ],
+            },
+          },
+        ]);
+        const persona = { id: PERSONA_ID, avatarUrl: null, coverUrl: null };
+
+        const rehomed = await service.rehomeUnlinkedPersona(
+          asManager(),
+          persona,
+          'unlink',
+        );
+
+        expect(rehomed.has(BEFORE_KEY)).toBe(true);
+        expect(rehomed.has(SESSION_ONE_KEY)).toBe(true);
+        expect(rehomed.has(SESSION_TWO_KEY)).toBe(true);
+        const rewrittenCoverUp = {
+          coverUp: {
+            type: 'cover_up',
+            beforeImageUrl: rehomed.get(BEFORE_KEY),
+          },
+        };
+        const rewrittenInProgress = {
+          sessions: [
+            { imageUrl: rehomed.get(SESSION_ONE_KEY) },
+            { imageUrl: rehomed.get(SESSION_TWO_KEY) },
+          ],
+        };
+        expect(manager.query).toHaveBeenCalledWith(
+          expect.stringContaining('SET "structured" = $2::jsonb') as unknown,
+          [COVER_UP_ROW_ID, JSON.stringify(rewrittenCoverUp)],
+        );
+        expect(manager.query).toHaveBeenCalledWith(
+          expect.stringContaining('SET "structured" = $2::jsonb') as unknown,
+          [IN_PROGRESS_ROW_ID, JSON.stringify(rewrittenInProgress)],
+        );
+        expect(JSON.stringify(rewrittenCoverUp)).not.toContain(OWNER_ID);
+        expect(JSON.stringify(rewrittenInProgress)).not.toContain(OWNER_ID);
+      });
+
+      it('leaves structured alone when no nested ref moved', async () => {
+        stageNestedRows([
+          {
+            id: IN_PROGRESS_ROW_ID,
+            structured: {
+              sessions: [
+                { imageUrl: 'https://images.example/session.jpg' },
+                { imageUrl: OWN_PERSONA_KEY },
+              ],
+            },
+          },
+        ]);
+        const persona = {
+          id: PERSONA_ID,
+          avatarUrl: AVATAR_KEY,
+          coverUrl: null,
+        };
+
+        // Backfill keeps the persona's own key; the avatar still moves, so
+        // the rewrite pass runs and skips the unchanged structured row.
+        const rehomed = await service.rehomeUnlinkedPersona(
+          asManager(),
+          persona,
+          'backfill',
+        );
+
+        expect(rehomed.has(AVATAR_KEY)).toBe(true);
+        expect(rehomed.has(OWN_PERSONA_KEY)).toBe(false);
+        const structuredWrites = manager.query.mock.calls.filter(
+          ([sql]: [string]) => sql.includes('SET "structured"'),
+        );
+        expect(structuredWrites).toEqual([]);
+      });
+    });
+
     // Linked, then unlinked, then linked and unlinked again: the second
     // unlink must not carry a key the persona showed while linked.
     it('gives a key the persona already holds a fresh one on unlink', async () => {

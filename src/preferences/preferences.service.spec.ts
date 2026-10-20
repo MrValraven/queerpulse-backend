@@ -580,6 +580,7 @@ describe('PreferencesService', () => {
         autoplayNext: true,
         hideExplicit: false,
         crossfadeSeconds: 0,
+        askBeforeWarnings: true,
       });
       expect(repo.save).not.toHaveBeenCalled();
     });
@@ -660,6 +661,45 @@ describe('PreferencesService', () => {
         hideExplicit: false,
         crossfadeSeconds: 3,
       });
+    });
+
+    // Studio safety and moderation.
+    it('reads and changes the ask-first switch alone', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioAutoplayNext: true,
+          studioHideExplicit: false,
+          studioCrossfadeSeconds: 2,
+          studioAskBeforeWarnings: true,
+        }),
+      );
+
+      const result = await service.updateStudioPlayback('u1', {
+        askBeforeWarnings: false,
+      });
+
+      expect(result).toEqual({
+        autoplayNext: true,
+        hideExplicit: false,
+        crossfadeSeconds: 2,
+        askBeforeWarnings: false,
+      });
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          studioAskBeforeWarnings: false,
+          studioCrossfadeSeconds: 2,
+        }),
+      );
+    });
+
+    it('starts a first save with the ask-first switch on', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await service.updateStudioPlayback('u1', { hideExplicit: true });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ studioAskBeforeWarnings: true }),
+      );
     });
   });
 });

@@ -14,33 +14,52 @@ import {
   CommunityMember,
   RosterRole,
 } from '../communities/entities/community-member.entity';
-import {
-  Report,
-  ReportStatus,
-  ReportSubjectType,
-} from '../reports/entities/report.entity';
+import { Invite } from '../membership/entities/invite.entity';
+import { PlatformJoinRequest } from '../membership/entities/join-request.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User } from '../users/entities/user.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
+import {
+  compareCodeUnits,
+  type MemberAssessment,
+  type RingAssessment,
+  type TrustAssessment,
+} from './admin-trust-network-assessment';
+import { AdminTrustNetworkAssessmentService } from './admin-trust-network-assessment.service';
+import { loadJoinPaths } from './admin-trust-network-join-paths';
 import {
   buildScenes,
   CommunityMembershipInput,
   initialsFor,
+  orderMembershipsPrimaryFirst,
   roleLabelFor,
-  sceneFor,
   standingFor,
   toneFor,
+  TrustCaseDTO,
   TrustEdgeDTO,
+  TrustJoinPathDTO,
+  TrustMemberRefDTO,
   TrustNetworkDTO,
   TrustNetworkMemberSearchResultDTO,
+  TrustNetworkSummaryDTO,
   TrustNodeDTO,
+  TrustRingDTO,
+  TrustWeakVoucherDTO,
 } from './admin-trust-network-response';
-import { detectRingSlugs } from './admin-trust-network-ring';
+import { selectNodeUserIds } from './admin-trust-network-selection';
 import { GetTrustNetworkQuery } from './dto/get-trust-network.query';
 
-/** Payload cap: the most-recently-joined members and all edges among them.
- *  Well above current scale; `truncated` signals when it bites. */
-const MAX_NODES = 500;
+/** The graph DTO carries the top cases by score; `openCaseCount` keeps the
+ *  platform-wide total. */
+export const CASES_LIMIT = 50;
+
+/** A member with no join record at all. */
+const UNKNOWN_JOIN_PATH: TrustJoinPathDTO = {
+  kind: 'unknown',
+  bySlug: null,
+  byName: null,
+  at: null,
+};
 
 /** `searchMembers` typeahead: shortest term it fires on (a 1-char LIKE would
  *  match almost everyone) and the max rows returned. Mirrors
@@ -63,52 +82,81 @@ export class AdminTrustNetworkService {
     @InjectRepository(CommunityMember)
     private readonly communityMembers: Repository<CommunityMember>,
     @InjectRepository(Vouch) private readonly vouches: Repository<Vouch>,
-    @InjectRepository(Report) private readonly reports: Repository<Report>,
+    @InjectRepository(Invite) private readonly invites: Repository<Invite>,
+    @InjectRepository(PlatformJoinRequest)
+    private readonly joinRequests: Repository<PlatformJoinRequest>,
+    private readonly assessmentService: AdminTrustNetworkAssessmentService,
   ) {}
 
+  /**
+   * The trust network around `focus` (or the newest members without one).
+   * Nodes are picked by `selectNodeUserIds` (BFS from the focus, B10); every
+   * per-member signal (standing, account kind, rings, isolation, track record,
+   * counts) and the case list come from the cached platform-wide assessment,
+   * so the graph, the triage list and the summary badge always agree.
+   */
   async getGraph(query: GetTrustNetworkQuery = {}): Promise<TrustNetworkDTO> {
-    const totalMembers = await this.profiles.count();
-    const newest = await this.profiles.find({
-      order: { joinedAt: 'DESC' },
-      take: MAX_NODES,
-    });
+    const [assessment, totalMembers, focusUserId] = await Promise.all([
+      this.assessmentService.getAssessment(),
+      this.profiles.count(),
+      this.resolveFocusUserId(query.focus),
+    ]);
 
-    // `focus` pins the member the graph modal is centered on into the node
-    // set even when their join date falls outside the newest-first cutoff —
-    // otherwise opening an older member's network renders as "not found"
-    // just because they joined a while ago (ADM-10).
-    const focusSlug = query.focus?.trim();
-    const focusProfile =
-      focusSlug && !newest.some((profile) => profile.slug === focusSlug)
-        ? await this.profiles.findOne({ where: { slug: focusSlug } })
-        : null;
-    const profiles = focusProfile ? [focusProfile, ...newest] : newest;
+    const selectedUserIds = await selectNodeUserIds({
+      focusUserId,
+      loadNeighbourUserIds: (frontier) => this.loadNeighbourUserIds(frontier),
+      loadJoinedAtByUserId: (userIds) => this.loadJoinedAtByUserId(userIds),
+      loadNewestUserIds: (excludeUserIds, take) =>
+        this.loadNewestUserIds(excludeUserIds, take),
+    });
+    const profiles = await this.loadProfilesInOrder(selectedUserIds);
     const truncated = totalMembers > profiles.length;
 
     const userIds = profiles.map((profile) => profile.userId);
-    const slugs = profiles.map((profile) => profile.slug);
-    const slugByUserId = new Map(profiles.map((p) => [p.userId, p.slug]));
+    const slugByUserId = new Map(
+      profiles.map((profile) => [profile.userId, profile.slug]),
+    );
+    const assessmentByUserId = new Map(
+      profiles.map((profile) => [
+        profile.userId,
+        assessment.byUserId.get(profile.userId) ??
+          unassessedMember(profile.verified),
+      ]),
+    );
 
-    const [
-      openReportCountByUserId,
-      suspendedUserIds,
-      membershipsByUserId,
-      invitedByUserId,
-    ] = await Promise.all([
-      this.loadOpenReportCounts(userIds, slugs),
-      this.loadSuspendedUserIds(userIds),
+    const [membershipsByUserId, invitedByUserId] = await Promise.all([
       this.loadMemberships(userIds),
       this.loadInvitedByMap(userIds),
     ]);
+    const joinPathByUserId = await loadJoinPaths(
+      {
+        invites: this.invites,
+        joinRequests: this.joinRequests,
+        profiles: this.profiles,
+      },
+      profiles.map((profile) => ({
+        userId: profile.userId,
+        invitedByUserId: invitedByUserId.get(profile.userId) ?? null,
+        accountKind:
+          assessmentByUserId.get(profile.userId)?.accountKind ?? 'member',
+        joinedAt: profile.joinedAt,
+      })),
+    );
 
-    // Nodes. sceneId is a community id; collect labels for the scenes list.
+    // Nodes. Scene ids are community ids; every community any node belongs
+    // to goes into the scenes list so each `sceneIds` entry resolves.
     const sceneLabelById = new Map<string, string>();
     const nodes: TrustNodeDTO[] = profiles.map((profile) => {
-      const openReportCount = openReportCountByUserId.get(profile.userId) ?? 0;
-      const suspended = suspendedUserIds.has(profile.userId);
-      const frozen = suspended && openReportCount === 0;
-      const scene = sceneFor(membershipsByUserId.get(profile.userId) ?? []);
-      if (scene) sceneLabelById.set(scene.id, scene.label);
+      const memberAssessment =
+        assessmentByUserId.get(profile.userId) ??
+        unassessedMember(profile.verified);
+      const orderedMemberships = orderMembershipsPrimaryFirst(
+        membershipsByUserId.get(profile.userId) ?? [],
+      );
+      for (const membership of orderedMemberships) {
+        sceneLabelById.set(membership.communityId, membership.communityName);
+      }
+      const primaryMembership = orderedMemberships[0];
       return {
         id: profile.slug,
         userId: profile.userId,
@@ -119,34 +167,43 @@ export class AdminTrustNetworkService {
         tone: toneFor(profile.slug),
         avatarUrl: toImageUrl(profile.avatarUrl),
         joinedAt: profile.joinedAt.toISOString(),
-        standing: standingFor({
-          suspended,
-          frozen,
-          openReportCount,
-          verified: profile.verified,
-        }),
-        // Real value computed below, once the edges (which `detectRingSlugs`
-        // needs) exist — this placeholder just satisfies the DTO shape.
-        inRing: false,
-        sceneId: scene?.id ?? null,
-        role: roleLabelFor(scene?.role ?? null),
-        openReportCount,
+        standing: memberAssessment.standing,
+        inRing: memberAssessment.ringId !== null,
+        sceneId: primaryMembership?.communityId ?? null,
+        role: roleLabelFor(primaryMembership?.role ?? null),
+        openReportCount:
+          assessment.members.get(profile.userId)?.openReportCount ?? 0,
         verified: profile.verified,
         private: profile.privateNetwork,
+        accountKind: memberAssessment.accountKind,
+        ringId: memberAssessment.ringId,
+        isolatedBy: weakVouchersFor(assessment, memberAssessment),
+        joinPath: joinPathByUserId.get(profile.userId) ?? UNKNOWN_JOIN_PATH,
+        trackRecord: {
+          vouchesGiven: memberAssessment.trackRecord.vouchesGiven,
+          laterFlaggedCount: memberAssessment.trackRecord.laterFlaggedCount,
+        },
+        activeInboundCount: memberAssessment.activeInboundCount,
+        activeOutboundCount: memberAssessment.activeOutboundCount,
+        sceneIds: orderedMemberships.map(
+          (membership) => membership.communityId,
+        ),
       };
     });
 
     // Edges: all vouches (incl. withdrawn) among the returned members.
     const includedUserIds = new Set(userIds);
-    const vouchRows = await this.vouches.find({
-      where: [{ voucherId: In(userIds) }, { voucheeId: In(userIds) }],
-      order: { createdAt: 'ASC' },
-    });
-    // Active-pair set for mutual detection (withdrawn edges are not "mutual").
+    const vouchRows = userIds.length
+      ? await this.vouches.find({
+          where: { voucherId: In(userIds), voucheeId: In(userIds) },
+          order: { createdAt: 'ASC' },
+        })
+      : [];
+    // Active-pair set for mutual detection (withdrawn edges are never mutual).
     const activePairs = new Set(
       vouchRows
-        .filter((v) => v.withdrawnAt === null)
-        .map((v) => `${v.voucherId}>${v.voucheeId}`),
+        .filter((vouchRow) => vouchRow.withdrawnAt === null)
+        .map((vouchRow) => `${vouchRow.voucherId}>${vouchRow.voucheeId}`),
     );
     const edges: TrustEdgeDTO[] = [];
     for (const vouch of vouchRows) {
@@ -182,55 +239,112 @@ export class AdminTrustNetworkService {
       });
     }
 
-    // ADM-23: real ring detection now that both nodes (standing/verified) and
-    // edges (active vouches) exist — mutates each node's placeholder `inRing`
-    // in place rather than rebuilding the array.
-    const ringSlugs = detectRingSlugs(
-      nodes.map((node) => ({
-        id: node.slug,
-        verified: node.verified,
-        standing: node.standing,
-      })),
-      edges,
-    );
-    for (const node of nodes) {
-      node.inRing = ringSlugs.has(node.slug);
-    }
+    const rings: TrustRingDTO[] = assessment.rings
+      .filter((ring) =>
+        ring.memberUserIds.some((memberUserId) =>
+          includedUserIds.has(memberUserId),
+        ),
+      )
+      .map((ring) => ringDtoFor(assessment, ring));
 
-    return { nodes, edges, scenes: buildScenes(sceneLabelById), truncated };
+    return {
+      nodes,
+      edges,
+      scenes: buildScenes(sceneLabelById),
+      truncated,
+      rings,
+      cases: caseDtosFor(assessment, CASES_LIMIT),
+      openCaseCount: assessment.cases.length,
+      platformStartedAt: assessment.platformStartedAt.toISOString(),
+      newAccountWindowDays: assessment.newAccountWindowDays,
+    };
   }
 
-  private async loadOpenReportCounts(
+  /** The members page badge and entry point (`GET /admin/trust-network/summary`),
+   *  read from the same cached assessment as `getGraph`. */
+  async getSummary(): Promise<TrustNetworkSummaryDTO> {
+    const assessment = await this.assessmentService.getAssessment();
+    return {
+      openCaseCount: assessment.cases.length,
+      entrySlug: entrySlugFor(assessment),
+    };
+  }
+
+  /** The focus profile's user id, or null when there is no focus or the slug
+   *  matches nobody (the graph then opens on the newest members). */
+  private async resolveFocusUserId(
+    focus: string | undefined,
+  ): Promise<string | null> {
+    const focusSlug = focus?.trim();
+    if (!focusSlug) return null;
+    const focusProfile = await this.profiles.findOne({
+      where: { slug: focusSlug },
+      select: ['userId'],
+    });
+    return focusProfile?.userId ?? null;
+  }
+
+  /** One BFS level: every vouch row touching `frontier` (active and
+   *  withdrawn, both directions), ids only. */
+  private async loadNeighbourUserIds(frontier: string[]): Promise<string[]> {
+    if (!frontier.length) return [];
+    const rows = await this.vouches
+      .createQueryBuilder('vouch')
+      .select('vouch.voucher_id', 'voucherId')
+      .addSelect('vouch.vouchee_id', 'voucheeId')
+      .where(
+        'vouch.voucher_id IN (:...frontier) OR vouch.vouchee_id IN (:...frontier)',
+        { frontier },
+      )
+      .getRawMany<{ voucherId: string; voucheeId: string }>();
+    return rows.flatMap((row) => [row.voucherId, row.voucheeId]);
+  }
+
+  private async loadJoinedAtByUserId(
     userIds: string[],
-    slugs: string[],
-  ): Promise<Map<string, number>> {
-    const byUserId = new Map<string, number>();
-    const subjectIds = [...userIds, ...slugs];
-    if (!subjectIds.length) return byUserId;
-    const rows = await this.reports
-      .createQueryBuilder('report')
-      .select('report.subject_id', 'subjectId')
-      .addSelect('COUNT(*)', 'count')
-      .where('report.subject_type = :subjectType', {
-        subjectType: ReportSubjectType.Member,
-      })
-      .andWhere('report.status IN (:...statuses)', {
-        statuses: [ReportStatus.Open, ReportStatus.Escalated],
-      })
-      .andWhere('report.subject_id IN (:...subjectIds)', { subjectIds })
-      .groupBy('report.subject_id')
-      .getRawMany<{ subjectId: string; count: string }>();
-    const bySubject = new Map(rows.map((r) => [r.subjectId, Number(r.count)]));
-    for (let index = 0; index < userIds.length; index += 1) {
-      const userId = userIds[index];
-      const slug = slugs[index];
-      if (userId === undefined || slug === undefined) continue;
-      byUserId.set(
-        userId,
-        (bySubject.get(userId) ?? 0) + (bySubject.get(slug) ?? 0),
-      );
+  ): Promise<Map<string, Date>> {
+    if (!userIds.length) return new Map();
+    const rows = await this.profiles.find({
+      where: { userId: In(userIds) },
+      select: ['userId', 'joinedAt'],
+    });
+    return new Map(rows.map((row) => [row.userId, row.joinedAt]));
+  }
+
+  /** Newest-joined user ids first, skipping `excludeUserIds`. */
+  private async loadNewestUserIds(
+    excludeUserIds: string[],
+    take: number,
+  ): Promise<string[]> {
+    if (take <= 0) return [];
+    const builder = this.profiles
+      .createQueryBuilder('profile')
+      .select('profile.user_id', 'userId');
+    if (excludeUserIds.length) {
+      builder.where('profile.user_id NOT IN (:...excludeUserIds)', {
+        excludeUserIds,
+      });
     }
-    return byUserId;
+    const rows = await builder
+      .orderBy('profile.joinedAt', 'DESC')
+      .addOrderBy('profile.userId', 'ASC')
+      .limit(take)
+      .getRawMany<{ userId: string }>();
+    return rows.map((row) => row.userId);
+  }
+
+  /** Full profile rows for the selection, in selection order (focus first). */
+  private async loadProfilesInOrder(userIds: string[]): Promise<Profile[]> {
+    if (!userIds.length) return [];
+    const rows = await this.profiles.find({ where: { userId: In(userIds) } });
+    const orderByUserId = new Map(
+      userIds.map((userId, index) => [userId, index]),
+    );
+    return rows.sort(
+      (first, second) =>
+        (orderByUserId.get(first.userId) ?? Number.MAX_SAFE_INTEGER) -
+        (orderByUserId.get(second.userId) ?? Number.MAX_SAFE_INTEGER),
+    );
   }
 
   /** userId → the userId of whoever invited them (User.invited_by), or null. */
@@ -248,15 +362,6 @@ export class AdminTrustNetworkService {
         (user.invitedBy as unknown as string | null) ?? null,
       ]),
     );
-  }
-
-  private async loadSuspendedUserIds(userIds: string[]): Promise<Set<string>> {
-    if (!userIds.length) return new Set();
-    const rows = await this.users.find({
-      where: { id: In(userIds), status: UserStatus.Suspended },
-      select: ['id'],
-    });
-    return new Set(rows.map((row) => row.id));
   }
 
   /** Every top-level community each of `userIds` belongs to, for the trust
@@ -311,13 +416,13 @@ export class AdminTrustNetworkService {
   }
 
   /**
-   * Typeahead behind the graph modal's "find a member" search box (ADM-10) —
-   * lets an admin locate a member outside the MAX_NODES join-date window
-   * instead of only ever seeing the newest MAX_NODES. Mirrors
+   * Typeahead behind the graph modal's "find a member" search box (ADM-10):
+   * lets an admin locate any member, including one outside the MAX_NODES
+   * selection around the current focus. Mirrors
    * `AdminMediaService.searchUploaders`: an accent-folded LIKE over first/last
    * name + slug, ordered by name, capped, and empty for a too-short term
    * (which would match almost everyone). Picking a result feeds its `slug`
-   * back in as `getGraph`'s `focus`, which pins it into the node set
+   * back in as `getGraph`'s `focus`, which puts it first in the node set
    * regardless of join date.
    */
   async searchMembers(
@@ -345,4 +450,120 @@ export class AdminTrustNetworkService {
       avatarUrl: toImageUrl(profile.avatarUrl),
     }));
   }
+}
+
+/** A node missing from the cached assessment (it joined inside the cache's
+ *  60 s window) reads as an ordinary member with no signals until the next
+ *  refresh. */
+function unassessedMember(isVerified: boolean): MemberAssessment {
+  return {
+    accountKind: 'member',
+    standing: standingFor({
+      suspended: false,
+      frozen: false,
+      openReportCount: 0,
+      verified: isVerified,
+    }),
+    ringId: null,
+    isolatedBy: [],
+    trackRecord: { vouchesGiven: 0, laterFlaggedCount: 0 },
+    activeInboundCount: 0,
+    activeOutboundCount: 0,
+  };
+}
+
+/** userId to slug + display name, from the assessment's member roster. */
+function memberRefFor(
+  assessment: TrustAssessment,
+  userId: string,
+): TrustMemberRefDTO | null {
+  const member = assessment.members.get(userId);
+  return member ? { slug: member.slug, name: member.name } : null;
+}
+
+function weakVouchersFor(
+  assessment: TrustAssessment,
+  memberAssessment: MemberAssessment,
+): TrustWeakVoucherDTO[] {
+  return memberAssessment.isolatedBy.flatMap((weakVoucher) => {
+    const voucherRef = memberRefFor(assessment, weakVoucher.userId);
+    return voucherRef ? [{ ...voucherRef, reason: weakVoucher.reason }] : [];
+  });
+}
+
+function ringDtoFor(
+  assessment: TrustAssessment,
+  ring: RingAssessment,
+): TrustRingDTO {
+  const memberSlugs = ring.memberUserIds
+    .map((memberUserId) => memberRefFor(assessment, memberUserId)?.slug)
+    .filter((slug): slug is string => slug !== undefined)
+    .sort(compareCodeUnits);
+  return {
+    id: ring.id,
+    memberSlugs,
+    memberCount: ring.memberUserIds.length,
+    firstJoinedAt: ring.firstJoinedAt.toISOString(),
+    lastJoinedAt: ring.lastJoinedAt.toISOString(),
+    sharedVouchers: ring.sharedVoucherUserIds
+      .map((voucherUserId) => memberRefFor(assessment, voucherUserId))
+      .filter(
+        (voucherRef): voucherRef is TrustMemberRefDTO => voucherRef !== null,
+      ),
+  };
+}
+
+/** The top `limit` cases (the assessment keeps them ranked), with the
+ *  subject resolved to slug + name. */
+function caseDtosFor(
+  assessment: TrustAssessment,
+  limit: number,
+): TrustCaseDTO[] {
+  return assessment.cases.slice(0, limit).flatMap((trustCase) => {
+    const subjectRef = memberRefFor(assessment, trustCase.subjectUserId);
+    if (!subjectRef) return [];
+    return [
+      {
+        id: trustCase.id,
+        kind: trustCase.kind,
+        subjectSlug: subjectRef.slug,
+        subjectName: subjectRef.name,
+        ringId: trustCase.ringId,
+        memberCount: trustCase.memberCount,
+        weakVoucherCount: trustCase.weakVoucherCount,
+        openReportCount: trustCase.openReportCount,
+        windowHours: trustCase.windowHours,
+        score: trustCase.score,
+      },
+    ];
+  });
+}
+
+/** Where the members page entry opens the graph: the top case's subject,
+ *  else the earliest-joined staff or founder account, else null. */
+function entrySlugFor(assessment: TrustAssessment): string | null {
+  const topCase = assessment.cases[0];
+  if (topCase) {
+    const subjectRef = memberRefFor(assessment, topCase.subjectUserId);
+    if (subjectRef) return subjectRef.slug;
+  }
+
+  let earliestMember: { slug: string; joinedAt: Date } | null = null;
+  for (const [userId, memberAssessment] of assessment.byUserId) {
+    if (
+      memberAssessment.accountKind !== 'staff' &&
+      memberAssessment.accountKind !== 'founder'
+    ) {
+      continue;
+    }
+    const member = assessment.members.get(userId);
+    if (!member) continue;
+    const isEarlier =
+      earliestMember === null ||
+      member.joinedAt.getTime() < earliestMember.joinedAt.getTime() ||
+      (member.joinedAt.getTime() === earliestMember.joinedAt.getTime() &&
+        member.slug.localeCompare(earliestMember.slug) < 0);
+    if (isEarlier) earliestMember = member;
+  }
+  return earliestMember?.slug ?? null;
 }

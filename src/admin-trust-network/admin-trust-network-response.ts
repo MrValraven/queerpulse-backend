@@ -5,14 +5,51 @@ import {
   toneFor,
 } from '../admin-members/admin-members-response';
 
+import type {
+  AccountKind,
+  TrustCaseKind,
+  WeakVoucherReason,
+} from './admin-trust-network-assessment';
+
 export type Standing = 'trusted' | 'warned' | 'new' | 'flagged';
+
+// One definition each: the assessment owns these unions, the DTO re-exports.
+export type { AccountKind, TrustCaseKind, WeakVoucherReason };
+
+export type JoinPathKind = 'founder' | 'invite' | 'application' | 'unknown';
+
+/** A member as admins already see them in the drawer: slug plus display name. */
+export interface TrustMemberRefDTO {
+  slug: string;
+  name: string;
+}
+
+export interface TrustWeakVoucherDTO extends TrustMemberRefDTO {
+  reason: WeakVoucherReason;
+}
+
+export interface TrustJoinPathDTO {
+  kind: JoinPathKind;
+  /** The inviter (invite) or the reviewer (application). */
+  bySlug: string | null;
+  byName: string | null;
+  /** ISO. Invite `usedAt`, request `reviewedAt`, or `joinedAt` for a founder. */
+  at: string | null;
+}
+
+export interface TrustTrackRecordDTO {
+  /** Distinct vouchees ever, active and withdrawn. */
+  vouchesGiven: number;
+  /** Of those, the ones currently suspended or with standing `flagged`. */
+  laterFlaggedCount: number;
+}
 
 export interface TrustNodeDTO {
   id: string;
-  /** The member's real account id (`User.id`) — distinct from `id`/`slug`
+  /** The member's real account id (`User.id`). It differs from `id`/`slug`
    *  above, which are the profile slug used as the graph's node key. Admin
    *  actions that address the account directly (e.g. verifying a member)
-   *  need this, not the slug. */
+   *  need this one. */
   userId: string;
   slug: string;
   name: string;
@@ -22,16 +59,28 @@ export interface TrustNodeDTO {
   avatarUrl: string | null;
   joinedAt: string;
   standing: Standing;
-  /** ADM-23: real cycle detection (`detectRingSlugs`) — true when this node
-   *  is part of a closed self-vouching loop among new/unverified accounts.
-   *  A graph-structure signal distinct from `standing`, which keeps its own
-   *  meaning (suspended/frozen/high-report-count). */
+  /** ADM-23: true when this node belongs to a ring the platform-wide
+   *  assessment found (a closed self-vouching loop among new, unverified
+   *  accounts). A graph-structure signal separate from `standing`, which keeps
+   *  its own meaning (suspended/frozen/high-report-count). */
   inRing: boolean;
+  /** Primary community; `sceneIds[0]` when the member has any. */
   sceneId: string | null;
   role: string | null;
   openReportCount: number;
   verified: boolean;
   private: boolean;
+  accountKind: AccountKind;
+  ringId: string | null;
+  /** The weak active inbound vouchers. Empty when the member is not isolated. */
+  isolatedBy: TrustWeakVoucherDTO[];
+  joinPath: TrustJoinPathDTO;
+  trackRecord: TrustTrackRecordDTO;
+  /** Platform-wide counts, across every member. */
+  activeInboundCount: number;
+  activeOutboundCount: number;
+  /** Every top-level community, primary first. */
+  sceneIds: string[];
 }
 
 export interface TrustEdgeDTO {
@@ -53,14 +102,63 @@ export interface SceneDTO {
   color: string;
 }
 
+export interface TrustRingDTO {
+  /** `ring:${alphabetically first member slug}` */
+  id: string;
+  /** The full ring, members outside the returned view included. */
+  memberSlugs: string[];
+  memberCount: number;
+  /** ISO, earliest member joinedAt. */
+  firstJoinedAt: string;
+  lastJoinedAt: string;
+  /** Members outside the ring vouching for 2+ ring members. */
+  sharedVouchers: TrustMemberRefDTO[];
+}
+
+export interface TrustCaseDTO {
+  /** Ring id, `isolated:${slug}` or `flagged:${slug}`. */
+  id: string;
+  kind: TrustCaseKind;
+  /** Who the graph focuses on when the case is clicked. */
+  subjectSlug: string;
+  subjectName: string;
+  ringId: string | null;
+  /** Ring size; 1 for the other kinds. */
+  memberCount: number;
+  /** Isolated cases only; 0 for the other kinds. */
+  weakVoucherCount: number;
+  openReportCount: number;
+  /** Ring cases only: ceil((last - first joinedAt) / 1h). */
+  windowHours: number | null;
+  score: number;
+}
+
 export interface TrustNetworkDTO {
   nodes: TrustNodeDTO[];
   edges: TrustEdgeDTO[];
+  /** Every community named in any node's `sceneIds`. */
   scenes: SceneDTO[];
   truncated: boolean;
+  /** Rings with at least one member in `nodes`. */
+  rings: TrustRingDTO[];
+  /** Platform-wide, top `CASES_LIMIT` by score. */
+  cases: TrustCaseDTO[];
+  /** Platform-wide total. */
+  openCaseCount: number;
+  /** ISO */
+  platformStartedAt: string;
+  newAccountWindowDays: number;
 }
 
-/** One typeahead result from `GET /admin/trust-network/search` — enough to
+/** `GET /admin/trust-network/summary`: the members page badge and entry point,
+ *  served without loading the graph. */
+export interface TrustNetworkSummaryDTO {
+  openCaseCount: number;
+  /** Top case subject, else the earliest-joined founder or staff slug, else null. */
+  entrySlug: string | null;
+}
+
+/** One typeahead result from `GET /admin/trust-network/search`: enough to
  *  render a picker row and jump the graph to `slug` (ADM-10). */
 export interface TrustNetworkMemberSearchResultDTO {
   slug: string;
@@ -87,8 +185,8 @@ export function standingFor(input: {
 }
 
 // Only the ORDER matters here (highest role wins the "primary community"
-// tie-break), so adding `co_owner` re-based the numbers rather than changing
-// any relative ranking that already existed. A co-owner holds owner-level
+// tie-break), so adding `co_owner` re-based the numbers and kept every
+// relative ranking that already existed. A co-owner holds owner-level
 // powers inside the community and so outranks a mod, while the community's one
 // accountable owner of record still outranks them.
 const ROLE_RANK: Record<RosterRole, number> = {
@@ -105,19 +203,27 @@ export interface CommunityMembershipInput {
   communitySize: number;
 }
 
-/** Primary community = highest role, tie-break by community size desc then id.
+/** Every membership ordered primary first: highest role, tie-break by
+ *  community size desc then id. Returns a new array. */
+export function orderMembershipsPrimaryFirst(
+  memberships: CommunityMembershipInput[],
+): CommunityMembershipInput[] {
+  return [...memberships].sort((first, second) => {
+    const rankDifference = ROLE_RANK[second.role] - ROLE_RANK[first.role];
+    if (rankDifference !== 0) return rankDifference;
+    const sizeDifference = second.communitySize - first.communitySize;
+    if (sizeDifference !== 0) return sizeDifference;
+    return first.communityId.localeCompare(second.communityId);
+  });
+}
+
+/** Primary community = the first of `orderMembershipsPrimaryFirst`.
  *  Returns null when the member is in no community. */
 export function sceneFor(
   memberships: CommunityMembershipInput[],
 ): { id: string; label: string; role: RosterRole } | null {
   if (!memberships.length) return null;
-  const best = [...memberships].sort((a, b) => {
-    const rankDiff = ROLE_RANK[b.role] - ROLE_RANK[a.role];
-    if (rankDiff !== 0) return rankDiff;
-    const sizeDiff = b.communitySize - a.communitySize;
-    if (sizeDiff !== 0) return sizeDiff;
-    return a.communityId.localeCompare(b.communityId);
-  })[0];
+  const best = orderMembershipsPrimaryFirst(memberships)[0];
   if (best === undefined) return null;
   return { id: best.communityId, label: best.communityName, role: best.role };
 }
@@ -136,7 +242,7 @@ const SCENE_COLORS = [
   'var(--accent)',
   'var(--amber)',
   'var(--plum)',
-  'var(--coral)',
+  'var(--rose)',
 ];
 
 /** Assigns a stable palette color per distinct scene id, round-robin over the

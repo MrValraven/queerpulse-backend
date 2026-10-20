@@ -29,6 +29,8 @@ const HIGH_REASONS: ReadonlySet<ReasonCode> = new Set([
 
 const MEDIUM_REASONS: ReadonlySet<ReasonCode> = new Set([
   'hate_speech',
+  // Studio safety: hateful lyrics are hate speech set to music.
+  'hateful_lyrics',
   'discrimination',
   'impersonation',
   'venue_staff',

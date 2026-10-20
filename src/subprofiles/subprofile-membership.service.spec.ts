@@ -15,6 +15,7 @@ import { Subprofile } from './entities/subprofile.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SUBPROFILE_CREATOR_CHANGED } from './subprofile.events';
+import { END_PLAYLIST_EDITING_OF_CO_OWNER_SQL } from '../studio/studio-playlist-editor-endings';
 
 /**
  * Seat-ending coverage for `leave` and `removeMember`: the two paths that end
@@ -183,6 +184,35 @@ describe('SubprofileMembershipService', () => {
       expect(managerArgument).toBe(manager);
     });
 
+    // Collaborative playlists: leaving the persona ends the member's editing
+    // of its playlists in the leave transaction, after the roster delete.
+    it('ends the departing co-owner playlist editing after the roster delete, in the same transaction', async () => {
+      await service.leave(DEPARTING_ID, SUBPROFILE_ID);
+
+      expect(manager.query).toHaveBeenCalledWith(
+        END_PLAYLIST_EDITING_OF_CO_OWNER_SQL,
+        [SUBPROFILE_ID, DEPARTING_ID],
+      );
+      const deleteOrder = manager.delete.mock.invocationCallOrder[0] ?? 0;
+      const endingIndex = manager.query.mock.calls.findIndex(
+        ([statement]) => statement === END_PLAYLIST_EDITING_OF_CO_OWNER_SQL,
+      );
+      const endingOrder =
+        manager.query.mock.invocationCallOrder[endingIndex] ?? 0;
+      expect(deleteOrder).toBeLessThan(endingOrder);
+    });
+
+    it('ends no playlist editing when the last-owner guard blocks the leave', async () => {
+      manager.count.mockResolvedValue(1);
+      await expect(
+        service.leave(DEPARTING_ID, SUBPROFILE_ID),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(manager.query).not.toHaveBeenCalledWith(
+        END_PLAYLIST_EDITING_OF_CO_OWNER_SQL,
+        expect.anything(),
+      );
+    });
+
     // CW-24: the live-room eviction event must not go out until the
     // transaction that ends the seat has actually resolved, mirroring
     // `GroupsService.leaveGroup`'s post-commit fan-out. `onStaffRemoved` is
@@ -301,6 +331,26 @@ describe('SubprofileMembershipService', () => {
         .calls[0] as [string, string];
       expect(calledUserId).toBe(TARGET_ID);
       expect(calledUserId).not.toBe(CREATOR_ID);
+    });
+
+    it('ends the removed co-owner playlist editing in the removal transaction', async () => {
+      await service.removeMember(CREATOR_ID, SUBPROFILE_ID, 'target-slug');
+
+      expect(manager.query).toHaveBeenCalledWith(
+        END_PLAYLIST_EDITING_OF_CO_OWNER_SQL,
+        [SUBPROFILE_ID, TARGET_ID],
+      );
+    });
+
+    it('ends no playlist editing when the target row is already gone', async () => {
+      manager.delete.mockResolvedValue({ affected: 0 });
+      await expect(
+        service.removeMember(CREATOR_ID, SUBPROFILE_ID, 'target-slug'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(manager.query).not.toHaveBeenCalledWith(
+        END_PLAYLIST_EDITING_OF_CO_OWNER_SQL,
+        expect.anything(),
+      );
     });
 
     // Access ends in the same transaction as the removal: the roster delete
@@ -554,7 +604,12 @@ describe('SubprofileMembershipService', () => {
       await service.leave(DEPARTING_ID, SUBPROFILE_ID);
 
       expect(manager.update).not.toHaveBeenCalled();
-      expect(manager.query).not.toHaveBeenCalled();
+      // The playlist editing ending is the one statement a plain leave runs.
+      expect(
+        manager.query.mock.calls.filter(
+          ([statement]) => statement !== END_PLAYLIST_EDITING_OF_CO_OWNER_SQL,
+        ),
+      ).toEqual([]);
       expect(identityMailboxSync.resyncMailbox).not.toHaveBeenCalled();
       expect(creatorChangedEmits()).toHaveLength(0);
     });
@@ -640,6 +695,15 @@ describe('SubprofileMembershipService', () => {
         Subprofile,
         { id: SHARED_PERSONA_ID },
         { userId: SUCCESSOR_ID },
+      );
+    });
+
+    it('ends the erased creator playlist editing on the persona in the handoff transaction', async () => {
+      await service.handOverCreatedPersonasFor(CREATOR_ID);
+
+      expect(manager.query).toHaveBeenCalledWith(
+        END_PLAYLIST_EDITING_OF_CO_OWNER_SQL,
+        [SHARED_PERSONA_ID, CREATOR_ID],
       );
     });
 

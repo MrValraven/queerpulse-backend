@@ -2,6 +2,7 @@ import { plainToInstance } from 'class-transformer';
 import {
   IsEmail,
   IsEnum,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
@@ -207,6 +208,12 @@ export class EnvironmentVariables {
   @IsNumber()
   @Min(1)
   EVENT_ATTENDANCE_RETENTION_DAYS?: number;
+
+  // Days a creator draft (event wizard, listing edit, community start) may sit unsaved before the purge.
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  CREATOR_DRAFT_RETENTION_DAYS?: number;
 
   @IsOptional()
   @IsNumber()

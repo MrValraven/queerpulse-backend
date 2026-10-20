@@ -51,6 +51,8 @@ export const SHARED_UPLOAD_HANDLERS: ReadonlySet<string> = new Set([
   'CommunitiesController.update',
   // Event cover: cohosts edit the same event.
   'EventsController.update',
+  // Pulse Live question images: co-hosts edit the same quiz. Paired with the service-side unchanged-value check in QuizshowQuizService.
+  'QuizshowEventController.replaceQuiz',
   // Group-chat photo: any owner/admin of the group edits the same conversation.
   'ConversationsController.update',
   // Business listing photos: claimed listings have more than one editor.

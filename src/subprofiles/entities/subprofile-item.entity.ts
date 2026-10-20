@@ -5,6 +5,14 @@ import {
   Index,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import type {
+  TattooCoverUpType,
+  TattooFlashAvailability,
+  TattooGuestSpotType,
+  TattooScarWorkType,
+  TattooShopProductType,
+  TattooSkinTone,
+} from '../tattoo-artist-vocab';
 
 // Shared skin-field types (Personas redesign Phase 0). Kept in lockstep with
 // the frontend mirror in `subprofiles.api.ts` (design plan "Shared Contract").
@@ -20,6 +28,48 @@ export interface MenuCourse {
   name: string;
   dishes: MenuDish[];
 }
+export interface TattooFlashFields {
+  availability?: TattooFlashAvailability; // flash only
+  size?: string; // free text, "8 cm"
+  price?: string; // TATTOO_PRICE_PATTERN, flash only
+  placements?: string[]; // "forearm", "calf"
+}
+export interface TattooHealedFields {
+  healedFor?: string;
+  placement?: string;
+  skinTone?: TattooSkinTone;
+}
+export interface TattooPhotoFlags {
+  /** Owner-only. Stripped from public DTOs. */
+  hasClientConsent?: boolean;
+  /** Absent reads as true in `scar_work`, false in the other body-photo sections. */
+  isBlurred?: boolean;
+}
+export interface TattooCoverUpFields {
+  type: TattooCoverUpType;
+  beforeImageUrl: string;
+}
+export interface TattooScarWorkFields {
+  type: TattooScarWorkType;
+}
+export interface TattooSession {
+  imageUrl: string;
+  date?: string; // ISO date or ""
+  note?: string;
+}
+export interface TattooSpotFields {
+  type: TattooGuestSpotType;
+  endDate?: string; // ISO date or "", on or after item.date
+}
+export interface TattooFlashDayFields {
+  eventSlug?: string;
+  cause?: string;
+}
+export interface TattooShopFields {
+  type: TattooShopProductType;
+  price?: string; // TATTOO_PRICE_PATTERN
+}
+
 /** Nested per-item data that doesn't fit flat columns (subprofile_items.structured). */
 export interface ItemStructured {
   courses?: MenuCourse[] | null;
@@ -27,6 +77,16 @@ export interface ItemStructured {
   // Per-item social links stored in the `structured` jsonb blob (no dedicated
   // column). Shape mirrors the persona-level SubprofileSocialLink.
   links?: { platform: string; urlOrHandle: string }[] | null;
+  // Tattoo artist keys (validated per section by the tattoo whitelist).
+  flash?: TattooFlashFields | null;
+  healed?: TattooHealedFields | null;
+  photo?: TattooPhotoFlags | null;
+  coverUp?: TattooCoverUpFields | null;
+  scarWork?: TattooScarWorkFields | null;
+  sessions?: TattooSession[] | null;
+  spot?: TattooSpotFields | null;
+  flashDay?: TattooFlashDayFields | null;
+  shop?: TattooShopFields | null;
 }
 
 // Union of every kind's content sections plus the universal `links` section.
@@ -192,6 +252,14 @@ export enum SubprofileSection {
   Episodes = 'episodes',
   Roles = 'roles',
   Works = 'works',
+  // Tattoo artist (+7)
+  CoverUps = 'cover_ups',
+  ScarWork = 'scar_work',
+  InProgress = 'in_progress',
+  WannaDos = 'wanna_dos',
+  GuestSpots = 'guest_spots',
+  FlashDays = 'flash_days',
+  Shop = 'shop',
 }
 
 @Entity('subprofile_items')

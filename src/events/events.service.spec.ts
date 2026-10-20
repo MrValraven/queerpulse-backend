@@ -38,7 +38,7 @@ import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventSeries } from './entities/event-series.entity';
-import { EVENT_DELETING } from './event.events';
+import { EVENT_CANCELLED, EVENT_DELETING } from './event.events';
 import { PREVIEW_STAND_IN_VIEWER_ID } from './event-preview';
 import {
   Event,
@@ -136,7 +136,7 @@ describe('EventsService', () => {
     filterViewable: jest.Mock;
   };
   // `remove()` announces a hard delete through `emitAsync` and waits for it.
-  let eventEmitter: { emitAsync: jest.Mock };
+  let eventEmitter: { emitAsync: jest.Mock; emit: jest.Mock };
   let mentions: {
     notify: jest.Mock<
       Promise<Set<string>>,
@@ -379,7 +379,10 @@ describe('EventsService', () => {
       }),
       filterViewable: jest.fn((rows: Event[]) => Promise.resolve(rows)),
     };
-    eventEmitter = { emitAsync: jest.fn().mockResolvedValue([]) };
+    eventEmitter = {
+      emitAsync: jest.fn().mockResolvedValue([]),
+      emit: jest.fn(),
+    };
     mentions = {
       notify: jest
         .fn<
@@ -3846,6 +3849,149 @@ describe('EventsService', () => {
           select: { eventId: true },
         });
       });
+    });
+  });
+  describe('Pulse Live rules', () => {
+    let manager: {
+      query: jest.Mock;
+      save: (entity: unknown, entityLike: Event) => Event;
+      getRepository: () => unknown;
+      delete: jest.Mock;
+    };
+    let isTransactionRolledBack: boolean;
+
+    const quizEvent = (overrides: Record<string, unknown> = {}) => ({
+      ...editableEvent(),
+      gatheringFamily: GatheringFamily.Meet,
+      eventType: 'quiz',
+      formatDetails: { isAdultsOnly: true },
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      isTransactionRolledBack = false;
+      manager = {
+        query: jest.fn().mockResolvedValue([{ exists: false }]),
+        save: (_entity: unknown, entityLike: Event) => events.save(entityLike),
+        getRepository: () => events,
+        delete: transactionDelete,
+      };
+      (events.manager as unknown as { query: jest.Mock }).query = manager.query;
+      events.manager.transaction.mockImplementation(
+        async (runInTransaction: (transactionManager: unknown) => unknown) => {
+          try {
+            return await runInTransaction(manager);
+          } catch (error) {
+            isTransactionRolledBack = true;
+            throw error;
+          }
+        },
+      );
+    });
+
+    const readRefusal = async (
+      attempt: Promise<unknown>,
+    ): Promise<{ status: number; body: Record<string, unknown> }> => {
+      try {
+        await attempt;
+      } catch (error) {
+        const refusal = error as {
+          getStatus: () => number;
+          getResponse: () => Record<string, unknown>;
+        };
+        return { status: refusal.getStatus(), body: refusal.getResponse() };
+      }
+      throw new Error('Expected the call to be refused');
+    };
+
+    it('keeps the 18+ flag when a meet event is a quiz', async () => {
+      await service.create('host-1', {
+        title: 'Quiz night',
+        description: 'Teams and trivia.',
+        startAt: '2099-01-01T18:00:00.000Z',
+        timezone: 'Europe/Lisbon',
+        gatheringFamily: GatheringFamily.Meet,
+        eventType: 'quiz',
+        formatDetails: { isAdultsOnly: true },
+      });
+
+      const created = events.create.mock.calls[0]![0];
+      expect(created.formatDetails).toEqual({ isAdultsOnly: true });
+    });
+
+    it('drops the 18+ flag when a quiz event changes format', async () => {
+      events.findOne.mockResolvedValue(quizEvent());
+
+      await service.update('x', 'u1', { eventType: 'karaoke' });
+
+      expect(events.save).toHaveBeenCalledWith(
+        expect.objectContaining({ formatDetails: null }),
+      );
+    });
+
+    it('refuses to drop the 18+ flag while the quiz holds an adults round', async () => {
+      events.findOne.mockResolvedValue(quizEvent());
+      manager.query.mockResolvedValue([{ exists: true }]);
+
+      const refusal = await readRefusal(
+        service.update('x', 'u1', { formatDetails: { isAdultsOnly: false } }),
+      );
+
+      expect(refusal.status).toBe(409);
+      expect(refusal.body.code).toBe('quizshow_quiz_has_adults_rounds');
+      expect(events.save).not.toHaveBeenCalled();
+    });
+
+    it('checks every occurrence of a series edit', async () => {
+      events.findOne.mockResolvedValue(
+        quizEvent({ seriesId: 'series-1', seriesIndex: 0 }),
+      );
+      events.find.mockResolvedValue([
+        quizEvent({
+          id: 'e2',
+          slug: 'x-2',
+          seriesId: 'series-1',
+          seriesIndex: 1,
+        }),
+      ]);
+      manager.query
+        .mockResolvedValueOnce([{ exists: false }])
+        .mockResolvedValueOnce([{ exists: true }]);
+
+      const refusal = await readRefusal(
+        service.update('x', 'u1', { eventType: 'karaoke' }, 'future'),
+      );
+
+      expect(refusal.body.code).toBe('quizshow_quiz_has_adults_rounds');
+      expect(manager.query).toHaveBeenCalledTimes(2);
+      expect(isTransactionRolledBack).toBe(true);
+    });
+
+    it('announces one cancellation for every occurrence it took down', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        seriesId: 'series-1',
+        seriesIndex: 0,
+      });
+      events.find.mockResolvedValue([
+        { ...editableEvent(), id: 'e2', slug: 'x-2', seriesIndex: 1 },
+      ]);
+
+      await service.cancel('x', 'u1', 'future');
+
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(EVENT_CANCELLED, {
+        eventIds: ['e1', 'e2'],
+      });
+    });
+
+    it('serves a null Pulse Live block while the feature is hidden', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+
+      const detail = await service.getBySlug('x', 'u1');
+
+      expect(detail.quizshow).toBeNull();
+      expect(manager.query).not.toHaveBeenCalled();
     });
   });
 });

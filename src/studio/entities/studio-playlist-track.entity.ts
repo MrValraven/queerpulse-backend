@@ -11,6 +11,7 @@ import {
 } from 'typeorm';
 import { StudioPlaylist } from './studio-playlist.entity';
 import { StudioTrack } from './studio-track.entity';
+import { User } from '../../users/entities/user.entity';
 
 /**
  * One entry of a Studio playlist (Studio v2). `(playlist_id, position)` is
@@ -20,7 +21,11 @@ import { StudioTrack } from './studio-track.entity';
  * each of its tracks a fresh id, and the entry keeps the old track out of
  * reach as an unavailable row for the owner, so the named persona's track
  * never reappears under the pseudonymous one.
- * Migration `1831500000000-AddStudioPlaylists`.
+ * `added_by_user_id` (collaborative playlists) names the member who added
+ * the entry, owner included; it reaches the owner and active editors only,
+ * and an editor's seat ending clears it on that playlist.
+ * Migrations `1831500000000-AddStudioPlaylists` and
+ * `1833100100000-AddStudioPlaylistEditors`.
  */
 @Entity('studio_playlist_tracks')
 @Unique(
@@ -32,6 +37,9 @@ import { StudioTrack } from './studio-track.entity';
 )
 @Unique('UQ_studio_playlist_tracks_playlist_track', ['playlistId', 'trackId'])
 @Check('CHK_studio_playlist_tracks_position', `"position" >= 1`)
+@Index('IDX_studio_playlist_tracks_added_by_user_id', ['addedByUserId'], {
+  where: '"added_by_user_id" IS NOT NULL',
+})
 export class StudioPlaylistTrack {
   @PrimaryGeneratedColumn('uuid', {
     primaryKeyConstraintName: 'PK_studio_playlist_tracks',
@@ -68,4 +76,14 @@ export class StudioPlaylistTrack {
 
   @CreateDateColumn({ type: 'timestamptz' })
   addedAt!: Date;
+
+  @Column({ type: 'uuid', nullable: true })
+  addedByUserId!: string | null;
+
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({
+    name: 'added_by_user_id',
+    foreignKeyConstraintName: 'FK_studio_playlist_tracks_added_by',
+  })
+  addedBy?: User | null;
 }

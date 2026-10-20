@@ -19,12 +19,20 @@
  * `GET /studio/playlists/liked` is already a playlists path. The plain
  * `/me/saved` list, its `?kind=` filter, a list itself
  * (`/me/saved/lists/<listId>`) and list items of other kinds name no Studio
- * item and are logged as usual. Case-blind, and the staff routes under
+ * item and are logged as usual. Studio rich cards add the release read: a
+ * `GET` (or `HEAD`) on `/studio/releases/<id>` itself, which every release
+ * card fires. The owner edit and delete on that path and the owner tools
+ * under it (`/studio/releases/<id>/preview-link` and the rest) are logged as
+ * usual. A caller that passes no method counts as a read, so the release path
+ * is skipped when in doubt. Case-blind, and the staff routes under
  * `/admin/studio/` are logged as usual.
  *
  * This module imports nothing: `instrument.ts` reads it before `Sentry.init`.
  */
-export function isStudioListeningRequest(url: string | undefined): boolean {
+export function isStudioListeningRequest(
+  url: string | undefined,
+  method?: string,
+): boolean {
   if (!url) {
     return false;
   }
@@ -36,6 +44,7 @@ export function isStudioListeningRequest(url: string | undefined): boolean {
     /(?:^|\/)studio\/(?:tracks|playlists|previews|episodes)\/[^/]+(?:\/|$)/i.test(
       path,
     ) ||
+    (STUDIO_RELEASE_READ_PATTERN.test(path) && isReadMethod(method)) ||
     /(?:^|\/)studio\/artists\/[^/]+\/press-kit\/?$/i.test(path) ||
     /(?:^|\/)studio\/search\/?$/i.test(path) ||
     /(?:^|\/)studio\/radio\/?$/i.test(path) ||
@@ -44,6 +53,19 @@ export function isStudioListeningRequest(url: string | undefined): boolean {
       path,
     )
   );
+}
+
+/** `/studio/releases/<id>` with nothing after the id but an optional slash. */
+const STUDIO_RELEASE_READ_PATTERN =
+  /(?:^|\/)studio\/releases\/[^/?#]+\/?(?:[?#]|$)/i;
+
+/** GET and HEAD read; an absent method reads too, so a doubtful case is skipped. */
+function isReadMethod(method: string | undefined): boolean {
+  if (method === undefined) {
+    return true;
+  }
+  const upperCaseMethod = method.toUpperCase();
+  return upperCaseMethod === 'GET' || upperCaseMethod === 'HEAD';
 }
 
 /** What a logged preview URL shows where the bearer token was. */
@@ -79,10 +101,11 @@ export function redactStudioPreviewToken(
   );
 }
 
-/** The request fields of a Sentry event that can carry a URL. */
+/** The request fields of a Sentry event that can carry a URL, with its method. */
 export interface StudioListeningRequestFields {
   url?: string;
   query_string?: unknown;
+  method?: string;
 }
 
 /**
@@ -94,7 +117,7 @@ export interface StudioListeningRequestFields {
 export function dropStudioListeningUrl(
   request: StudioListeningRequestFields | undefined,
 ): boolean {
-  if (!request || !isStudioListeningRequest(request.url)) {
+  if (!request || !isStudioListeningRequest(request.url, request.method)) {
     return false;
   }
   delete request.url;

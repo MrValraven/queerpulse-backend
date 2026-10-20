@@ -16,6 +16,7 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { CreatorDraftSlotsService } from '../creator-drafts/creator-draft-slots.service';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
@@ -79,6 +80,8 @@ export class EventsController {
     private readonly eventBansService: EventBansService,
     private readonly eventCheckInService: EventCheckInService,
     private readonly eventLineupService: EventLineupService,
+    // Creator drafts: a publish deletes the caller's draft for it.
+    private readonly creatorDraftSlots: CreatorDraftSlotsService,
   ) {}
 
   @Get()
@@ -126,8 +129,13 @@ export class EventsController {
   @ApiBadRequestResponse({
     description: 'Invalid schedule (past start, or end before start).',
   })
-  create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateEventDto) {
-    return this.eventsService.create(user.userId, dto);
+  async create(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: CreateEventDto,
+  ) {
+    const created = await this.eventsService.create(user.userId, dto);
+    await this.creatorDraftSlots.discardAfterPublish(user.userId, 'event');
+    return created;
   }
 
   @Get(':slug')

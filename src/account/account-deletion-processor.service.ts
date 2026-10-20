@@ -25,6 +25,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
+import { restoreTracksHeldByClaimantWithin } from '../studio/studio-claim-store';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { releaseHandleWithin } from '../handles/handles.service';
@@ -457,6 +458,15 @@ export class AccountDeletionProcessorService {
       //     handed over. Audio a live track on a handed-over persona still
       //     holds is kept on purpose: content other members rely on survives.
       studioAudioKeys = await this.studioAudioKeysOf(manager, userId);
+
+      // 2g. Studio copyright claims (Studio safety and moderation). Step 3
+      //     cascades this member's claims away (`claimant_id` is ON DELETE
+      //     CASCADE). A track one of their accepted or countered claims
+      //     kept offline comes back when no other withholding claim remains
+      //     on it; a track their upheld claim holds stays offline. The
+      //     tracks are locked in id order first. Runs while `claimant_id`
+      //     still names them.
+      await restoreTracksHeldByClaimantWithin(manager, userId);
 
       // 3. Hard-delete the user. Every other member-owned table carries an
       //    `ON DELETE CASCADE` FK to `users("id")` and goes with it — 70+ FKs

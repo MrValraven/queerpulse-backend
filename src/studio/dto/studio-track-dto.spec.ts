@@ -420,4 +420,53 @@ describe('Studio track bodies', () => {
       'sources',
     ]);
   });
+
+  // Studio safety and moderation.
+  it('takes known content warning ids, an empty list and up to eight', async () => {
+    expect(
+      await errorsFor(UpdateStudioTrackDto, {
+        contentWarnings: ['medical', 'police'],
+      }),
+    ).toEqual([]);
+    expect(
+      await errorsFor(UpdateStudioTrackDto, { contentWarnings: [] }),
+    ).toEqual([]);
+    expect(
+      await errorsFor(UpdateStudioTrackDto, {
+        contentWarnings: [
+          'medical',
+          'violence',
+          'substances',
+          'family-rejection',
+          'sexual-content',
+          'self-harm',
+          'housing-loss',
+          'police',
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it('refuses an unknown warning id, null, a string and a ninth entry', async () => {
+    for (const contentWarnings of [
+      ['gore'],
+      null,
+      'police',
+      [
+        'medical',
+        'violence',
+        'substances',
+        'family-rejection',
+        'sexual-content',
+        'self-harm',
+        'housing-loss',
+        'police',
+        'police',
+      ],
+    ]) {
+      expect(
+        await errorsFor(UpdateStudioTrackDto, { contentWarnings }),
+      ).toEqual(['contentWarnings']);
+    }
+  });
 });

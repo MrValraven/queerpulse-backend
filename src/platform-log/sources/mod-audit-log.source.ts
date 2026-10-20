@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { parseCreatorDraftViewedNote } from '../../creator-drafts/creator-draft-audit';
+import { CREATOR_DRAFT_VIEWED_ACTION } from '../../creator-drafts/creator-drafts.constants';
 import { ModAuditLog } from '../../moderation/entities/mod-audit-log.entity';
 import {
   applyPlatformLogWindow,
@@ -94,6 +96,25 @@ export class ModAuditLogSource implements PlatformLogSource {
   private toEntry(row: ModAuditRow): PlatformLogRawEntry {
     const isSystemAction =
       row.actor_id === null && MOD_SYSTEM_ACTIONS.includes(row.action);
+    if (row.action === CREATOR_DRAFT_VIEWED_ACTION) {
+      return {
+        sourceKey: this.key,
+        rowId: row.row_id,
+        occurredAtExact: row.occurred_at_exact,
+        category: 'staff',
+        kind: `mod.${row.action}`,
+        actorUserId: row.actor_id,
+        actorFallbackName: null,
+        actorKind: 'staff',
+        targetUserId: row.target_user_id,
+        targetFallbackName: row.target_name,
+        subject: { label: '', route: '/admin/creator-drafts' },
+        params: compactParams({
+          draftKind: parseCreatorDraftViewedNote(row.note)?.kind,
+        }),
+        note: null,
+      };
+    }
     return {
       sourceKey: this.key,
       rowId: row.row_id,

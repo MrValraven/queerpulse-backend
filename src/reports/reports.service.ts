@@ -41,6 +41,10 @@ import {
   StudioRelease,
   StudioReleaseStatus,
 } from '../studio/entities/studio-release.entity';
+import { captureQuizshowAnswerForReport } from '../quizshow/quizshow-answer-report';
+import type { QuizshowAnswerSnapshotEvidence } from '../quizshow/quizshow.contract';
+import { playableTrackSql } from '../studio/studio-playlist-visibility';
+import { studioSafetyError } from '../studio/studio-safety.constants';
 import { SubprofilePost } from '../subprofile-posts/entities/subprofile-post.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import {
@@ -214,6 +218,21 @@ const IDENTITY_NOT_FOUND_MESSAGE = 'Business not found';
 // wants, or reaching into another module's internals for one regex.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Studio safety: the subjects whose `copyright` reports go to the claim
+ *  form (`POST /studio/tracks/:id/copyright-claims`). */
+export const STUDIO_COPYRIGHT_CLAIM_SUBJECT_TYPES: readonly ReportSubjectType[] =
+  [ReportSubjectType.StudioTrack, ReportSubjectType.StudioRelease];
+
+/** Studio safety: a track a listener can play right now, by its uuid. The
+ *  same rule every Studio listener read applies, blocks aside. */
+export const LISTENER_PLAYABLE_TRACK_SQL = `SELECT "track"."id"::text AS "id"
+  FROM "studio_tracks" "track"
+ INNER JOIN "studio_releases" "release" ON "release"."id" = "track"."release_id"
+ INNER JOIN "subprofiles" "persona" ON "persona"."id" = "release"."subprofile_id"
+ WHERE "track"."id" = $1
+   AND ${playableTrackSql('track', 'release', 'persona')}
+ LIMIT 1`;
 
 /**
  * Makes a caller-supplied string safe to interpolate into a `key=value` log
@@ -396,6 +415,16 @@ export class ReportsService {
       });
     }
 
+    // Studio safety and moderation: copyright on a Studio track or release
+    // goes through the claim form, which collects a good-faith statement and
+    // reaches the artist. Refused before anything reads the subject.
+    if (
+      input.reasonCode === 'copyright' &&
+      STUDIO_COPYRIGHT_CLAIM_SUBJECT_TYPES.includes(input.subjectType)
+    ) {
+      throw studioSafetyError('studio_use_copyright_claim');
+    }
+
     // Persona report (ENG-446): a moderator takedown is stored under the
     // report's `subjectId`, and every persona read looks it up by the
     // persona's lowercase uuid. So the id is canonicalised here, before the
@@ -410,10 +439,38 @@ export class ReportsService {
       input = await this.withCanonicalStudioReleaseSubject(input);
     }
 
+    // Studio safety: a track report names a track a listener can play, by
+    // its uuid, canonicalised before the dedupe lookup and the insert.
+    if (input.subjectType === ReportSubjectType.StudioTrack) {
+      input = await this.withCanonicalStudioTrackSubject(input);
+    }
+
     // Studio v3: a persona post report names a post by its uuid,
     // canonicalised before the dedupe lookup and the insert read it.
     if (input.subjectType === ReportSubjectType.PersonaPost) {
       input = await this.withCanonicalPersonaPostSubject(input);
+    }
+
+    // Pulse Live: an answer report names an answer by its uuid and keeps a
+    // snapshot of it (see `captureQuizshowAnswerForReport`). A malformed id
+    // never reaches the database.
+    let reportedQuizshowAnswerSnapshot: QuizshowAnswerSnapshotEvidence | null =
+      null;
+    if (input.subjectType === ReportSubjectType.QuizshowAnswer) {
+      if (reporterId === null || !UUID_RE.test(input.subjectId)) {
+        throw new NotFoundException('Answer not found');
+      }
+      const answerId = input.subjectId.toLowerCase();
+      reportedQuizshowAnswerSnapshot = await captureQuizshowAnswerForReport(
+        this.reports.manager,
+        answerId,
+        reporterId,
+        new Date(),
+      );
+      if (!reportedQuizshowAnswerSnapshot) {
+        throw new NotFoundException('Answer not found');
+      }
+      input = { ...input, subjectId: answerId };
     }
 
     // A member can't report their own message — mirrors the DTO's `canReport`
@@ -696,6 +753,7 @@ export class ReportsService {
             reportedEventPhoto,
             reportedGroupSnapshot,
             reportedIdentitySnapshot,
+            reportedQuizshowAnswerSnapshot,
           ),
           severity,
           slaDueAt: slaDueAtFor(severity, now),
@@ -833,6 +891,31 @@ export class ReportsService {
       throw new NotFoundException('Release not found');
     }
     return { ...input, subjectId: releaseId };
+  }
+
+  /**
+   * Studio safety: a track report names a track a listener can play right
+   * now (published release, listenable persona, audio in place, a published
+   * episode, no copyright claim holding it). A slug, an unknown id and every hidden track
+   * get the same 404, so filing never confirms that a hidden track exists.
+   * The uuid is lowercased so an uppercase spelling lands on the key
+   * `studio_tracks.id::text` produces.
+   */
+  private async withCanonicalStudioTrackSubject(
+    input: CreateReportInput,
+  ): Promise<CreateReportInput> {
+    if (!UUID_RE.test(input.subjectId)) {
+      throw new NotFoundException('Track not found');
+    }
+    const trackId = input.subjectId.toLowerCase();
+    const rows: { id: string }[] = await this.reports.manager.query(
+      LISTENER_PLAYABLE_TRACK_SQL,
+      [trackId],
+    );
+    if (!rows.length) {
+      throw new NotFoundException('Track not found');
+    }
+    return { ...input, subjectId: trackId };
   }
 
   /**
@@ -1801,6 +1884,7 @@ export class ReportsService {
     reportedEventPhoto: EventPhoto | null,
     reportedGroupSnapshot: GroupSnapshotEvidence | null,
     reportedIdentitySnapshot: MailboxIdentitySnapshotEvidence | null,
+    reportedQuizshowAnswerSnapshot: QuizshowAnswerSnapshotEvidence | null,
   ): unknown[] | null {
     const evidence: unknown[] = clientEvidence ? [...clientEvidence] : [];
     if (reportedMessage) {
@@ -1879,6 +1963,11 @@ export class ReportsService {
     // alongside its filing gate, appended here like the group snapshot.
     if (reportedIdentitySnapshot) {
       evidence.push(reportedIdentitySnapshot);
+    }
+    // Pulse Live answer snapshot: captured at filing so it survives the
+    // 30-day deletion and a host deleting the results.
+    if (reportedQuizshowAnswerSnapshot) {
+      evidence.push(reportedQuizshowAnswerSnapshot);
     }
     return evidence.length ? evidence : null;
   }

@@ -6,7 +6,11 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from '../reports/entities/report.entity';
-import { StudioTakedownReportService } from './studio-takedown-report.service';
+import { StudioTrack } from '../studio/entities/studio-track.entity';
+import {
+  STUDIO_RELEASE_REPORTS_PREDICATE,
+  StudioTakedownReportService,
+} from './studio-takedown-report.service';
 
 const NAMED_REPORT_ID = 'f1000000-0000-4000-8000-0000000000aa';
 const SECOND_REPORT_ID = 'f1100000-0000-4000-8000-0000000000bb';
@@ -16,6 +20,7 @@ const OTHER_RELEASE_ID = 'f2000000-0000-4000-8000-000000000002';
 const STAFF_ID = 'f3000000-0000-4000-8000-000000000001';
 const REPORTER_ID = 'f3000000-0000-4000-8000-000000000002';
 const OTHER_REPORTER_ID = 'f3000000-0000-4000-8000-000000000003';
+const TRACK_ID = 'f4000000-0000-4000-8000-000000000001';
 
 const reportRow = (overrides: Partial<Report> = {}): Report =>
   ({
@@ -71,6 +76,7 @@ describe('StudioTakedownReportService', () => {
     findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
     save: jest.Mock;
+    exists: jest.Mock;
   };
   let notifications: { create: jest.Mock };
   let service: StudioTakedownReportService;
@@ -92,6 +98,7 @@ describe('StudioTakedownReportService', () => {
         return openReportsQuery;
       }),
       save: jest.fn((rows: Report[]) => Promise.resolve(rows)),
+      exists: jest.fn().mockResolvedValue(true),
     };
     notifications = { create: jest.fn().mockResolvedValue(null) };
     service = new StudioTakedownReportService(
@@ -123,12 +130,12 @@ describe('StudioTakedownReportService', () => {
     expect(manager.createQueryBuilder).toHaveBeenCalledWith(Report, 'report');
     expect(openReportsQuery.setLock).toHaveBeenCalledWith('pessimistic_write');
     expect(openReportsQuery.where).toHaveBeenCalledWith(
-      '"report"."subject_type" = :studioReportSubjectType',
-      { studioReportSubjectType: 'studio_release' },
-    );
-    expect(openReportsQuery.andWhere).toHaveBeenCalledWith(
-      'lower("report"."subject_id") = :studioReportReleaseId',
-      { studioReportReleaseId: RELEASE_ID },
+      STUDIO_RELEASE_REPORTS_PREDICATE,
+      {
+        studioReleaseSubjectType: 'studio_release',
+        studioTrackSubjectType: 'studio_track',
+        studioReportReleaseId: RELEASE_ID,
+      },
     );
     expect(openReportsQuery.andWhere).toHaveBeenCalledWith(
       '"report"."status" IN (:...studioReportActionableStatuses)',
@@ -370,5 +377,161 @@ describe('StudioTakedownReportService', () => {
       ),
     ).resolves.toBeUndefined();
     expect(notifications.create).toHaveBeenCalledTimes(2);
+  });
+
+  // Studio safety and moderation: a takedown also closes the reports about
+  // the release's tracks, and may start from one of them.
+  describe('track reports', () => {
+    it('reads the release reports and the reports about its tracks', () => {
+      expect(STUDIO_RELEASE_REPORTS_PREDICATE).toContain(
+        '"report"."subject_type" = :studioTrackSubjectType',
+      );
+      expect(STUDIO_RELEASE_REPORTS_PREDICATE).toContain(
+        '"release_track"."release_id" = :studioReportReleaseId',
+      );
+      expect(STUDIO_RELEASE_REPORTS_PREDICATE).toContain(
+        'lower("report"."subject_id") = :studioReportReleaseId',
+      );
+    });
+
+    it('starts a takedown from an open report about one of the release tracks', async () => {
+      namedReport = reportRow({
+        subjectType: ReportSubjectType.StudioTrack,
+        subjectId: TRACK_ID.toUpperCase(),
+      });
+      openReports = [namedReport];
+
+      const outcome = await resolve();
+
+      expect(manager.exists).toHaveBeenCalledWith(StudioTrack, {
+        where: { id: TRACK_ID, releaseId: RELEASE_ID },
+      });
+      expect(outcome.kind).toBe('resolved');
+      const [saved] = manager.save.mock.calls[0]![0] as Report[];
+      expect(saved).toEqual(
+        expect.objectContaining({
+          status: ReportStatus.Resolved,
+          resolutionAction: 'studio_release_taken_down',
+          resolutionNote: 'Uploaded without the rights',
+        }),
+      );
+    });
+
+    it('answers a mismatch for a track report about another release', async () => {
+      namedReport = reportRow({
+        subjectType: ReportSubjectType.StudioTrack,
+        subjectId: TRACK_ID,
+      });
+      manager.exists.mockResolvedValue(false);
+      expect(await resolve()).toEqual({ kind: 'mismatch' });
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('answers a mismatch for a track report whose id is no uuid, without a lookup', async () => {
+      namedReport = reportRow({
+        subjectType: ReportSubjectType.StudioTrack,
+        subjectId: 'opening',
+      });
+      expect(await resolve()).toEqual({ kind: 'mismatch' });
+      expect(manager.exists).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveNamedTrackReportWithin', () => {
+    const resolveTrackReport = (isOwnerNoticeSent = true) =>
+      service.resolveNamedTrackReportWithin(
+        manager as unknown as EntityManager,
+        {
+          trackId: TRACK_ID,
+          actorId: STAFF_ID,
+          reportId: NAMED_REPORT_ID,
+          action: 'studio_track_marked_explicit',
+          isOwnerNoticeSent,
+        },
+      );
+
+    beforeEach(() => {
+      namedReport = reportRow({
+        subjectType: ReportSubjectType.StudioTrack,
+        subjectId: TRACK_ID.toUpperCase(),
+      });
+    });
+
+    it('resolves the named track report alone, with the action and no note', async () => {
+      const outcome = await resolveTrackReport();
+
+      expect(manager.findOne).toHaveBeenCalledWith(Report, {
+        where: { id: NAMED_REPORT_ID },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+      expect(outcome.kind).toBe('resolved');
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: NAMED_REPORT_ID,
+          status: ReportStatus.Resolved,
+          resolutionActorId: STAFF_ID,
+          resolutionAction: 'studio_track_marked_explicit',
+          resolutionNote: null,
+          resolutionDuration: null,
+          resolutionNotified: ['member', 'reporter'],
+        }),
+      );
+    });
+
+    it('lists the member as notified only when owners heard', async () => {
+      await resolveTrackReport(false);
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ resolutionNotified: ['reporter'] }),
+      );
+    });
+
+    it('lists no reporter when the acting staff member filed it', async () => {
+      namedReport = reportRow({
+        subjectType: ReportSubjectType.StudioTrack,
+        subjectId: TRACK_ID,
+        reporterId: STAFF_ID,
+      });
+      await resolveTrackReport();
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ resolutionNotified: ['member'] }),
+      );
+    });
+
+    it.each([
+      ['a report that does not exist', null],
+      ['a release report', reportRow()],
+      [
+        'a report about another track',
+        reportRow({
+          subjectType: ReportSubjectType.StudioTrack,
+          subjectId: 'f4000000-0000-4000-8000-000000000002',
+        }),
+      ],
+    ])('answers a mismatch for %s and writes nothing', async (_label, row) => {
+      namedReport = row;
+      expect(await resolveTrackReport()).toEqual({ kind: 'mismatch' });
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('answers not open for a resolved report and writes nothing', async () => {
+      namedReport = reportRow({
+        subjectType: ReportSubjectType.StudioTrack,
+        subjectId: TRACK_ID,
+        status: ReportStatus.Resolved,
+        resolutionAction: 'studio_track_marked_explicit',
+      });
+      expect(await resolveTrackReport()).toEqual({ kind: 'not_open' });
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('resolves an escalated report like an open one', async () => {
+      namedReport = reportRow({
+        subjectType: ReportSubjectType.StudioTrack,
+        subjectId: TRACK_ID,
+        status: ReportStatus.Escalated,
+      });
+      expect((await resolveTrackReport()).kind).toBe('resolved');
+    });
   });
 });

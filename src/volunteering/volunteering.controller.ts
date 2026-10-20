@@ -203,7 +203,8 @@ export class VolunteeringController {
   @ApiOperation({ summary: 'Sign up for an opportunity' })
   @ApiCreatedResponse({ description: 'The created signup.' })
   @ApiConflictResponse({
-    description: 'The opportunity is at capacity, or you already signed up.',
+    description:
+      'The opportunity is closed (code `OPPORTUNITY_CLOSED`), at capacity, or you already signed up.',
   })
   @ApiNotFoundResponse({ description: 'No opportunity with that slug.' })
   @ApiUnauthorizedResponse({

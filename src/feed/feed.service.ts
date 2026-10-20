@@ -40,6 +40,7 @@ import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { toArticleLocale } from '../magazine/magazine-locale';
 import { BlockFilterService } from '../social/block-filter.service';
 import { HiddenFromService } from '../social/hidden-from.service';
+import { studioShareOrigins } from '../studio/studio-share-link';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -2243,6 +2244,10 @@ export class FeedService {
     const interactionsFor = (postId: string): FeedPostInteractions =>
       interactionsByPostId.get(postId) ?? EMPTY_POST_INTERACTIONS;
 
+    // Studio rich cards: the origins a Studio link may sit on, read once per
+    // page.
+    const studioOrigins = studioShareOrigins();
+
     return candidates.map((c) => {
       const author: MemberRef | null = c.authorId
         ? (authors.get(c.authorId) ?? null)
@@ -2259,7 +2264,7 @@ export class FeedService {
             post.id,
           );
           return {
-            ...communityPostToFeedItem(post, community, author),
+            ...communityPostToFeedItem(post, community, author, studioOrigins),
             ...signals,
             reactionCount,
             replyCount,

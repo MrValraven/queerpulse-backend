@@ -3,7 +3,12 @@
 import { NestFactory } from '@nestjs/core';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../app.module';
+import {
+  SubprofileSection,
+  type ItemStructured,
+} from '../subprofiles/entities/subprofile-item.entity';
 import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
+import { listItemImageRefs } from '../subprofiles/subprofile-item-images';
 import { toBareKey } from './bare-key';
 import { PersonaImageKeysService } from './persona-image-keys.service';
 import { storageKeyOwnerId } from './storage-key';
@@ -67,10 +72,20 @@ async function countMemberScopedReferences(
       WHERE "subprofile_id" = $1 AND "image_key" IS NOT NULL`,
     [persona.id],
   );
+  const nestedItemRows: { structured: ItemStructured }[] =
+    await dataSource.query(
+      `SELECT "structured" FROM "subprofile_items"
+        WHERE "subprofile_id" = $1 AND "section" IN ($2, $3)
+          AND "structured" IS NOT NULL`,
+      [persona.id, SubprofileSection.CoverUps, SubprofileSection.InProgress],
+    );
   return [
     persona.avatar_url,
     persona.cover_url,
     ...rows.map((row) => row.value),
+    ...nestedItemRows.flatMap((row) =>
+      listItemImageRefs({ structured: row.structured }),
+    ),
   ]
     .filter((value): value is string => Boolean(value))
     .filter((value) => storageKeyOwnerId(toBareKey(value)) !== null).length;

@@ -28,6 +28,10 @@ describe('launchedFeatures registry', () => {
     expect(isFeatureLaunched('cinema')).toBe(false);
   });
 
+  it('ships Pulse Live hidden until the user flips it', () => {
+    expect(isFeatureLaunched('quizshow')).toBe(false);
+  });
+
   // The Work and Economy surface is hidden in every production build by
   // COMING_SOON_PATTERNS (frontend src/app/authGate.ts), so these three keys
   // must stay off: leaving them on means the API accepts job posts,

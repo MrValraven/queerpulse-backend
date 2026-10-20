@@ -93,6 +93,11 @@ export const launchedFeatures = {
   // grant. Every Studio controller is tagged `@Feature('studio')`; the grant
   // itself is checked per request by `StudioAccessGuard`.
   studio: { launched: true },
+  // Pulse Live: live quiz and party games on events (`/events/:slug/quizshow*`,
+  // `/quizshow/*` and the `/quizshow` socket namespace, whose gateway checks
+  // this flag itself). Hidden until the user flips it, after the starter packs
+  // are fact-checked (`QUIZSHOW_STARTER_PACKS_ARE_FACT_CHECKED`).
+  quizshow: { launched: false },
 } satisfies Record<string, FeatureConfig>;
 
 export type FeatureKey = keyof typeof launchedFeatures;

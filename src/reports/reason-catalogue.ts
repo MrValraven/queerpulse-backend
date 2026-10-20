@@ -28,6 +28,10 @@ export type ReasonCode =
   | 'copyright'
   | 'not_affirming'
   | 'off_platform'
+  // Studio safety and moderation: lyrics that attack people for who they
+  // are, and a track that is explicit without the flag.
+  | 'hateful_lyrics'
+  | 'untagged_explicit'
   // System-filed listing-domain codes (NOT member-selectable — deliberately
   // absent from `REASON_CODES` / `SUBJECT_REASONS`, so `GET /reports/reasons`
   // never offers them and `POST /reports`'s `@IsIn(REASON_CODES)` rejects them).
@@ -60,6 +64,8 @@ export const REASON_CODES: readonly ReasonCode[] = [
   'copyright',
   'not_affirming',
   'off_platform',
+  'hateful_lyrics',
+  'untagged_explicit',
   'other',
 ];
 
@@ -90,6 +96,8 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   copyright: "Uses someone else's music or artwork without permission",
   not_affirming: 'Not LGBTQ+ affirming — broke the community pledge',
   off_platform: 'Asked to pay or move off-platform',
+  hateful_lyrics: 'Hateful lyrics',
+  untagged_explicit: 'Explicit but not marked',
   // System-filed listing codes (see the `ReasonCode` union comment) — labelled
   // so any code→label lookup is total, but never surfaced as a report option.
   listing_dispute: 'Dispute or claim of a business listing',
@@ -464,7 +472,21 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'impersonation',
     'copyright',
     'discrimination',
+    'untagged_explicit',
     'spam',
+    'other',
+  ],
+  // Studio safety and moderation: one track. `copyright` stays offered so
+  // the reason list shows it and the report form can route it to the claim
+  // form; filing it is refused (`studio_use_copyright_claim`).
+  [ReportSubjectType.StudioTrack]: [
+    'hateful_lyrics',
+    'untagged_explicit',
+    'impersonation',
+    'harassment',
+    'outing',
+    'spam',
+    'copyright',
     'other',
   ],
   // Studio v3: one persona post, a member's own words and photo, so it
@@ -475,6 +497,17 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'harassment',
     'hate_speech',
     'impersonation',
+    'discrimination',
+    'spam',
+    'other',
+  ],
+  // Pulse Live: a member's own words in a room of people who know them, so
+  // outing and doxxing lead.
+  [ReportSubjectType.QuizshowAnswer]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
     'discrimination',
     'spam',
     'other',

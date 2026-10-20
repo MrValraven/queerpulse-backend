@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, MoreThan, Not, Repository } from 'typeorm';
 import { ERASED_AUTHOR_TOPIC_BYLINE } from '../content/topic-post-link.service';
@@ -10,6 +11,10 @@ import {
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { EventSeries } from '../events/entities/event-series.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import {
+  EVENT_CANCELLED,
+  type EventCancelledEvent,
+} from '../events/event.events';
 import { hasEnded } from '../events/event-timing';
 import { seatHostAsGoing } from '../events/host-seat';
 import { clearUnmanagedFutureRunByLinks } from '../events/run-by-listing-links';
@@ -128,6 +133,9 @@ export class ContentOwnerErasureService {
     // The forum and topic steps are set-based raw SQL, so they run on the
     // root connection and `AccountModule` registers no extra repositories.
     private readonly dataSource: DataSource,
+    // Fires `EVENT_CANCELLED` after the cancel, so Pulse Live ends an open
+    // session of a called-off event.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -164,6 +172,9 @@ export class ContentOwnerErasureService {
     );
     await this.runIsolated('topic post bylines', () =>
       this.scrubTopicPostBylines(userId),
+    );
+    await this.runIsolated('Pulse Live attached organisers', () =>
+      this.detachFromQuizshowSessions(userId),
     );
   }
 
@@ -354,6 +365,12 @@ export class ContentOwnerErasureService {
       { id: In(events.map((event) => event.id)) },
       { status: EventStatus.Cancelled },
     );
+    // The same signal `EventsService.cancel` sends: Pulse Live ends an open
+    // session of each called-off event as abandoned, and its listener catches
+    // its own errors.
+    this.eventEmitter.emit(EVENT_CANCELLED, {
+      eventIds: events.map((event) => event.id),
+    } satisfies EventCancelledEvent);
     await this.notifyAttendeesCancelled(events);
   }
 
@@ -699,6 +716,22 @@ export class ContentOwnerErasureService {
         ERASED_AUTHOR_TOPIC_BYLINE.authorInitials,
         ERASED_AUTHOR_TOPIC_BYLINE.authorTone,
       ],
+    );
+  }
+
+  /**
+   * `quizshow_sessions.attached_organiser_user_ids` lists every organiser who
+   * attached to a live game as host or screen. It is a uuid array with no FK,
+   * so nothing removes the member's id when their user row goes. One
+   * set-based statement takes it out of every session that holds it, open or
+   * ended, so no Pulse Live row keeps the erased member's id.
+   */
+  private async detachFromQuizshowSessions(userId: string): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE "quizshow_sessions"
+          SET "attached_organiser_user_ids" = array_remove("attached_organiser_user_ids", $1::uuid)
+        WHERE $1::uuid = ANY("attached_organiser_user_ids")`,
+      [userId],
     );
   }
 }

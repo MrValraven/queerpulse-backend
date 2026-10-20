@@ -9,6 +9,15 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
+import type {
+  TattooBookingRoute,
+  TattooBooksStatus,
+  TattooColour,
+  TattooComfortOption,
+  TattooConsultation,
+  TattooHygienePractice,
+  TattooWhatToSend,
+} from '../tattoo-artist-vocab';
 
 export enum SubprofileKind {
   Developer = 'developer',
@@ -264,6 +273,61 @@ export interface TherapistWorksAlongside {
   note: string;
 }
 
+// Tattoo artist skin blocks. Every sub-field is optional; the skin editor
+// leaves blank fields absent. Validated on PATCH by the tattoo skin validator.
+export interface TattooBooksFacts {
+  status?: TattooBooksStatus;
+  nextOpening?: string; // ISO date
+  waitNote?: string;
+}
+export interface TattooBooking {
+  route?: TattooBookingRoute;
+  email?: string; // shown when route = 'email'
+  formUrl?: string; // shown when route = 'form_link'; https:// only
+  whatToSend?: TattooWhatToSend[];
+  consultation?: TattooConsultation;
+  replyTime?: string;
+}
+export interface TattooStyleFacts {
+  styles?: string[]; // TattooStyle ids or the artist's own words, stored order
+  colour?: TattooColour;
+  minSize?: string;
+  doesNotDo?: string[];
+}
+export interface TattooPrices {
+  minimum?: string;
+  hourly?: string;
+  dayRate?: string; // TATTOO_PRICE_PATTERN
+  deposit?: { amount?: string; isRefundable?: boolean; note?: string };
+  cancellation?: string;
+  touchUps?: { isFree?: boolean; months?: string }; // "1" to "24"
+}
+export interface TattooComfort {
+  options?: TattooComfortOption[];
+  note?: string;
+}
+export interface TattooHygiene {
+  practices?: TattooHygienePractice[];
+}
+export interface TattooScarWorkIntro {
+  intro?: string;
+  hasFreeConsult?: boolean;
+  hasReducedPrice?: boolean;
+  reducedPriceNote?: string;
+}
+export interface TattooStudio {
+  city?: string;
+  isPrivateStudio?: boolean;
+  isByAppointmentOnly?: boolean;
+}
+export interface TattooLineage {
+  trainedWith?: string;
+  tattooingSince?: string; // 4-digit year
+  isTakingApprentices?: boolean;
+  apprenticeNote?: string;
+  teaches?: string[];
+}
+
 // Persona-level skin blocks (Personas redesign Phase 0, design plan "Shared
 // Contract"). Kept in lockstep with the frontend mirror in
 // `subprofiles.api.ts`. Only the keys relevant to the persona's derived skin
@@ -419,6 +483,16 @@ export interface SkinData {
     price?: string;
     note?: string;
   };
+  /** Tattoo artist blocks. `null` means the owner cleared the block. */
+  tattoo?: TattooBooksFacts | null;
+  tattooBooking?: TattooBooking | null;
+  tattooStyles?: TattooStyleFacts | null;
+  tattooPrices?: TattooPrices | null;
+  tattooComfort?: TattooComfort | null;
+  tattooHygiene?: TattooHygiene | null;
+  tattooScarWork?: TattooScarWorkIntro | null;
+  tattooStudio?: TattooStudio | null;
+  tattooLineage?: TattooLineage | null;
 }
 
 @Entity('subprofiles')

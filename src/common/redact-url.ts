@@ -77,6 +77,10 @@ export const REDACTED_QUERY_VALUE = '[redacted]';
  *
  * Deliberately NOT here: `redirect`, `q`, `search`, `page`, `lang` and the
  * other filter parameters. They are the debugging value of logging a URL.
+ *
+ * `url` is read by its value (see {@link isStudioUrlQueryParameter}): only a
+ * Studio address in it is redacted, and every other unfurl target stays
+ * readable.
  */
 export const SENSITIVE_QUERY_PARAMETER_NAMES: ReadonlySet<string> = new Set([
   'invite',
@@ -124,6 +128,90 @@ function decodeParameterName(rawName: string): string {
 export function isSensitiveQueryParameterName(rawName: string): boolean {
   return SENSITIVE_QUERY_PARAMETER_NAMES.has(
     decodeParameterName(rawName).toLowerCase(),
+  );
+}
+
+/**
+ * Studio rich cards: `GET /link-preview?url=` and `GET /link-preview/batch`
+ * carry the address a member pasted, and a Studio address names a track,
+ * release, playlist or private preview a member was looking at. So a `url`
+ * value pointing at a `/studio` path on any host is redacted, and an older
+ * client that still asks to unfurl one never writes it into the request log
+ * or an error report.
+ */
+const URL_QUERY_PARAMETER_NAME = 'url';
+
+/**
+ * A `/studio` path segment anywhere in the value: `https://host/studio/...`,
+ * `/studio/...`, `host/studio/...` or the backslash spelling
+ * `https:\\host\studio\...`. Matching anywhere errs toward redacting.
+ */
+const STUDIO_PATH_IN_VALUE = /(?:^|[/\\])studio(?:[/\\?#]|$)/i;
+
+/**
+ * The most decoding passes a value gets, so a deep stack of encodings stays
+ * cheap. `studio/studio-share-link.ts` reads an own-origin path to the same
+ * depth.
+ */
+export const MAX_QUERY_VALUE_DECODE_PASSES = 5;
+
+/**
+ * Decodes a raw query value until it stops changing (at most
+ * {@link MAX_QUERY_VALUE_DECODE_PASSES} passes), so a value encoded once, twice
+ * or three times all come back readable. Each valid escape decodes on its own
+ * and a malformed escape such as `%zz` stays as written, so one bad escape
+ * never hides the rest of the value.
+ */
+function decodeQueryValue(rawValue: string): string {
+  let decoded = rawValue;
+  for (
+    let decodePass = 0;
+    decodePass < MAX_QUERY_VALUE_DECODE_PASSES;
+    decodePass += 1
+  ) {
+    const next = decoded
+      .replace(/\+/g, ' ')
+      .replace(/%([0-9a-fA-F]{2})/g, (_match, hexPair: string) =>
+        String.fromCharCode(parseInt(hexPair, 16)),
+      );
+    if (next === decoded) {
+      break;
+    }
+    decoded = next;
+  }
+  return decoded;
+}
+
+/** Whether a `url` parameter's value points at a Studio path on any host. */
+export function isStudioUrlQueryParameter(
+  rawName: string,
+  rawValue: string,
+): boolean {
+  if (decodeParameterName(rawName).toLowerCase() !== URL_QUERY_PARAMETER_NAME) {
+    return false;
+  }
+  return (
+    STUDIO_PATH_IN_VALUE.test(rawValue) ||
+    STUDIO_PATH_IN_VALUE.test(decodeQueryValue(rawValue))
+  );
+}
+
+/**
+ * The full redaction question for a parameter already parsed into a name and
+ * a value (a string, or a list for a repeated parameter): a credential by
+ * name, or a Studio address in `url`. Sentry keeps the query in this shape.
+ */
+export function isSensitiveQueryParameter(
+  rawName: string,
+  value: unknown,
+): boolean {
+  if (isSensitiveQueryParameterName(rawName)) {
+    return true;
+  }
+  const values: unknown[] = Array.isArray(value) ? value : [value];
+  return values.some(
+    (entry) =>
+      typeof entry === 'string' && isStudioUrlQueryParameter(rawName, entry),
   );
 }
 
@@ -184,7 +272,12 @@ export function redactSensitiveQueryParameters(
       const separatorIndex = pair.indexOf('=');
       const rawName =
         separatorIndex === -1 ? pair : pair.slice(0, separatorIndex);
-      if (!isSensitiveQueryParameterName(rawName)) {
+      const rawValue =
+        separatorIndex === -1 ? '' : pair.slice(separatorIndex + 1);
+      if (
+        !isSensitiveQueryParameterName(rawName) &&
+        !isStudioUrlQueryParameter(rawName, rawValue)
+      ) {
         return pair;
       }
       // A valueless sensitive parameter (`?token`) still comes back with the

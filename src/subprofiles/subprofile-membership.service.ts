@@ -26,6 +26,7 @@ import {
   SubprofileCreatorChangedEvent,
   SubprofileMemberRemovedEvent,
 } from './subprofile.events';
+import { endPlaylistEditingOfCoOwner } from '../studio/studio-playlist-editor-endings';
 
 /** Two seat reports from one transaction, merged in the order they happened. */
 function mergeSeatChanges(
@@ -158,6 +159,10 @@ export class SubprofileMembershipService {
           );
         }
         await manager.delete(SubprofileMember, { subprofileId: id, userId });
+        // Collaborative playlists: the member stops editing the persona's
+        // playlists in this transaction (plain SQL, like the credit
+        // release), and a departing playlist owner's co-owner editors go too.
+        await endPlaylistEditingOfCoOwner(manager, id, userId);
         // Ends the departing co-owner's mailbox seat in this same transaction,
         // so a failed sync rolls the departure back with it. The live-room
         // eviction event is deferred to after this transaction resolves
@@ -254,6 +259,7 @@ export class SubprofileMembershipService {
         return null;
       }
       await manager.delete(SubprofileMember, { subprofileId, userId });
+      await endPlaylistEditingOfCoOwner(manager, subprofileId, userId);
       const removedChanges = await this.identityMailboxSync.onStaffRemoved(
         identity.id,
         userId,
@@ -365,6 +371,7 @@ export class SubprofileMembershipService {
             'That member does not co-own this persona.',
           );
         }
+        await endPlaylistEditingOfCoOwner(manager, id, targetProfile.userId);
         return this.identityMailboxSync.onStaffRemoved(
           identity.id,
           targetProfile.userId,

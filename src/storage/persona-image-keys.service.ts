@@ -1,7 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository } from 'typeorm';
+import { SubprofileSection } from '../subprofiles/entities/subprofile-item.entity';
+import type { ItemStructured } from '../subprofiles/entities/subprofile-item.entity';
 import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
+import {
+  listItemImageRefs,
+  mapItemImageRefs,
+} from '../subprofiles/subprofile-item-images';
 import { toBareKey } from './bare-key';
 import { PersonaStorageKey } from './entities/persona-storage-key.entity';
 import {
@@ -246,9 +252,10 @@ export class PersonaImageKeysService {
 
   /**
    * Re-homes every image an unlinked persona shows and rewrites each
-   * reference in place: the avatar and cover, every item image, every
-   * connected feed's show art, (Studio v1) every Studio release cover and
-   * (Studio v3) every persona post photo.
+   * reference in place: the avatar and cover, every item image (the item's
+   * own photo plus a cover-up before photo and every work-in-progress session
+   * photo kept in `structured`), every connected feed's show art, (Studio v1)
+   * every Studio release cover and (Studio v3) every persona post photo.
    * `persona.avatarUrl`/`coverUrl` are rewritten
    * in memory too, for a caller that saves its own copy of the row next.
    *
@@ -274,6 +281,13 @@ export class PersonaImageKeysService {
         WHERE "subprofile_id" = $1 AND "image_url" IS NOT NULL`,
       [persona.id],
     );
+    const nestedItemRows: { id: string; structured: ItemStructured }[] =
+      await manager.query(
+        `SELECT "id", "structured" FROM "subprofile_items"
+          WHERE "subprofile_id" = $1 AND "section" IN ($2, $3)
+            AND "structured" IS NOT NULL`,
+        [persona.id, SubprofileSection.CoverUps, SubprofileSection.InProgress],
+      );
     const feedRows: { image_key: string }[] = await manager.query(
       `SELECT DISTINCT "image_key" FROM "subprofile_feeds"
         WHERE "subprofile_id" = $1 AND "image_key" IS NOT NULL`,
@@ -296,6 +310,9 @@ export class PersonaImageKeysService {
         persona.avatarUrl,
         persona.coverUrl,
         ...itemRows.map((row) => row.image_url),
+        ...nestedItemRows.flatMap((row) =>
+          listItemImageRefs({ structured: row.structured }),
+        ),
         ...feedRows.map((row) => row.image_key),
         ...studioCoverRows.map((row) => row.cover_key),
         ...postImageRows.map((row) => row.image_key),
@@ -321,6 +338,22 @@ export class PersonaImageKeysService {
       `UPDATE "subprofiles" SET "avatar_url" = $2, "cover_url" = $3 WHERE "id" = $1`,
       [persona.id, persona.avatarUrl, persona.coverUrl],
     );
+    for (const row of nestedItemRows) {
+      const rewrittenItem = mapItemImageRefs(
+        { structured: row.structured },
+        (ref) => PersonaImageKeysService.applyRehome(rehomed, ref),
+      );
+      if (
+        JSON.stringify(rewrittenItem.structured) ===
+        JSON.stringify(row.structured)
+      ) {
+        continue;
+      }
+      await manager.query(
+        `UPDATE "subprofile_items" SET "structured" = $2::jsonb WHERE "id" = $1`,
+        [row.id, JSON.stringify(rewrittenItem.structured)],
+      );
+    }
     for (const [storedValue, freshKey] of rehomed) {
       await manager.query(
         `UPDATE "subprofile_items" SET "image_url" = $3

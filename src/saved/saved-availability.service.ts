@@ -40,6 +40,7 @@ import { StudioTrack } from '../studio/entities/studio-track.entity';
 import { episodeReleasedSql } from '../studio/studio-episode-rule';
 import {
   creditPersonaCreatorIdSql,
+  notWithheldTrackSql,
   personaCreatorBlockExemptSql,
   playlistOpenToViewerSql,
 } from '../studio/studio-playlist-visibility';
@@ -644,7 +645,10 @@ export class SavedAvailabilityService {
       .innerJoin('release.subprofile', 'persona')
       .where('track.id IN (:...ids)', { ids })
       // Studio artist kinds: an episode is available once it is published.
-      .andWhere(episodeReleasedSql('track', 'release'));
+      .andWhere(episodeReleasedSql('track', 'release'))
+      // Studio safety: a track a copyright claim holds reads unavailable,
+      // with no reason given.
+      .andWhere(notWithheldTrackSql('track'));
     this.applyStudioListeningGate(queryBuilder, viewerId);
     return this.subjectKeys(queryBuilder, 'track.id');
   }

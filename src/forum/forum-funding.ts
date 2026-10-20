@@ -445,7 +445,7 @@ export const PT_MOBILE_PATTERN =
  * length and hold at least `MIN_IBAN_BBAN_DIGITS` digits after the country
  * code and check digits.
  */
-function hasValidIbanChecksum(compact: string): boolean {
+export function hasValidIbanChecksum(compact: string): boolean {
   const rearranged = compact.slice(4) + compact.slice(0, 4);
   let remainder = 0;
   for (const character of rearranged) {

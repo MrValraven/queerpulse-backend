@@ -82,6 +82,8 @@ import { SubprofileUpdatesService } from './subprofile-updates.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { editableSnapshot, SubprofilesService } from './subprofiles.service';
 import { SUBPROFILE_DELETED } from './subprofile.events';
+import type { FlashDayEventRef } from './flash-day-event-links';
+import { TATTOO_ITEM_SECTIONS } from './tattoo-artist-vocab';
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -835,6 +837,9 @@ describe('SubprofilesService', () => {
     ownerIdsFor: jest.Mock;
     eligibleTargetKeys: jest.Mock;
     listOptions: jest.Mock;
+    listFlashDayEventOptions: jest.Mock;
+    eligibleFlashDayEventSlugs: jest.Mock;
+    resolveFlashDayEvents: jest.Mock;
   };
   // The `HandlesService` stub, read back from the testing module so specs can
   // order its calls against the persona row lock.
@@ -1382,6 +1387,13 @@ describe('SubprofilesService', () => {
       ownerIdsFor: jest.fn().mockResolvedValue(new Map<string, string[]>()),
       eligibleTargetKeys: jest.fn().mockResolvedValue(new Set<string>()),
       listOptions: jest.fn().mockResolvedValue([]),
+      // Flash day event links (tattoo contract). Defaults to "no options, no
+      // eligible slug, nothing resolved".
+      listFlashDayEventOptions: jest.fn().mockResolvedValue([]),
+      eligibleFlashDayEventSlugs: jest
+        .fn()
+        .mockResolvedValue(new Set<string>()),
+      resolveFlashDayEvents: jest.fn().mockResolvedValue(new Map()),
     };
 
     personaImageKeys = {
@@ -1860,6 +1872,141 @@ describe('SubprofilesService', () => {
       ]);
       const result = await service.listMine('user-1');
       expect(result.map((view) => view.id)).toEqual(['sp-older', 'sp-newer']);
+    });
+
+    // Tattoo contract "Flash day event links": owner reads resolve linked
+    // events once per response, and the owner sees `photo` as stored.
+    describe('flash day events on owner reads', () => {
+      const linkedEventRef: FlashDayEventRef = {
+        slug: 'pride-flash-day',
+        title: 'Pride flash day',
+        startsAt: '2026-11-14T12:00:00.000Z',
+        endsAt: null,
+        venue: 'Ink house',
+        neighbourhood: 'Mouraria',
+        isOnline: false,
+        imageUrl: null,
+      };
+
+      it('resolves owner flash day events once for the whole persona list', async () => {
+        members.find.mockImplementation((rawOptions: unknown) => {
+          const options = rawOptions as { where: { userId?: string } };
+          if (options.where.userId) {
+            return Promise.resolve([
+              { subprofileId: 'sp-ink', userId: 'user-1', position: 0 },
+              { subprofileId: 'sp-studio', userId: 'user-1', position: 1 },
+            ]);
+          }
+          return Promise.resolve([
+            { subprofileId: 'sp-ink' },
+            { subprofileId: 'sp-studio' },
+          ]);
+        });
+        const inkPersona = makeSubprofile({
+          id: 'sp-ink',
+          kind: SubprofileKind.TattooArtist,
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+        const studioPersona = makeSubprofile({
+          id: 'sp-studio',
+          slug: 'studio',
+          kind: SubprofileKind.TattooArtist,
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+        subprofiles.find.mockResolvedValue([inkPersona, studioPersona]);
+        const inkFlashDay = makeItem({
+          id: 'it-ink-flash-day',
+          subprofileId: 'sp-ink',
+          section: SubprofileSection.FlashDays,
+          structured: { flashDay: { eventSlug: 'pride-flash-day' } },
+        });
+        const studioFlashDay = makeItem({
+          id: 'it-studio-flash-day',
+          subprofileId: 'sp-studio',
+          section: SubprofileSection.FlashDays,
+          structured: { flashDay: { cause: 'Mutual aid fund' } },
+        });
+        publicRead.loadItemsFor.mockResolvedValue(
+          new Map([
+            ['sp-ink', [inkFlashDay]],
+            ['sp-studio', [studioFlashDay]],
+          ]),
+        );
+        affiliationEligibility.resolveFlashDayEvents.mockResolvedValue(
+          new Map([['it-ink-flash-day', linkedEventRef]]),
+        );
+
+        const result = await service.listMine('user-1');
+
+        expect(
+          affiliationEligibility.resolveFlashDayEvents,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          affiliationEligibility.resolveFlashDayEvents,
+        ).toHaveBeenCalledWith(
+          'user-1',
+          [inkPersona, studioPersona],
+          [inkFlashDay, studioFlashDay],
+        );
+        const inkView = result.find((view) => view.id === 'sp-ink');
+        expect(inkView?.items[0]?.linkedEvent).toEqual(linkedEventRef);
+        const studioView = result.find((view) => view.id === 'sp-studio');
+        expect(studioView?.items[0]?.linkedEvent).toBeNull();
+      });
+
+      it('keeps hasClientConsent and the resolved linkedEvent on the owner view', async () => {
+        const persona = makeSubprofile({
+          id: 'sp-1',
+          userId: 'creator-1',
+          kind: SubprofileKind.TattooArtist,
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+        subprofiles.findOne.mockResolvedValue(persona);
+        const healedItem = makeItem({
+          id: 'it-healed',
+          section: SubprofileSection.Healed,
+          position: 0,
+          structured: { photo: { hasClientConsent: true, isBlurred: false } },
+        });
+        const flashDayItem = makeItem({
+          id: 'it-flash-day',
+          section: SubprofileSection.FlashDays,
+          position: 0,
+          structured: {
+            flashDay: {
+              eventSlug: 'pride-flash-day',
+              cause: 'Mutual aid fund',
+            },
+          },
+        });
+        items.find.mockResolvedValue([healedItem, flashDayItem]);
+        affiliationEligibility.resolveFlashDayEvents.mockResolvedValue(
+          new Map([['it-flash-day', linkedEventRef]]),
+        );
+
+        const view = await service.getOwnedDTO('user-1', 'sp-1');
+
+        expect(
+          affiliationEligibility.resolveFlashDayEvents,
+        ).toHaveBeenCalledWith(
+          'creator-1',
+          [persona],
+          [healedItem, flashDayItem],
+        );
+        const healedView = view.items.find((item) => item.id === 'it-healed');
+        expect(healedView?.structured?.photo).toEqual({
+          hasClientConsent: true,
+          isBlurred: false,
+        });
+        const flashDayView = view.items.find(
+          (item) => item.id === 'it-flash-day',
+        );
+        expect(flashDayView?.linkedEvent).toEqual(linkedEventRef);
+        expect(flashDayView?.structured?.flashDay).toEqual({
+          eventSlug: 'pride-flash-day',
+          cause: 'Mutual aid fund',
+        });
+      });
     });
   });
 
@@ -2597,6 +2744,59 @@ describe('SubprofilesService', () => {
       updates.snapshotSectionTitles.mockResolvedValue(['Old A', 'Old B']);
     });
 
+    // Tattoo item sections carry `structured` keys and body-photo consent
+    // an import cannot supply, so the guard refuses them before any read.
+    it.each([...TATTOO_ITEM_SECTIONS])(
+      'refuses a top insert into %s',
+      async (section) => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({ kind: SubprofileKind.TattooArtist, editVersion: 4 }),
+        );
+        const selectCandidates = jest.fn().mockResolvedValue([]);
+
+        await expect(
+          service.insertItemsAtTop(
+            'user-1',
+            'sp-1',
+            section as SubprofileSection,
+            { selectCandidates, onInserted: jest.fn() },
+          ),
+        ).rejects.toThrow(
+          new BadRequestException(
+            `Section "${section}" is not valid for kind "tattoo_artist"`,
+          ),
+        );
+        expect(selectCandidates).not.toHaveBeenCalled();
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rehomes the imported image refs and passes no empty ref', async () => {
+      stageSectionCount(0);
+      await service.insertItemsAtTop(
+        'user-1',
+        'sp-1',
+        SubprofileSection.Projects,
+        {
+          selectCandidates: () =>
+            Promise.resolve([
+              {
+                ref: 'entry-art',
+                fields: { ...fields('With art'), imageUrl: 'work/u1/show.jpg' },
+              },
+              { ref: 'entry-plain', fields: fields('No art') },
+            ]),
+          onInserted: jest.fn().mockResolvedValue(undefined),
+        },
+      );
+
+      expect(personaImageKeys.rehomeForPersonaWrite).toHaveBeenCalledWith(
+        manager,
+        'sp-1',
+        ['work/u1/show.jpg'],
+      );
+    });
+
     it('shifts the section down and inserts the candidates at positions 0..k-1', async () => {
       stageSectionCount(2);
       const onInserted = jest.fn().mockResolvedValue(undefined);
@@ -3185,6 +3385,446 @@ describe('SubprofilesService', () => {
             (call) => call[0] === SubprofileItemRevision,
           ),
         ).toBe(false);
+      });
+    });
+
+    // Tattoo contract: the per-section `structured` whitelist, flash day event
+    // links, the body-photo consent rule and nested item images, all on the
+    // section save.
+    describe('tattoo sections', () => {
+      const REQUESTER_ID = '11111111-1111-1111-1111-111111111111';
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const uploadOf = (ownerId: string, fileSegment: string) =>
+        `avatars/${ownerId}/${fileSegment}.jpg`;
+      const AFTER_UPLOAD = uploadOf(
+        REQUESTER_ID,
+        '33333333-3333-3333-3333-333333333333',
+      );
+      const BEFORE_UPLOAD = uploadOf(
+        REQUESTER_ID,
+        '44444444-4444-4444-4444-444444444444',
+      );
+      const FIRST_SESSION_UPLOAD = uploadOf(
+        REQUESTER_ID,
+        '55555555-5555-5555-5555-555555555555',
+      );
+      const SECOND_SESSION_UPLOAD = uploadOf(
+        REQUESTER_ID,
+        '66666666-6666-6666-6666-666666666666',
+      );
+      const FOREIGN_UPLOAD = uploadOf(
+        OTHER_ID,
+        '77777777-7777-7777-7777-777777777777',
+      );
+      const OTHER_PERSONA_KEY =
+        'persona/88888888-8888-8888-8888-888888888888/99999999-9999-9999-9999-999999999999.jpg';
+      const mintedKeyOf = (fileSegment: string) =>
+        `persona/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/${fileSegment}.jpg`;
+      const MINTED_AFTER = mintedKeyOf('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+      const MINTED_BEFORE = mintedKeyOf('cccccccc-cccc-cccc-cccc-cccccccccccc');
+      const MINTED_FIRST_SESSION = mintedKeyOf(
+        'dddddddd-dddd-dddd-dddd-dddddddddddd',
+      );
+      const MINTED_SECOND_SESSION = mintedKeyOf(
+        'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+      );
+      const FLASH_DAY_DATE = '2026-11-14';
+      const EVENT_SLUG = 'pride-flash-day';
+
+      const makeTattooPersona = (overrides: Partial<Subprofile> = {}) =>
+        makeSubprofile({
+          userId: REQUESTER_ID,
+          kind: SubprofileKind.TattooArtist,
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          handle: 'robin-ink',
+          ...overrides,
+        });
+
+      const savedRowsOf = (callIndex: number) =>
+        (manager.save.mock.calls[callIndex] as [SubprofileItem[]])[0];
+
+      it('refuses a shop key in a gigs save with TATTOO_ITEM_INVALID before the transaction', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({ kind: SubprofileKind.Musician }),
+        );
+
+        const attempt = service.replaceSection('user-1', 'sp-1', 'gigs', [
+          { title: 'Late show', structured: { shop: { type: 'print' } } },
+        ]);
+
+        await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+        await expect(attempt).rejects.toMatchObject({
+          response: {
+            code: 'TATTOO_ITEM_INVALID',
+            itemIndex: 0,
+            field: 'structured.shop',
+          },
+        });
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      });
+
+      it('refuses an eventSlug on an unlinked persona with FLASH_DAY_EVENT_UNLINKED_PERSONA', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeTattooPersona({
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            handle: null,
+          }),
+        );
+
+        await expect(
+          service.replaceSection(REQUESTER_ID, 'sp-1', 'flash_days', [
+            {
+              title: 'Pride flash day',
+              date: FLASH_DAY_DATE,
+              structured: { flashDay: { eventSlug: EVENT_SLUG } },
+            },
+          ]),
+        ).rejects.toMatchObject({
+          response: { code: 'FLASH_DAY_EVENT_UNLINKED_PERSONA', itemIndex: 0 },
+        });
+        expect(
+          affiliationEligibility.eligibleFlashDayEventSlugs,
+        ).not.toHaveBeenCalled();
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      });
+
+      it('refuses an ineligible eventSlug with FLASH_DAY_EVENT_NOT_ELIGIBLE and its itemIndex', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        affiliationEligibility.eligibleFlashDayEventSlugs.mockResolvedValue(
+          new Set<string>(),
+        );
+
+        await expect(
+          service.replaceSection(REQUESTER_ID, 'sp-1', 'flash_days', [
+            {
+              title: 'Walk-in day',
+              date: FLASH_DAY_DATE,
+              structured: { flashDay: { cause: 'Mutual aid fund' } },
+            },
+            {
+              title: 'Pride flash day',
+              date: FLASH_DAY_DATE,
+              structured: { flashDay: { eventSlug: EVENT_SLUG } },
+            },
+          ]),
+        ).rejects.toMatchObject({
+          response: { code: 'FLASH_DAY_EVENT_NOT_ELIGIBLE', itemIndex: 1 },
+        });
+        expect(
+          affiliationEligibility.eligibleFlashDayEventSlugs,
+        ).toHaveBeenCalledWith(expect.objectContaining({ id: 'sp-1' }), [
+          EVENT_SLUG,
+        ]);
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      });
+
+      it('accepts a flash day linked to an event a co-owner hosts', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        affiliationEligibility.eligibleFlashDayEventSlugs.mockResolvedValue(
+          new Set([EVENT_SLUG]),
+        );
+        manager.find.mockResolvedValue([]);
+
+        await service.replaceSection(REQUESTER_ID, 'sp-1', 'flash_days', [
+          {
+            title: 'Pride flash day',
+            date: FLASH_DAY_DATE,
+            structured: {
+              flashDay: { eventSlug: EVENT_SLUG, cause: 'Mutual aid fund' },
+            },
+          },
+        ]);
+
+        expect(savedRowsOf(0)[0]?.structured).toEqual({
+          flashDay: { eventSlug: EVENT_SLUG, cause: 'Mutual aid fund' },
+        });
+      });
+
+      it('stores a flash day eventSlug trimmed', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        affiliationEligibility.eligibleFlashDayEventSlugs.mockResolvedValue(
+          new Set([EVENT_SLUG]),
+        );
+        manager.find.mockResolvedValue([]);
+
+        await service.replaceSection(REQUESTER_ID, 'sp-1', 'flash_days', [
+          {
+            title: 'Pride flash day',
+            date: FLASH_DAY_DATE,
+            structured: { flashDay: { eventSlug: `  ${EVENT_SLUG} ` } },
+          },
+        ]);
+
+        expect(
+          affiliationEligibility.eligibleFlashDayEventSlugs,
+        ).toHaveBeenCalledWith(expect.objectContaining({ id: 'sp-1' }), [
+          EVENT_SLUG,
+        ]);
+        expect(savedRowsOf(0)[0]?.structured).toEqual({
+          flashDay: { eventSlug: EVENT_SLUG },
+        });
+      });
+
+      it('stores no eventSlug key for a whitespace-only slug', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        manager.find.mockResolvedValue([]);
+
+        await service.replaceSection(REQUESTER_ID, 'sp-1', 'flash_days', [
+          {
+            title: 'Walk-in day',
+            date: FLASH_DAY_DATE,
+            structured: {
+              flashDay: { eventSlug: '   ', cause: 'Mutual aid fund' },
+            },
+          },
+        ]);
+
+        expect(
+          affiliationEligibility.eligibleFlashDayEventSlugs,
+        ).not.toHaveBeenCalled();
+        const savedStructured = savedRowsOf(0)[0]?.structured;
+        expect(savedStructured).toEqual({
+          flashDay: { cause: 'Mutual aid fund' },
+        });
+        expect(savedStructured?.flashDay).not.toHaveProperty('eventSlug');
+      });
+
+      it('refuses an eventSlug when the persona went unlinked while the save waited on the lock', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        affiliationEligibility.eligibleFlashDayEventSlugs.mockResolvedValue(
+          new Set([EVENT_SLUG]),
+        );
+        manager.findOne.mockImplementation((entity: unknown) =>
+          Promise.resolve(
+            entity === Subprofile
+              ? makeTattooPersona({
+                  linkVisibility: SubprofileLinkVisibility.Unlinked,
+                  handle: null,
+                })
+              : null,
+          ),
+        );
+        manager.find.mockResolvedValue([]);
+
+        await expect(
+          service.replaceSection(REQUESTER_ID, 'sp-1', 'flash_days', [
+            {
+              title: 'Pride flash day',
+              date: FLASH_DAY_DATE,
+              structured: { flashDay: { eventSlug: EVENT_SLUG } },
+            },
+          ]),
+        ).rejects.toMatchObject({
+          response: { code: 'FLASH_DAY_EVENT_UNLINKED_PERSONA', itemIndex: 0 },
+        });
+        expect(dataSource.transaction).toHaveBeenCalled();
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a new healed image without consent with CLIENT_CONSENT_REQUIRED and writes nothing', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        manager.find.mockResolvedValue([]);
+
+        await expect(
+          service.replaceSection(REQUESTER_ID, 'sp-1', 'healed', [
+            {
+              title: 'Healed rose',
+              imageUrl: AFTER_UPLOAD,
+              structured: { photo: { hasClientConsent: false } },
+            },
+          ]),
+        ).rejects.toMatchObject({
+          response: { code: 'CLIENT_CONSENT_REQUIRED', itemIndex: 0 },
+        });
+        expect(manager.save).not.toHaveBeenCalled();
+        expect(manager.remove).not.toHaveBeenCalled();
+        expect(personaImageKeys.rehomeForPersonaWrite).not.toHaveBeenCalled();
+      });
+
+      it('saves a reorder of legacy healed rows that carry no photo flags', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        const alpha = makeItem({
+          id: 'it-alpha',
+          section: SubprofileSection.Healed,
+          title: 'Alpha',
+          imageUrl: AFTER_UPLOAD,
+          position: 0,
+        });
+        const beta = makeItem({
+          id: 'it-beta',
+          section: SubprofileSection.Healed,
+          title: 'Beta',
+          imageUrl: BEFORE_UPLOAD,
+          position: 1,
+        });
+        manager.find.mockImplementation((entity: unknown) =>
+          entity === SubprofileItem
+            ? Promise.resolve([alpha, beta])
+            : Promise.resolve([]),
+        );
+
+        await service.replaceSection(REQUESTER_ID, 'sp-1', 'healed', [
+          { title: 'Beta', imageUrl: BEFORE_UPLOAD },
+          { title: 'Alpha', imageUrl: AFTER_UPLOAD },
+        ]);
+
+        expect(savedRowsOf(0).map((row) => row.imageUrl)).toEqual([
+          BEFORE_UPLOAD,
+          AFTER_UPLOAD,
+        ]);
+      });
+
+      it('answers CLIENT_CONSENT_REQUIRED first when a new image is also a foreign upload', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        manager.find.mockResolvedValue([]);
+
+        await expect(
+          service.replaceSection(REQUESTER_ID, 'sp-1', 'healed', [
+            {
+              title: 'Healed rose',
+              imageUrl: OTHER_PERSONA_KEY,
+              structured: { photo: { hasClientConsent: false } },
+            },
+          ]),
+        ).rejects.toMatchObject({
+          response: { code: 'CLIENT_CONSENT_REQUIRED', itemIndex: 0 },
+        });
+        expect(personaImageKeys.isMemberOfKeyPersona).not.toHaveBeenCalled();
+      });
+
+      it('refuses a foreign upload in a session photo', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        manager.find.mockResolvedValue([]);
+
+        await expect(
+          service.replaceSection(REQUESTER_ID, 'sp-1', 'in_progress', [
+            {
+              title: 'Back piece',
+              structured: {
+                photo: { hasClientConsent: true },
+                sessions: [
+                  { imageUrl: FIRST_SESSION_UPLOAD },
+                  { imageUrl: FOREIGN_UPLOAD },
+                ],
+              },
+            },
+          ]),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('rehomes the before photo and session photos on an unlinked persona and stores the rewritten structured', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeTattooPersona({
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            handle: null,
+          }),
+        );
+        manager.find.mockResolvedValue([]);
+        personaImageKeys.rehomeForPersonaWrite.mockResolvedValue(
+          new Map([
+            [AFTER_UPLOAD, MINTED_AFTER],
+            [BEFORE_UPLOAD, MINTED_BEFORE],
+            [FIRST_SESSION_UPLOAD, MINTED_FIRST_SESSION],
+            [SECOND_SESSION_UPLOAD, MINTED_SECOND_SESSION],
+          ]),
+        );
+
+        await service.replaceSection(REQUESTER_ID, 'sp-1', 'cover_ups', [
+          {
+            title: 'Rose over a name',
+            imageUrl: AFTER_UPLOAD,
+            structured: {
+              photo: { hasClientConsent: true },
+              coverUp: { type: 'cover_up', beforeImageUrl: BEFORE_UPLOAD },
+            },
+          },
+        ]);
+        await service.replaceSection(REQUESTER_ID, 'sp-1', 'in_progress', [
+          {
+            title: 'Back piece',
+            structured: {
+              photo: { hasClientConsent: true },
+              sessions: [
+                { imageUrl: FIRST_SESSION_UPLOAD, date: '2026-09-01' },
+                { imageUrl: SECOND_SESSION_UPLOAD, note: 'Shading' },
+              ],
+            },
+          },
+        ]);
+
+        expect(personaImageKeys.rehomeForPersonaWrite).toHaveBeenNthCalledWith(
+          1,
+          manager,
+          'sp-1',
+          [AFTER_UPLOAD, BEFORE_UPLOAD],
+        );
+        expect(personaImageKeys.rehomeForPersonaWrite).toHaveBeenNthCalledWith(
+          2,
+          manager,
+          'sp-1',
+          [FIRST_SESSION_UPLOAD, SECOND_SESSION_UPLOAD],
+        );
+        const [coverUpRow] = savedRowsOf(0);
+        expect(coverUpRow?.imageUrl).toBe(MINTED_AFTER);
+        expect(coverUpRow?.structured).toEqual({
+          photo: { hasClientConsent: true },
+          coverUp: { type: 'cover_up', beforeImageUrl: MINTED_BEFORE },
+        });
+        const [inProgressRow] = savedRowsOf(1);
+        expect(inProgressRow?.structured).toEqual({
+          photo: { hasClientConsent: true },
+          sessions: [
+            { imageUrl: MINTED_FIRST_SESSION, date: '2026-09-01' },
+            { imageUrl: MINTED_SECOND_SESSION, note: 'Shading' },
+          ],
+        });
+      });
+
+      it('lists flash day event options for an owner', async () => {
+        const persona = makeTattooPersona({ userId: 'user-1' });
+        subprofiles.findOne.mockResolvedValue(persona);
+        const options = [
+          {
+            slug: EVENT_SLUG,
+            title: 'Pride flash day',
+            startsAt: '2026-11-14T12:00:00.000Z',
+            endsAt: null,
+            venue: 'Studio Lumen',
+            neighbourhood: 'Mouraria',
+            isOnline: false,
+            imageUrl: null,
+          },
+        ];
+        affiliationEligibility.listFlashDayEventOptions.mockResolvedValue(
+          options,
+        );
+
+        await expect(
+          service.listFlashDayEventOptions('user-1', 'sp-1'),
+        ).resolves.toEqual(options);
+        expect(membership.getOwned).toHaveBeenCalledWith('user-1', 'sp-1');
+        expect(
+          affiliationEligibility.listFlashDayEventOptions,
+        ).toHaveBeenCalledWith('user-1', persona);
+        const getOwnedOrder =
+          membership.getOwned.mock.invocationCallOrder[0] ?? 0;
+        const optionsOrder =
+          affiliationEligibility.listFlashDayEventOptions.mock
+            .invocationCallOrder[0] ?? 0;
+        expect(getOwnedOrder).toBeLessThan(optionsOrder);
+      });
+
+      it('403s the flash day event options for a non-owner before reading anything', async () => {
+        subprofiles.findOne.mockResolvedValue(makeTattooPersona());
+        members.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.listFlashDayEventOptions('stranger-1', 'sp-1'),
+        ).rejects.toThrow(ForbiddenException);
+        expect(
+          affiliationEligibility.listFlashDayEventOptions,
+        ).not.toHaveBeenCalled();
       });
     });
   });
@@ -4259,6 +4899,113 @@ describe('SubprofilesService', () => {
       });
     });
 
+    // Tattoo contract: a tattoo persona's books status is the authority for
+    // `availability` on every save, and the PATCH validates the `tattoo*`
+    // skin keys before anything is written.
+    describe('tattoo books status', () => {
+      const earlierStamp = new Date('2026-03-01T09:00:00Z');
+      const tattooSkin = (status: string) =>
+        ({ tattoo: { status } }) as unknown as SkinData;
+      const savedRow = () => (manager.save.mock.calls[0] as [Subprofile])[0];
+
+      it('saves availability booking for a waitlist tattoo persona whatever the PATCH sent', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            kind: SubprofileKind.TattooArtist,
+            availability: 'open_to_collabs',
+          }),
+        );
+        await service.update('user-1', 'sp-1', {
+          availability: 'open_to_collabs',
+          skinData: tattooSkin('waitlist'),
+        });
+        expect(savedRow().availability).toBe('booking');
+      });
+
+      it('forces availability from the stored books status when the PATCH sends availability alone', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            kind: SubprofileKind.TattooArtist,
+            availability: 'not_available',
+            skinData: tattooSkin('closed'),
+          }),
+        );
+        await service.update('user-1', 'sp-1', {
+          availability: 'booking',
+        });
+        expect(savedRow().availability).toBe('not_available');
+      });
+
+      it('keeps the sent availability on a tattoo persona with no books status', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            kind: SubprofileKind.TattooArtist,
+            availability: 'open_to_collabs',
+            skinData: null,
+          }),
+        );
+        await service.update('user-1', 'sp-1', {
+          availability: 'booking',
+        });
+        expect(savedRow().availability).toBe('booking');
+      });
+
+      it("leaves a therapist persona's availability as sent", async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            kind: SubprofileKind.Therapist,
+            availability: 'booking',
+            skinData: tattooSkin('waitlist'),
+          }),
+        );
+        await service.update('user-1', 'sp-1', {
+          availability: 'open_to_collabs',
+        });
+        expect(savedRow().availability).toBe('open_to_collabs');
+      });
+
+      it('stamps availabilityUpdatedAt when only the books status moved', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            kind: SubprofileKind.TattooArtist,
+            availability: 'open_to_collabs',
+            skinData: tattooSkin('open'),
+            availabilityUpdatedAt: earlierStamp,
+          }),
+        );
+        const before = Date.now();
+        await service.update('user-1', 'sp-1', {
+          skinData: tattooSkin('closed'),
+        });
+        const stamp = savedRow().availabilityUpdatedAt;
+        expect(savedRow().availability).toBe('not_available');
+        expect(stamp).toBeInstanceOf(Date);
+        expect(stamp).not.toEqual(earlierStamp);
+        expect(stamp!.getTime()).toBeGreaterThanOrEqual(before);
+      });
+
+      it('refuses a PATCH with a bad deposit amount with 400 TATTOO_SKIN_INVALID and saves nothing', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({ kind: SubprofileKind.TattooArtist }),
+        );
+        const badDepositSkin = {
+          tattooPrices: { deposit: { amount: '1234567' } },
+        } as unknown as SkinData;
+        const attempt = service.update('user-1', 'sp-1', {
+          skinData: badDepositSkin,
+        });
+        await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+        await expect(attempt).rejects.toMatchObject({
+          response: {
+            code: 'TATTOO_SKIN_INVALID',
+            path: 'tattooPrices.deposit.amount',
+          },
+        });
+        expect(manager.save).not.toHaveBeenCalled();
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      });
+    });
+
     // A link switch frees the old name WITHOUT forwarding, in either
     // direction: forwarding would tie a pseudonymous address to the member
     // behind it. A plain handle edit keeps forwarding, for both link kinds.
@@ -5020,6 +5767,34 @@ describe('SubprofilesService', () => {
             manager.query.mock.invocationCallOrder[rekeyCallIndex()] ?? 0;
           expect(identityDeleteOrder).toBeGreaterThan(0);
           expect(identityDeleteOrder).toBeLessThan(rekeyOrder);
+        });
+
+        // Tattoo contract "Flash day event links": an unlinked persona links
+        // no event, so the switch clears every stored flash day event slug
+        // under the old id, before the re-key.
+        it('clears flash day event slugs on unlink inside the switch transaction', async () => {
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+          expect(manager.query).toHaveBeenCalledWith(
+            expect.stringContaining(`#- '{flashDay,eventSlug}'`),
+            ['sp-1', 'flash_days'],
+          );
+          const clearCallIndex = manager.query.mock.calls.findIndex(
+            ([sql]: unknown[]) =>
+              typeof sql === 'string' &&
+              sql.includes(`#- '{flashDay,eventSlug}'`),
+          );
+          const clearOrder =
+            manager.query.mock.invocationCallOrder[clearCallIndex] ?? 0;
+          const rekeyOrder =
+            manager.query.mock.invocationCallOrder[rekeyCallIndex()] ?? 0;
+          expect(clearOrder).toBeGreaterThan(0);
+          expect(clearOrder).toBeLessThan(rekeyOrder);
         });
 
         // A member's block of the persona identity must outlive the identity:
@@ -6048,6 +6823,324 @@ describe('SubprofilesService', () => {
         ).rejects.toThrow(new ForbiddenException('Not your subprofile'));
         expect(manager.save).not.toHaveBeenCalled();
         expect(manager.update).not.toHaveBeenCalled();
+      });
+    });
+
+    // Tattoo contract: a restore applies the consent rule as a blur, keeps
+    // a flash day event link only while it stays valid, and rehomes every
+    // image ref the restored item stores.
+    describe('tattoo restores', () => {
+      const OLD_WORK_IMAGE = 'work-image/u1/old.jpg';
+      const NEW_WORK_IMAGE = 'work-image/u1/new.jpg';
+      const OLD_BEFORE_IMAGE = 'work-image/u1/old-before.jpg';
+      const NEW_BEFORE_IMAGE = 'work-image/u1/new-before.jpg';
+      const OLD_SESSION_IMAGE = 'work-image/u1/old-session.jpg';
+      const NEW_SESSION_IMAGE = 'work-image/u1/new-session.jpg';
+      const PERSONA_AFTER_KEY =
+        'persona/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jpg';
+      const PERSONA_BEFORE_KEY =
+        'persona/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/cccccccc-cccc-cccc-cccc-cccccccccccc.jpg';
+      const PERSONA_SESSION_KEY =
+        'persona/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/dddddddd-dddd-dddd-dddd-dddddddddddd.jpg';
+      const EVENT_SLUG = 'pride-flash-day';
+
+      const stageTattooRestore = (staged: {
+        persona: Subprofile;
+        currentItem: SubprofileItem;
+        snapshotItem: SubprofileItem;
+        sectionRows: SubprofileItem[];
+      }) => {
+        const revision = {
+          id: 'rev-1',
+          itemId: 'it-1',
+          subprofileId: 'sp-1',
+          section: staged.currentItem.section,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+          snapshot: editableSnapshot(staged.snapshotItem),
+        };
+        manager.findOne.mockImplementation((entity: unknown) => {
+          if (entity === Subprofile) return Promise.resolve(staged.persona);
+          if (entity === SubprofileItem) {
+            return Promise.resolve(staged.currentItem);
+          }
+          if (entity === SubprofileItemRevision) {
+            return Promise.resolve(revision);
+          }
+          return Promise.resolve(null);
+        });
+        manager.find.mockImplementation((entity: unknown) =>
+          Promise.resolve(entity === SubprofileItem ? staged.sectionRows : []),
+        );
+      };
+
+      const savedRestoredItem = () =>
+        (
+          manager.save.mock.calls.find(
+            (call) => (call[0] as { id?: string }).id === 'it-1',
+          ) as [SubprofileItem] | undefined
+        )?.[0];
+
+      it('restores a scar work revision with an unstored image as blurred without consent', async () => {
+        stageTattooRestore({
+          persona: lockedPersona(),
+          currentItem: makeItem({
+            id: 'it-1',
+            section: SubprofileSection.ScarWork,
+            imageUrl: NEW_WORK_IMAGE,
+            structured: { photo: { hasClientConsent: true } },
+          }),
+          snapshotItem: makeItem({
+            section: SubprofileSection.ScarWork,
+            imageUrl: OLD_WORK_IMAGE,
+            structured: { photo: { isBlurred: false } },
+          }),
+          sectionRows: [
+            makeItem({
+              id: 'it-1',
+              section: SubprofileSection.ScarWork,
+              imageUrl: NEW_WORK_IMAGE,
+            }),
+          ],
+        });
+
+        const editVersion = await service.restoreRevision(
+          'user-1',
+          'sp-1',
+          'it-1',
+          'rev-1',
+          4,
+        );
+
+        expect(editVersion).toBe(5);
+        expect(manager.find).toHaveBeenCalledWith(SubprofileItem, {
+          where: { subprofileId: 'sp-1', section: SubprofileSection.ScarWork },
+        });
+        const restoredItem = savedRestoredItem();
+        expect(restoredItem?.imageUrl).toBe(OLD_WORK_IMAGE);
+        expect(restoredItem?.structured?.photo).toEqual({
+          hasClientConsent: false,
+          isBlurred: true,
+        });
+      });
+
+      it("keeps a restored revision's photo flags when its images are still stored", async () => {
+        stageTattooRestore({
+          persona: lockedPersona(),
+          currentItem: makeItem({
+            id: 'it-1',
+            section: SubprofileSection.ScarWork,
+            imageUrl: NEW_WORK_IMAGE,
+          }),
+          snapshotItem: makeItem({
+            section: SubprofileSection.ScarWork,
+            imageUrl: OLD_WORK_IMAGE,
+            structured: { photo: { isBlurred: false } },
+          }),
+          sectionRows: [
+            makeItem({
+              id: 'it-1',
+              section: SubprofileSection.ScarWork,
+              imageUrl: NEW_WORK_IMAGE,
+            }),
+            makeItem({
+              id: 'it-2',
+              section: SubprofileSection.ScarWork,
+              imageUrl: OLD_WORK_IMAGE,
+            }),
+          ],
+        });
+
+        await service.restoreRevision('user-1', 'sp-1', 'it-1', 'rev-1');
+
+        expect(savedRestoredItem()?.structured).toEqual({
+          photo: { isBlurred: false },
+        });
+      });
+
+      it('drops the eventSlug of a flash day restored onto an unlinked persona', async () => {
+        stageTattooRestore({
+          persona: lockedPersona({
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          }),
+          currentItem: makeItem({
+            id: 'it-1',
+            section: SubprofileSection.FlashDays,
+            structured: { flashDay: { cause: 'Mutual aid fund' } },
+          }),
+          snapshotItem: makeItem({
+            section: SubprofileSection.FlashDays,
+            structured: {
+              flashDay: { eventSlug: EVENT_SLUG, cause: 'Mutual aid fund' },
+            },
+          }),
+          sectionRows: [],
+        });
+
+        await expect(
+          service.restoreRevision('user-1', 'sp-1', 'it-1', 'rev-1', 4),
+        ).resolves.toBe(5);
+
+        expect(savedRestoredItem()?.structured).toEqual({
+          flashDay: { cause: 'Mutual aid fund' },
+        });
+        expect(
+          affiliationEligibility.eligibleFlashDayEventSlugs,
+        ).not.toHaveBeenCalled();
+      });
+
+      it('drops an eventSlug that is no longer eligible', async () => {
+        stageTattooRestore({
+          persona: lockedPersona({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+          currentItem: makeItem({
+            id: 'it-1',
+            section: SubprofileSection.FlashDays,
+            structured: { flashDay: { cause: 'Mutual aid fund' } },
+          }),
+          snapshotItem: makeItem({
+            section: SubprofileSection.FlashDays,
+            structured: {
+              flashDay: { eventSlug: EVENT_SLUG, cause: 'Mutual aid fund' },
+            },
+          }),
+          sectionRows: [],
+        });
+        affiliationEligibility.eligibleFlashDayEventSlugs.mockResolvedValue(
+          new Set<string>(),
+        );
+
+        await expect(
+          service.restoreRevision('user-1', 'sp-1', 'it-1', 'rev-1', 4),
+        ).resolves.toBe(5);
+
+        expect(
+          affiliationEligibility.eligibleFlashDayEventSlugs,
+        ).toHaveBeenCalledWith(expect.objectContaining({ id: 'sp-1' }), [
+          EVENT_SLUG,
+        ]);
+        expect(savedRestoredItem()?.structured).toEqual({
+          flashDay: { cause: 'Mutual aid fund' },
+        });
+      });
+
+      it('keeps the eventSlug of a flash day whose event is still eligible', async () => {
+        stageTattooRestore({
+          persona: lockedPersona({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+          currentItem: makeItem({
+            id: 'it-1',
+            section: SubprofileSection.FlashDays,
+            structured: { flashDay: { cause: 'Mutual aid fund' } },
+          }),
+          snapshotItem: makeItem({
+            section: SubprofileSection.FlashDays,
+            structured: {
+              flashDay: { eventSlug: EVENT_SLUG, cause: 'Mutual aid fund' },
+            },
+          }),
+          sectionRows: [],
+        });
+        affiliationEligibility.eligibleFlashDayEventSlugs.mockResolvedValue(
+          new Set([EVENT_SLUG]),
+        );
+
+        await service.restoreRevision('user-1', 'sp-1', 'it-1', 'rev-1');
+
+        expect(savedRestoredItem()?.structured).toEqual({
+          flashDay: { eventSlug: EVENT_SLUG, cause: 'Mutual aid fund' },
+        });
+      });
+
+      it("rehomes a restored revision's nested photos on an unlinked persona", async () => {
+        stageTattooRestore({
+          persona: lockedPersona({
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          }),
+          currentItem: makeItem({
+            id: 'it-1',
+            section: SubprofileSection.CoverUps,
+            imageUrl: NEW_WORK_IMAGE,
+            structured: {
+              photo: { hasClientConsent: true },
+              coverUp: { type: 'cover_up', beforeImageUrl: NEW_BEFORE_IMAGE },
+            },
+          }),
+          snapshotItem: makeItem({
+            section: SubprofileSection.CoverUps,
+            imageUrl: OLD_WORK_IMAGE,
+            structured: {
+              photo: { hasClientConsent: true },
+              coverUp: { type: 'cover_up', beforeImageUrl: OLD_BEFORE_IMAGE },
+            },
+          }),
+          sectionRows: [],
+        });
+        personaImageKeys.rehomeForPersonaWrite.mockResolvedValue(
+          new Map([
+            [OLD_WORK_IMAGE, PERSONA_AFTER_KEY],
+            [OLD_BEFORE_IMAGE, PERSONA_BEFORE_KEY],
+          ]),
+        );
+
+        await service.restoreRevision('user-1', 'sp-1', 'it-1', 'rev-1');
+
+        expect(personaImageKeys.rehomeForPersonaWrite).toHaveBeenCalledWith(
+          manager,
+          'sp-1',
+          [OLD_WORK_IMAGE, OLD_BEFORE_IMAGE],
+          {
+            shouldRefreshOwnKeys: true,
+            keepValues: [NEW_WORK_IMAGE, NEW_BEFORE_IMAGE],
+          },
+        );
+        const restoredItem = savedRestoredItem();
+        expect(restoredItem?.imageUrl).toBe(PERSONA_AFTER_KEY);
+        expect(restoredItem?.structured).toEqual({
+          photo: { hasClientConsent: true },
+          coverUp: { type: 'cover_up', beforeImageUrl: PERSONA_BEFORE_KEY },
+        });
+      });
+
+      it("rehomes a restored revision's session photos on an unlinked persona", async () => {
+        stageTattooRestore({
+          persona: lockedPersona({
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          }),
+          currentItem: makeItem({
+            id: 'it-1',
+            section: SubprofileSection.InProgress,
+            structured: {
+              photo: { hasClientConsent: true },
+              sessions: [{ imageUrl: NEW_SESSION_IMAGE }],
+            },
+          }),
+          snapshotItem: makeItem({
+            section: SubprofileSection.InProgress,
+            structured: {
+              photo: { hasClientConsent: true },
+              sessions: [{ imageUrl: OLD_SESSION_IMAGE, note: 'Linework' }],
+            },
+          }),
+          sectionRows: [],
+        });
+        personaImageKeys.rehomeForPersonaWrite.mockResolvedValue(
+          new Map([[OLD_SESSION_IMAGE, PERSONA_SESSION_KEY]]),
+        );
+
+        await service.restoreRevision('user-1', 'sp-1', 'it-1', 'rev-1');
+
+        expect(personaImageKeys.rehomeForPersonaWrite).toHaveBeenCalledWith(
+          manager,
+          'sp-1',
+          [OLD_SESSION_IMAGE],
+          { shouldRefreshOwnKeys: true, keepValues: [NEW_SESSION_IMAGE] },
+        );
+        expect(savedRestoredItem()?.structured).toEqual({
+          photo: { hasClientConsent: true },
+          sessions: [{ imageUrl: PERSONA_SESSION_KEY, note: 'Linework' }],
+        });
       });
     });
   });

@@ -876,6 +876,146 @@ describe('attachment copy (ENG-227)', () => {
   });
 });
 
+describe('Studio share copy (Studio rich cards)', () => {
+  const STUDIO_ORIGIN = 'https://queerpulse.test';
+  const STUDIO_ID = '0f8a3c2e-5b1d-4e6f-9a7b-1c2d3e4f5a6b';
+  const STUDIO_TRACK_URL = `${STUDIO_ORIGIN}/studio/track?id=${STUDIO_ID}`;
+  const STUDIO_RELEASE_URL = `${STUDIO_ORIGIN}/studio/album?id=${STUDIO_ID}`;
+  const STUDIO_PLAYLIST_URL = `${STUDIO_ORIGIN}/studio/collection?id=${STUDIO_ID}`;
+  const originalFrontendUrl = process.env.FRONTEND_URL;
+
+  beforeEach(() => {
+    process.env.FRONTEND_URL = STUDIO_ORIGIN;
+  });
+
+  afterEach(() => {
+    if (originalFrontendUrl === undefined) {
+      delete process.env.FRONTEND_URL;
+    } else {
+      process.env.FRONTEND_URL = originalFrontendUrl;
+    }
+  });
+
+  it('pushes the share line alone for a DM that is only a Studio link', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent({ body: STUDIO_TRACK_URL }));
+    const payload = sentPayload(push, 0);
+    expect(payload.title).toBe('Alex Doe');
+    expect(payload.body).toBe('Shared a track from Studio');
+    expect(payload.l10n).toEqual({ bodyKey: 'push:messages.studio.track' });
+  });
+
+  it('adds the note and leaves the link out for a DM with a note', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: `this one for the drive home\n${STUDIO_TRACK_URL}` }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe(
+      'Shared a track from Studio: this one for the drive home',
+    );
+    expect(payload.body).not.toContain('queerpulse.test');
+    expect(payload.l10n).toEqual({
+      bodyKey: 'push:messages.studio.trackWithNote',
+      params: { note: 'this one for the drive home' },
+    });
+  });
+
+  it('names the sender under the group title for a release with a note', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: `${STUDIO_RELEASE_URL} for Saturday` }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.title).toBe('Terrace crew');
+    expect(payload.body).toBe(
+      'Alex Doe shared a release from Studio: for Saturday',
+    );
+    expect(payload.l10n).toEqual({
+      bodyKey: 'push:messages.group.studio.releaseWithNote',
+      params: { name: 'Alex Doe', note: 'for Saturday' },
+    });
+    expect(payload.data.isGroup).toBe(true);
+  });
+
+  it('pushes the group share line alone when only punctuation is left', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: `${STUDIO_PLAYLIST_URL}.` }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe('Alex Doe shared a playlist from Studio');
+    expect(payload.l10n).toEqual({
+      bodyKey: 'push:messages.group.studio.playlist',
+      params: { name: 'Alex Doe' },
+    });
+  });
+
+  it('previews a Studio path on another host as plain text', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    const body = `look https://elsewhere.example/studio/track?id=${STUDIO_ID}`;
+    await listener.handleMessageCreated(makeEvent({ body }));
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe(body);
+    expect(payload).not.toHaveProperty('l10n');
+  });
+
+  it('folds a mention into one share push for the mentioned member', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+      mentionSlugUserIds: { ana: 'recipient-1' },
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: `@ana this one ${STUDIO_RELEASE_URL}` }),
+    );
+    expect(push.sendToUsers).toHaveBeenCalledTimes(2);
+    const calls = push.sendToUsers.mock.calls as [string[], PushPayload][];
+    const mentionCall = calls.find(([userIds]) =>
+      userIds.includes('recipient-1'),
+    );
+    const plainCall = calls.find(([userIds]) =>
+      userIds.includes('recipient-2'),
+    );
+    if (!mentionCall || !plainCall) {
+      throw new Error('expected one call per recipient');
+    }
+    const [, mentionPayload] = mentionCall;
+    const [, plainPayload] = plainCall;
+    expect(mentionPayload.body).toBe(
+      'Alex Doe mentioned you and shared a release from Studio: @ana this one',
+    );
+    expect(mentionPayload.l10n).toEqual({
+      bodyKey: 'push:messages.group.mention.studio.releaseWithNote',
+      params: { name: 'Alex Doe', note: '@ana this one' },
+    });
+    expect(plainPayload.body).toBe(
+      'Alex Doe shared a release from Studio: @ana this one',
+    );
+  });
+});
+
 describe('per-recipient push pacing (ENG-230)', () => {
   const START_MS = 1_800_000_000_000;
 

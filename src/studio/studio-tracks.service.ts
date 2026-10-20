@@ -43,6 +43,10 @@ import {
   studioError,
   studioFormatForKind,
 } from './studio.constants';
+import {
+  normalizeContentWarnings,
+  studioSafetyError,
+} from './studio-safety.constants';
 
 /** Whether a requested order names every current track exactly once. */
 export function isSameTrackSet(
@@ -94,6 +98,7 @@ function chaptersForTrack(
  * Studio artist kinds: a new track on a published show is a draft episode,
  * the show's order is fixed once it is out, and the lyrics cap, show notes
  * and sources follow the persona's format and the release type.
+ * Studio safety: a PATCH writes the artist's content warnings and keeps an explicit flag our team locked.
  */
 @Injectable()
 export class StudioTracksService {
@@ -178,7 +183,16 @@ export class StudioTracksService {
         track.sources = sourcesForTrack(body.sources, release);
       }
       if (body.isExplicit !== undefined) {
+        // Studio safety: our team's explicit mark stays on; asking to keep
+        // it on changes nothing.
+        if (!body.isExplicit && track.explicitLockedAt) {
+          throw studioSafetyError('studio_track_explicit_locked');
+        }
         track.isExplicit = body.isExplicit;
+      }
+      if (body.contentWarnings !== undefined) {
+        // Studio safety: the artist list only, once each in theme order.
+        track.contentWarnings = normalizeContentWarnings(body.contentWarnings);
       }
       if (body.waveformPeaks !== undefined) {
         track.waveformPeaks =
@@ -306,8 +320,11 @@ export class StudioTracksService {
       userId,
       unlockedTrack.releaseId,
     );
+    // Studio safety: the track row too, after the release row, so a PATCH
+    // and a staff mark-explicit (which locks the track) run one at a time.
     const track = await manager.findOne(StudioTrack, {
       where: { id: trackId, releaseId: release.id },
+      lock: { mode: 'pessimistic_write' },
     });
     if (!track) {
       throw new NotFoundException('Track not found');

@@ -15,10 +15,16 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
+import { recordCreatorDraftViewed } from '../creator-drafts/creator-draft-audit';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminListingDraftsService } from './admin-listing-drafts.service';
 import { ListAdminListingDraftsQuery } from './dto/list-admin-listing-drafts.query';
@@ -36,6 +42,8 @@ import { ListAdminListingDraftsQuery } from './dto/list-admin-listing-drafts.que
  * console can only finish the BUSINESS half as a team listing offered back to
  * them (`GET :id` returns that half and nothing about the member), and they
  * add their own answers and take the pledge when they accept.
+ *
+ * Every detail read writes a `creator_draft_viewed` row to the Platform log.
  */
 @Feature('listings')
 @UseGuards(ActiveMemberGuard, RolesGuard)
@@ -46,7 +54,10 @@ import { ListAdminListingDraftsQuery } from './dto/list-admin-listing-drafts.que
 @ApiForbiddenResponse({ description: 'Requires the admin role.' })
 @Controller('admin/listing-drafts')
 export class AdminListingDraftsController {
-  constructor(private readonly adminListingDrafts: AdminListingDraftsService) {}
+  constructor(
+    private readonly adminListingDrafts: AdminListingDraftsService,
+    private readonly modAudit: ModAuditService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -76,7 +87,18 @@ export class AdminListingDraftsController {
   @ApiNotFoundResponse({
     description: 'No such draft, or it was submitted or discarded.',
   })
-  getOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.adminListingDrafts.getOne(id);
+  async getOne(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    const detail = await this.adminListingDrafts.getOne(id);
+    await recordCreatorDraftViewed(
+      this.modAudit,
+      user.userId,
+      'listing',
+      id,
+      'listing_drafts',
+    );
+    return detail;
   }
 }

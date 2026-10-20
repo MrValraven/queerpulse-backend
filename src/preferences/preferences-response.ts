@@ -156,12 +156,14 @@ export function toLanguagePreferenceDTO(
 
 /**
  * `GET|PUT /me/studio-playback` (Studio open demo pages): the Studio
- * player's three settings, named for what each one does.
+ * player's four settings, named for what each one does.
  */
 export interface StudioPlaybackDTO {
   autoplayNext: boolean;
   hideExplicit: boolean;
   crossfadeSeconds: number;
+  /** Studio safety and moderation: pause before a warned track. */
+  askBeforeWarnings: boolean;
 }
 
 export function toStudioPlaybackDTO(row: MemberPreferences): StudioPlaybackDTO {
@@ -169,5 +171,6 @@ export function toStudioPlaybackDTO(row: MemberPreferences): StudioPlaybackDTO {
     autoplayNext: row.studioAutoplayNext,
     hideExplicit: row.studioHideExplicit,
     crossfadeSeconds: row.studioCrossfadeSeconds,
+    askBeforeWarnings: row.studioAskBeforeWarnings,
   };
 }

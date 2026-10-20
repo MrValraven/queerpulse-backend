@@ -1,7 +1,10 @@
 import { DataSource } from 'typeorm';
 import { NEW_DOMAIN_EXPORT_CONTRIBUTORS } from './data-export-contributors';
 import {
+  StudioCopyrightClaimsExportContributor,
   StudioPersonaCreditsExportContributor,
+  StudioPlaylistAdditionsExportContributor,
+  StudioPlaylistSeatsExportContributor,
   StudioPlaylistsExportContributor,
   StudioReleaseRemindersExportContributor,
 } from './data-export-contributors-studio';
@@ -309,5 +312,241 @@ describe('StudioReleaseRemindersExportContributor', () => {
     );
     // No status filter in the WHERE clause, so no reminder row is dropped.
     expect(sql.slice(sql.indexOf('WHERE'))).not.toContain('"status"');
+  });
+});
+
+describe('StudioPlaylistSeatsExportContributor', () => {
+  let query: jest.Mock;
+  let contributor: StudioPlaylistSeatsExportContributor;
+
+  beforeEach(() => {
+    query = jest.fn();
+    contributor = new StudioPlaylistSeatsExportContributor({
+      query,
+    } as unknown as DataSource);
+  });
+
+  it('rides on the saved category under its own archive key, after the persona posts', () => {
+    expect(contributor.category).toBe('saved');
+    expect(contributor.archiveKey).toBe('studioPlaylistSeats');
+    expect(NEW_DOMAIN_EXPORT_CONTRIBUTORS).toContain(
+      StudioPlaylistSeatsExportContributor,
+    );
+    const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
+    expect(csvKeys.indexOf('studioPlaylistSeats')).toBe(
+      csvKeys.indexOf('personaPosts') + 1,
+    );
+  });
+
+  it('writes every seat the member holds or held, ended ones included', async () => {
+    query.mockResolvedValueOnce([
+      {
+        playlist_name: 'Night bus',
+        status: 'active',
+        source: 'member_invite',
+        invited_at: new Date('2026-10-14T09:00:00.000Z'),
+        accepted_at: new Date('2026-10-14T09:30:00.000Z'),
+        ended_at: null,
+      },
+      {
+        playlist_name: 'As the persona',
+        status: 'revoked',
+        source: 'persona_co_owner',
+        invited_at: new Date('2026-10-14T10:00:00.000Z'),
+        accepted_at: null,
+        ended_at: new Date('2026-10-15T08:00:00.000Z'),
+      },
+    ]);
+
+    await expect(contributor.buildContribution(USER_ID)).resolves.toEqual([
+      {
+        playlistName: 'Night bus',
+        status: 'active',
+        source: 'member_invite',
+        invitedAt: '2026-10-14T09:00:00.000Z',
+        acceptedAt: '2026-10-14T09:30:00.000Z',
+        endedAt: null,
+      },
+      {
+        playlistName: 'As the persona',
+        status: 'revoked',
+        source: 'persona_co_owner',
+        invitedAt: '2026-10-14T10:00:00.000Z',
+        acceptedAt: null,
+        endedAt: '2026-10-15T08:00:00.000Z',
+      },
+    ]);
+    const [sql, parameters] = query.mock.calls[0] as [string, unknown[]];
+    expect(parameters).toEqual([USER_ID]);
+    expect(sql).toContain(`WHERE "editor"."user_id" = $1`);
+    expect(sql).not.toContain('"status" IN');
+  });
+
+  it('names no other member', async () => {
+    query.mockResolvedValueOnce([]);
+    await contributor.buildContribution(USER_ID);
+    const [sql] = query.mock.calls[0] as [string];
+    expect(sql).not.toContain('"invited_by_user_id"');
+    expect(sql).not.toContain('"profiles"');
+  });
+});
+
+describe('StudioPlaylistAdditionsExportContributor', () => {
+  let query: jest.Mock;
+  let contributor: StudioPlaylistAdditionsExportContributor;
+
+  beforeEach(() => {
+    query = jest.fn();
+    contributor = new StudioPlaylistAdditionsExportContributor({
+      query,
+    } as unknown as DataSource);
+  });
+
+  it('rides on the saved category right after the seats', () => {
+    expect(contributor.category).toBe('saved');
+    expect(contributor.archiveKey).toBe('studioPlaylistAdditions');
+    expect(NEW_DOMAIN_EXPORT_CONTRIBUTORS).toContain(
+      StudioPlaylistAdditionsExportContributor,
+    );
+    const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
+    expect(csvKeys.indexOf('studioPlaylistAdditions')).toBe(
+      csvKeys.indexOf('studioPlaylistSeats') + 1,
+    );
+    expect(
+      NEW_DOMAIN_EXPORT_CONTRIBUTORS.indexOf(
+        StudioPlaylistAdditionsExportContributor,
+      ),
+    ).toBe(
+      NEW_DOMAIN_EXPORT_CONTRIBUTORS.indexOf(
+        StudioPlaylistSeatsExportContributor,
+      ) + 1,
+    );
+  });
+
+  it('writes the tracks the member added to playlists they do not own, a gone track with a null title', async () => {
+    query.mockResolvedValueOnce([
+      {
+        playlist_name: 'Night bus',
+        track_title: 'Opening',
+        added_at: new Date('2026-10-14T09:05:00.000Z'),
+      },
+      {
+        playlist_name: 'Night bus',
+        track_title: null,
+        added_at: new Date('2026-10-14T09:06:00.000Z'),
+      },
+    ]);
+
+    await expect(contributor.buildContribution(USER_ID)).resolves.toEqual([
+      {
+        playlistName: 'Night bus',
+        trackTitle: 'Opening',
+        addedAt: '2026-10-14T09:05:00.000Z',
+      },
+      {
+        playlistName: 'Night bus',
+        trackTitle: null,
+        addedAt: '2026-10-14T09:06:00.000Z',
+      },
+    ]);
+    const [sql, parameters] = query.mock.calls[0] as [string, unknown[]];
+    expect(parameters).toEqual([USER_ID]);
+    expect(sql).toContain(`"entry"."added_by_user_id" = $1`);
+    expect(sql).toContain(`"playlist"."user_id" <> $1`);
+    expect(sql).toContain('LEFT JOIN "studio_tracks" "track"');
+  });
+});
+
+describe('StudioCopyrightClaimsExportContributor', () => {
+  let query: jest.Mock;
+  let contributor: StudioCopyrightClaimsExportContributor;
+
+  beforeEach(() => {
+    query = jest.fn();
+    contributor = new StudioCopyrightClaimsExportContributor({
+      query,
+    } as unknown as DataSource);
+  });
+
+  it('rides on the reports category under its own archive key, after the playlist additions', () => {
+    expect(contributor.category).toBe('reports');
+    expect(contributor.archiveKey).toBe('studioCopyrightClaims');
+    expect(NEW_DOMAIN_EXPORT_CONTRIBUTORS).toContain(
+      StudioCopyrightClaimsExportContributor,
+    );
+    const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
+    expect(csvKeys.indexOf('studioCopyrightClaims')).toBe(
+      csvKeys.indexOf('studioPlaylistAdditions') + 1,
+    );
+  });
+
+  it("writes each of the member's claims with the track, the artist and every step", async () => {
+    query.mockResolvedValueOnce([
+      {
+        track_title: 'Opening',
+        artist_name: 'Night Shift',
+        status: 'countered',
+        claimant_role: 'rights_holder',
+        original_work: 'Saudade by Ana Moura',
+        original_link: null,
+        details: 'The hook from 0:40',
+        counter_note: 'I wrote every bar',
+        claimant_reply: null,
+        staff_note: null,
+        created_at: new Date('2026-10-14T09:00:00.000Z'),
+        accepted_at: new Date('2026-10-14T10:00:00.000Z'),
+        countered_at: new Date('2026-10-14T11:00:00.000Z'),
+        replied_at: null,
+        decided_at: null,
+      },
+    ]);
+
+    expect(await contributor.buildContribution(USER_ID)).toEqual([
+      {
+        trackTitle: 'Opening',
+        artist: 'Night Shift',
+        status: 'countered',
+        claimantRole: 'rights_holder',
+        originalWork: 'Saudade by Ana Moura',
+        originalLink: null,
+        details: 'The hook from 0:40',
+        counterNote: 'I wrote every bar',
+        claimantReply: null,
+        staffNote: null,
+        createdAt: '2026-10-14T09:00:00.000Z',
+        acceptedAt: '2026-10-14T10:00:00.000Z',
+        counteredAt: '2026-10-14T11:00:00.000Z',
+        repliedAt: null,
+        decidedAt: null,
+      },
+    ]);
+    expect(query.mock.calls[0]?.[1]).toEqual([USER_ID]);
+    expect(query.mock.calls[0]?.[0]).toContain(
+      'WHERE "claim"."claimant_id" = $1',
+    );
+    expect(query.mock.calls[0]?.[0]).not.toContain('decided_by_id');
+  });
+
+  // A persona unlink severs the claim: the archive names the track and
+  // artist as they were at filing and reads no live row of the persona.
+  it('exports a severed claim with the names kept at filing and joins no live row', async () => {
+    query.mockResolvedValueOnce([]);
+
+    await contributor.buildContribution(USER_ID);
+
+    const [sql] = query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain(
+      'COALESCE("track"."title", "claim"."track_title_at_filing") AS "track_title"',
+    );
+    expect(sql).toContain(
+      'COALESCE("persona"."display_name", "claim"."artist_name_at_filing") AS "artist_name"',
+    );
+    expect(sql).toContain(
+      'ON "track"."id" = "claim"."track_id" AND NOT "claim"."is_severed"',
+    );
+    expect(sql).toContain(
+      'ON "release"."id" = "claim"."release_id" AND NOT "claim"."is_severed"',
+    );
+    expect(sql).toContain('ON "persona"."id" = "release"."subprofile_id"');
   });
 });

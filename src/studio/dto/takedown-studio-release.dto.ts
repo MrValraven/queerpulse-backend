@@ -21,6 +21,7 @@ export class TakedownStudioReleaseDto {
    * Studio open demo pages: the open `studio_release` report this takedown
    * was started from. It must be about this release, or the takedown is
    * refused. Every open report about the release is resolved either way.
+   * Or (Studio safety) a `studio_track` report about one of the release's tracks.
    */
   @IsOptional()
   @IsUUID()

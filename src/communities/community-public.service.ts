@@ -17,6 +17,7 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { toImageUrl } from '../common/image-url';
+import { VolunteeringService } from '../volunteering/volunteering.service';
 import {
   CommunityGateCardResponse,
   CommunityRulesResponse,
@@ -26,6 +27,7 @@ import {
   CommunityUpcomingGathering,
   CommunityUpcomingGatheringsResponse,
 } from './community-upcoming-gatherings-response';
+import { CommunityOpportunitiesResponse } from './community-volunteering-response';
 import { hasLivePendingInvite } from './community-invite-liveness';
 import { CommunityInvite } from './entities/community-invite.entity';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
@@ -140,6 +142,13 @@ const UPCOMING_GATHERINGS_MAX_PAGE = 10;
  * `getRules`, backing `GET /communities/:slug/rules`, serves the house rules
  * to the gate card's audience, since those are the people asked to accept
  * them at the door.
+ *
+ * `listOpenOpportunities`, backing `GET /communities/:slug/volunteering`,
+ * fills the community page's Volunteering tab: the open volunteer
+ * opportunities attributed to this community. Its audience is exactly
+ * `listUpcomingGatherings`'s (the roster, plus signed-in visitors of a
+ * `public` community), behind the same gates and the same 404 posture, with
+ * one widening: roster members keep reading an archived community's tab.
  */
 @Injectable()
 export class CommunityPublicService {
@@ -165,6 +174,10 @@ export class CommunityPublicService {
     // moderator-takedown gate `CommunitiesService.getBySlug` applies, so a
     // hidden or removed community stays a 404 there too.
     private readonly contentModeration: ContentModerationService,
+    // Read by `listOpenOpportunities` alone, once its gates have passed.
+    // Exported by `VolunteeringModule`, which `CommunitiesModule` already
+    // imports for the pulse lane, so this closes no cycle.
+    private readonly volunteering: VolunteeringService,
   ) {}
 
   async getPublicTeaser(slug: string): Promise<PublicCommunityResponse> {
@@ -429,6 +442,47 @@ export class CommunityPublicService {
   }
 
   /**
+   * `GET /communities/:slug/volunteering`: the community page's Volunteering
+   * tab, every open opportunity attributed to this community.
+   *
+   * FOUR STEPS, in this order.
+   *
+   * 1. MAY THIS CALLER SEE THE COMMUNITY AT ALL. `assertCommunityVisible`,
+   *    with the archive widened to the roster (PRD-143 parity, as `getRules`
+   *    asks): members keep reading an archived community, and its
+   *    opportunities with it. No pending-invite carve-out, so a private
+   *    community stays a 404 to everybody off its roster.
+   * 2. IS THIS CALLER A NON-MEMBER OF A GATED TIER. They get the gate card on
+   *    the page, so this answers 404 exactly as `listUpcomingGatherings` does,
+   *    reading the role step 1 already resolved.
+   * 3. IS THIS A SPACE. The Volunteering tab belongs to top-level
+   *    communities only, so a space answers an empty page without a query.
+   * 4. WHICH OPPORTUNITIES. `VolunteeringService.pageOpenByCommunity` owns
+   *    what "open" means (status open, spots left, under no takedown),
+   *    newest first, capped at `COMMUNITY_OPPORTUNITIES_LIMIT` with the full
+   *    count beside it.
+   */
+  async listOpenOpportunities(
+    slug: string,
+    viewerId: string,
+  ): Promise<CommunityOpportunitiesResponse> {
+    const { community, role } = await this.assertCommunityVisible(
+      slug,
+      viewerId,
+      { allowArchivedForRoster: true },
+    );
+    if (isGatedTier(community.accessTier) && !role) {
+      throw new NotFoundException('Community not found');
+    }
+    // Loose `!= null`, matching the `archivedAt` check in
+    // `assertCommunityVisible`: a top-level community's `parentId` is null.
+    if (community.parentId != null) {
+      return { items: [], total: 0 };
+    }
+    return this.volunteering.pageOpenByCommunity(community.id);
+  }
+
+  /**
    * Resolves a community by slug for a SIGNED-IN caller and answers 404
    * unless they are allowed to know it exists. The three gates are
    * `CommunitiesService.getBySlug`'s, in its order and with its 404-never-403
@@ -449,8 +503,9 @@ export class CommunityPublicService {
     // the two people), through the shared `hasLivePendingInvite`.
     //
     // `allowArchivedForRoster` lets any roster member through an archived
-    // community (staff already pass). `getRules` asks for it, matching the
-    // archive rule members get everywhere else (PRD-143).
+    // community (staff already pass). `getRules` and `listOpenOpportunities`
+    // ask for it, matching the archive rule members get everywhere else
+    // (PRD-143).
     options: {
       allowPendingInvite?: boolean;
       allowArchivedForRoster?: boolean;

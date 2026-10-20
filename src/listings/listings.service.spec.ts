@@ -1308,6 +1308,42 @@ describe('ListingsService', () => {
     });
   });
 
+  describe('loadOwnedOrCoManagedOr404', () => {
+    it('answers the owner with isOwner true, an active co-manager with false and anyone else with the plain 404', async () => {
+      const listing = baseListing({ ownerId: 'owner-1' });
+      listings.findOne.mockResolvedValue(listing);
+
+      await expect(
+        service.loadOwnedOrCoManagedOr404('QPL-2026-0001', 'owner-1'),
+      ).resolves.toEqual({ listing, isOwner: true });
+      expect(coManagers.isActiveCoManager).not.toHaveBeenCalled();
+
+      coManagers.isActiveCoManager.mockResolvedValueOnce(true);
+      await expect(
+        service.loadOwnedOrCoManagedOr404('QPL-2026-0001', 'co-manager-1'),
+      ).resolves.toEqual({ listing, isOwner: false });
+      expect(coManagers.isActiveCoManager).toHaveBeenLastCalledWith(
+        'listing-1',
+        'co-manager-1',
+      );
+
+      coManagers.isActiveCoManager.mockResolvedValueOnce(false);
+      const strangerCall = service.loadOwnedOrCoManagedOr404(
+        'QPL-2026-0001',
+        'stranger-1',
+      );
+      await expect(strangerCall).rejects.toBeInstanceOf(NotFoundException);
+      await expect(strangerCall).rejects.toMatchObject({
+        response: {
+          statusCode: 404,
+          message: 'Listing not found',
+          error: 'Not Found',
+        },
+      });
+      await expect(strangerCall).rejects.not.toHaveProperty('response.code');
+    });
+  });
+
   describe('update', () => {
     it('404s a non-owner and writes nothing', async () => {
       scopeFindOneToOwner(

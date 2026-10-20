@@ -1789,6 +1789,158 @@ export enum NotificationType {
    * See migration `AddStudioArtistKindEnumValues1833000000000`.
    */
   StudioEpisodePublished = 'studio_episode_published',
+
+  /**
+   * Collaborative playlists. The owner of a member-credited Studio playlist
+   * invited this member to edit it. The member answers on the playlist page
+   * (`/studio/collection?id=<playlistId>`).
+   *
+   * ACTOR: the owner, under `actorId` (`ACTOR_PAYLOAD_KEY`), passed to
+   * `createForRecipients` for block and mute filtering too.
+   *
+   * Unbundled, `invitations` category, pushes.
+   *
+   * PAYLOAD: `{ playlistId, playlistName, actorId }`.
+   *
+   * See migration `AddStudioPlaylistEditorNotificationTypes1833100000000`.
+   */
+  StudioPlaylistEditorInvite = 'studio_playlist_editor_invite',
+
+  /**
+   * Collaborative playlists. The invited member accepted. Sent to the
+   * owner; the actor is the member who answered. Unbundled, `invitations`,
+   * bell only. PAYLOAD: `{ playlistId, playlistName, actorId }`.
+   *
+   * See migration `AddStudioPlaylistEditorNotificationTypes1833100000000`.
+   */
+  StudioPlaylistEditorInviteAccepted = 'studio_playlist_editor_invite_accepted',
+
+  /**
+   * Collaborative playlists. The invited member declined. Same shape and
+   * posture as the acceptance.
+   *
+   * See migration `AddStudioPlaylistEditorNotificationTypes1833100000000`.
+   */
+  StudioPlaylistEditorInviteDeclined = 'studio_playlist_editor_invite_declined',
+
+  /**
+   * Collaborative playlists. The owner of a persona-credited playlist picked
+   * this co-owner of the persona as an editor. Co-owners already share the
+   * persona, so there is nothing to accept.
+   *
+   * ACTOR: the owner, under `actorId`. Unbundled, `personas` category,
+   * pushes. PAYLOAD: `{ playlistId, playlistName, personaName, actorId }`.
+   *
+   * See migration `AddStudioPlaylistEditorNotificationTypes1833100000000`.
+   */
+  StudioPlaylistEditorAdded = 'studio_playlist_editor_added',
+
+  /**
+   * Studio safety and moderation. Our team accepted a copyright claim about
+   * a track of a persona this member runs, so the track is offline for
+   * listeners while the claim is reviewed.
+   *
+   * RECIPIENTS: the persona's creator and every co-owner, resolved at send
+   * time (`TRACK_NOTICE_SQL`). NO ACTOR and nothing about the claimant:
+   * `createForRecipients` gets no actor id and the payload names the claim
+   * and the track only.
+   *
+   * ALWAYS DELIVERED and IN-APP ONLY, like `StudioReleaseTakenDown`: a lock
+   * screen naming the track would tell anyone nearby which persona the
+   * member runs. Unbundled.
+   *
+   * PAYLOAD: `{ claimId, trackId, releaseId, trackTitle }`.
+   *
+   * See migration `AddStudioSafetyEnumValues1834000000000`.
+   */
+  StudioCopyrightClaimAccepted = 'studio_copyright_claim_accepted',
+
+  /**
+   * Studio safety. Our team declined the member's own copyright claim at
+   * the first check. To the claimant alone; always delivered, in-app only,
+   * unbundled, no actor.
+   *
+   * PAYLOAD: `{ claimId, trackTitle }`. The staff note stays on the claim.
+   */
+  StudioCopyrightClaimDeclined = 'studio_copyright_claim_declined',
+
+  /**
+   * Studio safety. The artist sent a counter-notice to the member's claim.
+   * To the claimant alone; always delivered, in-app only, unbundled, no
+   * actor. Nothing names the artist's member.
+   *
+   * PAYLOAD: `{ claimId, trackTitle }`. The counter-notice stays on the
+   * claim.
+   */
+  StudioCopyrightClaimCountered = 'studio_copyright_claim_countered',
+
+  /**
+   * Studio safety. Our team upheld or rejected a claim. Two writes under one
+   * type: one to the claimant, one to the track's owners, each row naming
+   * its audience in `recipientRole`. Always delivered, in-app only,
+   * unbundled, no actor.
+   *
+   * PAYLOAD: owner rows `{ claimId, trackId, releaseId, trackTitle, outcome,
+   * recipientRole: 'owner' }`; claimant rows `{ claimId, trackTitle,
+   * outcome, recipientRole: 'claimant' }`, and `toClientPayload` drops a
+   * track or release id from any row that is not an owner row.
+   */
+  StudioCopyrightClaimDecided = 'studio_copyright_claim_decided',
+
+  /**
+   * Studio safety. The claimant withdrew an accepted or countered claim, so
+   * the track may be back online. To the track's owners; always delivered,
+   * in-app only, unbundled, no actor. A submitted claim withdraws silently.
+   *
+   * PAYLOAD: `{ claimId, trackId, releaseId, trackTitle }`.
+   */
+  StudioCopyrightClaimWithdrawn = 'studio_copyright_claim_withdrawn',
+
+  /**
+   * Studio safety. Our team marked a track explicit or added a content
+   * warning to it. To the track's owners, only when the action changed the
+   * track; always delivered, in-app only, unbundled, no actor.
+   *
+   * PAYLOAD: `{ trackId, releaseId, trackTitle, change }`, `change` one of
+   * `explicit` and `content_warning`.
+   */
+  StudioTrackMarked = 'studio_track_marked',
+
+  /**
+   * Meet the team. A listing's managers invited a persona to join the
+   * listing's team. To the persona's co-owners; no actor, unbundled. Category
+   * Personas; pushed, opening the persona's Works at pane.
+   *
+   * PAYLOAD: `{ subprofileId, personaName, listingName, listingSlug,
+   * roleLabel }`.
+   *
+   * Migration: `AddListingTeamNotificationTypes1835100000000`.
+   */
+  ListingTeamInvite = 'listing_team_invite',
+
+  /**
+   * Meet the team. A persona asked to join a listing's team. To the listing's
+   * managers; no actor, unbundled. Category Listings; pushed, opening the
+   * listing editor's Team section.
+   *
+   * PAYLOAD: `{ listingRef, listingName, personaName, personaHandle }`.
+   *
+   * Migration: `AddListingTeamNotificationTypes1835100000000`.
+   */
+  ListingTeamRequest = 'listing_team_request',
+
+  /**
+   * Meet the team. The other side answered yes, so the link is confirmed. To
+   * the side that started it; no actor, unbundled. Category Listings; pushed,
+   * opening that side's own surface.
+   *
+   * PAYLOAD: `{ initiatedBy, listingName, listingSlug, personaName,
+   * personaHandle }` plus `listingRef` when `initiatedBy` is `listing` and
+   * `subprofileId` when it is `persona`.
+   *
+   * Migration: `AddListingTeamNotificationTypes1835100000000`.
+   */
+  ListingTeamAccepted = 'listing_team_accepted',
 }
 
 @Entity('notifications')

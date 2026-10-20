@@ -134,9 +134,12 @@ export class StudioPreviewsService {
     const track = await this.tracks.findOne({
       where: { id: trackId.toLowerCase(), releaseId: release.id },
     });
+    // Studio safety: a withheld track answers the same 404 as every other
+    // preview failure.
     if (
       !track ||
       !hasPlayableAudio(track) ||
+      Boolean(track.withheldAt) ||
       !track.audioKey ||
       !track.audioContentType
     ) {

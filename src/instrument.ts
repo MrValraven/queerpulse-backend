@@ -4,7 +4,7 @@ import * as Sentry from '@sentry/node';
 // "must be the first import" property below still holds. Never let this file
 // grow an import that reaches the Nest container.
 import {
-  isSensitiveQueryParameterName,
+  isSensitiveQueryParameter,
   redactSensitiveQueryParameters,
   redactSensitiveQueryString,
   REDACTED_QUERY_VALUE,
@@ -14,6 +14,16 @@ import {
   dropStudioListeningReferer,
   dropStudioListeningUrl,
 } from './studio/studio-request-log';
+// Also import-free, for the same reason.
+import {
+  dropCreatorDraftReferer,
+  dropCreatorDraftUrl,
+  isCreatorDraftRequest,
+} from './creator-drafts/creator-draft-request-log';
+// Also import-free, for the same reason.
+import { dropCommunityGivingRequestBody } from './communities/community-giving-request-log';
+// Also import-free, for the same reason.
+import { dropQuizshowRequestBody } from './quizshow/quizshow-request-log';
 
 /**
  * Sentry initialization, isolated in its own module so it runs BEFORE anything
@@ -73,14 +83,27 @@ export function scrubSensitiveQueryParameters(
   event: Sentry.ErrorEvent,
 ): Sentry.ErrorEvent {
   const request = event.request;
+  // Sentry attaches the incoming body by default, and a giving save carries
+  // IBANs and MB WAY numbers. Checked first, while `request.url` is intact.
+  dropCommunityGivingRequestBody(request);
+  // Pulse Live bodies hold join codes and quiz text, and its socket frames
+  // never reach Sentry.
+  dropQuizshowRequestBody(request);
   // The Referer header can name the same listening page the URL would.
   dropStudioListeningReferer(request);
+  dropCreatorDraftReferer(request);
   // A referer that survives can still carry an invite code or a token.
   redactKeptReferer(request);
   // Studio records nothing about what a member listens to, so the URL and
   // query string of a track, playlist or search request are removed from the
   // event: the same paths the request log and the HTTP metrics skip.
-  if (request && !dropStudioListeningUrl(request)) {
+  // An Admin's draft read names a draft beside the admin, and a draft save
+  // carries the whole payload in its body, so both drop the same fields.
+  if (
+    request &&
+    !dropStudioListeningUrl(request) &&
+    !dropCreatorDraftUrl(request)
+  ) {
     if (typeof request.url === 'string') {
       request.url = redactSensitiveQueryParameters(request.url);
     }
@@ -90,7 +113,7 @@ export function scrubSensitiveQueryParameters(
       request.query_string = request.query_string.map(
         ([name, value]): [string, string] => [
           name,
-          isSensitiveQueryParameterName(name) ? REDACTED_QUERY_VALUE : value,
+          isSensitiveQueryParameter(name, value) ? REDACTED_QUERY_VALUE : value,
         ],
       );
     } else if (
@@ -100,12 +123,15 @@ export function scrubSensitiveQueryParameters(
       request.query_string = Object.fromEntries(
         Object.entries(request.query_string).map(([name, value]) => [
           name,
-          isSensitiveQueryParameterName(name) ? REDACTED_QUERY_VALUE : value,
+          isSensitiveQueryParameter(name, value) ? REDACTED_QUERY_VALUE : value,
         ]),
       );
     }
   }
 
+  event.breadcrumbs = event.breadcrumbs?.filter(
+    (breadcrumb) => !isCreatorDraftBreadcrumb(breadcrumb),
+  );
   for (const breadcrumb of event.breadcrumbs ?? []) {
     const url: unknown = breadcrumb.data?.url;
     if (breadcrumb.data && typeof url === 'string') {
@@ -114,6 +140,11 @@ export function scrubSensitiveQueryParameters(
   }
 
   return event;
+}
+
+function isCreatorDraftBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {
+  const url: unknown = breadcrumb.data?.url;
+  return typeof url === 'string' && isCreatorDraftRequest(url);
 }
 
 /**

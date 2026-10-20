@@ -7,6 +7,7 @@ import { registerAs } from '@nestjs/config';
 //   - FeatureUsageRetentionService (feature_usage_daily)
 //   - PushSubscriptionRetentionService (stale push subscriptions)
 //   - EventAttendanceRetentionService  (past gatherings' attendance details)
+//   - CreatorDraftRetentionService     (creator drafts nobody touched)
 //
 // All are optional overrides — the defaults below are production-safe. They are
 // validated as optional positive numbers in src/config/env.validation.ts so a
@@ -67,6 +68,16 @@ export default registerAs('retention', () => ({
   eventAttendanceDays: positiveIntOrDefault(
     process.env.EVENT_ATTENDANCE_RETENTION_DAYS,
     30,
+  ),
+  /**
+   * A creator draft (event wizard, listing edit, Start-a-Community) that
+   * nobody saved for this many days is deleted, and every read treats it as
+   * absent before then. Persona, Studio and list-a-business drafts are real
+   * records and they never expire.
+   */
+  creatorDraftDays: positiveIntOrDefault(
+    process.env.CREATOR_DRAFT_RETENTION_DAYS,
+    90,
   ),
   /** Rows removed/updated per statement inside each retention loop. */
   batchSize: positiveIntOrDefault(process.env.RETENTION_BATCH_SIZE, 1000),

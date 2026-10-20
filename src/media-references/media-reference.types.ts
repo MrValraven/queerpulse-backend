@@ -36,7 +36,8 @@ export type MediaReferenceType =
   | 'press-contact' // PressContact.avatarUrl
   | 'sticker' // Sticker.storageKey
   | 'studio-cover' // StudioRelease.coverKey
-  | 'persona-post'; // SubprofilePost.imageKey
+  | 'persona-post' // SubprofilePost.imageKey
+  | 'quizshow-question'; // QuizshowQuestion.mediaRef and an open session's quiz snapshot
 
 export interface MediaReference {
   type: MediaReferenceType;

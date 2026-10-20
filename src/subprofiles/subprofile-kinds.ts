@@ -277,7 +277,15 @@ export type SubprofileSection =
   | 'puzzles'
   | 'episodes'
   | 'roles'
-  | 'works';
+  | 'works'
+  // Tattoo artist (+7)
+  | 'cover_ups'
+  | 'scar_work'
+  | 'in_progress'
+  | 'wanna_dos'
+  | 'guest_spots'
+  | 'flash_days'
+  | 'shop';
 
 // kind -> ordered content sections (excludes the universal 'links')
 export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
@@ -314,7 +322,19 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   voguer: ['balls', 'reel'],
   // studio
   illustrator: ['portfolio', 'clients'],
-  tattoo_artist: ['flash', 'healed'],
+  tattoo_artist: [
+    'flash',
+    'healed',
+    'wanna_dos',
+    'in_progress',
+    'cover_ups',
+    'scar_work',
+    'aftercare',
+    'credentials',
+    'guest_spots',
+    'flash_days',
+    'shop',
+  ],
   animator: ['reel', 'clients'],
   comic_artist: ['books', 'strips'],
   game_designer: ['games', 'jams'],

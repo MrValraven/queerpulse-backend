@@ -51,11 +51,13 @@ export type DepthSpec =
  * questionnaire data and its design allows no behavioural analytics of any
  * Go together action, aggregate counts included. Studio is here because its
  * design records nothing about what a member listens to or browses, aggregate
- * counts included.
+ * counts included. Pulse Live records nothing about how members play beyond
+ * one night's results card.
  */
 export const UNTRACKED_FEATURES = [
   'goTogether',
   'studio',
+  'quizshow',
 ] as const satisfies readonly FeatureKey[];
 
 export type UntrackedFeatureKey = (typeof UNTRACKED_FEATURES)[number];

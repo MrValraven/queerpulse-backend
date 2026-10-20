@@ -523,6 +523,27 @@ export class SubprofilesController {
     return this.subprofilesService.listAffiliationOptions(user.userId, id);
   }
 
+  // The flash day event picker. Two segments under `:id`, like the route above.
+  @Get(':id/flash-day-event-options')
+  @ApiOperation({
+    summary: 'List the events a tattoo persona can link to a flash day',
+  })
+  @ApiOkResponse({
+    description:
+      'Published public events the requester hosts, co-hosts or plays, upcoming soonest first, then past newest first, at most 100. Empty for an unlinked persona.',
+  })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listFlashDayEventOptions(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.subprofilesService.listFlashDayEventOptions(user.userId, id);
+  }
+
   @Post(':id/publish')
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Publish a subprofile' })

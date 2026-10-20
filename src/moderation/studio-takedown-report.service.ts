@@ -8,6 +8,7 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { formatReportReference } from '../reports/report-reference';
+import { StudioTrack } from '../studio/entities/studio-track.entity';
 import { STUDIO_AUDIT_ACTIONS } from '../studio/studio.constants';
 import { ResolutionNotifiedParty } from './moderation-response';
 
@@ -31,6 +32,39 @@ export type StudioTakedownReportsOutcome =
   | { kind: 'mismatch' }
   | { kind: 'not_open' };
 
+/** Studio safety and moderation: a staff track action started from one
+ *  report. Only that report resolves; other reports on the track may name a
+ *  different harm. */
+export interface StudioTrackReportInput {
+  trackId: string;
+  actorId: string;
+  reportId: string;
+  /** The audit action the track action writes, stored as the report's
+   *  `resolutionAction`. */
+  action: string;
+  /** True when the track's owners receive `studio_track_marked`. */
+  isOwnerNoticeSent: boolean;
+}
+
+export type StudioTrackReportOutcome =
+  | { kind: 'resolved'; report: Report }
+  | { kind: 'mismatch' }
+  | { kind: 'not_open' };
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The reports a release takedown resolves: those about the release and
+ *  (Studio safety) those about any of its tracks. Case-blind on the stored
+ *  subject id. */
+export const STUDIO_RELEASE_REPORTS_PREDICATE = `(("report"."subject_type" = :studioReleaseSubjectType
+      AND lower("report"."subject_id") = :studioReportReleaseId)
+    OR ("report"."subject_type" = :studioTrackSubjectType
+      AND lower("report"."subject_id") IN (
+        SELECT "release_track"."id"::text FROM "studio_tracks" "release_track"
+         WHERE "release_track"."release_id" = :studioReportReleaseId
+      )))`;
+
 /**
  * Studio open demo pages: a Studio takedown resolves every open or
  * escalated report about the release, inside the takedown's own transaction
@@ -38,7 +72,7 @@ export type StudioTakedownReportsOutcome =
  * (`reportId`) first checks that report: it must be an open or escalated
  * `studio_release` report about this release (or, on a repeat while the
  * release is still taken down, one an earlier takedown of this release
- * resolved), or the whole takedown fails.
+ * resolved), or the whole takedown fails. Studio safety and moderation widens both: the named report may be a `studio_track` report about one of the release's tracks, and every takedown also resolves the actionable reports about the release's tracks.
  *
  * The resolved report carries the fields `ModerationService.actOnReport`
  * writes when `PATCH /mod/reports/:id` resolves a report, and each reporter's
@@ -60,7 +94,7 @@ export class StudioTakedownReportService {
 
   /**
    * Checks the named report (when there is one), then locks and resolves
-   * every actionable `studio_release` report about the release. Actionable
+   * every actionable `studio_release` report about the release and `studio_track` report about its tracks. Actionable
    * means open or escalated, the same set the moderation console still acts
    * on (`ModerationService.assertActionableStatus` refuses resolved only).
    * A named report that is missing, about another subject or about another
@@ -86,8 +120,7 @@ export class StudioTakedownReportService {
       });
       if (
         !namedReport ||
-        namedReport.subjectType !== ReportSubjectType.StudioRelease ||
-        namedReport.subjectId.toLowerCase() !== releaseId
+        !(await this.isReportAboutRelease(manager, namedReport, releaseId))
       ) {
         return { kind: 'mismatch' };
       }
@@ -107,10 +140,9 @@ export class StudioTakedownReportService {
     const openReports = await manager
       .createQueryBuilder(Report, 'report')
       .setLock('pessimistic_write')
-      .where('"report"."subject_type" = :studioReportSubjectType', {
-        studioReportSubjectType: ReportSubjectType.StudioRelease,
-      })
-      .andWhere('lower("report"."subject_id") = :studioReportReleaseId', {
+      .where(STUDIO_RELEASE_REPORTS_PREDICATE, {
+        studioReleaseSubjectType: ReportSubjectType.StudioRelease,
+        studioTrackSubjectType: ReportSubjectType.StudioTrack,
         studioReportReleaseId: releaseId,
       })
       .andWhere('"report"."status" IN (:...studioReportActionableStatuses)', {
@@ -142,6 +174,76 @@ export class StudioTakedownReportService {
       report.resolutionNotified = notified;
     }
     return { kind: 'resolved', reports: await manager.save(openReports) };
+  }
+
+  /**
+   * Studio safety and moderation: a staff track action (`mark-explicit`,
+   * `content-warnings`) started from one report. The report must be an open
+   * or escalated `studio_track` report about this track (`mismatch`
+   * otherwise, `not_open` once handled); it is locked and resolved like a
+   * takedown resolves its reports, with the action as `resolutionAction`
+   * and no note. `member` is listed as notified only when the owners got
+   * `studio_track_marked`; `reporter` when a reachable reporter other than
+   * the actor filed it. The caller sends the receipt after commit
+   * (`notifyReportersBestEffort`).
+   */
+  async resolveNamedTrackReportWithin(
+    manager: EntityManager,
+    input: StudioTrackReportInput,
+  ): Promise<StudioTrackReportOutcome> {
+    const report = await manager.findOne(Report, {
+      where: { id: input.reportId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (
+      !report ||
+      report.subjectType !== ReportSubjectType.StudioTrack ||
+      report.subjectId.toLowerCase() !== input.trackId.toLowerCase()
+    ) {
+      return { kind: 'mismatch' };
+    }
+    if (
+      report.status !== ReportStatus.Open &&
+      report.status !== ReportStatus.Escalated
+    ) {
+      return { kind: 'not_open' };
+    }
+    const notified: ResolutionNotifiedParty[] = input.isOwnerNoticeSent
+      ? ['member']
+      : [];
+    if (report.reporterId && report.reporterId !== input.actorId) {
+      notified.push('reporter');
+    }
+    report.status = ReportStatus.Resolved;
+    report.resolvedAt = new Date();
+    report.resolutionActorId = input.actorId;
+    report.resolutionAction = input.action;
+    report.resolutionDuration = null;
+    report.resolutionNote = null;
+    report.resolutionNotified = notified;
+    return { kind: 'resolved', report: await manager.save(report) };
+  }
+
+  // A named takedown report: a release report about this release, or (Studio
+  // safety) a track report about one of its tracks. A track id that is no
+  // uuid never reaches the uuid column.
+  private async isReportAboutRelease(
+    manager: EntityManager,
+    report: Report,
+    releaseId: string,
+  ): Promise<boolean> {
+    if (report.subjectType === ReportSubjectType.StudioRelease) {
+      return report.subjectId.toLowerCase() === releaseId;
+    }
+    if (
+      report.subjectType === ReportSubjectType.StudioTrack &&
+      UUID_PATTERN.test(report.subjectId)
+    ) {
+      return manager.exists(StudioTrack, {
+        where: { id: report.subjectId.toLowerCase(), releaseId },
+      });
+    }
+    return false;
   }
 
   /**

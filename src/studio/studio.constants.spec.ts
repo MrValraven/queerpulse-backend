@@ -1,4 +1,8 @@
-import { HttpStatus } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpStatus,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   StudioReleaseStatus,
   StudioReleaseType,
@@ -12,6 +16,8 @@ import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
 import {
   STUDIO_ARTIST_PERSONA_KINDS,
   STUDIO_AUDIT_ACTIONS,
+  STUDIO_CLAIM_LIMITS,
+  STUDIO_CONTENT_WARNING_IDS,
   STUDIO_CREDIT_ROLES,
   STUDIO_CURATION_SHELVES,
   STUDIO_DISCOVERY_LIMITS,
@@ -25,6 +31,7 @@ import {
   STUDIO_MOODS,
   STUDIO_PERSONA_CREDIT_STATUSES,
   STUDIO_PLAYLIST_VISIBILITIES,
+  STUDIO_PLAYLIST_ROLES,
   STUDIO_PRESS,
   STUDIO_RELEASE_STATUSES,
   STUDIO_RELEASE_TYPES,
@@ -51,10 +58,16 @@ import {
   studioAudioMaxBytesForKind,
   studioDefaultGenreForKind,
   studioError,
+  studioErrorWithDetails,
   studioFormatForKind,
   studioLyricsMaxLengthFor,
   studioPersonaKindsForFormat,
 } from './studio.constants';
+import {
+  STUDIO_SAFETY_AUDIT_ACTIONS,
+  STUDIO_SAFETY_ERROR_CODES,
+  studioSafetyError,
+} from './studio-safety.constants';
 
 describe('Studio vocabulary', () => {
   it('keeps the entity enums identical to the wire vocabularies', () => {
@@ -538,6 +551,16 @@ describe('studioError', () => {
     ['studio_episode_already_published', HttpStatus.CONFLICT],
     ['studio_episode_order_locked', HttpStatus.CONFLICT],
     ['studio_not_a_podcast', HttpStatus.CONFLICT],
+    ['studio_playlist_not_found', HttpStatus.NOT_FOUND],
+    ['studio_playlist_entry_not_found', HttpStatus.NOT_FOUND],
+    ['studio_playlist_invite_not_found', HttpStatus.NOT_FOUND],
+    ['studio_playlist_editor_not_found', HttpStatus.NOT_FOUND],
+    ['studio_playlist_owner_only', HttpStatus.FORBIDDEN],
+    ['studio_playlist_editor_source_mismatch', HttpStatus.CONFLICT],
+    ['studio_playlist_editor_cap', HttpStatus.CONFLICT],
+    ['studio_playlist_invite_unavailable', HttpStatus.CONFLICT],
+    ['studio_playlist_credit_change_removes_editors', HttpStatus.CONFLICT],
+    ['studio_playlist_editor_ineligible', HttpStatus.UNPROCESSABLE_ENTITY],
   ] as const)(
     'answers %s with HTTP %i and the code in the body',
     (code, status) => {
@@ -550,7 +573,7 @@ describe('studioError', () => {
   );
 
   it('lists every contract code exactly once', () => {
-    expect(new Set(STUDIO_ERROR_CODES).size).toBe(59);
+    expect(new Set(STUDIO_ERROR_CODES).size).toBe(83);
   });
 
   it('says nothing about the release in the withdrawn body', () => {
@@ -559,5 +582,81 @@ describe('studioError', () => {
       code: 'studio_release_withdrawn',
       message: 'This release was withdrawn.',
     });
+  });
+
+  it('answers a 404 code as a NotFoundException and a 403 code as a ForbiddenException', () => {
+    expect(studioError('studio_playlist_not_found')).toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(studioError('studio_playlist_owner_only')).toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(studioError('studio_playlist_not_found').getResponse()).toEqual({
+      statusCode: HttpStatus.NOT_FOUND,
+      code: 'studio_playlist_not_found',
+      message: 'This playlist is not available.',
+    });
+  });
+
+  it('adds the details to the body of a refusal that names members', () => {
+    const exception = studioErrorWithDetails(
+      'studio_playlist_editor_ineligible',
+      { memberSlugs: ['ana-silva'] },
+    );
+    expect(exception.getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY);
+    expect(exception.getResponse()).toEqual({
+      statusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+      code: 'studio_playlist_editor_ineligible',
+      message: expect.any(String) as string,
+      memberSlugs: ['ana-silva'],
+    });
+  });
+
+  // Studio safety and moderation.
+  it('folds the safety refusals and audit actions into the Studio maps', () => {
+    for (const code of STUDIO_SAFETY_ERROR_CODES) {
+      expect(STUDIO_ERROR_CODES).toContain(code);
+      expect(studioError(code).getResponse()).toEqual(
+        studioSafetyError(code).getResponse(),
+      );
+    }
+    expect(STUDIO_AUDIT_ACTIONS).toEqual(
+      expect.objectContaining(STUDIO_SAFETY_AUDIT_ACTIONS),
+    );
+  });
+
+  it('names the safety vocabulary where the contract puts it', () => {
+    expect(STUDIO_CONTENT_WARNING_IDS).toHaveLength(8);
+    expect(STUDIO_CLAIM_LIMITS.liveClaimsPerClaimant).toBe(10);
+  });
+
+  it('keeps the code and the status when the details carry the same keys', () => {
+    const body = studioErrorWithDetails('studio_playlist_editor_cap', {
+      code: 'something_else',
+      statusCode: 200,
+    }).getResponse();
+    expect(body).toEqual(
+      expect.objectContaining({
+        code: 'studio_playlist_editor_cap',
+        statusCode: HttpStatus.CONFLICT,
+      }),
+    );
+  });
+});
+
+describe('Studio collaborative playlist vocabulary', () => {
+  it('names the three roles a viewer can hold on a playlist', () => {
+    expect(STUDIO_PLAYLIST_ROLES).toEqual(['owner', 'editor', 'invitee']);
+  });
+
+  it('bounds the editors, the candidate list, the slugs and the search', () => {
+    expect(STUDIO_LIMITS).toEqual(
+      expect.objectContaining({
+        playlistEditorsMax: 10,
+        playlistEditorCandidatesMax: 50,
+        playlistEditorSlugMaxLength: 120,
+        playlistEditorSearchMaxLength: 80,
+      }),
+    );
   });
 });

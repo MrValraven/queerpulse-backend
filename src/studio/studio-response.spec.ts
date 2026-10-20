@@ -17,6 +17,7 @@ import {
   canFileStudioDispute,
   hasUnnotedTrackChanges,
   isListenerPlayableTrack,
+  listenerStatsForTracks,
   statsForTracks,
   toListenerTrackSummaries,
   toStudioArtistRef,
@@ -27,7 +28,13 @@ import {
   toStudioReleaseResponse,
   toStudioStream,
   toStudioTrackResponse,
+  toStudioTrackSummary,
 } from './studio-response';
+import {
+  StudioClaimantRole,
+  StudioCopyrightClaimStatus,
+} from './entities/studio-copyright-claim.entity';
+import { StudioOwnerClaim } from './studio-claim-response';
 
 const persona = (
   overrides: Partial<StudioArtistPersona> = {},
@@ -78,11 +85,13 @@ const release = (overrides: Partial<StudioRelease> = {}): StudioRelease =>
 
 const PEAKS = Array.from({ length: 200 }, (_unused, index) => index);
 const SUMMARY_KEYS = [
+  'contentWarnings',
   'durationSeconds',
   'hasAudio',
   'id',
   'isDraft',
   'isExplicit',
+  'isWithheld',
   'notesExcerpt',
   'position',
   'publishedAt',
@@ -1048,5 +1057,208 @@ describe('Studio artist kinds mappers', () => {
     expect(
       isListenerPlayableTrack(track({}), { type: StudioReleaseType.Mix }, now),
     ).toBe(true);
+  });
+});
+
+describe('Studio safety on the response mappers', () => {
+  const ownerClaim: StudioOwnerClaim = {
+    id: 'claim-1',
+    trackId: 'track-2',
+    status: StudioCopyrightClaimStatus.Accepted,
+    originalWork: 'Saudade by Ana Moura',
+    originalLink: null,
+    details: 'The hook from 0:40',
+    claimantRole: StudioClaimantRole.RightsHolder,
+    counterNote: null,
+    claimantReply: null,
+    staffNote: null,
+    acceptedAt: '2026-10-14T10:00:00.000Z',
+    counteredAt: null,
+    decidedAt: null,
+    canCounter: true,
+  };
+
+  it('serves the artist and staff warnings together on every row, in theme order', () => {
+    const summary = toStudioTrackSummary(
+      track({
+        contentWarnings: ['police'],
+        staffContentWarnings: ['medical', 'police'],
+      }),
+    );
+    expect(summary.contentWarnings).toEqual(['medical', 'police']);
+    expect(summary.isWithheld).toBe(false);
+  });
+
+  it('reads a track written before the safety columns as no warnings', () => {
+    const summary = toStudioTrackSummary(track({}));
+    expect(summary.contentWarnings).toEqual([]);
+    expect(summary.isWithheld).toBe(false);
+  });
+
+  it('gives owner rows the two source lists and the lock', () => {
+    const response = toStudioReleaseResponse(
+      release(),
+      persona(),
+      [
+        track({
+          isExplicit: true,
+          explicitLockedAt: new Date('2026-10-14T10:00:00.000Z'),
+          contentWarnings: ['police'],
+          staffContentWarnings: ['medical'],
+        }),
+      ],
+      { isOwner: true, isStaff: false },
+    );
+    expect(response.tracks[0]).toEqual(
+      expect.objectContaining({
+        contentWarnings: ['medical', 'police'],
+        artistContentWarnings: ['police'],
+        staffContentWarnings: ['medical'],
+        isExplicitLocked: true,
+      }),
+    );
+  });
+
+  it('redacts a withheld row for listeners and keeps its place', () => {
+    const response = toStudioReleaseResponse(
+      release(),
+      persona(),
+      [
+        track({ id: 'track-1', position: 1 }),
+        track({
+          id: 'track-2',
+          position: 2,
+          title: 'Borrowed',
+          isExplicit: true,
+          contentWarnings: ['police'],
+          notes: 'Sleeve notes',
+          withheldAt: new Date('2026-10-14T10:00:00.000Z'),
+        }),
+        track({ id: 'track-3', position: 3 }),
+      ],
+      { isOwner: false, isStaff: false },
+    );
+    expect(response.tracks.map((row) => [row.id, row.position])).toEqual([
+      ['track-1', 1],
+      ['track-2', 2],
+      ['track-3', 3],
+    ]);
+    expect(response.tracks[1]).toEqual({
+      id: 'track-2',
+      position: 2,
+      title: '',
+      durationSeconds: null,
+      isExplicit: false,
+      hasAudio: false,
+      publishedAt: null,
+      isDraft: false,
+      notesExcerpt: null,
+      contentWarnings: [],
+      isWithheld: true,
+    });
+  });
+
+  it('counts a withheld row for listeners and leaves its length out', () => {
+    const tracks = [
+      track({ id: 'track-1', durationSeconds: 200 }),
+      track({
+        id: 'track-2',
+        position: 2,
+        durationSeconds: 300,
+        withheldAt: new Date('2026-10-14T10:00:00.000Z'),
+      }),
+    ];
+    expect(listenerStatsForTracks(tracks)).toEqual({
+      trackCount: 2,
+      totalDurationSeconds: 200,
+    });
+    const listenerResponse = toStudioReleaseResponse(
+      release(),
+      persona(),
+      tracks,
+      { isOwner: false, isStaff: false },
+    );
+    expect(listenerResponse.trackCount).toBe(2);
+    expect(listenerResponse.totalDurationSeconds).toBe(200);
+    const ownerResponse = toStudioReleaseResponse(
+      release(),
+      persona(),
+      tracks,
+      {
+        isOwner: true,
+        isStaff: false,
+      },
+    );
+    expect(ownerResponse.totalDurationSeconds).toBe(500);
+  });
+
+  it('shows owners and staff the whole withheld row', () => {
+    for (const viewer of [
+      { isOwner: true, isStaff: false },
+      { isOwner: false, isStaff: true },
+    ]) {
+      const response = toStudioReleaseResponse(
+        release(),
+        persona(),
+        [
+          track({
+            title: 'Borrowed',
+            withheldAt: new Date('2026-10-14T10:00:00.000Z'),
+          }),
+        ],
+        viewer,
+      );
+      expect(response.tracks[0]).toEqual(
+        expect.objectContaining({ title: 'Borrowed', isWithheld: true }),
+      );
+    }
+  });
+
+  it('carries claims to owners only, on the release and the track', () => {
+    const tracks = [track({})];
+    expect(
+      toStudioReleaseResponse(
+        release(),
+        persona(),
+        tracks,
+        { isOwner: true, isStaff: false },
+        [],
+        [],
+        undefined,
+        [ownerClaim],
+      ).claims,
+    ).toEqual([ownerClaim]);
+    for (const viewer of [
+      { isOwner: false, isStaff: false },
+      { isOwner: false, isStaff: true },
+    ]) {
+      expect(
+        toStudioReleaseResponse(
+          release(),
+          persona(),
+          tracks,
+          viewer,
+          [],
+          [],
+          undefined,
+          [ownerClaim],
+        ).claims,
+      ).toEqual([]);
+    }
+    const releaseCard = toStudioReleaseCard(
+      release(),
+      persona(),
+      EMPTY_RELEASE_STATS,
+    );
+    expect(
+      toStudioTrackResponse(track({}), releaseCard, [], { isOwner: true }, [
+        ownerClaim,
+      ]).claims,
+    ).toEqual([ownerClaim]);
+    expect(
+      toStudioTrackResponse(track({}), releaseCard, [], { isOwner: false }, [
+        ownerClaim,
+      ]).claims,
+    ).toEqual([]);
   });
 });

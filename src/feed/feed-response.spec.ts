@@ -42,6 +42,9 @@ const author: MemberRef = {
   avatarUrl: null,
 };
 
+const STUDIO_ORIGINS = ['https://queerpulse.test'];
+const STUDIO_TRACK_ID = '0f8a3c2e-5b1d-4e6f-9a7b-1c2d3e4f5a6b';
+
 describe('feed-response mappers', () => {
   describe('forumThreadToFeedItem', () => {
     it('maps an anonymous thread to a null actor with bylineMask anonymous', () => {
@@ -121,10 +124,118 @@ describe('feed-response mappers', () => {
 
   describe('communityPostToFeedItem', () => {
     it('a flat community post has an empty title', () => {
-      const item = communityPostToFeedItem(basePost(), null, author);
+      const item = communityPostToFeedItem(
+        basePost(),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
 
       expect(item.title).toBe('');
       expect(item.link).toBe('/feed');
+      expect(item.studioLink).toBeNull();
+    });
+  });
+
+  describe('communityPostToFeedItem Studio link (Studio rich cards)', () => {
+    it('carries the canonical path of the first Studio link and leaves it out of the summary', () => {
+      const item = communityPostToFeedItem(
+        basePost({
+          body: `New one from Lua https://queerpulse.test/studio/track?id=${STUDIO_TRACK_ID.toUpperCase()}&t=42`,
+        }),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
+
+      expect(item.studioLink).toBe(`/studio/track?id=${STUDIO_TRACK_ID}&t=42`);
+      expect(item.summary).toBe('New one from Lua');
+    });
+
+    it('reads a markdown-wrapped Studio link as its label in the summary', () => {
+      const item = communityPostToFeedItem(
+        basePost({
+          body: `listen to [the EP](https://queerpulse.test/studio/album?id=${STUDIO_TRACK_ID}) tonight`,
+        }),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
+
+      expect(item.studioLink).toBe(`/studio/album?id=${STUDIO_TRACK_ID}`);
+      expect(item.summary).toBe('listen to the EP tonight');
+    });
+
+    it('finds a link that sits past the 220 character summary window', () => {
+      const item = communityPostToFeedItem(
+        basePost({
+          body: `${'a'.repeat(300)}\nhttps://queerpulse.test/studio/album?id=${STUDIO_TRACK_ID}`,
+        }),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
+
+      expect(item.studioLink).toBe(`/studio/album?id=${STUDIO_TRACK_ID}`);
+      expect(item.summary).toHaveLength(220);
+      expect(item.summary).not.toContain('studio');
+    });
+
+    it('reads a root-relative Studio path', () => {
+      const item = communityPostToFeedItem(
+        basePost({ body: `/studio/collection?id=${STUDIO_TRACK_ID}` }),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
+
+      expect(item.studioLink).toBe(`/studio/collection?id=${STUDIO_TRACK_ID}`);
+      expect(item.summary).toBe('');
+    });
+
+    it('keeps a Studio path on another host as plain text', () => {
+      const body = `look https://elsewhere.example/studio/track?id=${STUDIO_TRACK_ID}`;
+      const item = communityPostToFeedItem(
+        basePost({ body }),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
+
+      expect(item.studioLink).toBeNull();
+      expect(item.summary).toBe(body);
+    });
+
+    it('keeps a preview link as plain text', () => {
+      const body = `early mix https://queerpulse.test/studio/preview/${'b'.repeat(43)}`;
+      const item = communityPostToFeedItem(
+        basePost({ body }),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
+
+      expect(item.studioLink).toBeNull();
+      expect(item.summary).toBe(body);
+    });
+
+    it('blanks the Studio link and the summary of a tombstoned post', () => {
+      const item = communityPostToFeedItem(
+        basePost({
+          body: `https://queerpulse.test/studio/track?id=${STUDIO_TRACK_ID}`,
+          deletedAt: new Date('2026-07-11T00:00:00.000Z'),
+        }),
+        null,
+        author,
+        STUDIO_ORIGINS,
+      );
+
+      expect(item.studioLink).toBeNull();
+      expect(item.summary).toBe('');
+    });
+
+    it('sets no Studio link on a forum thread', () => {
+      expect(forumThreadToFeedItem(baseThread(), author).studioLink).toBeNull();
     });
   });
 });

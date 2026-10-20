@@ -103,6 +103,7 @@ import {
 } from './community-governance-log.service';
 import { CommunityBan } from './entities/community-ban.entity';
 import { CommunityBanRatification } from './entities/community-ban-ratification.entity';
+import { CommunityGivingMethod } from './entities/community-giving-method.entity';
 import {
   CommunityInvite,
   CommunityInviteStatus,
@@ -386,6 +387,9 @@ export class CommunitiesService {
     // `create` below. Never a roster add: see `CommunityInvite`'s docstring.
     @InjectRepository(CommunityInvite)
     private readonly invites: Repository<CommunityInvite>,
+    // Counted by `buildDetail` for `CommunityDetailDTO.givingMethodCount`.
+    @InjectRepository(CommunityGivingMethod)
+    private readonly givingMethods: Repository<CommunityGivingMethod>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     // For the house-account guardrail on `transferOwnership` (a `User.isSystem`
     // account can never be handed a community). The repo is available via
@@ -4141,6 +4145,7 @@ export class CommunitiesService {
       role,
       parent,
       parentMembership,
+      givingMethodCount,
     ] = await Promise.all([
       // The viewer's own roster row, loaded even when the caller already
       // knows their role: `rulesVersionAccepted` lives on it, and it is what
@@ -4185,6 +4190,8 @@ export class CommunitiesService {
             where: { communityId: community.parentId, userId: viewerId },
           })
         : Promise.resolve(null),
+      // One indexed COUNT on `community_giving_methods.community_id`.
+      this.givingMethods.count({ where: { communityId: community.id } }),
     ]);
     // A space itself never hosts spaces, so its own count is always 0
     // without a query.
@@ -4208,6 +4215,7 @@ export class CommunitiesService {
       membership?.rulesVersionAccepted ?? null,
       invite?.createdAt ?? null,
       subcommunityContext,
+      givingMethodCount,
     );
   }
 

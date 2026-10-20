@@ -25,11 +25,13 @@ import { ListingPublicQuestion } from './entities/listing-public-question.entity
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
+import { ListingTeamMember } from './entities/listing-team-member.entity';
 import { Listing } from './entities/listing.entity';
 import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { ReportsModule } from '../reports/reports.module';
 import { SafeSpaceVouchesModule } from '../safe-space-vouches/safe-space-vouches.module';
 import { SafeSpaceNominationsModule } from '../safe-space-nominations/safe-space-nominations.module';
+import { SubprofilesModule } from '../subprofiles/subprofiles.module';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingCoManagersController } from './listing-co-managers.controller';
 import { ListingCoManagersService } from './listing-co-managers.service';
@@ -39,6 +41,11 @@ import { ListingEditSuggestionsService } from './listing-edit-suggestions.servic
 import { ListingOwnerOffersService } from './listing-owner-offers.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingOwnershipService } from './listing-ownership.service';
+import { ListingTeamAlertsListener } from './listing-team-alerts.listener';
+import { ListingTeamLinksController } from './listing-team-links.controller';
+import { ListingTeamLinksService } from './listing-team-links.service';
+import { ListingTeamController } from './listing-team.controller';
+import { ListingTeamService } from './listing-team.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
 import { MySuggestedListingsService } from './my-suggested-listings.service';
 import { ListingsController } from './listings.controller';
@@ -79,6 +86,9 @@ import { ListingsService } from './listings.service';
       // listing day to day. Invited and accepted, never direct-added, and never
       // present in any public response.
       ListingCoManager,
+      // Meet the team: the consent-based link between a listing and a persona.
+      // Never present in a response without the eligibility and block rules.
+      ListingTeamMember,
       // An admin nominating a member as the owner of a listing that has
       // none. Sits at `offered` until the member answers; an accept then
       // calls the same ownership-transfer path a claim uses.
@@ -163,6 +173,11 @@ import { ListingsService } from './listings.service';
     // Shared by `ListingsService`, `ListingClaimsService` and
     // `ListingEditSuggestionsService`, all providers of this module.
     AdminQueueNotificationsModule,
+    // `SubprofileMembershipService`, the persona seat check behind the
+    // team-link routes. `SubprofilesModule` reaches the listings code through
+    // plain functions alone and imports no module that imports this one, so
+    // the edge is one-directional and needs no `forwardRef`.
+    SubprofilesModule,
   ],
   controllers: [
     // FIRST, and that is load-bearing rather than stylistic. Nest resolves
@@ -172,6 +187,9 @@ import { ListingsService } from './listings.service';
     // Move this line down and every invite route silently becomes a lookup for
     // a listing whose ref is "co-manager-invites".
     ListingCoManagersController,
+    // Also ahead of `ListingsController`: the `:ref/team` routes share its
+    // `listings` base path and `@Get(':ref')`.
+    ListingTeamController,
     ListingsController,
     // Every moderator/admin route over listings, split out so the whole class
     // shares one `ActiveMemberGuard + RolesGuard` pair (BE-HSG-29).
@@ -181,6 +199,9 @@ import { ListingsService } from './listings.service';
     // so that class stays entirely public + CDN-cacheable — see the
     // controller's own docstring.
     ListingEnquiriesController,
+    // The persona side of Meet the team, on the `subprofiles` base path with
+    // two or more segments under `:id`.
+    ListingTeamLinksController,
   ],
   providers: [
     ListingsService,
@@ -192,6 +213,10 @@ import { ListingsService } from './listings.service';
     // routes, and `AdminListingsController` for the admin-only `staff*`
     // delegation ones.
     ListingCoManagersService,
+    // Meet the team: both sides' services and the in-app and push alerts.
+    ListingTeamService,
+    ListingTeamLinksService,
+    ListingTeamAlertsListener,
     ListingEditSuggestionsService,
     // The one place a listing changes hands. `ListingClaimsService` calls it
     // on an approved claim and the staff owner-offer path calls it on an

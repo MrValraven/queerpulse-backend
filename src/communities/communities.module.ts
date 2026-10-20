@@ -4,6 +4,7 @@ import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admi
 import { BanEvasionModule } from '../ban-evasion/ban-evasion.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { CreatorDraftSlotsModule } from '../creator-drafts/creator-draft-slots.module';
 import { EventsModule } from '../events/events.module';
 import { ForumModule } from '../forum/forum.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
@@ -35,6 +36,8 @@ import { CommunityOwnerReviewController } from './community-owner-review.control
 import { CommunityOwnerReviewService } from './community-owner-review.service';
 import { CommunityResourcesController } from './community-resources.controller';
 import { CommunityResourcesService } from './community-resources.service';
+import { CommunityGivingController } from './community-giving.controller';
+import { CommunityGivingService } from './community-giving.service';
 import { CommunitySupportOffersController } from './community-support-offers.controller';
 import { CommunitySupportOffersService } from './community-support-offers.service';
 import { CommunitySystemMembershipService } from './community-system-membership.service';
@@ -53,6 +56,7 @@ import { CommunityPostsController } from './community-posts.controller';
 import { CommunityPostsService } from './community-posts.service';
 import { CommunityPulseController } from './community-pulse.controller';
 import { CommunityPulseService } from './community-pulse.service';
+import { CommunityVolunteeringController } from './community-volunteering.controller';
 import { SpaceRequestsController } from './space-requests.controller';
 import { SpaceRequestsService } from './space-requests.service';
 import { CommunityBan } from './entities/community-ban.entity';
@@ -60,6 +64,7 @@ import { CommunityBanRatification } from './entities/community-ban-ratification.
 import { CommunityGovernanceLog } from './entities/community-governance-log.entity';
 import { CommunityOwnerReviewRequest } from './entities/community-owner-review-request.entity';
 import { CommunityResource } from './entities/community-resource.entity';
+import { CommunityGivingMethod } from './entities/community-giving-method.entity';
 import { CommunitySupportOffer } from './entities/community-support-offer.entity';
 import { CommunityInvite } from './entities/community-invite.entity';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
@@ -122,6 +127,8 @@ import { SubcommunitiesService } from './subcommunities.service';
       // The owner-editable link shelf on the About tab, which until now could
       // only ever show demo fixtures.
       CommunityResource,
+      // A community's giving section (Support tab), written by CommunityGivingService.
+      CommunityGivingMethod,
       // What platform staff have offered this community (OPS-05). Written on
       // the admin side (`AdminCommunitiesModule` registers its own
       // `forFeature` for the same entity, the precedent every other shared
@@ -210,6 +217,9 @@ import { SubcommunitiesService } from './subcommunities.service';
     // `ConfigModule` and `NotificationsModule` (its community entities are
     // read-only `forFeature` registrations), and neither reaches this module.
     BanEvasionModule,
+    // `CreatorDraftSlotsService`: a successful create deletes the author's
+    // community draft. Repository-only module; closes no cycle.
+    CreatorDraftSlotsModule,
   ],
   controllers: [
     CommunitiesController,
@@ -221,6 +231,10 @@ import { SubcommunitiesService } from './subcommunities.service';
     // controller's own doc comment.
     CommunityPulseController,
     CommunityInsightsController,
+    // `communities/:slug/volunteering`, the community page's Volunteering
+    // tab. Its own class so it can carry `@Feature('volunteering')`: the
+    // launched-features guard reads one feature key per class or handler.
+    CommunityVolunteeringController,
     // The caller's own per-community notification level plus the one-time
     // welcome acknowledgement. Its own controller for the same reason as the
     // two above: this feature's read side never has to touch
@@ -240,6 +254,8 @@ import { SubcommunitiesService } from './subcommunities.service';
     CommunityPublicController,
     // Owner/mod surfaces that likewise keep off `CommunitiesController`.
     CommunityResourcesController,
+    // `communities/:slug/giving`, the Support section (owner or co-owner writes).
+    CommunityGivingController,
     CommunityInvitesController,
     CommunityBansController,
     CommunityBanRatificationController,
@@ -285,6 +301,8 @@ import { SubcommunitiesService } from './subcommunities.service';
     // pulls in no dependency on `AuthModule`.
     CommunityOwnerInactivityService,
     CommunityResourcesService,
+    // Reads and replaces a community's giving section, logging every change.
+    CommunityGivingService,
     CommunityInvitesService,
     CommunityBansService,
     // PRD-25. Opens, lists, decides and lazily expires the hold a permanent

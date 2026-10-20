@@ -26,6 +26,10 @@ describe('FEATURE_DEPTH', () => {
     expect(isTrackedFeature('studio')).toBe(false);
   });
 
+  it('never measures Pulse Live', () => {
+    expect(isTrackedFeature('quizshow')).toBe(false);
+  });
+
   it('gives every reach-only feature a stated reason', () => {
     for (const [featureKey, spec] of Object.entries(FEATURE_DEPTH)) {
       if (spec.kind === 'reach-only') {

@@ -31,6 +31,7 @@ import type {
   SubprofilesService,
   TopInsertCandidate,
 } from '../subprofiles.service';
+import { TATTOO_ITEM_SECTIONS } from '../tattoo-artist-vocab';
 import { FeedFetchError } from './feed-fetch';
 import {
   MAX_ART_DOWNLOADS_PER_PUBLISH,
@@ -1078,6 +1079,46 @@ describe('SubprofileFeedsService', () => {
         ).rejects.toBeInstanceOf(BadRequestException);
       },
     );
+
+    describe('on a tattoo persona', () => {
+      beforeEach(() => {
+        subprofilesService.getOwned.mockResolvedValue({
+          ...makePersona(),
+          kind: SubprofileKind.TattooArtist,
+        });
+      });
+
+      it.each([...TATTOO_ITEM_SECTIONS])(
+        'refuses importing episodes into %s on a tattoo persona',
+        async (section) => {
+          const error: unknown = await service
+            .connect(OWNER_ID, PERSONA_ID, {
+              url: 'https://feeds.example/show',
+              section,
+              backfill: 'all',
+            })
+            .catch((caught: unknown) => caught);
+          expect(error).toBeInstanceOf(BadRequestException);
+          expect((error as BadRequestException).message).toBe(
+            `Section "${section}" cannot receive imported episodes for kind "tattoo_artist"`,
+          );
+          expect(fetcher.fetchFeed).not.toHaveBeenCalled();
+          expect(txManager.save).not.toHaveBeenCalled();
+          expect(feeds.update).not.toHaveBeenCalled();
+        },
+      );
+
+      it('refuses moving an existing feed into a tattoo item section', async () => {
+        const error: unknown = await service
+          .update(OWNER_ID, PERSONA_ID, FEED_ID, { section: 'flash' })
+          .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).message).toBe(
+          'Section "flash" cannot receive imported episodes for kind "tattoo_artist"',
+        );
+        expect(feeds.update).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('syncNow', () => {

@@ -141,7 +141,28 @@ describe('issueFreshPersonaId', () => {
       sql.includes('UPDATE "studio_tracks"'),
     );
     expect(trackIndex).toBeGreaterThan(releaseIndex);
-    expect(query.mock.calls[trackIndex]?.[1]).toEqual([freshId]);
+    expect(query.mock.calls[trackIndex]?.[1]).toEqual([
+      freshId,
+      'studio_track',
+    ]);
+  });
+
+  // Studio safety and moderation: an open report on a track moves with it,
+  // as release and persona post reports do.
+  it('moves open reports on a Studio track with its fresh id', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const [sql] = statementTouching('studio_tracks') ?? [];
+    expect(sql).toContain('"track_remap" AS MATERIALIZED');
+    expect(sql).toContain('gen_random_uuid() AS "fresh_id"');
+    expect(sql).toContain(
+      'UPDATE "reports" SET "subject_id" = "track_remap"."fresh_id"::text',
+    );
+    expect(sql).toContain('"reports"."subject_type" = $2');
+    expect(sql).toContain(
+      'lower("reports"."subject_id") = "track_remap"."previous_id"::text',
+    );
+    expect(sql).toContain('SET "id" = "track_remap"."fresh_id"');
   });
 
   // Studio artist kinds: episode dates would match the named persona's
@@ -277,6 +298,28 @@ describe('issueFreshPersonaId', () => {
     expect(parameters).toEqual([freshId, 'persona_post']);
   });
 
+  // Studio safety and moderation: a claim that followed its track through
+  // the cascade is severed, so the claimant's view and export serve the
+  // names kept at filing and never show the pseudonymous persona.
+  it("severs the copyright claims on the persona's releases once the tracks move", async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const trackIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "studio_tracks"'),
+    );
+    const severIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "studio_copyright_claims"'),
+    );
+    expect(severIndex).toBeGreaterThan(trackIndex);
+    const [sql, parameters] = query.mock.calls[severIndex] ?? [];
+    expect(sql).toContain('SET "is_severed" = true');
+    expect(sql).toContain(
+      'SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1',
+    );
+    expect(sql).not.toContain('updated_at');
+    expect(parameters).toEqual([freshId]);
+  });
+
   it('drops the post quota ledger of the named persona', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
@@ -317,6 +360,20 @@ describe('issueFreshPersonaId', () => {
     expect(releaseIndex).toBeGreaterThan(pickIndex);
     expect(query.mock.calls[creditIndex]?.[1]).toEqual([freshId]);
     expect(query.mock.calls[pickIndex]?.[1]).toEqual([freshId]);
+  });
+
+  it('deletes every team link of the persona once its row has moved', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const quotaIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('DELETE FROM "subprofile_post_quota_entries"'),
+    );
+    const teamIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('DELETE FROM "listing_team_members"'),
+    );
+    expect(quotaIndex).toBeGreaterThan(-1);
+    expect(teamIndex).toBeGreaterThan(quotaIndex);
+    expect(query.mock.calls[teamIndex]?.[1]).toEqual([freshId]);
   });
 });
 

@@ -1,5 +1,9 @@
-import { ForbiddenException } from '@nestjs/common';
-import { GUARDS_METADATA } from '@nestjs/common/constants';
+import { ForbiddenException, RequestMethod } from '@nestjs/common';
+import {
+  GUARDS_METADATA,
+  METHOD_METADATA,
+  PATH_METADATA,
+} from '@nestjs/common/constants';
 import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
   ACCOUNT_RESTRICTED_CODE,
@@ -379,6 +383,45 @@ describe('SubprofilesController replace-all PUTs pass expectedEditVersion (ENG-4
       'sp1',
       [],
       undefined,
+    );
+  });
+});
+
+describe('SubprofilesController.listFlashDayEventOptions', () => {
+  const editorUser = { userId: 'u1' } as CurrentUserData;
+
+  it('passes the caller and the persona id to listFlashDayEventOptions', async () => {
+    const eventOptions = [{ eventId: 'e1' }];
+    const subprofilesService = {
+      listFlashDayEventOptions: jest.fn().mockResolvedValue(eventOptions),
+    };
+    const controller = new SubprofilesController(
+      subprofilesService as never,
+      {} as never,
+    );
+
+    await expect(
+      controller.listFlashDayEventOptions(editorUser, 'sp1'),
+    ).resolves.toBe(eventOptions);
+    expect(subprofilesService.listFlashDayEventOptions).toHaveBeenCalledWith(
+      'u1',
+      'sp1',
+    );
+  });
+
+  it('serves GET :id/flash-day-event-options', () => {
+    const handler = (
+      SubprofilesController.prototype as unknown as Record<
+        'listFlashDayEventOptions',
+        () => unknown
+      >
+    ).listFlashDayEventOptions;
+
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(
+      ':id/flash-day-event-options',
+    );
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.GET,
     );
   });
 });

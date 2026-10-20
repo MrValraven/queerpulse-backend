@@ -1,4 +1,5 @@
 import {
+  isSensitiveQueryParameter,
   REDACTED_QUERY_VALUE,
   redactSensitiveQueryParameters,
   redactSensitiveQueryString,
@@ -131,5 +132,147 @@ describe('redactSensitiveQueryString', () => {
 
   it('returns an empty query string unchanged', () => {
     expect(redactSensitiveQueryString('')).toBe('');
+  });
+});
+
+describe('Studio url values (Studio rich cards)', () => {
+  const TRACK_URL =
+    'https://queerpulse.test/studio/track?id=0f8a3c2e-5b1d-4e6f-9a7b-1c2d3e4f5a6b';
+
+  it('redacts an encoded Studio address on the link preview route', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview?url=${encodeURIComponent(TRACK_URL)}`,
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts an unencoded Studio address', () => {
+    expect(
+      redactSensitiveQueryParameters(`/link-preview?url=${TRACK_URL}`),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a Studio address on any host, preview links included', () => {
+    const previewUrl = 'https://elsewhere.example/studio/preview/token-value';
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview?url=${encodeURIComponent(previewUrl)}`,
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a root-relative Studio path', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        '/link-preview?url=%2Fstudio%2Fcollection%3Fid%3Dabc',
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a value encoded twice', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview?url=${encodeURIComponent(encodeURIComponent(TRACK_URL))}`,
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a value encoded three times', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview?url=${encodeURIComponent(encodeURIComponent(encodeURIComponent(TRACK_URL)))}`,
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a Studio address that carries a malformed escape after it', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview?url=${encodeURIComponent(TRACK_URL)}%zz`,
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a Studio address spelled with backslashes', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview?url=${encodeURIComponent('https:\\\\host\\studio\\track')}`,
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a url value that mentions a Studio path in its own query', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        '/link-preview?url=https://example.com/page?next=/studio/x',
+      ),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts each Studio address in a batch and keeps the others', () => {
+    const otherUrl = encodeURIComponent('https://example.com/page');
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview/batch?url=${encodeURIComponent(TRACK_URL)}&url=${otherUrl}`,
+      ),
+    ).toBe(`/link-preview/batch?url=${REDACTED_QUERY_VALUE}&url=${otherUrl}`);
+  });
+
+  it('matches the url parameter name case-insensitively', () => {
+    expect(
+      redactSensitiveQueryParameters(
+        `/link-preview?URL=${encodeURIComponent(TRACK_URL)}`,
+      ),
+    ).toBe(`/link-preview?URL=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('keeps a url value that only looks like Studio, byte for byte', () => {
+    for (const target of [
+      '/link-preview?url=https%3A%2F%2Fexample.com%2Fstudio-ghibli',
+      '/link-preview?url=https%3A%2F%2Fstudio.example%2Fpage',
+    ]) {
+      expect(redactSensitiveQueryParameters(target)).toBe(target);
+    }
+  });
+
+  it('reads only the url parameter by its value', () => {
+    const target = '/feed?redirect=/studio/track?id=abc';
+    expect(redactSensitiveQueryParameters(target)).toBe(target);
+  });
+
+  it('does not throw on a malformed escape in a Studio value', () => {
+    expect(
+      redactSensitiveQueryParameters('/link-preview?url=%zz/studio/track'),
+    ).toBe(`/link-preview?url=${REDACTED_QUERY_VALUE}`);
+  });
+
+  it('redacts a bare query string the same way', () => {
+    expect(
+      redactSensitiveQueryString(`url=${encodeURIComponent(TRACK_URL)}&page=2`),
+    ).toBe(`url=${REDACTED_QUERY_VALUE}&page=2`);
+  });
+});
+
+describe('isSensitiveQueryParameter', () => {
+  const TRACK_URL = 'https://queerpulse.test/studio/track?id=abc';
+
+  it('answers true for a named credential whatever its value', () => {
+    expect(isSensitiveQueryParameter('invite', 'abc')).toBe(true);
+  });
+
+  it('answers true for a Studio url value, alone or repeated', () => {
+    expect(isSensitiveQueryParameter('url', TRACK_URL)).toBe(true);
+    expect(
+      isSensitiveQueryParameter('url', ['https://example.com/page', TRACK_URL]),
+    ).toBe(true);
+  });
+
+  it('answers false for other url values and for Studio paths in other names', () => {
+    expect(isSensitiveQueryParameter('url', 'https://example.com/page')).toBe(
+      false,
+    );
+    expect(isSensitiveQueryParameter('page', '/studio/track')).toBe(false);
+    expect(isSensitiveQueryParameter('url', undefined)).toBe(false);
   });
 });

@@ -12,12 +12,19 @@ import {
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioReleaseDispute } from './entities/studio-release-dispute.entity';
 import {
+  StudioClaimantRole,
+  StudioCopyrightClaim,
+  StudioCopyrightClaimStatus,
+} from './entities/studio-copyright-claim.entity';
+import {
+  LISTENER_HEARD_TRACK_FILTER_SQL,
   LISTENER_PLAYABLE_TRACK_FILTER_SQL,
   StudioCatalogService,
 } from './studio-catalog.service';
 import { encodeStudioCursor } from './studio-cursor';
 import { episodeReleasedSql } from './studio-episode-rule';
 import { StudioOwnershipService } from './studio-ownership.service';
+import { notWithheldTrackSql } from './studio-playlist-visibility';
 import {
   RELEASE_CREDIT_SUMMARY_SQL,
   TRACK_PUBLIC_CREDITS_SQL,
@@ -30,6 +37,9 @@ import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
 const VIEWER_ID = '8b000000-0000-4000-8000-000000000001';
 const PERSONA_ID = '8b000000-0000-4000-8000-000000000002';
 const TRACK_ID = '8b000000-0000-4000-8000-000000000003';
+const PUBLISHED_EPISODE_ID = '8b000000-0000-4000-8000-000000000011';
+const DRAFT_EPISODE_ID = '8b000000-0000-4000-8000-000000000012';
+const OTHER_DRAFT_EPISODE_ID = '8b000000-0000-4000-8000-000000000013';
 const AUDIO_KEY =
   'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3';
 const PEAKS = Array.from({ length: 200 }, (_unused, index) => index);
@@ -139,6 +149,7 @@ describe('StudioCatalogService', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     query: jest.Mock;
+    manager: { find: jest.Mock };
   };
   let subprofiles: { createQueryBuilder: jest.Mock; findOne: jest.Mock };
   let ownership: { isPersonaMember: jest.Mock };
@@ -166,6 +177,7 @@ describe('StudioCatalogService', () => {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
       query: jest.fn().mockResolvedValue([]),
+      manager: { find: jest.fn().mockResolvedValue([]) },
     };
     subprofiles = { createQueryBuilder: jest.fn(), findOne: jest.fn() };
     ownership = { isPersonaMember: jest.fn().mockResolvedValue(false) };
@@ -794,6 +806,135 @@ describe('StudioCatalogService', () => {
       releases.createQueryBuilder.mockReturnValueOnce(queryBuilderMock());
       await expect(
         service.getReleaseAsPreview(VIEWER_ID, releaseRow(1).id),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('serves staff the preview link view of a draft with no owner fields', async () => {
+      releases.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({ one: releaseRow(1, StudioReleaseStatus.Draft) }),
+      );
+      tracks.find.mockResolvedValue([
+        {
+          id: TRACK_ID,
+          position: 2,
+          title: 'Opening',
+          audioKey: AUDIO_KEY,
+          durationSeconds: 200,
+          isExplicit: false,
+        },
+      ]);
+
+      const response = await service.getReleaseAsStaffDraftPreview(
+        releaseRow(1).id,
+      );
+
+      expect(response).toEqual(
+        expect.objectContaining({
+          isPreview: true,
+          isOwner: false,
+          rightsConfirmedAt: null,
+          takedownReason: null,
+          previewToken: null,
+          sceneId: null,
+          claims: [],
+          dispute: null,
+        }),
+      );
+      expect(response.tracks.map((summary) => summary.position)).toEqual([1]);
+      expect(releaseExtras.forRelease).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({ id: releaseRow(1).id }),
+      );
+      expect(ownership.isPersonaMember).not.toHaveBeenCalled();
+      expect(disputes.find).not.toHaveBeenCalled();
+    });
+
+    it('answers a staff preview of a missing release with a plain 404', async () => {
+      releases.createQueryBuilder.mockReturnValueOnce(queryBuilderMock());
+      await expect(
+        service.getReleaseAsStaffDraftPreview(releaseRow(1).id),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('puts the draft episode into the show preview as a draft, beside the published episodes only', async () => {
+      const show = {
+        ...releaseRow(1, StudioReleaseStatus.Published),
+        type: StudioReleaseType.Podcast,
+      };
+      releases.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({ one: show }),
+      );
+      tracks.find.mockResolvedValue([
+        {
+          id: PUBLISHED_EPISODE_ID,
+          position: 1,
+          title: 'Pilot',
+          audioKey: AUDIO_KEY,
+          durationSeconds: 1800,
+          isExplicit: false,
+          publishedAt: new Date('2026-09-01T00:00:00Z'),
+        },
+        {
+          id: DRAFT_EPISODE_ID,
+          position: 2,
+          title: 'Part two',
+          audioKey: null,
+          durationSeconds: null,
+          isExplicit: false,
+          publishedAt: null,
+        },
+        {
+          id: OTHER_DRAFT_EPISODE_ID,
+          position: 3,
+          title: 'Later',
+          audioKey: AUDIO_KEY,
+          durationSeconds: 900,
+          isExplicit: false,
+          publishedAt: null,
+        },
+      ]);
+
+      const response = await service.getReleaseAsStaffDraftPreview(
+        show.id,
+        DRAFT_EPISODE_ID,
+      );
+
+      expect(
+        response.tracks.map((summary) => [summary.id, summary.isDraft]),
+      ).toEqual([
+        [PUBLISHED_EPISODE_ID, false],
+        [DRAFT_EPISODE_ID, true],
+      ]);
+      expect(response.tracks[1]).toEqual(
+        expect.objectContaining({
+          title: 'Part two',
+          hasAudio: false,
+          publishedAt: null,
+        }),
+      );
+    });
+
+    it('answers 404 for an episode id that is no draft episode of that show', async () => {
+      const show = {
+        ...releaseRow(1, StudioReleaseStatus.Published),
+        type: StudioReleaseType.Podcast,
+      };
+      releases.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({ one: show }),
+      );
+      tracks.find.mockResolvedValue([
+        {
+          id: PUBLISHED_EPISODE_ID,
+          position: 1,
+          title: 'Pilot',
+          audioKey: AUDIO_KEY,
+          durationSeconds: 1800,
+          isExplicit: false,
+          publishedAt: new Date('2026-09-01T00:00:00Z'),
+        },
+      ]);
+      await expect(
+        service.getReleaseAsStaffDraftPreview(show.id, PUBLISHED_EPISODE_ID),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -1595,8 +1736,208 @@ describe('StudioCatalogService', () => {
         episodeReleasedSql('track', 'release'),
       );
       expect(stats.addSelect).toHaveBeenCalledWith(
-        `COALESCE(SUM("track"."duration_seconds") FILTER (WHERE ${LISTENER_PLAYABLE_TRACK_FILTER_SQL}), 0)::int`,
+        `COALESCE(SUM("track"."duration_seconds") FILTER (WHERE ${LISTENER_HEARD_TRACK_FILTER_SQL}), 0)::int`,
         'playable_duration_seconds',
+      );
+    });
+  });
+
+  // Studio safety and moderation: withheld tracks and the owner's claims.
+  describe('Studio safety', () => {
+    const WITHHELD_AT = new Date('2026-10-14T10:00:00.000Z');
+    const withheldTrack = {
+      id: TRACK_ID,
+      releaseId: releaseRow(1).id,
+      position: 1,
+      title: 'Borrowed',
+      audioKey: AUDIO_KEY,
+      audioContentType: 'audio/mpeg',
+      durationSeconds: 200,
+      isExplicit: false,
+      credits: [],
+      lyrics: null,
+      waveformPeaks: null,
+      loudnessLufs: null,
+      peakDb: null,
+      withheldAt: WITHHELD_AT,
+    };
+    const acceptedClaim = {
+      id: 'cb000000-0000-4000-8000-000000000001',
+      trackId: TRACK_ID,
+      releaseId: releaseRow(1).id,
+      claimantId: 'cb100000-0000-4000-8000-000000000001',
+      claimantRole: StudioClaimantRole.RightsHolder,
+      originalWork: 'Saudade',
+      originalLink: null,
+      details: 'The hook',
+      status: StudioCopyrightClaimStatus.Accepted,
+      counterNote: null,
+      counteredAt: null,
+      claimantReply: null,
+      repliedAt: null,
+      staffNote: null,
+      acceptedAt: WITHHELD_AT,
+      decidedAt: null,
+      createdAt: new Date('2026-10-14T09:00:00.000Z'),
+    } as StudioCopyrightClaim;
+
+    it('answers a listener 410 for a withheld track after the release checks pass', async () => {
+      tracks.findOne.mockResolvedValue(withheldTrack);
+      releases.createQueryBuilder
+        .mockReturnValueOnce(queryBuilderMock({ one: releaseRow(1) }))
+        .mockReturnValueOnce(queryBuilderMock({ exists: true }));
+
+      const failure = await thrownBy(service.getTrack(VIEWER_ID, TRACK_ID));
+
+      expect(failure.getStatus()).toBe(410);
+      expect(failure.getResponse()).toEqual({
+        statusCode: 410,
+        code: 'studio_track_withheld',
+        message: 'This track is unavailable.',
+      });
+    });
+
+    it('keeps the withdrawn release answer ahead of a withheld track', async () => {
+      tracks.findOne.mockResolvedValue(withheldTrack);
+      releases.createQueryBuilder
+        .mockReturnValueOnce(
+          queryBuilderMock({
+            one: releaseRow(1, StudioReleaseStatus.TakenDown),
+          }),
+        )
+        .mockReturnValueOnce(queryBuilderMock({ exists: false }));
+      subprofiles.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({ exists: true }),
+      );
+
+      const failure = await thrownBy(service.getTrack(VIEWER_ID, TRACK_ID));
+
+      expect(failure.getResponse()).toEqual(
+        expect.objectContaining({ code: 'studio_release_withdrawn' }),
+      );
+    });
+
+    it('shows the owner a withheld track with its claims', async () => {
+      ownership.isPersonaMember.mockResolvedValue(true);
+      tracks.findOne.mockResolvedValue(withheldTrack);
+      tracks.manager.find.mockResolvedValue([acceptedClaim]);
+      releases.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({ one: releaseRow(1) }),
+      );
+
+      const response = await service.getTrack(VIEWER_ID, TRACK_ID);
+
+      expect(response.isWithheld).toBe(true);
+      expect(response.title).toBe('Borrowed');
+      expect(response.claims).toEqual([
+        expect.objectContaining({ id: acceptedClaim.id, canCounter: true }),
+      ]);
+      expect(tracks.manager.find).toHaveBeenCalledWith(
+        StudioCopyrightClaim,
+        expect.objectContaining({
+          order: { acceptedAt: 'DESC', id: 'DESC' },
+        }),
+      );
+    });
+
+    it('reads no claims for a listener', async () => {
+      tracks.findOne.mockResolvedValue({ ...withheldTrack, withheldAt: null });
+      releases.createQueryBuilder
+        .mockReturnValueOnce(queryBuilderMock({ one: releaseRow(1) }))
+        .mockReturnValueOnce(queryBuilderMock({ exists: true }));
+
+      const response = await service.getTrack(VIEWER_ID, TRACK_ID);
+
+      expect(response.claims).toEqual([]);
+      expect(tracks.manager.find).not.toHaveBeenCalled();
+    });
+
+    it('reads owner claims for every track of the release', async () => {
+      ownership.isPersonaMember.mockResolvedValue(true);
+      releases.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({ one: releaseRow(1) }),
+      );
+      tracks.find.mockResolvedValue([
+        withheldTrack,
+        {
+          ...withheldTrack,
+          id: 'cb200000-0000-4000-8000-000000000002',
+          position: 2,
+          withheldAt: null,
+        },
+      ]);
+      tracks.manager.find.mockResolvedValue([acceptedClaim]);
+
+      const response = await service.getRelease(VIEWER_ID, releaseRow(1).id);
+
+      const [[, options]] = tracks.manager.find.mock.calls as [
+        [unknown, { where: { trackId: { value: string[] } } }],
+      ];
+      expect(options.where.trackId.value).toEqual([
+        TRACK_ID,
+        'cb200000-0000-4000-8000-000000000002',
+      ]);
+      expect(response.claims).toHaveLength(1);
+    });
+
+    it('answers a listener 410 on the stream of a withheld track', async () => {
+      tracks.findOne.mockResolvedValue(withheldTrack);
+      releases.createQueryBuilder
+        .mockReturnValueOnce(queryBuilderMock({ one: releaseRow(1) }))
+        .mockReturnValueOnce(queryBuilderMock({ exists: true }));
+
+      const failure = await thrownBy(service.getStream(VIEWER_ID, TRACK_ID));
+
+      expect(failure.getStatus()).toBe(410);
+      expect(storage.createPresignedAudioStream).not.toHaveBeenCalled();
+    });
+
+    it('lets the owner stream a withheld track', async () => {
+      ownership.isPersonaMember.mockResolvedValue(true);
+      tracks.findOne.mockResolvedValue(withheldTrack);
+      releases.createQueryBuilder.mockReturnValueOnce(
+        queryBuilderMock({ one: releaseRow(1) }),
+      );
+
+      await service.getStream(VIEWER_ID, TRACK_ID);
+
+      expect(storage.createPresignedAudioStream).toHaveBeenCalledWith(
+        AUDIO_KEY,
+        'audio/mpeg',
+        200,
+      );
+    });
+
+    it('leaves withheld tracks out of track search', async () => {
+      const queryBuilder = queryBuilderMock();
+      tracks.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.search(VIEWER_ID, 'opening', 'tracks');
+
+      expect(andWherePredicates(queryBuilder)).toContain(
+        notWithheldTrackSql('track'),
+      );
+    });
+
+    it('leaves a withheld length out of a listener card and keeps it in the count', async () => {
+      const queryBuilder = queryBuilderMock();
+      tracks.createQueryBuilder.mockReturnValue(queryBuilder);
+      releases.createQueryBuilder.mockReturnValue(
+        queryBuilderMock({ many: [releaseRow(1)] }),
+      );
+
+      await service.staffSummariesByReleaseId([releaseRow(1).id]);
+
+      expect(LISTENER_HEARD_TRACK_FILTER_SQL).toContain(
+        notWithheldTrackSql('track'),
+      );
+      expect(queryBuilder.addSelect).toHaveBeenCalledWith(
+        `COALESCE(SUM("track"."duration_seconds") FILTER (WHERE ${LISTENER_HEARD_TRACK_FILTER_SQL}), 0)::int`,
+        'playable_duration_seconds',
+      );
+      expect(queryBuilder.addSelect).toHaveBeenCalledWith(
+        `COUNT(*) FILTER (WHERE ${LISTENER_PLAYABLE_TRACK_FILTER_SQL})::int`,
+        'playable_track_count',
       );
     });
   });

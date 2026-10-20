@@ -12,6 +12,7 @@ import { MediaReferenceResolver } from '../media-references/media-reference.reso
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
+import { RESTORE_TRACKS_OF_ERASED_CLAIMANT_SQL } from '../studio/studio-claim-store';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -77,7 +78,11 @@ describe('AccountDeletionProcessorService storage erasure', () => {
     delete: jest.Mock;
     find: jest.Mock;
   };
-  let dataSource: { transaction: jest.Mock; getRepository: jest.Mock };
+  let dataSource: {
+    transaction: jest.Mock;
+    getRepository: jest.Mock;
+    query: jest.Mock;
+  };
   let communityOwnerOrphan: { handleOwnerErasure: jest.Mock };
   let contentOwnerErasure: { eraseFor: jest.Mock };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
@@ -190,6 +195,8 @@ describe('AccountDeletionProcessorService storage erasure', () => {
           createQueryBuilder: jest.fn().mockReturnValue(arrayQueryBuilder),
         };
       }),
+      // The Pulse Live question source reads raw SQL; no quiz holds these keys.
+      query: jest.fn().mockResolvedValue([]),
     };
 
     storage = {
@@ -492,6 +499,22 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       // transaction opens.
       expect(handOverOrder).toBeLessThan(
         firstCallOrder(dataSource.transaction),
+      );
+    });
+
+    // Studio safety and moderation: a track the member's claims alone held
+    // comes back before the cascade removes those claims.
+    it("restores the tracks the member's claims alone held, before the user delete", async () => {
+      await service.processDueDeletions();
+
+      const queryCalls = manager.query.mock.calls as Array<[string, unknown[]]>;
+      const restoreIndex = queryCalls.findIndex(
+        ([sql]) => sql === RESTORE_TRACKS_OF_ERASED_CLAIMANT_SQL,
+      );
+      expect(restoreIndex).toBeGreaterThanOrEqual(0);
+      expect(queryCalls[restoreIndex]![1]).toEqual([USER_ID]);
+      expect(manager.query.mock.invocationCallOrder[restoreIndex]).toBeLessThan(
+        firstCallOrder(manager.delete),
       );
     });
 

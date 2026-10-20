@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { runWithConcurrency } from '../common/run-with-concurrency';
+import {
+  isOwnOriginStudioUrl,
+  studioShareOrigins,
+} from '../studio/studio-share-link';
 import { MAX_BATCH_URLS } from './link-preview.constants';
 import { LinkPreviewResponse, emptyPreview } from './link-preview.response';
 import { parseOpenGraph } from './og-parse';
@@ -27,6 +31,13 @@ export class LinkPreviewService {
   private readonly maxEntries = 500;
 
   async preview(url: string): Promise<LinkPreviewResponse> {
+    // Studio rich cards: a Studio page on this deployment renders as a card
+    // from the reader's own Studio reads, so it is never fetched, cached or
+    // unfurled here. A preview link (`/studio/preview/<token>`) is a bearer
+    // secret and gets the same empty card.
+    if (isOwnOriginStudioUrl(url, studioShareOrigins())) {
+      return emptyPreview(url);
+    }
     const cached = this.readCache(url);
     if (cached) return cached;
 

@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -104,14 +109,25 @@ export class CommunityGovernanceLogService {
     private readonly dataSource: DataSource,
   ) {}
 
-  async log(input: LogGovernanceActionInput): Promise<void> {
-    // `.save(this.governanceLogs.create(...))`, not `.insert(...)`: `insert`'s
+  /**
+   * Write one governance entry. A caller that must not commit without its
+   * audit entry passes its transaction manager, and the entry then rolls back
+   * with the change (`CommunityGivingService.replaceBySlug` does this).
+   */
+  async log(
+    input: LogGovernanceActionInput,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const repository = manager
+      ? manager.getRepository(CommunityGovernanceLog)
+      : this.governanceLogs;
+    // `.save(repository.create(...))` over `.insert(...)`: `insert`'s
     // `QueryDeepPartialEntity` mapped type rejects a plain `Record<string,
     // unknown>` for lacking an index signature it can recurse into (same
-    // class of issue noted on `Report.evidence`) — `create`+`save` takes the
+    // class of issue noted on `Report.evidence`). `create`+`save` takes the
     // concrete entity shape instead and has no such trouble.
-    await this.governanceLogs.save(
-      this.governanceLogs.create({
+    await repository.save(
+      repository.create({
         communityId: input.communityId,
         actorUserId: input.actorUserId,
         action: input.action,

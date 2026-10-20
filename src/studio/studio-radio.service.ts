@@ -11,6 +11,10 @@ import {
 import { StudioReleaseType } from './entities/studio-release.entity';
 import { playableTrackSql } from './studio-playlist-visibility';
 import { StudioArtistRef } from './studio-response';
+import {
+  StudioContentWarningId,
+  effectiveContentWarnings,
+} from './studio-safety.constants';
 import { STUDIO_DISCOVERY_LIMITS, studioError } from './studio.constants';
 
 /** Everything the player needs for one queue item without a release fetch. */
@@ -24,6 +28,9 @@ export interface StudioRadioItem {
   releaseTitle: string;
   coverUrl: string | null;
   artist: StudioArtistRef;
+  /** Studio safety: the artist's and our team's warnings, for the player's
+   *  ask-first gate on a radio extension. */
+  contentWarnings: StudioContentWarningId[];
 }
 
 /** Up to 300 items in random server order. The browser shuffles and refills. */
@@ -39,11 +46,14 @@ interface RadioRow extends Record<string, unknown> {
   release_id: string;
   release_title: string;
   cover_key: string | null;
+  content_warnings: string[] | null;
+  staff_content_warnings: string[] | null;
 }
 
 /**
  * `$1` the viewer, `$2` the genre or mood, `$3` the cap. Playable tracks
- * (published release, audio and duration in place, persona listenable) of
+ * (published release, audio and duration in place, persona listenable, and
+ * not withheld (Studio safety, through `playableTrackSql`)) of
  * releases in that genre or mood, creators clear of blocks either way,
  * sampled at random. `filterColumn` is one of two literals.
  * Studio artist kinds: podcast shows stay out, so a radio never plays an episode.
@@ -56,6 +66,8 @@ export function radioSql(filterColumn: 'genre' | 'mood'): string {
        "release"."id" AS "release_id",
        "release"."title" AS "release_title",
        "release"."cover_key" AS "cover_key",
+       "track"."content_warnings" AS "content_warnings",
+       "track"."staff_content_warnings" AS "staff_content_warnings",
        ${personaColumnsSql('persona', 'artist')}
   FROM "studio_tracks" "track"
   INNER JOIN "studio_releases" "release" ON "release"."id" = "track"."release_id"
@@ -106,6 +118,10 @@ export class StudioRadioService {
         releaseTitle: row.release_title,
         coverUrl: toImageUrl(row.cover_key),
         artist: artistRefFromColumns(personaColumnsFromRow(row, 'artist')),
+        contentWarnings: effectiveContentWarnings(
+          row.content_warnings,
+          row.staff_content_warnings,
+        ),
       })),
     };
   }

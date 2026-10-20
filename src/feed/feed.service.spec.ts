@@ -310,6 +310,7 @@ const communityDefaults: Community = {
   parentId: null,
   allowsSubcommunities: false,
   archivedWithParent: false,
+  givingIntro: null,
 };
 
 const baseCommunity = (overrides: Partial<Community> = {}): Community =>
@@ -1676,6 +1677,35 @@ describe('FeedService', () => {
       link: '/feed',
     });
     expect(communities.find).not.toHaveBeenCalled();
+  });
+
+  it('carries the Studio link of a community post into its feed item (Studio rich cards)', async () => {
+    const originalFrontendUrl = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = 'https://queerpulse.test';
+    try {
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([
+          basePost({
+            communityId: null,
+            body: 'Listen https://queerpulse.test/studio/track?id=0f8a3c2e-5b1d-4e6f-9a7b-1c2d3e4f5a6b',
+          }),
+        ]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(page.data[0]).toMatchObject({
+        type: 'community_post',
+        summary: 'Listen',
+        studioLink: '/studio/track?id=0f8a3c2e-5b1d-4e6f-9a7b-1c2d3e4f5a6b',
+      });
+    } finally {
+      if (originalFrontendUrl === undefined) {
+        delete process.env.FRONTEND_URL;
+      } else {
+        process.env.FRONTEND_URL = originalFrontendUrl;
+      }
+    }
   });
 
   describe('"all" tab affinity ranking (SOC-04)', () => {

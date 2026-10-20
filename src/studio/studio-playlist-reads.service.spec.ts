@@ -1,5 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { FindOperator, In, Repository } from 'typeorm';
 import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
@@ -11,6 +11,11 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { StudioPlaylistTrack } from './entities/studio-playlist-track.entity';
 import {
+  StudioPlaylistEditor,
+  StudioPlaylistEditorSource,
+  StudioPlaylistEditorStatus,
+} from './entities/studio-playlist-editor.entity';
+import {
   StudioPlaylist,
   StudioPlaylistVisibility,
 } from './entities/studio-playlist.entity';
@@ -18,12 +23,18 @@ import { StudioTrack } from './entities/studio-track.entity';
 import { StudioAccessService } from './studio-access.service';
 import { StudioCatalogService } from './studio-catalog.service';
 import { encodePlaylistCursor } from './studio-playlist-cursor';
-import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
+import {
+  mineListedPlaylistSql,
+  StudioPlaylistReadsService,
+} from './studio-playlist-reads.service';
 import {
   creditPersonaCreatorIdSql,
+  creditStandsSql,
   personaCreatorBlockExemptSql,
   personaCreditActiveSql,
+  playlistOwnerIsActiveSql,
   publiclyListedPlaylistSql,
+  viewerHoldsLiveEditorRowSql,
 } from './studio-playlist-visibility';
 import { StudioReleaseCard } from './studio-response';
 import { withdrawnReleaseSql } from './studio-visibility';
@@ -136,6 +147,7 @@ const entryRow = (
   trackId,
   position,
   addedAt: new Date(`2026-10-1${position}T09:00:00.000Z`),
+  addedByUserId: null,
 });
 
 const releaseCard = {
@@ -151,9 +163,20 @@ describe('StudioPlaylistReadsService', () => {
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let catalog: { cardsByReleaseId: jest.Mock; getTrack: jest.Mock };
   let access: { hasAccess: jest.Mock };
-  let blockFilter: { excludeBlocked: jest.Mock; isBlockedEitherWay: jest.Mock };
+  let blockFilter: {
+    excludeBlocked: jest.Mock;
+    isBlockedEitherWay: jest.Mock;
+    blockedUserIds: jest.Mock;
+  };
   let connections: { areConnected: jest.Mock };
-  let users: { exists: jest.Mock };
+  let users: { exists: jest.Mock; find: jest.Mock };
+  // `peopleByUserIds` reads every other member as active.
+  let inactiveUserIds: Set<string>;
+  let editors: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let service: StudioPlaylistReadsService;
 
   const queueBuilders = (
@@ -201,9 +224,25 @@ describe('StudioPlaylistReadsService', () => {
     blockFilter = {
       excludeBlocked: jest.fn((queryBuilder: QueryBuilderMock) => queryBuilder),
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
     connections = { areConnected: jest.fn().mockResolvedValue(false) };
-    users = { exists: jest.fn().mockResolvedValue(true) };
+    inactiveUserIds = new Set<string>();
+    users = {
+      exists: jest.fn().mockResolvedValue(true),
+      find: jest.fn((options: { where: { id: FindOperator<string> } }) =>
+        Promise.resolve(
+          (options.where.id.value as unknown as string[])
+            .filter((userId) => !inactiveUserIds.has(userId))
+            .map((userId) => ({ id: userId })),
+        ),
+      ),
+    };
+    editors = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      createQueryBuilder: jest.fn(() => queryBuilderMock()),
+    };
     service = new StudioPlaylistReadsService(
       playlists as unknown as Repository<StudioPlaylist>,
       entries as unknown as Repository<StudioPlaylistTrack>,
@@ -215,6 +254,7 @@ describe('StudioPlaylistReadsService', () => {
       blockFilter as unknown as BlockFilterService,
       connections as unknown as ConnectionsService,
       users as unknown as Repository<User>,
+      editors as unknown as Repository<StudioPlaylistEditor>,
     );
   });
 
@@ -676,8 +716,8 @@ describe('StudioPlaylistReadsService', () => {
       const page = await service.listMine(OWNER_ID, undefined);
 
       expect(listing.where).toHaveBeenCalledWith(
-        '"playlist"."user_id" = :ownerId',
-        { ownerId: OWNER_ID },
+        mineListedPlaylistSql('playlist', 'mineViewerId'),
+        { mineViewerId: OWNER_ID },
       );
       expect(listing.limit).toHaveBeenCalledWith(25);
       expect(page.items).toHaveLength(24);
@@ -882,5 +922,473 @@ describe('StudioPlaylistReadsService', () => {
     await expect(service.playableTrackIds(VIEWER_ID, [])).resolves.toEqual(
       new Set(),
     );
+  });
+
+  describe('collaborative playlists', () => {
+    const EDITOR_ID = VIEWER_ID;
+    const FORMER_EDITOR_ID = 'e1000000-0000-4000-8000-000000000009';
+    const editorProfile = {
+      userId: EDITOR_ID,
+      slug: 'bea-costa',
+      firstName: 'Bea',
+      lastName: 'Costa',
+      pronouns: null,
+      avatarUrl: null,
+      photoVisible: true,
+    };
+    let activeEditorUserIds: string[];
+
+    const editorRow = (
+      status: StudioPlaylistEditorStatus,
+    ): StudioPlaylistEditor => ({
+      id: 'editor-row-1',
+      playlistId: PLAYLIST_ID,
+      userId: EDITOR_ID,
+      invitedByUserId: OWNER_ID,
+      source: StudioPlaylistEditorSource.MemberInvite,
+      status,
+      invitedAt: new Date('2026-10-14T09:00:00.000Z'),
+      acceptedAt: null,
+      endedAt: null,
+    });
+
+    const asEditor = (status: StudioPlaylistEditorStatus): void => {
+      editors.findOne.mockResolvedValue(editorRow(status));
+    };
+
+    beforeEach(() => {
+      activeEditorUserIds = [EDITOR_ID];
+      profiles.find.mockResolvedValue([ownerProfile, editorProfile]);
+      // The viewer's own rows are read with `status` selected; the added by
+      // check selects `userId` alone.
+      editors.find.mockImplementation(
+        (options: { select?: Record<string, boolean> }) =>
+          Promise.resolve(
+            options.select?.status
+              ? []
+              : activeEditorUserIds.map((userId) => ({ userId })),
+          ),
+      );
+      queueBuilders(editors, [
+        queryBuilderMock({
+          raw: [{ playlist_id: PLAYLIST_ID, editor_count: 2 }],
+        }),
+      ]);
+    });
+
+    it('gives an active editor every entry, unavailable ones included, with the editor count and no owner fields', async () => {
+      playlists.findOne.mockResolvedValue(
+        playlistRow({ visibility: StudioPlaylistVisibility.Private }),
+      );
+      asEditor(StudioPlaylistEditorStatus.Active);
+      entries.find.mockResolvedValue([
+        { ...entryRow('entry-1', TRACK_A, 1), addedByUserId: OWNER_ID },
+        { ...entryRow('entry-2', TRACK_B, 2), addedByUserId: EDITOR_ID },
+      ]);
+      queueBuilders(tracks, [
+        queryBuilderMock({ many: [trackRow(TRACK_A, 1)] }),
+        queryBuilderMock(),
+      ]);
+
+      const view = await service.getPlaylist(EDITOR_ID, PLAYLIST_ID);
+
+      expect(view.role).toBe('editor');
+      expect(view.isOwner).toBe(false);
+      expect(view.editorCount).toBe(2);
+      expect(view.visibility).toBeNull();
+      expect(view.creditSubprofileId).toBeNull();
+      expect(view.invite).toBeNull();
+      expect(
+        view.entries.map((entry) => [entry.entryId, entry.isAvailable]),
+      ).toEqual([
+        ['entry-1', true],
+        ['entry-2', false],
+      ]);
+      expect(view.entries.map((entry) => entry.addedBy?.slug)).toEqual([
+        OWNER_SLUG,
+        'bea-costa',
+      ]);
+      expect(access.hasAccess).not.toHaveBeenCalled();
+    });
+
+    it('gives a member with no role a null role, a null editor count and no added by on a public playlist', async () => {
+      entries.find.mockResolvedValue([
+        { ...entryRow('entry-1', TRACK_A, 1), addedByUserId: OWNER_ID },
+      ]);
+      queueBuilders(tracks, [
+        queryBuilderMock({ many: [trackRow(TRACK_A, 1)] }),
+      ]);
+
+      const view = await service.getPlaylist(VIEWER_ID, PLAYLIST_ID);
+
+      expect(view.role).toBeNull();
+      expect(view.editorCount).toBeNull();
+      expect(view.invite).toBeNull();
+      expect(view.entries[0]?.addedBy).toBeNull();
+      expect(editors.createQueryBuilder).not.toHaveBeenCalled();
+      expect(JSON.stringify(view)).not.toContain('bea-costa');
+    });
+
+    it('shows an invitee the listener view with the invitation and no editor data', async () => {
+      playlists.findOne.mockResolvedValue(
+        playlistRow({ visibility: StudioPlaylistVisibility.Private }),
+      );
+      asEditor(StudioPlaylistEditorStatus.Invited);
+      entries.find.mockResolvedValue([
+        { ...entryRow('entry-1', TRACK_A, 1), addedByUserId: OWNER_ID },
+        entryRow('entry-2', null, 2),
+      ]);
+      queueBuilders(tracks, [
+        queryBuilderMock({ many: [trackRow(TRACK_A, 1)] }),
+      ]);
+
+      const view = await service.getPlaylist(EDITOR_ID, PLAYLIST_ID);
+
+      expect(view.role).toBe('invitee');
+      expect(view.editorCount).toBeNull();
+      expect(view.invite).toEqual({
+        invitedBy: {
+          slug: OWNER_SLUG,
+          displayName: 'Ana Silva',
+          avatarUrl: null,
+        },
+        invitedAt: '2026-10-14T09:00:00.000Z',
+      });
+      expect(view.entries.map((entry) => entry.entryId)).toEqual(['entry-1']);
+      expect(view.entries[0]?.addedBy).toBeNull();
+    });
+
+    it('answers 404 to an editor while the persona credit is broken', async () => {
+      playlists.findOne.mockResolvedValue(
+        playlistRow({
+          creditSubprofileId: PERSONA_ID,
+          isCreditedToPersona: true,
+        }),
+      );
+      queueBuilders(playlists, [queryBuilderMock({ raw: [] })]);
+      asEditor(StudioPlaylistEditorStatus.Active);
+
+      await expect(
+        service.getPlaylist(EDITOR_ID, PLAYLIST_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('answers 404 to an editor and an invitee while the owner account is not active', async () => {
+      playlists.findOne.mockResolvedValue(
+        playlistRow({ visibility: StudioPlaylistVisibility.Private }),
+      );
+      users.exists.mockResolvedValue(false);
+
+      for (const status of [
+        StudioPlaylistEditorStatus.Active,
+        StudioPlaylistEditorStatus.Invited,
+      ]) {
+        asEditor(status);
+        await expect(
+          service.getPlaylist(EDITOR_ID, PLAYLIST_ID),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(await service.isOpenToViewer(EDITOR_ID, PLAYLIST_ID)).toBe(
+          false,
+        );
+      }
+      expect(users.exists).toHaveBeenCalledWith({
+        where: { id: OWNER_ID, status: 'active' },
+      });
+      expect(access.hasAccess).not.toHaveBeenCalled();
+    });
+
+    it('treats an editor row as void while the owner and the editor are blocked either way', async () => {
+      playlists.findOne.mockResolvedValue(
+        playlistRow({ visibility: StudioPlaylistVisibility.Private }),
+      );
+      asEditor(StudioPlaylistEditorStatus.Active);
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(
+        service.getPlaylist(EDITOR_ID, PLAYLIST_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('drops an added by that names a member who no longer edits', async () => {
+      entries.find.mockResolvedValue([
+        { ...entryRow('entry-1', TRACK_A, 1), addedByUserId: FORMER_EDITOR_ID },
+        { ...entryRow('entry-2', TRACK_C, 2), addedByUserId: EDITOR_ID },
+      ]);
+      queueBuilders(tracks, [
+        queryBuilderMock({
+          many: [trackRow(TRACK_A, 1), trackRow(TRACK_C, 2)],
+        }),
+      ]);
+
+      const view = await service.getPlaylist(OWNER_ID, PLAYLIST_ID);
+
+      expect(view.entries.map((entry) => entry.addedBy?.slug ?? null)).toEqual([
+        null,
+        'bea-costa',
+      ]);
+      expect(editors.find).toHaveBeenCalledWith({
+        where: {
+          playlistId: PLAYLIST_ID,
+          userId: In([FORMER_EDITOR_ID, EDITOR_ID]),
+          status: StudioPlaylistEditorStatus.Active,
+        },
+        select: { userId: true },
+      });
+    });
+
+    it('reads as added by nobody a member blocked either way with the viewer', async () => {
+      const OTHER_EDITOR_ID = 'e1000000-0000-4000-8000-000000000008';
+      activeEditorUserIds = [EDITOR_ID, OTHER_EDITOR_ID];
+      entries.find.mockResolvedValue([
+        { ...entryRow('entry-1', TRACK_A, 1), addedByUserId: OTHER_EDITOR_ID },
+        { ...entryRow('entry-2', TRACK_C, 2), addedByUserId: OWNER_ID },
+      ]);
+      queueBuilders(tracks, [
+        queryBuilderMock({
+          many: [trackRow(TRACK_A, 1), trackRow(TRACK_C, 2)],
+        }),
+      ]);
+      blockFilter.blockedUserIds.mockImplementation(
+        (_viewerId: string, candidateIds: string[]) =>
+          Promise.resolve(
+            new Set(
+              candidateIds.filter((userId) => userId === OTHER_EDITOR_ID),
+            ),
+          ),
+      );
+
+      const view = await service.getPlaylist(OWNER_ID, PLAYLIST_ID);
+
+      expect(view.entries.map((entry) => entry.addedBy?.slug ?? null)).toEqual([
+        null,
+        OWNER_SLUG,
+      ]);
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(OWNER_ID, [
+        OTHER_EDITOR_ID,
+        OWNER_ID,
+      ]);
+    });
+
+    it('spells the mine rule as owned, or a live seat while the credit stands and the owner is active', () => {
+      expect(mineListedPlaylistSql('playlist', 'mineViewerId')).toBe(
+        `("playlist"."user_id" = :mineViewerId
+    OR (${viewerHoldsLiveEditorRowSql('playlist', 'mineViewerId')}
+      AND ${creditStandsSql('playlist')}
+      AND ${playlistOwnerIsActiveSql('playlist')}))`,
+      );
+      expect(viewerHoldsLiveEditorRowSql('playlist', 'mineViewerId')).toContain(
+        `IN ('invited', 'active')`,
+      );
+    });
+
+    it('lists owned, edited and invited playlists on one keyset, minus blocked owners', async () => {
+      const listing = queryBuilderMock();
+      queueBuilders(playlists, [listing]);
+
+      await service.listMine(EDITOR_ID, undefined);
+
+      expect(listing.where).toHaveBeenCalledWith(
+        mineListedPlaylistSql('playlist', 'mineViewerId'),
+        { mineViewerId: EDITOR_ID },
+      );
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        listing,
+        EDITOR_ID,
+        '"playlist"."user_id"',
+      );
+      expect(listing.orderBy).toHaveBeenCalledWith(
+        'playlist.updatedAt',
+        'DESC',
+      );
+      expect(listing.addOrderBy).toHaveBeenCalledWith('playlist.id', 'DESC');
+    });
+
+    it('marks a card the viewer edits and counts its editors, beside a card they own', async () => {
+      const editedPlaylistId = 'e3000000-0000-4000-8000-000000000002';
+      queueBuilders(playlists, [
+        queryBuilderMock({
+          many: [
+            playlistRow({ id: editedPlaylistId, userId: PERSONA_CREATOR_ID }),
+            playlistRow({ userId: EDITOR_ID }),
+          ],
+        }),
+      ]);
+      editors.find.mockImplementation(
+        (options: { select?: Record<string, boolean> }) =>
+          Promise.resolve(
+            options.select?.status
+              ? [
+                  {
+                    playlistId: editedPlaylistId,
+                    status: StudioPlaylistEditorStatus.Active,
+                  },
+                ]
+              : [],
+          ),
+      );
+      queueBuilders(editors, [
+        queryBuilderMock({
+          raw: [{ playlist_id: editedPlaylistId, editor_count: 3 }],
+        }),
+      ]);
+
+      const page = await service.listMine(EDITOR_ID, undefined);
+
+      expect(page.items.map((card) => [card.role, card.editorCount])).toEqual([
+        ['editor', 3],
+        ['owner', 0],
+      ]);
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(EDITOR_ID, [
+        PERSONA_CREATOR_ID,
+      ]);
+    });
+
+    it('marks a card the viewer is invited to as invitee, with no editor count', async () => {
+      const invitedPlaylistId = 'e3000000-0000-4000-8000-000000000003';
+      queueBuilders(playlists, [
+        queryBuilderMock({
+          many: [
+            playlistRow({ id: invitedPlaylistId, userId: PERSONA_CREATOR_ID }),
+          ],
+        }),
+      ]);
+      editors.find.mockImplementation(
+        (options: { select?: Record<string, boolean> }) =>
+          Promise.resolve(
+            options.select?.status
+              ? [
+                  {
+                    playlistId: invitedPlaylistId,
+                    status: StudioPlaylistEditorStatus.Invited,
+                  },
+                ]
+              : [],
+          ),
+      );
+
+      const page = await service.listMine(EDITOR_ID, undefined);
+
+      expect(
+        page.items.map((card) => [card.id, card.role, card.editorCount]),
+      ).toEqual([[invitedPlaylistId, 'invitee', null]]);
+      expect(editors.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('keeps the editors table out of the search, persona page and track page predicates', async () => {
+      const search = queryBuilderMock();
+      const personaPage = queryBuilderMock();
+      const trackPage = queryBuilderMock();
+      queueBuilders(playlists, [search, personaPage, trackPage]);
+
+      await service.searchPlaylists(VIEWER_ID, 'night');
+      await service.listCreditedToPersona(VIEWER_ID, PERSONA_ID, undefined);
+      await service.listForTrack(VIEWER_ID, TRACK_A);
+
+      for (const builder of [search, personaPage, trackPage]) {
+        expect(predicatesOf(builder).join(' ')).not.toContain(
+          'studio_playlist_editors',
+        );
+        expect(predicatesOf(builder)).toContain(
+          publiclyListedPlaylistSql('playlist'),
+        );
+      }
+    });
+
+    it('names the viewer role: owner, editor, invitee or none', async () => {
+      const playlist = playlistRow();
+      expect(await service.viewerRole(OWNER_ID, playlist)).toBe('owner');
+      expect(await service.viewerRole(EDITOR_ID, playlist)).toBeNull();
+      asEditor(StudioPlaylistEditorStatus.Active);
+      expect(await service.viewerRole(EDITOR_ID, playlist)).toBe('editor');
+      asEditor(StudioPlaylistEditorStatus.Invited);
+      expect(await service.viewerRole(EDITOR_ID, playlist)).toBe('invitee');
+    });
+
+    it('answers whether a caller can open a playlist the way the detail read decides', async () => {
+      playlists.findOne.mockResolvedValueOnce(null);
+      expect(await service.isOpenToViewer(VIEWER_ID, PLAYLIST_ID)).toBe(false);
+
+      playlists.findOne.mockResolvedValue(
+        playlistRow({ visibility: StudioPlaylistVisibility.Private }),
+      );
+      expect(await service.isOpenToViewer(OWNER_ID, PLAYLIST_ID)).toBe(true);
+      expect(await service.isOpenToViewer(VIEWER_ID, PLAYLIST_ID)).toBe(false);
+      asEditor(StudioPlaylistEditorStatus.Active);
+      expect(await service.isOpenToViewer(EDITOR_ID, PLAYLIST_ID)).toBe(true);
+    });
+
+    it('maps members to slug, name and avatar with no user id, and falls back for a member with no profile', async () => {
+      const people = await service.peopleByUserIds([
+        EDITOR_ID,
+        FORMER_EDITOR_ID,
+        EDITOR_ID,
+      ]);
+      expect([...people.entries()]).toEqual([
+        [
+          EDITOR_ID,
+          { slug: 'bea-costa', displayName: 'Bea Costa', avatarUrl: null },
+        ],
+        [
+          FORMER_EDITOR_ID,
+          { slug: '', displayName: 'Member', avatarUrl: null },
+        ],
+      ]);
+      expect(users.find).toHaveBeenCalledWith({
+        where: {
+          id: In([EDITOR_ID, FORMER_EDITOR_ID]),
+          status: 'active',
+        },
+        select: { id: true },
+      });
+    });
+
+    it('leaves out every member whose account is not active, and reads nothing for no ids', async () => {
+      inactiveUserIds = new Set([FORMER_EDITOR_ID]);
+
+      const people = await service.peopleByUserIds([
+        EDITOR_ID,
+        FORMER_EDITOR_ID,
+      ]);
+
+      expect([...people.keys()]).toEqual([EDITOR_ID]);
+      expect(profiles.find).toHaveBeenCalledWith({
+        where: { userId: In([EDITOR_ID]) },
+      });
+
+      users.find.mockClear();
+      expect((await service.peopleByUserIds([])).size).toBe(0);
+      expect(users.find).not.toHaveBeenCalled();
+    });
+
+    it('reads as added by nobody an editor whose account is not active', async () => {
+      inactiveUserIds = new Set([EDITOR_ID]);
+      entries.find.mockResolvedValue([
+        { ...entryRow('entry-1', TRACK_A, 1), addedByUserId: EDITOR_ID },
+        { ...entryRow('entry-2', TRACK_C, 2), addedByUserId: OWNER_ID },
+      ]);
+      queueBuilders(tracks, [
+        queryBuilderMock({
+          many: [trackRow(TRACK_A, 1), trackRow(TRACK_C, 2)],
+        }),
+      ]);
+
+      const view = await service.getPlaylist(OWNER_ID, PLAYLIST_ID);
+
+      expect(view.entries.map((entry) => entry.addedBy?.slug ?? null)).toEqual([
+        null,
+        OWNER_SLUG,
+      ]);
+    });
+
+    it('answers a missing playlist with the playlist code', async () => {
+      playlists.findOne.mockResolvedValue(null);
+      await expect(
+        service.getPlaylist(VIEWER_ID, PLAYLIST_ID),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({
+          code: 'studio_playlist_not_found',
+        }) as unknown,
+      });
+    });
   });
 });

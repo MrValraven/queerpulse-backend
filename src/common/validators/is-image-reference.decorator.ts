@@ -70,6 +70,45 @@ export function isAllowedExternalImage(value: string): boolean {
 }
 
 /**
+ * The predicate behind {@link IsImageReference}, exported so a nested image
+ * field (a persona item's `structured.coverUp.beforeImageUrl` or
+ * `structured.sessions[].imageUrl`) passes the exact same check as a
+ * top-level one. Accepts `null` and `''`, one of our storage keys in its bare
+ * or `/files/` form, or an `https://` URL on {@link ALLOWED_IMAGE_HOSTS}.
+ */
+export function isImageReferenceValue(value: unknown): boolean {
+  if (value === null) {
+    return true;
+  }
+  if (typeof value !== 'string') {
+    return false;
+  }
+  // An empty string means "no image", exactly like `null` above. This is
+  // what the old `@IsString() @MaxLength(...)` validation allowed, and every
+  // wizard/form on the frontend sends `''` for an unset photo slot. Since
+  // `@IsOptional()` skips only `undefined`/`null`, the empty string a client
+  // always sends would otherwise fail validation on every save.
+  // `toImageUrl('')` already normalises it to `null` at the response
+  // boundary, so this is consistent end to end.
+  if (value === '') {
+    return true;
+  }
+  if (value.length > MAX_IMAGE_REFERENCE_LENGTH) {
+    return false;
+  }
+  // `storageKeyFromImageUrl` collapses our OWN resolved read URL
+  // (`<apiBaseUrl>/files/<key>`) back to the bare key, which is the shape
+  // several edit forms re-send on save: the same normalisation the write
+  // paths apply before persisting. So both shapes of "one of our uploads"
+  // are accepted here, and neither has to be listed as a trusted external
+  // host.
+  if (isStorageKey(storageKeyFromImageUrl(value))) {
+    return true;
+  }
+  return isAllowedExternalImage(value);
+}
+
+/**
  * An image field holds one of our storage keys, or an `https://` URL on one of
  * the few hosts we already serve images from ({@link ALLOWED_IMAGE_HOSTS}).
  * Anything else is refused.
@@ -89,36 +128,7 @@ export function IsImageReference(validationOptions?: ValidationOptions) {
       options: validationOptions,
       validator: {
         validate(value: unknown) {
-          if (value === null) {
-            return true;
-          }
-          if (typeof value !== 'string') {
-            return false;
-          }
-          // An empty string means "no image", exactly like `null` above. This
-          // is what the old `@IsString() @MaxLength(...)` validation allowed,
-          // and every wizard/form on the frontend sends `''` for an unset
-          // photo slot rather than omitting the field — `@IsOptional()` only
-          // skips `undefined`/`null`, not `''`, so without this the empty
-          // string a client always sends would fail validation on every save.
-          // `toImageUrl('')` already normalises it to `null` at the response
-          // boundary, so this is consistent end to end.
-          if (value === '') {
-            return true;
-          }
-          if (value.length > MAX_IMAGE_REFERENCE_LENGTH) {
-            return false;
-          }
-          // `storageKeyFromImageUrl` collapses our OWN resolved read URL
-          // (`<apiBaseUrl>/files/<key>`) back to the bare key, which is the
-          // shape several edit forms re-send on save — the same normalisation
-          // the write paths apply before persisting. So both shapes of "one of
-          // our uploads" are accepted here, and neither has to be listed as a
-          // trusted external host.
-          if (isStorageKey(storageKeyFromImageUrl(value))) {
-            return true;
-          }
-          return isAllowedExternalImage(value);
+          return isImageReferenceValue(value);
         },
         defaultMessage(args: ValidationArguments) {
           return `${args.property} must be an uploaded image key or an https:// URL on a trusted image host`;

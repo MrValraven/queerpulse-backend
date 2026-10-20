@@ -131,6 +131,8 @@ describe('DirectoryService public reads', () => {
   };
   let events: { find: jest.Mock };
   let queryBuilder: Record<string, jest.Mock>;
+  /** The manager `loadPublicTeam` reads the team through. */
+  let dataSourceManager: { query: jest.Mock; find: jest.Mock };
 
   /** The chain `buildDirectoryQuery` builds, every link returning itself. */
   const makeQueryBuilder = () => {
@@ -164,6 +166,10 @@ describe('DirectoryService public reads', () => {
       query: jest.fn().mockResolvedValue([]),
     };
     events = { find: jest.fn().mockResolvedValue([]) };
+    dataSourceManager = {
+      query: jest.fn().mockResolvedValue([]),
+      find: jest.fn().mockResolvedValue([]),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -212,7 +218,7 @@ describe('DirectoryService public reads', () => {
         { provide: StorageService, useValue: {} },
         {
           provide: DataSource,
-          useValue: { transaction: jest.fn() },
+          useValue: { transaction: jest.fn(), manager: dataSourceManager },
         },
         // The batched open-suspension lookup every public card read now makes.
         // No suspensions in these fixtures, so it answers with an empty Map.
@@ -968,6 +974,36 @@ describe('DirectoryService public reads', () => {
       await expect(service.getSafeSpaceBySlug('casa-t')).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+
+  describe('getDirectoryBySlug team', () => {
+    it('carries an empty team on a listing with no members', async () => {
+      const detail = await service.getDirectoryBySlug('casa-t');
+
+      expect(detail.team).toEqual([]);
+      expect(dataSourceManager.find).not.toHaveBeenCalled();
+    });
+
+    it('reads the anonymous team for a call that names no viewer', async () => {
+      await service.getDirectoryBySlug('casa-t');
+
+      const teamCalls = dataSourceManager.query.mock.calls as [
+        string,
+        unknown[],
+      ][];
+      expect(teamCalls).toHaveLength(1);
+      expect(teamCalls[0]?.[1]).toEqual(['listing-1']);
+    });
+
+    it('passes a signed-in viewer to the team read as its second parameter', async () => {
+      await service.getDirectoryBySlug('casa-t', true, 'viewer-1');
+
+      const teamCalls = dataSourceManager.query.mock.calls as [
+        string,
+        unknown[],
+      ][];
+      expect(teamCalls[0]?.[1]).toEqual(['listing-1', 'viewer-1']);
     });
   });
 });

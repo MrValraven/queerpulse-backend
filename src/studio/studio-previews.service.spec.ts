@@ -363,5 +363,22 @@ describe('StudioPreviewsService', () => {
       ).toEqual({ status: 404, body: PREVIEW_NOT_FOUND_BODY });
       expect(storage.createPresignedAudioStream).not.toHaveBeenCalled();
     });
+
+    // Studio safety: a withheld track streams nowhere, and the preview keeps
+    // its one failure answer.
+    it('streams nothing for a withheld track, with the same 404', async () => {
+      tracks.findOne.mockResolvedValueOnce({
+        id: TRACK_ID,
+        releaseId: RELEASE_ID,
+        audioKey: AUDIO_KEY,
+        audioContentType: 'audio/mpeg',
+        durationSeconds: 200,
+        withheldAt: new Date('2026-10-14T10:00:00.000Z'),
+      });
+      expect(
+        await failureOf(service.getPreviewStream(USER_ID, TOKEN, TRACK_ID)),
+      ).toEqual({ status: 404, body: PREVIEW_NOT_FOUND_BODY });
+      expect(storage.createPresignedAudioStream).not.toHaveBeenCalled();
+    });
   });
 });

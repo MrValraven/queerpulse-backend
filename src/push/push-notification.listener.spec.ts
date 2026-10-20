@@ -1638,4 +1638,321 @@ describe('PushNotificationListener', () => {
       expect(payload.data.url).toBe('/studio/track?id=episode%201');
     });
   });
+
+  // Collaborative playlists: an invitation pushes behind Invitations and a
+  // pick behind Personas; the answers stay in the bell.
+  describe('Studio playlist editors', () => {
+    const invitePayload = {
+      playlistId: 'playlist 1',
+      playlistName: 'Night bus',
+      actorId: 'actor-1',
+    };
+
+    it('pushes an invitation behind the Invitations switch, naming the owner and the playlist', async () => {
+      const { listener, push, notificationPreferences } = build({
+        actorProfile: ACTOR,
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPlaylistEditorInvite,
+            invitePayload,
+          ),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'invitations');
+      expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+        ['recipient-1'],
+        expect.anything(),
+        GENERIC_PUSH_COPY.notification,
+      );
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.title).toBe('Playlist invite');
+      expect(payload.body).toBe('Ana Silva invited you to edit Night bus');
+      expect(payload.data.url).toBe('/studio/collection?id=playlist%201');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:studioPlaylistEditorInvite.title',
+        bodyKey: 'push:studioPlaylistEditorInvite.body',
+        params: { name: 'Ana Silva', playlist: 'Night bus' },
+      });
+    });
+
+    it('pushes a pick behind the Personas switch, naming the persona', async () => {
+      const { listener, push, notificationPreferences } = build({
+        actorProfile: ACTOR,
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioPlaylistEditorAdded, {
+            ...invitePayload,
+            personaName: 'Night Shift',
+          }),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'personas');
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.title).toBe('You can edit a playlist');
+      expect(payload.body).toBe(
+        'Ana Silva added you as an editor of Night bus (Night Shift)',
+      );
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:studioPlaylistEditorAdded.title',
+        bodyKey: 'push:studioPlaylistEditorAdded.body',
+        params: {
+          name: 'Ana Silva',
+          playlist: 'Night bus',
+          persona: 'Night Shift',
+        },
+      });
+    });
+
+    it('sends nothing when Invitations is off', async () => {
+      const { listener, push } = build({
+        actorProfile: ACTOR,
+        pushDisabledCategories: ['invitations'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPlaylistEditorInvite,
+            invitePayload,
+          ),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it.each(['playlistId', 'playlistName'])(
+      'sends no invitation push when %s is missing',
+      async (missingKey) => {
+        const { listener, push } = build({ actorProfile: ACTOR });
+        await listener.handleNotificationBatchCreated(
+          emit(
+            makeNotification(NotificationType.StudioPlaylistEditorInvite, {
+              ...invitePayload,
+              [missingKey]: '',
+            }),
+          ),
+        );
+        expect(push.sendToUsers).not.toHaveBeenCalled();
+      },
+    );
+
+    it('sends no pick push when the persona name is missing', async () => {
+      const { listener, push } = build({ actorProfile: ACTOR });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPlaylistEditorAdded,
+            invitePayload,
+          ),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      NotificationType.StudioPlaylistEditorInviteAccepted,
+      NotificationType.StudioPlaylistEditorInviteDeclined,
+    ])('keeps %s in the bell with no push', async (type) => {
+      const { listener, push } = build({ actorProfile: ACTOR });
+      await listener.handleNotificationBatchCreated(
+        emit(makeNotification(type, invitePayload)),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Listing team', () => {
+    const invitePayload = {
+      subprofileId: 'persona-1',
+      personaName: 'River Ink',
+      listingName: 'Ink House',
+      listingSlug: 'ink-house',
+      roleLabel: 'Tattoo artist',
+    };
+    const requestPayload = {
+      listingRef: 'QPL-2026-0042',
+      listingName: 'Ink House',
+      personaName: 'River Ink',
+      personaHandle: 'river-ink',
+    };
+    const acceptedByListingPayload = {
+      initiatedBy: 'listing',
+      listingName: 'Ink House',
+      listingSlug: 'ink-house',
+      personaName: 'River Ink',
+      personaHandle: 'river-ink',
+      listingRef: 'QPL-2026-0042',
+    };
+    const acceptedByPersonaPayload = {
+      initiatedBy: 'persona',
+      listingName: 'Ink House',
+      listingSlug: 'ink-house',
+      personaName: 'River Ink',
+      personaHandle: 'river-ink',
+      subprofileId: 'persona-1',
+    };
+
+    it("pushes an invite behind Personas and opens the persona's Works at pane", async () => {
+      const { listener, push, notificationPreferences } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.ListingTeamInvite, invitePayload),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'personas');
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.title).toBe('Team invite');
+      expect(payload.body).toBe('Ink House invited River Ink to join the team');
+      expect(payload.data.url).toBe(
+        '/account/subprofiles/persona-1/edit?pane=works-at',
+      );
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:listingTeamInvite.title',
+        bodyKey: 'push:listingTeamInvite.body',
+        params: { persona: 'River Ink', listing: 'Ink House' },
+      });
+      expect(payload.icon).toBeUndefined();
+    });
+
+    it('pushes a request behind Listings and opens the Team section', async () => {
+      const { listener, push, notificationPreferences } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.ListingTeamRequest, requestPayload),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'listings');
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.title).toBe('Team request');
+      expect(payload.body).toBe(
+        'River Ink asked to join the team at Ink House',
+      );
+      expect(payload.data.url).toBe(
+        '/local/directory/list/QPL-2026-0042/edit#lb-editor-team',
+      );
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:listingTeamRequest.title',
+        bodyKey: 'push:listingTeamRequest.body',
+        params: { persona: 'River Ink', listing: 'Ink House' },
+      });
+    });
+
+    it("opens the starting side's own surface on an acceptance", async () => {
+      const listingStarted = build({});
+      await listingStarted.listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.ListingTeamAccepted,
+            acceptedByListingPayload,
+          ),
+        ),
+      );
+      const [, listingPayload] = listingStarted.push.sendToUsers.mock
+        .calls[0] as [string[], PushPayload];
+      expect(listingPayload.title).toBe('Team link confirmed');
+      expect(listingPayload.body).toBe(
+        'River Ink is now on the team at Ink House',
+      );
+      expect(listingPayload.data.url).toBe(
+        '/local/directory/list/QPL-2026-0042/edit#lb-editor-team',
+      );
+
+      const personaStarted = build({});
+      await personaStarted.listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.ListingTeamAccepted,
+            acceptedByPersonaPayload,
+          ),
+        ),
+      );
+      const [, personaPayload] = personaStarted.push.sendToUsers.mock
+        .calls[0] as [string[], PushPayload];
+      expect(personaPayload.data.url).toBe(
+        '/account/subprofiles/persona-1/edit?pane=works-at',
+      );
+      expect(personaPayload.l10n).toEqual({
+        titleKey: 'push:listingTeamAccepted.title',
+        bodyKey: 'push:listingTeamAccepted.body',
+        params: { persona: 'River Ink', listing: 'Ink House' },
+      });
+    });
+
+    it('sends nothing for a team payload missing a name or its link id', async () => {
+      const cases: Array<[NotificationType, Record<string, unknown>]> = [
+        [NotificationType.ListingTeamInvite, invitePayload],
+        [NotificationType.ListingTeamRequest, requestPayload],
+        [NotificationType.ListingTeamAccepted, acceptedByListingPayload],
+        [NotificationType.ListingTeamAccepted, acceptedByPersonaPayload],
+      ];
+      const requiredKeys = [
+        'personaName',
+        'listingName',
+        'subprofileId',
+        'listingRef',
+      ];
+      for (const [type, payload] of cases) {
+        for (const missingKey of requiredKeys) {
+          if (!(missingKey in payload)) continue;
+          const { listener, push } = build({});
+          await listener.handleNotificationBatchCreated(
+            emit(makeNotification(type, { ...payload, [missingKey]: '' })),
+          );
+          expect(push.sendToUsers).not.toHaveBeenCalled();
+        }
+      }
+    });
+
+    it('sends nothing when the category is off', async () => {
+      const invite = build({ pushDisabledCategories: ['personas'] });
+      await invite.listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.ListingTeamInvite, invitePayload),
+        ),
+      );
+      expect(invite.push.sendToUsers).not.toHaveBeenCalled();
+
+      const listings = build({ pushDisabledCategories: ['listings'] });
+      await listings.listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.ListingTeamRequest, requestPayload),
+        ),
+      );
+      await listings.listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.ListingTeamAccepted,
+            acceptedByListingPayload,
+          ),
+        ),
+      );
+      expect(listings.push.sendToUsers).not.toHaveBeenCalled();
+    });
+  });
 });

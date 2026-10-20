@@ -4056,8 +4056,10 @@ export class ListingsService {
    * Cost on the owner's own path is unchanged. The ownership test is a plain
    * comparison against the row already loaded, and the seat lookup runs only
    * when it fails.
+   *
+   * Public so `ListingTeamService` can gate every "Meet the team" route with it.
    */
-  private async loadOwnedOrCoManagedOr404(
+  async loadOwnedOrCoManagedOr404(
     ref: string,
     userId: string,
   ): Promise<ListingManagementAccess> {

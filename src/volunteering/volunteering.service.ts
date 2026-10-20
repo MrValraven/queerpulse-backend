@@ -26,8 +26,10 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { AccessTier } from '../communities/entities/community.entity';
 import { SUBCOMMUNITY_FEATURE_UNAVAILABLE_CODE } from '../communities/subcommunity-rules';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { isPrivateCommunityWithheld } from '../events/event-community-hosting';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
@@ -152,6 +154,15 @@ const MAX_SESSION_HOURS = 24;
 /** How many rows the per-opportunity / per-community breakdowns return. The
  *  platform totals are exact regardless; only the breakdown lists are cut. */
 export const HOURS_BREAKDOWN_LIMIT = 100;
+
+/** How many open opportunities the community Volunteering tab shows at once
+ *  (`pageOpenByCommunity`). The response carries the full `total`, so the tab
+ *  can say how many more are open beyond this page. */
+export const COMMUNITY_OPPORTUNITIES_LIMIT = 50;
+
+/** The `code` on the 409 a sign-up to a closed opportunity gets, so the
+ *  client can show its own "this opportunity has closed" copy. */
+export const OPPORTUNITY_CLOSED_CODE = 'OPPORTUNITY_CLOSED';
 
 /** Drops repeated causes while keeping the poster's order, so the first
  * occurrence of each wins. `@ArrayMaxSize` counts what the client SENT, so
@@ -379,23 +390,29 @@ export class VolunteeringService {
       qb.andWhere('o.commit = :commit', { commit: query.commit });
     }
     this.excludeModeratedOpportunities(qb);
+    this.excludePrivateAttributedOpportunities(qb);
 
-    return paginate(qb, page, async (rows) => {
-      if (!rows.length) return [];
-      const [filled, partnerRefs, communityRefs] = await Promise.all([
-        this.spotsFilledForMany(rows.map((o) => o.id)),
-        this.partnerRefsForMany(rows.map((o) => o.partnerId)),
-        this.communityRefsForMany(rows.map((o) => o.communityId)),
-      ]);
-      return rows.map((o) =>
-        toOpportunityCard(
-          o,
-          o.partnerId ? (partnerRefs.get(o.partnerId) ?? null) : null,
-          o.communityId ? (communityRefs.get(o.communityId) ?? null) : null,
-          filled.get(o.id) ?? 0,
-        ),
-      );
-    });
+    return paginate(qb, page, (rows) => this.toCards(rows));
+  }
+
+  // The public board reaches every visitor, and a `private` community's
+  // existence is a secret its roster keeps (`community-gate.ts`). So the board
+  // drops every opportunity attributed to one, in-query for the same
+  // pagination reason as `excludeModeratedOpportunities`. Request, invite and
+  // public attributions stay listed, since those names are public in
+  // discover. Community-scoped reads (the pulse lane, the Volunteering tab)
+  // are gated upstream by the community's own visibility check and keep them.
+  private excludePrivateAttributedOpportunities(
+    qb: SelectQueryBuilder<VolunteerOpportunity>,
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "communities" "attributed_community"
+        WHERE "attributed_community"."id" = o.community_id
+          AND "attributed_community"."access_tier" = :privateAccessTier
+      )`,
+      { privateAccessTier: AccessTier.Private },
+    );
   }
 
   /**
@@ -432,6 +449,11 @@ export class VolunteeringService {
         throw new NotFoundException('Opportunity not found');
       }
     }
+    await this.assertAttributedCommunityVisible(
+      opportunity,
+      viewerId,
+      viewerRole,
+    );
     return this.buildDetail(opportunity, viewerId);
   }
 
@@ -564,6 +586,12 @@ export class VolunteeringService {
         );
       }
 
+      // An opportunity attributed to a private community 404s for anyone off
+      // its roster, as its detail page does, so a sign-up attempt cannot
+      // confirm it exists. Platform staff get no exemption here: staff read
+      // the detail to act on it, and a sign-up is a member action.
+      await this.assertAttributedCommunityVisible(opportunity, userId);
+
       // A moderator takedown withholds a taken-down opportunity from new
       // signups the same way `getBySlug` withholds its detail page, refusing
       // with the same 404 an unknown slug gets so the takedown isn't
@@ -574,6 +602,17 @@ export class VolunteeringService {
       );
       if (state.hidden || state.removed) {
         throw new NotFoundException('Opportunity not found');
+      }
+
+      // A closed opportunity takes no new sign-ups, a declined applicant's
+      // reapplication included. Checked after the takedown so a taken-down
+      // opportunity still answers 404, and before capacity so a closed one
+      // that also happens to be full reads as closed.
+      if (opportunity.status === OpportunityStatus.Closed) {
+        throw new ConflictException({
+          message: 'This opportunity is closed',
+          code: OPPORTUNITY_CLOSED_CODE,
+        });
       }
 
       const signupRepo = manager.getRepository(VolunteerSignup);
@@ -652,6 +691,10 @@ export class VolunteeringService {
     viewerId: string,
   ): Promise<VolunteerSignupDTO[]> {
     const opportunity = await this.loadOr404(slug);
+    // Attribution visibility first: a viewer who may not see the private
+    // community the opportunity names gets the same 404 as an unknown slug.
+    // Posters and community organisers are on the roster, so they pass.
+    await this.assertAttributedCommunityVisible(opportunity, viewerId);
     await this.assertCanManageApplicants(
       opportunity,
       viewerId,
@@ -684,6 +727,10 @@ export class VolunteeringService {
     status: SignupStatus.Accepted | SignupStatus.Declined,
   ): Promise<VolunteerSignupDTO> {
     const opportunity = await this.loadOr404(slug);
+    // Attribution visibility first: a viewer who may not see the private
+    // community the opportunity names gets the same 404 as an unknown slug.
+    // Posters and community organisers are on the roster, so they pass.
+    await this.assertAttributedCommunityVisible(opportunity, deciderId);
     await this.assertCanManageApplicants(
       opportunity,
       deciderId,
@@ -774,6 +821,10 @@ export class VolunteeringService {
     input: CompleteSignupInput,
   ): Promise<VolunteerSignupDTO> {
     const opportunity = await this.loadOr404(slug);
+    // Attribution visibility first: a viewer who may not see the private
+    // community the opportunity names gets the same 404 as an unknown slug.
+    // Posters and community organisers are on the roster, so they pass.
+    await this.assertAttributedCommunityVisible(opportunity, confirmerId);
     await this.assertCanManageApplicants(
       opportunity,
       confirmerId,
@@ -1096,22 +1147,55 @@ export class VolunteeringService {
   }
 
   /**
-   * `GET /communities/:slug/pulse`'s opportunities lane — a community's own
+   * `GET /communities/:slug/pulse`'s opportunities lane: a community's own
    * still-open opportunities (status `open` AND not yet at capacity),
    * newest-first. "Open" alone isn't enough: a filled-but-not-yet-closed
    * opportunity (the poster hasn't called `close()`) shouldn't read as
    * something a member can still sign up for, so the capacity check is
    * folded into the query itself (a correlated subquery over
    * `volunteer_signups`, mirroring `EventsService.excludeModeratedEvents`'s
-   * `NOT EXISTS`-style in-query filtering) rather than fetched then
-   * post-filtered in JS. Card shaping (`toOpportunityCard`) reuses the same
-   * batched partner/community-ref + spots-filled lookups `list()` already
-   * does for a page of cards.
+   * `NOT EXISTS`-style in-query filtering), so every row that comes back is
+   * already one a member can join. The predicates live in
+   * `openByCommunityQuery`, shared with `pageOpenByCommunity`, and card
+   * shaping goes through `toCards`, the same batched lookups `list()` uses.
    */
   async listOpenByCommunity(
     communityId: string,
     limit = 5,
   ): Promise<OpportunityCardDTO[]> {
+    const rows = await this.openByCommunityQuery(communityId)
+      .take(limit)
+      .getMany();
+    return this.toCards(rows);
+  }
+
+  /**
+   * `GET /communities/:slug/volunteering`, the community Volunteering tab: the
+   * newest `limit` open opportunities with the same predicates as
+   * `listOpenByCommunity`, plus the `total` that match, so the tab can show
+   * its count badge and say when it lists only the newest. The caller
+   * (`CommunityPublicService`) gates the community's visibility first, so the
+   * cards keep their community ref.
+   */
+  async pageOpenByCommunity(
+    communityId: string,
+    limit = COMMUNITY_OPPORTUNITIES_LIMIT,
+  ): Promise<{ items: OpportunityCardDTO[]; total: number }> {
+    const [rows, total] = await this.openByCommunityQuery(communityId)
+      .take(limit)
+      .getManyAndCount();
+    return { items: await this.toCards(rows), total };
+  }
+
+  // --- internals ---
+
+  /** A community's open opportunities (status `open`, under capacity and
+   *  clear of takedowns), newest first with the id as a stable tie-break.
+   *  Shared by `listOpenByCommunity` and `pageOpenByCommunity`, which each add
+   *  their own `take` and terminal call. */
+  private openByCommunityQuery(
+    communityId: string,
+  ): SelectQueryBuilder<VolunteerOpportunity> {
     const qb = this.opportunities
       .createQueryBuilder('o')
       .where('o.community_id = :communityId', { communityId })
@@ -1120,27 +1204,70 @@ export class VolunteeringService {
         `(SELECT COUNT(*) FROM "volunteer_signups" "s" WHERE "s"."opportunity_id" = "o"."id" AND "s"."status" = 'accepted') < "o"."spots_total"`,
       )
       .orderBy('o.created_at', 'DESC')
-      .take(limit);
+      .addOrderBy('o.id', 'DESC');
     this.excludeModeratedOpportunities(qb);
-    const rows = await qb.getMany();
-    if (!rows.length) return [];
+    return qb;
+  }
 
-    const [filled, partnerRefs, communityRefs] = await Promise.all([
-      this.spotsFilledForMany(rows.map((o) => o.id)),
-      this.partnerRefsForMany(rows.map((o) => o.partnerId)),
-      this.communityRefsForMany(rows.map((o) => o.communityId)),
+  /** Shapes a page of opportunity rows into cards with one batched query each
+   *  for spots filled, partner refs and community refs. An empty page makes no
+   *  query at all. */
+  private async toCards(
+    rows: VolunteerOpportunity[],
+  ): Promise<OpportunityCardDTO[]> {
+    if (!rows.length) return [];
+    const [filledById, partnerRefs, communityRefs] = await Promise.all([
+      this.spotsFilledForMany(rows.map((row) => row.id)),
+      this.partnerRefsForMany(rows.map((row) => row.partnerId)),
+      this.communityRefsForMany(rows.map((row) => row.communityId)),
     ]);
-    return rows.map((o) =>
+    return rows.map((row) =>
       toOpportunityCard(
-        o,
-        o.partnerId ? (partnerRefs.get(o.partnerId) ?? null) : null,
-        o.communityId ? (communityRefs.get(o.communityId) ?? null) : null,
-        filled.get(o.id) ?? 0,
+        row,
+        row.partnerId ? (partnerRefs.get(row.partnerId) ?? null) : null,
+        row.communityId ? (communityRefs.get(row.communityId) ?? null) : null,
+        filledById.get(row.id) ?? 0,
       ),
     );
   }
 
-  // --- internals ---
+  /**
+   * 404s an opportunity attributed to a `private` community for a viewer who
+   * may not know that community exists: the same "Opportunity not found" a
+   * takedown and an unknown slug get, so the attribution is not confirmable.
+   * Passes platform staff (when `viewerRole` is given), the poster, and anyone
+   * on the community's roster, through the shared
+   * `isPrivateCommunityWithheld` rule events use for the communities they
+   * name. An unattributed opportunity and a staff viewer cost no query, and
+   * the roster lookup runs only for a private attribution.
+   */
+  private async assertAttributedCommunityVisible(
+    opportunity: VolunteerOpportunity,
+    viewerId: string | null,
+    viewerRole?: string,
+  ): Promise<void> {
+    const communityId = opportunity.communityId;
+    if (!communityId || isStaffRole(viewerRole)) return;
+    const isPoster = viewerId !== null && opportunity.posterId === viewerId;
+    if (isPoster) return;
+    const tierRefs = await this.communityMembership.tierRefsByIds([
+      communityId,
+    ]);
+    const tierRef = tierRefs.get(communityId);
+    if (!tierRef || tierRef.accessTier !== AccessTier.Private) return;
+    const isOnRoster =
+      viewerId !== null &&
+      (await this.communityMembership.isMember(communityId, viewerId));
+    if (
+      isPrivateCommunityWithheld({
+        accessTier: tierRef.accessTier,
+        isOrganizer: isPoster,
+        isOnRoster,
+      })
+    ) {
+      throw new NotFoundException('Opportunity not found');
+    }
+  }
 
   private async loadOr404(slug: string): Promise<VolunteerOpportunity> {
     const opportunity = await this.opportunities.findOne({ where: { slug } });

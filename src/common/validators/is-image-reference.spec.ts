@@ -1,6 +1,10 @@
 import { plainToInstance } from 'class-transformer';
 import { IsOptional, validateSync } from 'class-validator';
-import { IsImageReference } from './is-image-reference.decorator';
+import { resetImageUrlBaseForTesting, setImageUrlBase } from '../image-url';
+import {
+  IsImageReference,
+  isImageReferenceValue,
+} from './is-image-reference.decorator';
 
 class ImageHolder {
   @IsOptional()
@@ -108,5 +112,30 @@ describe('IsImageReference', () => {
     it('accepts an empty string directly, not merely via @IsOptional() short-circuiting', () => {
       expect(firstRequiredError('')).toBeUndefined();
     });
+  });
+});
+
+describe('isImageReferenceValue', () => {
+  const storageKey =
+    'work/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg';
+
+  beforeAll(() => setImageUrlBase('https://api.test'));
+  afterAll(() => resetImageUrlBaseForTesting());
+
+  it('accepts a bare key, a /files/ key, an empty string and null', () => {
+    expect(isImageReferenceValue(storageKey)).toBe(true);
+    expect(isImageReferenceValue(`https://api.test/files/${storageKey}`)).toBe(
+      true,
+    );
+    expect(isImageReferenceValue('')).toBe(true);
+    expect(isImageReferenceValue(null)).toBe(true);
+  });
+
+  it('refuses javascript:alert(1), data:image/png;base64,AAAA and an http:// URL', () => {
+    expect(isImageReferenceValue('javascript:alert(1)')).toBe(false);
+    expect(isImageReferenceValue('data:image/png;base64,AAAA')).toBe(false);
+    expect(
+      isImageReferenceValue('http://images.unsplash.com/photo-1611178204388'),
+    ).toBe(false);
   });
 });

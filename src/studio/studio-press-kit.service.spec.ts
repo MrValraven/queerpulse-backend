@@ -16,6 +16,7 @@ import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { episodeReleasedSql } from './studio-episode-rule';
 import { StudioOwnershipService } from './studio-ownership.service';
+import { notWithheldTrackSql } from './studio-playlist-visibility';
 import { StudioPressKitService } from './studio-press-kit.service';
 
 const VIEWER_ID = 'db000000-0000-4000-8000-000000000001';
@@ -225,6 +226,29 @@ describe('StudioPressKitService', () => {
       expect(
         chosen.andWhere!.mock.calls.map(([predicate]) => String(predicate)),
       ).toContain(episodeReleasedSql('track', 'release'));
+    });
+
+    // Studio safety and moderation.
+    it('keeps withheld tracks out of the chosen and the fallback tracks', async () => {
+      const fallback = queryBuilderMock({ many: [trackRow(FIRST_TRACK, 1)] });
+      tracks.createQueryBuilder.mockReturnValue(fallback);
+      await service.getPressKit(VIEWER_ID, PERSONA_ID);
+      expect(
+        fallback.andWhere!.mock.calls.map(([predicate]) => String(predicate)),
+      ).toContain(notWithheldTrackSql('track'));
+
+      pressKits.findOne.mockResolvedValue({
+        subprofileId: PERSONA_ID,
+        featuredTrackIds: [FIRST_TRACK],
+        quotes: [],
+        updatedAt: new Date('2026-10-12T09:00:00.000Z'),
+      });
+      const chosen = queryBuilderMock({ many: [trackRow(FIRST_TRACK, 1)] });
+      tracks.createQueryBuilder.mockReturnValue(chosen);
+      await service.getPressKit(VIEWER_ID, PERSONA_ID);
+      expect(
+        chosen.andWhere!.mock.calls.map(([predicate]) => String(predicate)),
+      ).toContain(notWithheldTrackSql('track'));
     });
 
     it('lists the latest six published releases', async () => {

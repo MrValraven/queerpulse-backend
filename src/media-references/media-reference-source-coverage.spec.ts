@@ -1,5 +1,8 @@
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
+import type { DataSource } from 'typeorm';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
 import {
   MEDIA_REFERENCE_SOURCES,
   RULED_OUT_IMAGE_FIELDS,
@@ -72,6 +75,12 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'UpdateSubprofileDTO.avatarUrl': 'Subprofile.avatarUrl',
   'UpdateSubprofileDTO.coverUrl': 'Subprofile.coverUrl',
   'SubprofileItemInputDTO.imageUrl': 'SubprofileItem.imageUrl',
+  // Validated in SubprofilesService, so the walk above
+  // cannot find them; the 'Persona item nested photos' describe asserts both.
+  'SubprofileItemInputDTO.structured.coverUp.beforeImageUrl':
+    'SubprofileItem.structured',
+  'SubprofileItemInputDTO.structured.sessions[].imageUrl':
+    'SubprofileItem.structured',
   'WorkItemDto.imageUrl': 'WorkItem.imageUrl',
   'UpdateProfileDto.avatarUrl': 'Profile.avatarUrl',
   'CreateEventDto.coverImageUrl': 'Event.coverImageUrl',
@@ -112,6 +121,10 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // one photo column.
   'CreatePersonaPostDto.imageKey': 'SubprofilePost.imageKey',
   'UpdatePersonaPostDto.imageKey': 'SubprofilePost.imageKey',
+  // Pulse Live: one image per quiz question, written by the quiz PUT and
+  // copied by an event import. The source also reads an open session's
+  // frozen quiz snapshot.
+  'QuizshowQuestionInputDto.mediaRef': 'QuizshowQuestion.mediaRef',
 };
 
 /** Recursively lists every `.ts` file under a `dto/` directory beneath `root`
@@ -247,5 +260,250 @@ describe('Persona post photos', () => {
       (source) => source.field === 'SubprofilePost.imageKey',
     );
     expect(postSource?.type).toBe('persona-post');
+  });
+});
+
+describe('Persona item nested photos', () => {
+  const nestedSource = MEDIA_REFERENCE_SOURCES.find(
+    (source) => source.field === 'SubprofileItem.structured',
+  );
+
+  it('are a persona-item reference', () => {
+    expect(nestedSource?.type).toBe('persona-item');
+  });
+
+  it('map every service-validated nested field to a wired source', () => {
+    const coveredSourceFields = new Set(
+      MEDIA_REFERENCE_SOURCES.map((source) => source.field),
+    );
+    for (const dtoField of [
+      'SubprofileItemInputDTO.structured.coverUp.beforeImageUrl',
+      'SubprofileItemInputDTO.structured.sessions[].imageUrl',
+    ]) {
+      const mappedSourceField = DTO_FIELD_TO_SOURCE_FIELD[dtoField];
+      expect(mappedSourceField).toBe('SubprofileItem.structured');
+      expect(coveredSourceFields.has(mappedSourceField ?? '')).toBe(true);
+    }
+  });
+
+  it('resolves a session photo to its parent persona', async () => {
+    const sessionKey = 'work-image/u1/s1.jpg';
+    const queryBuilder = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue([
+        {
+          subprofileId: 'p1',
+          title: 'Back piece',
+          structured: { sessions: [{ imageUrl: sessionKey }] },
+        },
+        {
+          subprofileId: 'p1',
+          title: 'work-image/u1/other.jpg',
+          structured: { sessions: [{ imageUrl: 'work-image/u1/other.jpg' }] },
+        },
+      ]),
+    };
+    const dataSource = {
+      getRepository: jest.fn((entity: unknown) => {
+        if (entity === SubprofileItem) {
+          return { createQueryBuilder: () => queryBuilder };
+        }
+        if (entity === Subprofile) {
+          return {
+            find: jest
+              .fn()
+              .mockResolvedValue([{ id: 'p1', handle: 'inkbyrui' }]),
+          };
+        }
+        throw new Error('unexpected repository');
+      }),
+    } as unknown as DataSource;
+
+    const resolved = await nestedSource!.resolve(
+      dataSource,
+      new Set([sessionKey]),
+      [sessionKey, `/files/${sessionKey}`],
+    );
+
+    expect(resolved).toEqual([
+      [
+        sessionKey,
+        {
+          type: 'persona-item',
+          entityId: 'p1',
+          label: 'Back piece',
+          slug: 'inkbyrui',
+        },
+      ],
+    ]);
+  });
+
+  it('ignores a key that only appears in the item title', async () => {
+    const titleOnlyKey = 'work-image/u1/title.jpg';
+    const queryBuilder = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue([
+        {
+          subprofileId: 'p1',
+          title: titleOnlyKey,
+          structured: { sessions: [{ imageUrl: 'work-image/u1/s1.jpg' }] },
+        },
+      ]),
+    };
+    const dataSource = {
+      getRepository: jest.fn(() => ({
+        createQueryBuilder: () => queryBuilder,
+        find: jest.fn().mockResolvedValue([{ id: 'p1', handle: 'inkbyrui' }]),
+      })),
+    } as unknown as DataSource;
+
+    const resolved = await nestedSource!.resolve(
+      dataSource,
+      new Set([titleOnlyKey]),
+      [titleOnlyKey, `/files/${titleOnlyKey}`],
+    );
+
+    expect(resolved).toEqual([]);
+  });
+});
+
+describe('Pulse Live question images', () => {
+  const questionSource = MEDIA_REFERENCE_SOURCES.find(
+    (source) => source.field === 'QuizshowQuestion.mediaRef',
+  );
+
+  function dataSourceReturning(rows: unknown[]): {
+    dataSource: DataSource;
+    query: jest.Mock;
+  } {
+    const query = jest.fn().mockResolvedValue(rows);
+    return { dataSource: { query } as unknown as DataSource, query };
+  }
+
+  it('are a quizshow-question reference', () => {
+    expect(questionSource?.type).toBe('quizshow-question');
+  });
+
+  it('a quiz question image counts as in use', async () => {
+    const imageKey = 'work-image/u1/caption.jpg';
+    const { dataSource, query } = dataSourceReturning([
+      {
+        media_ref: imageKey,
+        event_id: 'event-1',
+        event_title: 'Quiz night',
+        event_slug: 'quiz-night',
+      },
+    ]);
+
+    const resolved = await questionSource!.resolve(
+      dataSource,
+      new Set([imageKey]),
+      [imageKey, `/files/${imageKey}`],
+    );
+
+    expect(resolved).toEqual([
+      [
+        imageKey,
+        {
+          type: 'quizshow-question',
+          entityId: 'event-1',
+          label: 'Quiz night',
+          slug: 'quiz-night',
+        },
+      ],
+    ]);
+    expect(query).toHaveBeenCalledWith(expect.any(String), [
+      [imageKey, `/files/${imageKey}`],
+    ]);
+  });
+
+  it('counts every event whose quiz shares an imported key', async () => {
+    const imageKey = 'work-image/u1/shared.jpg';
+    const { dataSource } = dataSourceReturning([
+      {
+        media_ref: imageKey,
+        event_id: 'event-1',
+        event_title: 'First quiz night',
+        event_slug: 'first-quiz-night',
+      },
+      {
+        media_ref: `/files/${imageKey}`,
+        event_id: 'event-2',
+        event_title: 'Second quiz night',
+        event_slug: 'second-quiz-night',
+      },
+    ]);
+
+    const resolved = await questionSource!.resolve(
+      dataSource,
+      new Set([imageKey]),
+      [imageKey, `/files/${imageKey}`],
+    );
+
+    expect(resolved.map(([, reference]) => reference.entityId)).toEqual([
+      'event-1',
+      'event-2',
+    ]);
+  });
+
+  it('lists an event once when both stored forms of a key reference it', async () => {
+    const imageKey = 'work-image/u1/twice.jpg';
+    const { dataSource } = dataSourceReturning([
+      {
+        media_ref: imageKey,
+        event_id: 'event-1',
+        event_title: 'Quiz night',
+        event_slug: 'quiz-night',
+      },
+      {
+        media_ref: `/files/${imageKey}`,
+        event_id: 'event-1',
+        event_title: 'Quiz night',
+        event_slug: 'quiz-night',
+      },
+    ]);
+
+    const resolved = await questionSource!.resolve(
+      dataSource,
+      new Set([imageKey]),
+      [imageKey, `/files/${imageKey}`],
+    );
+
+    expect(resolved).toHaveLength(1);
+  });
+
+  it('reads the snapshot of an open session in the same query', async () => {
+    const { dataSource, query } = dataSourceReturning([]);
+
+    await questionSource!.resolve(
+      dataSource,
+      new Set(['work-image/u1/live.jpg']),
+      ['work-image/u1/live.jpg', '/files/work-image/u1/live.jpg'],
+    );
+
+    const [firstCall] = query.mock.calls as Array<[string, unknown[]]>;
+    const sql = String(firstCall?.[0]);
+    expect(sql).toContain('"quizshow_questions"');
+    expect(sql).toContain('"quiz_snapshot"');
+    expect(sql).toContain(
+      `"session"."status" IN ('lobby', 'running', 'paused')`,
+    );
+  });
+
+  it('runs no query for an empty candidate set', async () => {
+    const { dataSource, query } = dataSourceReturning([]);
+
+    const resolved = await questionSource!.resolve(dataSource, new Set(), []);
+
+    expect(resolved).toEqual([]);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('rules out the frozen snapshot of an ended session', () => {
+    expect(RULED_OUT_IMAGE_FIELDS).toContain('QuizshowSession.quizSnapshot');
   });
 });

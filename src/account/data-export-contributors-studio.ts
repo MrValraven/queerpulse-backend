@@ -221,3 +221,179 @@ export class StudioReleaseRemindersExportContributor implements DataExportContri
     }));
   }
 }
+
+interface PlaylistSeatExportRow {
+  playlist_name: string;
+  status: string;
+  source: string;
+  invited_at: Date;
+  accepted_at: Date | null;
+  ended_at: Date | null;
+}
+
+/**
+ * `saved` -> `studioPlaylistSeats` (collaborative playlists): every editor
+ * seat the member holds or held on another member's playlist, ended ones
+ * included (declined, revoked, left), by playlist name. The owner and the
+ * other editors are left unnamed: the rows are the member's own.
+ */
+@Injectable()
+export class StudioPlaylistSeatsExportContributor implements DataExportContribution {
+  readonly category = 'saved';
+  readonly archiveKey = 'studioPlaylistSeats';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const rows: PlaylistSeatExportRow[] = await this.dataSource.query(
+      `SELECT "playlist"."name" AS "playlist_name",
+              CAST("editor"."status" AS text) AS "status",
+              CAST("editor"."source" AS text) AS "source",
+              "editor"."invited_at" AS "invited_at",
+              "editor"."accepted_at" AS "accepted_at",
+              "editor"."ended_at" AS "ended_at"
+         FROM "studio_playlist_editors" "editor"
+        INNER JOIN "studio_playlists" "playlist"
+           ON "playlist"."id" = "editor"."playlist_id"
+        WHERE "editor"."user_id" = $1
+        ORDER BY "editor"."invited_at" ASC, "editor"."id" ASC`,
+      [userId],
+    );
+    return rows.map((row) => ({
+      playlistName: row.playlist_name,
+      status: row.status,
+      source: row.source,
+      invitedAt: row.invited_at.toISOString(),
+      acceptedAt: row.accepted_at ? row.accepted_at.toISOString() : null,
+      endedAt: row.ended_at ? row.ended_at.toISOString() : null,
+    }));
+  }
+}
+
+interface PlaylistAdditionExportRow {
+  playlist_name: string;
+  track_title: string | null;
+  added_at: Date;
+}
+
+/**
+ * `saved` -> `studioPlaylistAdditions` (collaborative playlists): the
+ * entries the member added to playlists they do not own, while the entry
+ * still names them (an ended seat clears "added by" on that playlist). A
+ * track that is gone, or that a persona unlink moved out of reach, keeps
+ * its date with a null title, as in `studioPlaylists`. The member's own
+ * playlists stay in `studioPlaylists`.
+ */
+@Injectable()
+export class StudioPlaylistAdditionsExportContributor implements DataExportContribution {
+  readonly category = 'saved';
+  readonly archiveKey = 'studioPlaylistAdditions';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const rows: PlaylistAdditionExportRow[] = await this.dataSource.query(
+      `SELECT "playlist"."name" AS "playlist_name",
+              "track"."title" AS "track_title",
+              "entry"."added_at" AS "added_at"
+         FROM "studio_playlist_tracks" "entry"
+        INNER JOIN "studio_playlists" "playlist"
+           ON "playlist"."id" = "entry"."playlist_id"
+         LEFT JOIN "studio_tracks" "track" ON "track"."id" = "entry"."track_id"
+        WHERE "entry"."added_by_user_id" = $1
+          AND "playlist"."user_id" <> $1
+        ORDER BY "entry"."added_at" ASC, "entry"."id" ASC`,
+      [userId],
+    );
+    return rows.map((row) => ({
+      playlistName: row.playlist_name,
+      trackTitle: row.track_title,
+      addedAt: row.added_at.toISOString(),
+    }));
+  }
+}
+
+interface CopyrightClaimExportRow {
+  track_title: string;
+  artist_name: string;
+  status: string;
+  claimant_role: string;
+  original_work: string;
+  original_link: string | null;
+  details: string;
+  counter_note: string | null;
+  claimant_reply: string | null;
+  staff_note: string | null;
+  created_at: Date;
+  accepted_at: Date | null;
+  countered_at: Date | null;
+  replied_at: Date | null;
+  decided_at: Date | null;
+}
+
+const isoOrNull = (value: Date | null): string | null =>
+  value ? value.toISOString() : null;
+
+/**
+ * `reports` -> `studioCopyrightClaims` (Studio safety and moderation): the
+ * copyright claims the member filed, by track title and artist name, with
+ * every step: the artist's counter-notice, the member's reply and our
+ * team's note. The deciding staff member stays out, as it does from the
+ * claim views. A claim a persona unlink severed joins no live row and
+ * exports the title and artist name kept at filing, so the archive never
+ * names the pseudonymous persona; a live claim whose track went falls back
+ * to those names too.
+ */
+@Injectable()
+export class StudioCopyrightClaimsExportContributor implements DataExportContribution {
+  readonly category = 'reports';
+  readonly archiveKey = 'studioCopyrightClaims';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const rows: CopyrightClaimExportRow[] = await this.dataSource.query(
+      `SELECT COALESCE("track"."title", "claim"."track_title_at_filing") AS "track_title",
+              COALESCE("persona"."display_name", "claim"."artist_name_at_filing") AS "artist_name",
+              "claim"."status"::text AS "status",
+              "claim"."claimant_role"::text AS "claimant_role",
+              "claim"."original_work" AS "original_work",
+              "claim"."original_link" AS "original_link",
+              "claim"."details" AS "details",
+              "claim"."counter_note" AS "counter_note",
+              "claim"."claimant_reply" AS "claimant_reply",
+              "claim"."staff_note" AS "staff_note",
+              "claim"."created_at" AS "created_at",
+              "claim"."accepted_at" AS "accepted_at",
+              "claim"."countered_at" AS "countered_at",
+              "claim"."replied_at" AS "replied_at",
+              "claim"."decided_at" AS "decided_at"
+         FROM "studio_copyright_claims" "claim"
+         LEFT JOIN "studio_tracks" "track"
+           ON "track"."id" = "claim"."track_id" AND NOT "claim"."is_severed"
+         LEFT JOIN "studio_releases" "release"
+           ON "release"."id" = "claim"."release_id" AND NOT "claim"."is_severed"
+         LEFT JOIN "subprofiles" "persona" ON "persona"."id" = "release"."subprofile_id"
+        WHERE "claim"."claimant_id" = $1
+        ORDER BY "claim"."created_at" ASC, "claim"."id" ASC`,
+      [userId],
+    );
+    return rows.map((row) => ({
+      trackTitle: row.track_title,
+      artist: row.artist_name,
+      status: row.status,
+      claimantRole: row.claimant_role,
+      originalWork: row.original_work,
+      originalLink: row.original_link,
+      details: row.details,
+      counterNote: row.counter_note,
+      claimantReply: row.claimant_reply,
+      staffNote: row.staff_note,
+      createdAt: row.created_at.toISOString(),
+      acceptedAt: isoOrNull(row.accepted_at),
+      counteredAt: isoOrNull(row.countered_at),
+      repliedAt: isoOrNull(row.replied_at),
+      decidedAt: isoOrNull(row.decided_at),
+    }));
+  }
+}

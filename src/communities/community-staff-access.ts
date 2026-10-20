@@ -6,7 +6,7 @@ import {
   CommunityMember,
   RosterRole,
 } from './entities/community-member.entity';
-import { Community } from './entities/community.entity';
+import { AccessTier, Community } from './entities/community.entity';
 import { resolveEffectiveRole } from './subcommunity-rules';
 
 /**
@@ -242,4 +242,57 @@ export async function resolveMemberCommunityInterior(
     contentModeration,
   });
   return resolved;
+}
+
+/**
+ * The owner-level roles: the community's owner and its co-owners. Tier 2
+ * (the governance gate) of the permission model described on
+ * `CommunitiesService.isStaffRole`, narrower than `COMMUNITY_STAFF_ROLES`
+ * because it leaves moderators out on purpose.
+ */
+export const COMMUNITY_OWNER_LEVEL_ROLES: readonly RosterRole[] = [
+  RosterRole.Owner,
+  RosterRole.CoOwner,
+];
+
+export function isCommunityOwnerLevelRole(role: RosterRole): boolean {
+  return COMMUNITY_OWNER_LEVEL_ROLES.includes(role);
+}
+
+/**
+ * Resolve a live community and assert the caller holds an owner-level role
+ * on it (owner or co-owner), own or inherited from parent staff on a space.
+ * Tier 2 (the governance gate) of the permission model in
+ * `CommunitiesService.isStaffRole`'s comment, used where moderators are
+ * deliberately excluded (the giving section).
+ *
+ * 404 `Community not found` for an unknown or archived slug, and for a
+ * caller off the roster of a `private` community, whose existence stays the
+ * secret. 403 `Only roster members can do that` for a caller off the roster
+ * of any other tier, and 403 for a moderator or plain member.
+ */
+export async function resolveOwnerLevelCommunity(
+  communities: Repository<Community>,
+  members: Repository<CommunityMember>,
+  slug: string,
+  userId: string,
+): Promise<ResolvedCommunityAccess> {
+  const community = await loadActiveCommunityOr404(communities, slug);
+  const { membership, role } = await loadEffectiveAccess(
+    members,
+    community,
+    userId,
+  );
+  if (role === null) {
+    if (community.accessTier === AccessTier.Private) {
+      throw new NotFoundException('Community not found');
+    }
+    throw new ForbiddenException('Only roster members can do that');
+  }
+  if (!isCommunityOwnerLevelRole(role)) {
+    throw new ForbiddenException(
+      'Only the community owner or a co-owner can do that',
+    );
+  }
+  return { community, membership, role };
 }

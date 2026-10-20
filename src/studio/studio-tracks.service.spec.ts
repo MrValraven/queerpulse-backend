@@ -387,6 +387,81 @@ describe('StudioTracksService', () => {
       expect(manager.save).toHaveBeenCalled();
       expect(manager.query).not.toHaveBeenCalled();
     });
+
+    // Studio safety and moderation.
+    it('stores the artist warnings once each, in theme order, and keeps the staff list', async () => {
+      storedTrack = {
+        ...storedTrack,
+        contentWarnings: [],
+        staffContentWarnings: ['violence'],
+      };
+      await service.update(USER_ID, FIRST_TRACK, {
+        contentWarnings: ['police', 'medical', 'police'],
+      });
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contentWarnings: ['medical', 'police'],
+          staffContentWarnings: ['violence'],
+        }),
+      );
+    });
+
+    it('clears the artist warnings with an empty list', async () => {
+      storedTrack = { ...storedTrack, contentWarnings: ['police'] };
+      await service.update(USER_ID, FIRST_TRACK, { contentWarnings: [] });
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ contentWarnings: [] }),
+      );
+    });
+
+    it('refuses to clear the explicit flag our team locked, and saves nothing', async () => {
+      storedTrack = {
+        ...storedTrack,
+        isExplicit: true,
+        explicitLockedAt: new Date('2026-10-14T10:00:00.000Z'),
+      };
+      expect(
+        await codeOf(
+          service.update(USER_ID, FIRST_TRACK, {
+            title: 'Renamed',
+            isExplicit: false,
+          }),
+        ),
+      ).toBe('studio_track_explicit_locked');
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('takes a locked track kept explicit as a no-op on the flag', async () => {
+      storedTrack = {
+        ...storedTrack,
+        isExplicit: true,
+        explicitLockedAt: new Date('2026-10-14T10:00:00.000Z'),
+      };
+      await service.update(USER_ID, FIRST_TRACK, { isExplicit: true });
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ isExplicit: true }),
+      );
+    });
+
+    it('lets the artist clear a flag our team never locked', async () => {
+      storedTrack = {
+        ...storedTrack,
+        isExplicit: true,
+        explicitLockedAt: null,
+      };
+      await service.update(USER_ID, FIRST_TRACK, { isExplicit: false });
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ isExplicit: false }),
+      );
+    });
+
+    it('re-reads the track under a row lock once the release is locked', async () => {
+      await service.update(USER_ID, FIRST_TRACK, { title: 'Opening (edit)' });
+      expect(manager.findOne).toHaveBeenCalledWith(StudioTrack, {
+        where: { id: FIRST_TRACK, releaseId: RELEASE_ID },
+        lock: { mode: 'pessimistic_write' },
+      });
+    });
   });
 
   describe('remove', () => {

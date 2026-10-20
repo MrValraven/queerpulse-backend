@@ -16,18 +16,22 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { AdminStudioAccessController } from './admin-studio-access.controller';
+import { AdminStudioCopyrightClaimsController } from './admin-studio-copyright-claims.controller';
 import { AdminStudioCurationController } from './admin-studio-curation.controller';
 import { AdminStudioCurationService } from './admin-studio-curation.service';
 import { AdminStudioDisputesController } from './admin-studio-disputes.controller';
 import { AdminStudioReleasesController } from './admin-studio-releases.controller';
 import { AdminStudioScenesController } from './admin-studio-scenes.controller';
 import { AdminStudioScenesService } from './admin-studio-scenes.service';
+import { AdminStudioTracksController } from './admin-studio-tracks.controller';
+import { StudioCopyrightClaim } from './entities/studio-copyright-claim.entity';
 import { StudioAccessGrant } from './entities/studio-access-grant.entity';
 import { StudioCuratedPick } from './entities/studio-curated-pick.entity';
 import { StudioPersonaCredit } from './entities/studio-persona-credit.entity';
 import { StudioSceneEvent } from './entities/studio-scene-event.entity';
 import { StudioScene } from './entities/studio-scene.entity';
 import { StudioPlaylistTrack } from './entities/studio-playlist-track.entity';
+import { StudioPlaylistEditor } from './entities/studio-playlist-editor.entity';
 import { StudioPressKit } from './entities/studio-press-kit.entity';
 import { StudioReleaseReminder } from './entities/studio-release-reminder.entity';
 import { StudioReleaseVersion } from './entities/studio-release-version.entity';
@@ -37,10 +41,14 @@ import { StudioRelease } from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioAccessGuard } from './studio-access.guard';
 import { StudioAccessService } from './studio-access.service';
+import { StudioAdminTracksService } from './studio-admin-tracks.service';
 import { StudioAppearsOnService } from './studio-appears-on.service';
 import { StudioArtistAppearsOnController } from './studio-artist-appears-on.controller';
 import { StudioAudioConfirmService } from './studio-audio-confirm.service';
 import { StudioCatalogService } from './studio-catalog.service';
+import { StudioClaimsAdminService } from './studio-claims-admin.service';
+import { StudioClaimsController } from './studio-claims.controller';
+import { StudioClaimsService } from './studio-claims.service';
 import { StudioCreditAlertsListener } from './studio-credit-alerts.listener';
 import { StudioCreditsInboxController } from './studio-credits-inbox.controller';
 import { StudioCreditsInboxService } from './studio-credits-inbox.service';
@@ -61,6 +69,9 @@ import { StudioPlaybackPreferencesController } from './studio-playback-preferenc
 import { StudioPlaylistListingsController } from './studio-playlist-listings.controller';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
 import { StudioPlaylistWritesService } from './studio-playlist-writes.service';
+import { StudioPlaylistEditorBlockListener } from './studio-playlist-editor-block.listener';
+import { StudioPlaylistEditorsController } from './studio-playlist-editors.controller';
+import { StudioPlaylistEditorsService } from './studio-playlist-editors.service';
 import { StudioPlaylistsController } from './studio-playlists.controller';
 import { StudioPressKitController } from './studio-press-kit.controller';
 import { StudioPressKitService } from './studio-press-kit.service';
@@ -78,6 +89,7 @@ import { StudioReleaseToolsController } from './studio-release-tools.controller'
 import { StudioReleaseVersionsService } from './studio-release-versions.service';
 import { StudioReleasesController } from './studio-releases.controller';
 import { StudioReleasesService } from './studio-releases.service';
+import { StudioSafetyNoticesService } from './studio-safety-notices.service';
 import { StudioScenesController } from './studio-scenes.controller';
 import { StudioScenesService } from './studio-scenes.service';
 import { StudioScheduledReleasesService } from './studio-scheduled-releases.service';
@@ -112,7 +124,16 @@ import { StudioTracksService } from './studio-tracks.service';
  * service, its controller and the episode alert listener; no new module
  * import. Liked songs (QUEERPULSE-STUDIO-LIKED-SONGS-PLAN-2026-10-14.md)
  * adds `StudioLikedTracksService` and registers `SavedItem` read-only, so
- * the service reads the caller's own `studio_track` saves.
+ * the service reads the caller's own `studio_track` saves. Collaborative
+ * playlists (QUEERPULSE-STUDIO-COLLAB-PLAYLISTS-DESIGN-2026-10-14.md) add
+ * `StudioPlaylistEditor`, the editors controller and service, and the
+ * `MEMBER_BLOCKED` listener that ends editor seats; no new module import.
+ * Studio safety and moderation (QUEERPULSE-STUDIO-SAFETY-MODERATION-DESIGN-2026-10-14.md)
+ * adds the copyright claims table, the claimant, owner and staff claim
+ * routes, the staff track actions and the in-app safety notices, on the
+ * existing imports (`ModerationModule` brings `ModAuditService` and
+ * `StudioTakedownReportService`, `NotificationsModule` the notices,
+ * `Profile` the claimant card).
  */
 @Module({
   imports: [
@@ -122,6 +143,7 @@ import { StudioTracksService } from './studio-tracks.service';
       StudioTrack,
       StudioPlaylist,
       StudioPlaylistTrack,
+      StudioPlaylistEditor,
       StudioReleaseReminder,
       StudioReleaseVersion,
       StudioPressKit,
@@ -130,6 +152,7 @@ import { StudioTracksService } from './studio-tracks.service';
       StudioCuratedPick,
       StudioPersonaCredit,
       StudioReleaseDispute,
+      StudioCopyrightClaim,
       Subprofile,
       SubprofileMember,
       SubprofileSocialLink,
@@ -158,6 +181,7 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioReleasesController,
     StudioTracksController,
     StudioPlaylistsController,
+    StudioPlaylistEditorsController,
     StudioPlaylistListingsController,
     StudioStatsController,
     StudioReleaseToolsController,
@@ -172,11 +196,14 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioRelatedArtistsController,
     StudioRadioController,
     StudioEpisodesController,
+    StudioClaimsController,
     AdminStudioAccessController,
     AdminStudioReleasesController,
     AdminStudioDisputesController,
     AdminStudioCurationController,
     AdminStudioScenesController,
+    AdminStudioCopyrightClaimsController,
+    AdminStudioTracksController,
   ],
   providers: [
     StudioAccessService,
@@ -216,6 +243,18 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioEpisodeAlertsListener,
     // Liked songs.
     StudioLikedTracksService,
+    // Collaborative playlists.
+    StudioPlaylistEditorsService,
+    StudioPlaylistEditorBlockListener,
+    // Studio safety and moderation.
+    StudioClaimsService,
+    StudioClaimsAdminService,
+    StudioAdminTracksService,
+    StudioSafetyNoticesService,
   ],
+  // The Admin creator drafts preview (`CreatorDraftsModule`) reads a release
+  // as its preview link shows it. That module imports this one; nothing here
+  // imports it back.
+  exports: [StudioCatalogService],
 })
 export class StudioModule {}

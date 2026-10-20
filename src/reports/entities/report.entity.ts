@@ -167,6 +167,28 @@ export enum ReportSubjectType {
   // Backed by `AddStudioArtistToolsEnumValues1832000000000` (adds the value
   // to `reports_subject_type_enum`).
   PersonaPost = 'persona_post',
+
+  // Studio safety and moderation. ONE Studio track (`studio_tracks`),
+  // addressed by the track's uuid; filing needs a track a listener can play
+  // (published release, listenable persona, audio in place, a published
+  // episode, no copyright claim holding it). Resolved by `ReportSubjectResolverService` to
+  // the persona's creator, with "<track> on <release> by <artist>" as the
+  // excerpt. Staff act through `POST /admin/studio/tracks/:id/mark-explicit`,
+  // `.../content-warnings` and the release takedown, so this subject stays
+  // out of `ModerationService.CONTENT_TAKEDOWN_SUBJECT_TYPES`. A `copyright`
+  // report on it is refused (the claim form handles copyright).
+  //
+  // Backed by `AddStudioSafetyEnumValues1834000000000`.
+  StudioTrack = 'studio_track',
+
+  // Pulse Live. ONE revealed party answer (`quizshow_answers`), addressed by
+  // the answer's uuid. Resolved by `ReportSubjectResolverService` to the
+  // answer's author, with "<screen name>: <text>" as the excerpt. Hosts hide
+  // an answer in the room and staff act on the account, so this subject stays
+  // out of `ModerationService.CONTENT_TAKEDOWN_SUBJECT_TYPES`.
+  //
+  // Backed by `AddQuizshowReportSubject1836000000000`.
+  QuizshowAnswer = 'quizshow_answer',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

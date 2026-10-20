@@ -21,6 +21,7 @@ import {
 } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
+import { loadWorksAt } from '../listings/listing-team-works-at';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import {
   foldedHaystack,
@@ -59,6 +60,7 @@ import { SubprofileEndorsementsService } from './subprofile-endorsements.service
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { kindsMatchingSearch } from './subprofile-kind-search';
 import { SubprofileMembershipService } from './subprofile-membership.service';
+import { PublishUnmetCode, validatePublish } from './subprofile-validation';
 import {
   QUEST_KINDS,
   toCardTableSummary,
@@ -368,6 +370,13 @@ export class SubprofilePublicReadService {
     const crops = await this.mediaCropService.getMany(
       sps.flatMap((sp) => imageKeysFor(sp, itemsById.get(sp.id) ?? [])),
     );
+    // ONE resolution for every flash day item on the page.
+    const linkedEventsByItemId =
+      await this.affiliationEligibility.resolveFlashDayEvents(
+        viewerId,
+        sps,
+        [...itemsById.values()].flat(),
+      );
     const viewerMemberIds = new Set(
       viewerMemberRows.map((row) => row.subprofileId),
     );
@@ -432,6 +441,8 @@ export class SubprofilePublicReadService {
         collaboratorsByHandle,
         viewerMemberIds.has(sp.id),
         crops,
+        [],
+        linkedEventsByItemId,
       ),
     );
   }
@@ -963,7 +974,7 @@ export class SubprofilePublicReadService {
 
   // Shared by `getByHandle` and `getBySlugForProfile`: resolves whether
   // `viewer` may see `sp` at all (`assertPublicViewVisible` above), then
-  // assembles the full public DTO.
+  // assembles the full public DTO (`assemblePublicView` below).
   private async buildPublicView(
     sp: Subprofile,
     viewer: CurrentUserData | undefined,
@@ -975,9 +986,105 @@ export class SubprofilePublicReadService {
 
     await this.assertPublicViewVisible(sp, viewer, isOwner);
 
+    return this.assemblePublicView(sp, viewer, ownerRef, isOwner);
+  }
+
+  /**
+   * Staff callers only (`AdminCreatorDraftRowsService`): the page `/p/<handle>`
+   * would show an anonymous visitor once this draft persona is published, for
+   * the Admin creator drafts view. `null` unless the row exists, is a draft,
+   * carries no `removedAt` and has a visibility other than `private` (a private
+   * persona shows nothing outside its owners, so it leaves nothing to preview).
+   *
+   * After those in-scope checks it goes straight to `assemblePublicView` with
+   * no viewer and `isOwner: false`, so `status` reads `"draft"` and every
+   * per-viewer flag reads as an anonymous visitor's. It skips the rest of
+   * `assertPublicViewVisible` on purpose: the members-only wall (staff are
+   * signed-in active members), the block check (there is no viewer to have
+   * blocked anyone) and the takedown check (a takedown is staff-visible
+   * already).
+   */
+  async getDraftPreviewForStaff(
+    subprofileId: string,
+  ): Promise<SubprofilePublicView | null> {
+    const sp = await this.subprofiles.findOne({ where: { id: subprofileId } });
+    if (
+      !sp ||
+      sp.status !== SubprofileStatus.Draft ||
+      sp.removedAt ||
+      sp.visibility === SubprofileVisibility.Private
+    ) {
+      return null;
+    }
+    return this.assemblePublicView(
+      sp,
+      undefined,
+      await this.linkedOwnerRefFor(sp),
+      false,
+    );
+  }
+
+  /**
+   * Staff callers only (`AdminCreatorDraftRowsService`): what still blocks each
+   * draft persona from publishing, as the creator's own publish would report
+   * it (`validatePublish`), keyed by persona id with one entry per persona.
+   * One batched read of the creators' profiles for the `handle_names_owner`
+   * check, then one handle-registry check per persona that carries a handle,
+   * all in parallel. Each check excludes the persona's own claim, the same
+   * owner `publish` passes.
+   */
+  async draftPublishGapsForStaff(
+    personas: readonly Subprofile[],
+  ): Promise<Map<string, PublishUnmetCode[]>> {
+    const gapsByPersonaId = new Map<string, PublishUnmetCode[]>();
+    if (personas.length === 0) {
+      return gapsByPersonaId;
+    }
+    const creatorIds = [...new Set(personas.map((persona) => persona.userId))];
+    const creatorProfiles = await this.profiles.find({
+      where: { userId: In(creatorIds) },
+    });
+    const creatorSlugByUserId = new Map(
+      creatorProfiles.map((profile) => [profile.userId, profile.slug]),
+    );
+    const gapEntries = await Promise.all(
+      personas.map(async (persona) => {
+        const isHandleTaken = persona.handle
+          ? await this.handles.isTaken(
+              this.subprofiles.manager,
+              persona.handle,
+              { kind: 'subprofile', subprofileId: persona.id },
+            )
+          : false;
+        const gaps = validatePublish(
+          persona,
+          [],
+          isHandleTaken,
+          creatorSlugByUserId.get(persona.userId) ?? null,
+        );
+        return [persona.id, gaps] as const;
+      }),
+    );
+    for (const [personaId, gaps] of gapEntries) {
+      gapsByPersonaId.set(personaId, gaps);
+    }
+    return gapsByPersonaId;
+  }
+
+  // The full public DTO for `sp` as `viewer` sees it, with no visibility
+  // decision of its own: every caller decides first (`buildPublicView` through
+  // `assertPublicViewVisible`, `getDraftPreviewForStaff` through its in-scope
+  // checks). A field added to the public view goes here, so every read that
+  // assembles the view gains it at once.
+  private async assemblePublicView(
+    sp: Subprofile,
+    viewer: CurrentUserData | undefined,
+    ownerRef: SubprofileOwnerRef | undefined,
+    isOwner: boolean,
+  ): Promise<SubprofilePublicView> {
     const viewerId = viewer?.userId ?? ANONYMOUS_VIEWER_ID;
-    // These seven reads are mutually independent — fire them in one round trip
-    // rather than seven sequential awaits.
+    // These eight reads are mutually independent, so they fire together in
+    // one round trip.
     const [
       items,
       socialLinkRows,
@@ -986,6 +1093,7 @@ export class SubprofilePublicReadService {
       followerCountsById,
       viewerFollowingIds,
       affiliationsById,
+      worksAt,
     ] = await Promise.all([
       this.items.find({ where: { subprofileId: sp.id } }),
       this.socialLinks.find({
@@ -997,6 +1105,14 @@ export class SubprofilePublicReadService {
       this.followersService.loadFollowerCountsFor([sp.id]),
       this.followersService.viewerFollowingFor(viewerId, [sp.id]),
       this.resolveAffiliationsFor(viewerId, [sp.id]),
+      // Every caller has made its visibility decision by now, so a withheld
+      // persona never reads its links.
+      loadWorksAt(
+        this.subprofiles.manager,
+        this.mediaCropService,
+        sp.id,
+        viewer?.status === UserStatus.Active,
+      ),
     ]);
     const endorsementCount = endorsementCountsById.get(sp.id) ?? 0;
     const viewerEndorsed = viewerEndorsedIds.has(sp.id);
@@ -1009,6 +1125,12 @@ export class SubprofilePublicReadService {
       items,
     );
     const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
+    const linkedEventsByItemId =
+      await this.affiliationEligibility.resolveFlashDayEvents(
+        viewerId,
+        [sp],
+        items,
+      );
     return toPublicDTO(
       sp,
       items,
@@ -1022,6 +1144,8 @@ export class SubprofilePublicReadService {
       collaboratorsByHandle,
       isOwner,
       crops,
+      worksAt,
+      linkedEventsByItemId,
     );
   }
 

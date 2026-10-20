@@ -130,6 +130,10 @@ const CATEGORY_BY_REASON_CODE: Partial<
   // Studio reports for music or artwork used without permission. No public
   // category fits yet, so the code joins "other" on purpose.
   copyright: 'other',
+  // Studio safety: hateful lyrics count where hate speech counts; an
+  // unmarked explicit track has no public category.
+  hateful_lyrics: 'harassment',
+  untagged_explicit: 'other',
   other: 'other',
 };
 

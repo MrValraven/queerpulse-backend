@@ -1,5 +1,6 @@
 import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
+import { StudioPlaylistEditor } from './entities/studio-playlist-editor.entity';
 import {
   StudioPlaylist,
   StudioPlaylistVisibility,
@@ -14,7 +15,7 @@ import {
   StudioTrackSummary,
   toStudioArtistRef,
 } from './studio-response';
-import { STUDIO_LIMITS } from './studio.constants';
+import { STUDIO_LIMITS, StudioPlaylistRole } from './studio.constants';
 
 // Wire shapes of the Studio v2 contract for playlists. `StudioPlaylist` in
 // the contract is `StudioPlaylistResponse` here, beside the entity.
@@ -33,6 +34,42 @@ export interface StudioPlaylistCredit {
   member: StudioPlaylistMemberCredit | null;
 }
 
+/** Collaborative playlists: a member as the owner and editors see them. No
+ *  user id on the wire; `slug` is empty for a member with no profile row. */
+export interface StudioPlaylistPerson {
+  slug: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+export interface StudioPlaylistEditorResponse {
+  /** `studio_playlist_editors.id`: the owner removes a row by it. */
+  editorId: string;
+  member: StudioPlaylistPerson;
+  /** Ended rows never leave the server. */
+  status: 'invited' | 'active';
+  source: 'member_invite' | 'persona_co_owner';
+  invitedAt: string;
+}
+
+export interface StudioPlaylistEditorList {
+  items: StudioPlaylistEditorResponse[];
+}
+
+export interface StudioPlaylistEditorCandidate {
+  member: StudioPlaylistPerson;
+  isEditor: boolean;
+}
+
+export interface StudioPlaylistEditorCandidateList {
+  items: StudioPlaylistEditorCandidate[];
+}
+
+export interface StudioPlaylistInvite {
+  invitedBy: StudioPlaylistPerson;
+  invitedAt: string;
+}
+
 export interface StudioPlaylistCard {
   id: string;
   name: string;
@@ -46,6 +83,11 @@ export interface StudioPlaylistCard {
   isOwner: boolean;
   /** The owner's own view only; null for everyone else. */
   visibility: StudioPlaylistVisibility | null;
+  /** The viewer's role on this playlist; null for everyone else.
+   *  `isOwner` stays and equals `role === 'owner'`. */
+  role: StudioPlaylistRole | null;
+  /** Active editors, for the owner and editors; null for everyone else. */
+  editorCount: number | null;
 }
 
 export type StudioPlaylistEntryTrack = StudioTrackSummary & {
@@ -67,6 +109,9 @@ export interface StudioPlaylistEntryResponse {
    */
   unavailableReason?: 'withdrawn';
   track: StudioPlaylistEntryTrack | null;
+  /** Who added the entry, for the owner and active editors only, and only
+   *  when it is the owner or a current active editor. */
+  addedBy: StudioPlaylistPerson | null;
 }
 
 export interface StudioPlaylistResponse extends StudioPlaylistCard {
@@ -74,6 +119,8 @@ export interface StudioPlaylistResponse extends StudioPlaylistCard {
   entries: StudioPlaylistEntryResponse[];
   /** The owner's own view only. */
   creditSubprofileId: string | null;
+  /** The open invitation, for an invitee only. */
+  invite: StudioPlaylistInvite | null;
 }
 
 export interface StudioPlaylistPlayableStats {
@@ -109,6 +156,11 @@ export interface StudioPlaylistCardSource {
   member: MemberRef | undefined;
   stats: StudioPlaylistPlayableStats;
   coverKeys: string[];
+  /** The viewer's live editor row on this playlist, read with the block
+   *  guard; absent or null for no row. */
+  editorRole?: 'editor' | 'invitee' | null;
+  /** Active editors of the playlist; read only for owner and editor. */
+  activeEditorCount?: number;
 }
 
 export function memberDisplayName(member: MemberRef | undefined): string {
@@ -131,6 +183,33 @@ export function toStudioPlaylistMemberCredit(
     slug: member?.slug ?? '',
     displayName: memberDisplayName(member),
     avatarUrl: member?.avatarUrl ?? null,
+  };
+}
+
+/** `MemberRef` comes from one batched profile read and already honours the
+ *  photo setting. */
+export function toStudioPlaylistPerson(
+  member: MemberRef | undefined,
+): StudioPlaylistPerson {
+  return {
+    slug: member?.slug ?? '',
+    displayName: memberDisplayName(member),
+    avatarUrl: member?.avatarUrl ?? null,
+  };
+}
+
+/** A live editor row on the wire. Callers pass `invited` or `active` rows
+ *  only. */
+export function toStudioPlaylistEditorResponse(
+  row: Pick<StudioPlaylistEditor, 'id' | 'status' | 'source' | 'invitedAt'>,
+  member: StudioPlaylistPerson,
+): StudioPlaylistEditorResponse {
+  return {
+    editorId: row.id,
+    member,
+    status: row.status as StudioPlaylistEditorResponse['status'],
+    source: row.source,
+    invitedAt: row.invitedAt.toISOString(),
   };
 }
 
@@ -160,6 +239,10 @@ export function toStudioPlaylistCard(
 ): StudioPlaylistCard {
   const { playlist, viewerId, isCreditBroken, stats, coverKeys } = source;
   const isOwner = playlist.userId === viewerId;
+  const role: StudioPlaylistRole | null = isOwner
+    ? 'owner'
+    : (source.editorRole ?? null);
+  const canSeeEditors = role === 'owner' || role === 'editor';
   return {
     id: playlist.id,
     name: playlist.name,
@@ -177,6 +260,8 @@ export function toStudioPlaylistCard(
     visibility: isOwner
       ? effectivePlaylistVisibility(playlist.visibility, isCreditBroken)
       : null,
+    role,
+    editorCount: canSeeEditors ? (source.activeEditorCount ?? 0) : null,
   };
 }
 
@@ -185,6 +270,7 @@ export function toStudioPlaylistResponse(
   playlist: StudioPlaylist,
   entries: StudioPlaylistEntryResponse[],
   isCreditBroken: boolean,
+  invite: StudioPlaylistInvite | null = null,
 ): StudioPlaylistResponse {
   return {
     ...card,
@@ -192,5 +278,6 @@ export function toStudioPlaylistResponse(
     entries,
     creditSubprofileId:
       card.isOwner && !isCreditBroken ? playlist.creditSubprofileId : null,
+    invite: card.role === 'invitee' ? invite : null,
   };
 }

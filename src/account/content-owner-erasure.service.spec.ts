@@ -1,5 +1,6 @@
 import { FindOperator, FindOptionsWhere, In } from 'typeorm';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { EVENT_CANCELLED } from '../events/event.events';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
 
@@ -75,6 +76,7 @@ describe('ContentOwnerErasureService gatherings', () => {
     const notifications = {
       createForRecipients: jest.fn().mockResolvedValue([]),
     };
+    const eventEmitter = { emit: jest.fn().mockReturnValue(true) };
     const service = new ContentOwnerErasureService(
       events as never,
       cohosts as never,
@@ -87,8 +89,16 @@ describe('ContentOwnerErasureService gatherings', () => {
       notifications as never,
       // The forum and topic steps (ENG-494); nothing to find here.
       { query: jest.fn().mockResolvedValue([[], 0]) } as never,
+      eventEmitter as never,
     );
-    return { service, events, cohosts, eventSeries, notifications };
+    return {
+      service,
+      events,
+      cohosts,
+      eventSeries,
+      notifications,
+      eventEmitter,
+    };
   };
 
   // The Date a `MoreThan(...)` arm was built around, so a test can compare the
@@ -193,6 +203,30 @@ describe('ContentOwnerErasureService gatherings', () => {
       .calls[0] as [string[], NotificationType];
     expect(recipients).toEqual(['goer-1']);
     expect(type).toBe(NotificationType.EventCancelled);
+  });
+
+  it('erasing a host cancels their live game', async () => {
+    const { service, events, eventEmitter } = build({
+      unfinishedEvents: [gathering()],
+    });
+    await service.eraseFor(ERASED_USER_ID);
+    // Pulse Live listens for this and ends the open session as abandoned.
+    expect(eventEmitter.emit).toHaveBeenCalledWith(EVENT_CANCELLED, {
+      eventIds: ['event-1'],
+    });
+    // Sent after the status flip, so the listener reads committed state.
+    const updateOrder = events.update.mock.invocationCallOrder[0] ?? 0;
+    const emitOrder = eventEmitter.emit.mock.invocationCallOrder[0] ?? 0;
+    expect(emitOrder).toBeGreaterThan(updateOrder);
+  });
+
+  it('sends no cancel signal for a gathering handed to a co-host', async () => {
+    const { service, eventEmitter } = build({
+      unfinishedEvents: [gathering()],
+      cohostRows: [{ eventId: 'event-1', userId: 'cohost-1' }],
+    });
+    await service.eraseFor(ERASED_USER_ID);
+    expect(eventEmitter.emit).not.toHaveBeenCalled();
   });
 
   // One erasure, one mixed calendar: the running festival is handed over, the
@@ -318,6 +352,7 @@ describe('ContentOwnerErasureService forum threads', () => {
       noOpUpdate as never,
       { createForRecipients: jest.fn() } as never,
       dataSource as never,
+      { emit: jest.fn().mockReturnValue(true) } as never,
     );
     return { service, dataSource };
   };
@@ -450,7 +485,25 @@ describe('ContentOwnerErasureService forum threads', () => {
       'DELETE FROM "forum_thread_funding"',
       'UPDATE "forum_thread" "t" SET "rep',
       'UPDATE "topic_post" SET "author_na',
+      'UPDATE "quizshow_sessions" SET "at',
     ]);
+  });
+
+  it('removes the erased member from every Pulse Live session they attached to', async () => {
+    const { service, dataSource } = build();
+    await service.eraseFor(ERASED_USER_ID);
+    const detach = statements(dataSource).find(({ sql }) =>
+      sql.startsWith('UPDATE "quizshow_sessions"'),
+    );
+    if (!detach) throw new Error('expected the Pulse Live organiser detach');
+    expect(detach.sql).toContain(
+      'array_remove("attached_organiser_user_ids", $1::uuid)',
+    );
+    expect(detach.sql).toContain(
+      '$1::uuid = ANY("attached_organiser_user_ids")',
+    );
+    expect(detach.sql).not.toContain('"status"');
+    expect(detach.parameters).toEqual([ERASED_USER_ID]);
   });
 
   // Funding & Grants: a surviving fundraiser keeps nobody accountable for

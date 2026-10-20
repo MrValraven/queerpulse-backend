@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsIn,
   IsOptional,
   IsString,
@@ -38,4 +39,11 @@ export class UpdateStudioPlaylistDto {
   @IsOptional()
   @IsUUID()
   creditSubprofileId?: string | null;
+
+  /** Collaborative playlists: confirms a credit change that ends the seats
+   *  of editors who no longer fit the new credit. Without it such a change
+   *  answers 409 `studio_playlist_credit_change_removes_editors`. */
+  @IsOptional()
+  @IsBoolean()
+  confirmEditorRemoval?: boolean;
 }

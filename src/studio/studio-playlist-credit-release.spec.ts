@@ -1,10 +1,16 @@
 import { EntityManager } from 'typeorm';
 import {
   PLAYLIST_CREDIT_RELEASE_ASSIGNMENTS,
+  RELEASE_PLAYLIST_CREDITS_IF_UNLISTENABLE_SQL,
+  RELEASE_PLAYLIST_CREDITS_OF_PERSONA_SQL,
   releasePlaylistCreditsIfPersonaUnlistenable,
   releasePlaylistCreditsOfPersona,
   releasePlaylistCreditsOnTakedown,
 } from './studio-playlist-credit-release';
+import {
+  CLEAR_ENDED_EDITOR_ADDED_BY_SQL,
+  RELEASED_PLAYLIST_EDITORS_CTE,
+} from './studio-playlist-editor-endings';
 
 const PERSONA_ID = '0b9f3c1e-5a52-4c51-9d6e-2f1a7c3b8e40';
 
@@ -70,5 +76,34 @@ describe('Studio playlist credit release', () => {
   it('skips a persona subject id that is no uuid, so the takedown transaction never fails on a cast', async () => {
     await releasePlaylistCreditsOnTakedown(manager, 'subprofile', 'nightform');
     expect(query).not.toHaveBeenCalled();
+  });
+
+  // Collaborative playlists: a released credit ends the co-owner editors of
+  // those playlists and clears their added by, in the same statement, so the
+  // persona paths that count statements still see one.
+  it('ends the co-owner editors of the released playlists in the same statement', async () => {
+    await releasePlaylistCreditsOfPersona(manager, PERSONA_ID);
+    await releasePlaylistCreditsIfPersonaUnlistenable(manager, PERSONA_ID);
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0]?.[0]).toBe(
+      RELEASE_PLAYLIST_CREDITS_OF_PERSONA_SQL,
+    );
+    expect(query.mock.calls[1]?.[0]).toBe(
+      RELEASE_PLAYLIST_CREDITS_IF_UNLISTENABLE_SQL,
+    );
+    for (const sql of [
+      RELEASE_PLAYLIST_CREDITS_OF_PERSONA_SQL,
+      RELEASE_PLAYLIST_CREDITS_IF_UNLISTENABLE_SQL,
+    ]) {
+      expect(sql).toMatch(/^WITH "released_playlist" AS \(/);
+      expect(sql).toContain('RETURNING "id"');
+      expect(sql).toContain(RELEASED_PLAYLIST_EDITORS_CTE);
+      expect(sql).toContain(CLEAR_ENDED_EDITOR_ADDED_BY_SQL);
+    }
+  });
+
+  it('keeps NOT EXISTS out of the delete and unlink release', () => {
+    expect(RELEASE_PLAYLIST_CREDITS_OF_PERSONA_SQL).not.toContain('NOT EXISTS');
   });
 });

@@ -20,6 +20,7 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { CreatorDraftSlotsService } from '../creator-drafts/creator-draft-slots.service';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
@@ -69,6 +70,8 @@ export class CommunitiesController {
   constructor(
     private readonly communitiesService: CommunitiesService,
     private readonly communityPostsService: CommunityPostsService,
+    // Creator drafts: a publish deletes the caller's draft for it.
+    private readonly creatorDraftSlots: CreatorDraftSlotsService,
   ) {}
 
   @Get()
@@ -163,11 +166,13 @@ export class CommunitiesController {
   @ApiConflictResponse({
     description: 'Could not allocate a unique community ref.',
   })
-  create(
+  async create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateCommunityDto,
   ) {
-    return this.communitiesService.create(user.userId, dto);
+    const created = await this.communitiesService.create(user.userId, dto);
+    await this.creatorDraftSlots.discardAfterPublish(user.userId, 'community');
+    return created;
   }
 
   @Patch(':slug')

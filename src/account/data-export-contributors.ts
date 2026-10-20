@@ -60,9 +60,14 @@ import {
   ReportsFiledExportContributor,
 } from './data-export-contributors-safety';
 import { MORE_EXPORT_CONTRIBUTORS } from './data-export-contributors-more';
+import { CreatorDraftsExportContributor } from './data-export-contributors-creator-drafts';
+import { QuizshowPlaysExportContributor } from './data-export-contributors-quizshow';
 import { PersonaPostsExportContributor } from './data-export-contributors-persona-posts';
 import {
+  StudioCopyrightClaimsExportContributor,
   StudioPersonaCreditsExportContributor,
+  StudioPlaylistAdditionsExportContributor,
+  StudioPlaylistSeatsExportContributor,
   StudioPlaylistsExportContributor,
   StudioReleaseRemindersExportContributor,
 } from './data-export-contributors-studio';
@@ -1097,5 +1102,15 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   // Studio v3: Notify me reminders and persona posts.
   StudioReleaseRemindersExportContributor,
   PersonaPostsExportContributor,
+  // Collaborative playlists: seats on other members' playlists and the
+  // tracks added there (data-export-contributors-studio.ts).
+  StudioPlaylistSeatsExportContributor,
+  StudioPlaylistAdditionsExportContributor,
+  // Studio safety and moderation: the copyright claims the member filed.
+  StudioCopyrightClaimsExportContributor,
+  // Creator drafts: the member's own event, listing edit and community wizard drafts.
+  CreatorDraftsExportContributor,
+  // Pulse Live: the sessions the member played, with their own answers and votes.
+  QuizshowPlaysExportContributor,
   MediaExportContributor,
 ] as const;

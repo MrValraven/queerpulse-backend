@@ -26,6 +26,7 @@ import type {
   GifAttachment,
   StickerAttachment,
 } from '../messaging/entities/message.entity';
+import type { QuizshowAnswerSnapshotEvidence } from '../quizshow/quizshow.contract';
 import {
   messageAttachmentFacts,
   primaryMessageAttachmentStorageKey,
@@ -336,7 +337,8 @@ export type ReportEvidenceEntry =
   | GroupListingSnapshotEvidence
   | PhotoSnapshotEvidence
   | GroupSnapshotEvidence
-  | MailboxIdentitySnapshotEvidence;
+  | MailboxIdentitySnapshotEvidence
+  | QuizshowAnswerSnapshotEvidence;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

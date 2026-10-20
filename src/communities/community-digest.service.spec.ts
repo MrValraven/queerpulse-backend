@@ -181,6 +181,79 @@ describe('CommunityDigestService', () => {
       ]);
     });
 
+    it('reads a Studio share post as its note, with the Studio link taken out', async () => {
+      members.find.mockResolvedValue([
+        {
+          communityId: 'community-1',
+          role: RosterRole.Member,
+          notificationLevel: CommunityNotificationLevel.All,
+        },
+      ]);
+      communities.find.mockResolvedValueOnce([
+        {
+          id: 'community-1',
+          slug: 'trans-nb-network',
+          name: 'Trans & Non-Binary Network',
+          parentId: null,
+          avatarImageUrl: null,
+        },
+      ]);
+      const releaseId = '0f8a3c2e-5b1d-4e6f-9a7b-1c2d3e4f5a6b';
+      posts.query.mockResolvedValueOnce([
+        {
+          id: 'post-1',
+          community_id: 'community-1',
+          body: `note\n\nhttps://queerpulse.com/studio/album?id=${releaseId}`,
+          kind: 'post',
+          created_at: new Date('2026-01-01T00:00:00Z'),
+        },
+      ]);
+
+      const result = await service.getDigest('user-1');
+
+      expect(result.communities[0]?.excerpts).toEqual([
+        expect.objectContaining({ postId: 'post-1', excerpt: 'note' }),
+      ]);
+    });
+
+    it('reads a markdown-wrapped Studio link as its label in the excerpt', async () => {
+      members.find.mockResolvedValue([
+        {
+          communityId: 'community-1',
+          role: RosterRole.Member,
+          notificationLevel: CommunityNotificationLevel.All,
+        },
+      ]);
+      communities.find.mockResolvedValueOnce([
+        {
+          id: 'community-1',
+          slug: 'trans-nb-network',
+          name: 'Trans & Non-Binary Network',
+          parentId: null,
+          avatarImageUrl: null,
+        },
+      ]);
+      const releaseId = '0f8a3c2e-5b1d-4e6f-9a7b-1c2d3e4f5a6b';
+      posts.query.mockResolvedValueOnce([
+        {
+          id: 'post-1',
+          community_id: 'community-1',
+          body: `listen to [the EP](https://queerpulse.com/studio/album?id=${releaseId}) tonight`,
+          kind: 'post',
+          created_at: new Date('2026-01-01T00:00:00Z'),
+        },
+      ]);
+
+      const result = await service.getDigest('user-1');
+
+      expect(result.communities[0]?.excerpts).toEqual([
+        expect.objectContaining({
+          postId: 'post-1',
+          excerpt: 'listen to the EP tonight',
+        }),
+      ]);
+    });
+
     it('counts gatherings a community joined as an accepted guest beside the ones it leads', async () => {
       members.find.mockResolvedValue([
         {

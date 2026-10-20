@@ -32,6 +32,7 @@ import {
   SubprofileLinkVisibility,
 } from '../entities/subprofile.entity';
 import { isSectionAllowed } from '../subprofile-kinds';
+import { isTattooItemSection } from '../tattoo-artist-vocab';
 import { MAX_ITEMS_PER_SECTION } from '../subprofile-validation';
 import { SECTION_FULL_CODE, SubprofilesService } from '../subprofiles.service';
 import { ConnectFeedDTO } from './dto/connect-feed.dto';
@@ -910,7 +911,8 @@ export class SubprofileFeedsService {
   }
 
   /** The section episodes may publish into: one the persona's kind has, and
-   *  never `links` (retired) or `gallery` (a photo strip). */
+   *  never `links` (retired), `gallery` (a photo strip) or one of the nine
+   *  tattoo item sections (imported rows carry no `structured` keys). */
   private assertImportSection(
     persona: Subprofile,
     section: string,
@@ -923,6 +925,7 @@ export class SubprofileFeedsService {
       !known ||
       candidate === SubprofileSection.Links ||
       candidate === SubprofileSection.Gallery ||
+      isTattooItemSection(candidate) ||
       !isSectionAllowed(persona.kind, candidate)
     ) {
       throw new BadRequestException(

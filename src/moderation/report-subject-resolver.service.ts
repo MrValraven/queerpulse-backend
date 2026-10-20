@@ -368,6 +368,15 @@ export class ReportSubjectResolverService {
       // Studio v3: one persona post, keyed by its uuid. See `PERSONA_POST_SQL`.
       case ReportSubjectType.PersonaPost:
         return this.queryByUuid(PERSONA_POST_SQL, subjectIds);
+
+      // Studio safety: one track, keyed by its uuid. See `STUDIO_TRACK_SQL`.
+      case ReportSubjectType.StudioTrack:
+        return this.queryByUuid(STUDIO_TRACK_SQL, subjectIds);
+
+      // Pulse Live: one revealed answer, keyed by its uuid. See
+      // `QUIZSHOW_ANSWER_SQL`.
+      case ReportSubjectType.QuizshowAnswer:
+        return this.queryByUuid(QUIZSHOW_ANSWER_SQL, subjectIds);
     }
   }
 
@@ -964,6 +973,40 @@ const PERSONA_POST_SQL = `
   FROM subprofile_posts p
   JOIN subprofiles s ON s.id = p.subprofile_id
   WHERE p.id = ANY($1::uuid[])
+`;
+
+/**
+ * Studio safety and moderation: one track. The author is the persona's
+ * creator, the person `STUDIO_RELEASE_SQL` names for the release, read by
+ * moderators alone. The excerpt is "<track> on <release> by <artist>", what
+ * a moderator needs to find the track. Any state resolves, withheld
+ * included, so a report filed before a claim held the track still reads.
+ */
+const STUDIO_TRACK_SQL = `
+  SELECT t.id::text AS key,
+         s.user_id  AS author_user_id,
+         NULLIF(btrim(t.title), '') || ' on ' || r.title || ' by ' || s.display_name AS excerpt,
+         NULL::uuid AS community_id
+  FROM studio_tracks t
+  JOIN studio_releases r ON r.id = t.release_id
+  JOIN subprofiles s ON s.id = r.subprofile_id
+  WHERE t.id = ANY($1::uuid[])
+`;
+
+/**
+ * Pulse Live: one party answer. The author is the player's account and the
+ * excerpt is "<screen name>: <text>". The row is deleted 30 days after the
+ * night, and the snapshot captured at filing keeps the facts after that, so a
+ * missing row answers unresolved.
+ */
+const QUIZSHOW_ANSWER_SQL = `
+  SELECT a.id::text AS key,
+         p.user_id AS author_user_id,
+         p.screen_name || ': ' || NULLIF(btrim(a.payload ->> 'text'), '') AS excerpt,
+         NULL::uuid AS community_id
+  FROM quizshow_answers a
+  JOIN quizshow_players p ON p.id = a.player_id
+  WHERE a.id = ANY($1::uuid[])
 `;
 
 /**

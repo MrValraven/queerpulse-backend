@@ -188,6 +188,27 @@ export class PushNotificationListener {
         case NotificationType.StudioCreditAccepted:
           await this.pushStudioCreditAccepted(userIds, notification);
           return;
+        // Collaborative playlists: an invitation to edit a member's
+        // playlist answers to Invitations, a pick as editor of a persona's
+        // playlist to Personas. The answers to an invitation stay in the
+        // bell.
+        case NotificationType.StudioPlaylistEditorInvite:
+          await this.pushStudioPlaylistEditorInvite(userIds, notification);
+          return;
+        case NotificationType.StudioPlaylistEditorAdded:
+          await this.pushStudioPlaylistEditorAdded(userIds, notification);
+          return;
+        // Meet the team: an invite to a persona answers to Personas, a
+        // request and a confirmation to Listings.
+        case NotificationType.ListingTeamInvite:
+          await this.pushListingTeamInvite(userIds, notification);
+          return;
+        case NotificationType.ListingTeamRequest:
+          await this.pushListingTeamRequest(userIds, notification);
+          return;
+        case NotificationType.ListingTeamAccepted:
+          await this.pushListingTeamAccepted(userIds, notification);
+          return;
         // Platform staff offering a struggling community help (OPS-05).
         // Always-on, no category gate, for the same reason as the types
         // above: it is the platform reaching the people running a room that
@@ -1037,6 +1058,203 @@ export class PushNotificationListener {
       },
       timestamp: notification.createdAt.getTime(),
     });
+  }
+
+  /**
+   * "Ana Silva invited you to edit Night bus" (collaborative playlists).
+   * Names the inviting owner, carries their face when it is public, and
+   * opens the playlist, where the invite banner waits. A payload missing the
+   * playlist id or name sends no push; the bell row is unaffected.
+   */
+  private async pushStudioPlaylistEditorInvite(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const playlistId = this.payloadString(notification, 'playlistId');
+    const playlist = this.payloadString(notification, 'playlistName');
+    if (!playlistId || !playlist) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Invitations,
+    );
+    if (recipientUserIds.length === 0) return;
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Playlist invite',
+        body: `${name} invited you to edit ${playlist}`,
+        tag: `notification:${notification.id}`,
+        data: {
+          url: `/studio/collection?id=${encodeURIComponent(playlistId)}`,
+        },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:studioPlaylistEditorInvite.title',
+          bodyKey: 'push:studioPlaylistEditorInvite.body',
+          params: { name, playlist },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
+   * "Ana Silva added you as an editor of Night bus (Night Shift)"
+   * (collaborative playlists). The recipient co-owns the persona, so the
+   * owner's name and the persona name are both theirs to read. Playlist id,
+   * playlist name and persona name are required.
+   */
+  private async pushStudioPlaylistEditorAdded(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const playlistId = this.payloadString(notification, 'playlistId');
+    const playlist = this.payloadString(notification, 'playlistName');
+    const persona = this.payloadString(notification, 'personaName');
+    if (!playlistId || !playlist || !persona) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Personas,
+    );
+    if (recipientUserIds.length === 0) return;
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'You can edit a playlist',
+        body: `${name} added you as an editor of ${playlist} (${persona})`,
+        tag: `notification:${notification.id}`,
+        data: {
+          url: `/studio/collection?id=${encodeURIComponent(playlistId)}`,
+        },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:studioPlaylistEditorAdded.title',
+          bodyKey: 'push:studioPlaylistEditorAdded.body',
+          params: { name, playlist, persona },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
+   * "Ink House invited River Ink to join the team" (Meet the team). Opens
+   * the persona's Works at pane. Persona id, persona name and listing name
+   * are required; no member is looked up.
+   */
+  private async pushListingTeamInvite(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const subprofileId = this.payloadString(notification, 'subprofileId');
+    const persona = this.payloadString(notification, 'personaName');
+    const listing = this.payloadString(notification, 'listingName');
+    if (!subprofileId || !persona || !listing) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Personas,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Team invite',
+      body: `${listing} invited ${persona} to join the team`,
+      tag: `notification:${notification.id}`,
+      data: { url: this.listingTeamInviteUrl(subprofileId) },
+      l10n: {
+        titleKey: 'push:listingTeamInvite.title',
+        bodyKey: 'push:listingTeamInvite.body',
+        params: { persona, listing },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "River Ink asked to join the team at Ink House" (Meet the team). Opens
+   * the listing editor's Team section. Listing ref, persona name and
+   * listing name are required.
+   */
+  private async pushListingTeamRequest(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const listingRef = this.payloadString(notification, 'listingRef');
+    const persona = this.payloadString(notification, 'personaName');
+    const listing = this.payloadString(notification, 'listingName');
+    if (!listingRef || !persona || !listing) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Listings,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Team request',
+      body: `${persona} asked to join the team at ${listing}`,
+      tag: `notification:${notification.id}`,
+      data: { url: this.listingTeamRequestUrl(listingRef) },
+      l10n: {
+        titleKey: 'push:listingTeamRequest.title',
+        bodyKey: 'push:listingTeamRequest.body',
+        params: { persona, listing },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "River Ink is now on the team at Ink House" (Meet the team). Opens the
+   * starting side's own surface: the listing editor's Team section when the
+   * listing started the link, the persona's Works at pane when the persona
+   * did. The id that surface needs is required alongside both names.
+   */
+  private async pushListingTeamAccepted(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const persona = this.payloadString(notification, 'personaName');
+    const listing = this.payloadString(notification, 'listingName');
+    const isListingStarted =
+      this.payloadString(notification, 'initiatedBy') === 'listing';
+    const surfaceId = this.payloadString(
+      notification,
+      isListingStarted ? 'listingRef' : 'subprofileId',
+    );
+    if (!persona || !listing || !surfaceId) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Listings,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Team link confirmed',
+      body: `${persona} is now on the team at ${listing}`,
+      tag: `notification:${notification.id}`,
+      data: {
+        url: isListingStarted
+          ? this.listingTeamRequestUrl(surfaceId)
+          : this.listingTeamInviteUrl(surfaceId),
+      },
+      l10n: {
+        titleKey: 'push:listingTeamAccepted.title',
+        bodyKey: 'push:listingTeamAccepted.body',
+        params: { persona, listing },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  private listingTeamInviteUrl(subprofileId: string): string {
+    return `/account/subprofiles/${encodeURIComponent(subprofileId)}/edit?pane=works-at`;
+  }
+
+  private listingTeamRequestUrl(listingRef: string): string {
+    return `/local/directory/list/${encodeURIComponent(listingRef)}/edit#lb-editor-team`;
   }
 
   /**

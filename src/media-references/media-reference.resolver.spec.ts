@@ -58,6 +58,8 @@ function createMockDataSource(
     getRepository: jest.fn((entity: unknown) => {
       return repositoriesByEntity.get(entity) ?? makeMockRepository();
     }),
+    // The Pulse Live question source reads raw SQL; no quiz holds these keys.
+    query: jest.fn().mockResolvedValue([]),
   } as unknown as DataSource;
 }
 

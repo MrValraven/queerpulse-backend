@@ -22,6 +22,10 @@ import {
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import type { CardTableSummary } from './subprofile-table-summary';
+import type { ListingWorksAt } from '../listings/listing-team-response';
+import type { FlashDayEventRef } from './flash-day-event-links';
+import { mapItemImageRefs } from './subprofile-item-images';
+import { isTattooBodyPhotoSection } from './tattoo-artist-vocab';
 
 export interface SubprofileItemView {
   id: string;
@@ -49,8 +53,23 @@ export interface SubprofileItemView {
   edition: string | null;
   workState: WorkState | null;
   structured: ItemStructured | null;
+  /** Present on `flash_days` items only: the public event the item links to,
+   *  resolved at read time, or null when the item links to no event anyone
+   *  can see. */
+  linkedEvent?: FlashDayEventRef | null;
   /** ISO 8601 first-published timestamp (item row creation on QueerPulse). */
   createdAt: string;
+}
+
+/**
+ * Who an item view is for and what the caller resolved for it. The owner
+ * audience sees the photo flags exactly as stored; a visitor sees only the
+ * resolved `isBlurred`. `linkedEventsByItemId` holds the public event each
+ * `flash_days` item links to, keyed by item id.
+ */
+export interface ItemReadContext {
+  isOwnerAudience: boolean;
+  linkedEventsByItemId: ReadonlyMap<string, FlashDayEventRef>;
 }
 
 // Resolved collaboration credit — exposed for BOTH linked and unlinked
@@ -215,6 +234,10 @@ export interface SubprofilePublicView {
   followerCount: number;
   viewerFollowing: boolean;
   affiliations: AffiliationView[];
+  // "Meet the team": the listings this persona works at, accepted links to
+  // publicly visible listings in answer order, at most 10. Always present;
+  // `listForProfile` serves `[]`.
+  worksAt: ListingWorksAt[];
   ownerSlug?: string; // linked only
   ownerName?: string; // linked only
   // Is the current viewer a co-owner (creator or invited member) of THIS
@@ -306,7 +329,14 @@ export function toItemView(
   // — see the module doc on `toSubprofileDTO` for why this stays a plain Map
   // parameter rather than an async fetch inside this (deliberately sync) mapper.
   crops: Map<string, CropRect> = new Map(),
+  // The default is the visitor shape, so a caller that passes nothing gets
+  // the safe public view.
+  readContext: ItemReadContext = {
+    isOwnerAudience: false,
+    linkedEventsByItemId: new Map(),
+  },
 ): SubprofileItemView {
+  const structuredView = toItemStructuredView(item, readContext);
   return {
     id: item.id,
     section: item.section,
@@ -332,9 +362,81 @@ export function toItemView(
     dimensions: item.dimensions ?? null,
     edition: item.edition ?? null,
     workState: item.workState ?? null,
-    structured: item.structured ?? null,
+    structured: structuredView.structured,
+    ...(structuredView.hasLinkedEvent
+      ? { linkedEvent: structuredView.linkedEvent }
+      : {}),
     createdAt: item.createdAt.toISOString(),
   };
+}
+
+interface ItemStructuredView {
+  structured: ItemStructured | null;
+  // True on `flash_days` items, which always carry `linkedEvent`.
+  hasLinkedEvent: boolean;
+  linkedEvent: FlashDayEventRef | null;
+}
+
+/**
+ * Shapes an item's `structured` for one audience, on a copy (the entity is
+ * left as loaded):
+ * - nested image refs resolve through `toImageUrl`, and an unresolvable one
+ *   reads as "";
+ * - a visitor sees a body-photo item's `photo` as `{ isBlurred }` alone, with
+ *   an absent flag read as true in `scar_work` and false in the other three
+ *   body-photo sections, and sees no `photo` on any other section; the owner
+ *   sees `photo` as stored;
+ * - a `flash_days` item gets its linked event from the read context, and when
+ *   none resolves its `flashDay` keeps only `cause`, so the response names
+ *   no event that is missing or closed to the public.
+ */
+function toItemStructuredView(
+  item: SubprofileItem,
+  readContext: ItemReadContext,
+): ItemStructuredView {
+  const storedStructured = item.structured ?? null;
+  // `mapItemImageRefs` hands back a fresh top-level `structured` object, so
+  // the edits below never reach the entity.
+  // Nested objects it leaves alone (`healed`, `flash`, ...) stay shared by
+  // reference with the entity, so callers must never mutate a view in place.
+  let structured: ItemStructured | null = storedStructured
+    ? (mapItemImageRefs({ structured: storedStructured }, toImageUrl)
+        .structured ?? null)
+    : null;
+
+  if (!readContext.isOwnerAudience) {
+    if (isTattooBodyPhotoSection(item.section)) {
+      const storedIsBlurred = storedStructured?.photo?.isBlurred;
+      const isBlurred =
+        typeof storedIsBlurred === 'boolean'
+          ? storedIsBlurred
+          : item.section === SubprofileSection.ScarWork;
+      structured = { ...(structured ?? {}), photo: { isBlurred } };
+    } else if (structured && 'photo' in structured) {
+      delete structured.photo;
+    }
+  }
+
+  const isFlashDay = item.section === SubprofileSection.FlashDays;
+  const linkedEvent = isFlashDay
+    ? (readContext.linkedEventsByItemId.get(item.id) ?? null)
+    : null;
+  if (isFlashDay && structured?.flashDay) {
+    if (linkedEvent) {
+      // The resolved event's slug wins, so a stored slug with stray
+      // whitespace always matches `linkedEvent.slug`.
+      structured.flashDay = {
+        ...structured.flashDay,
+        eventSlug: linkedEvent.slug,
+      };
+    } else {
+      const flashDayWithoutSlug = { ...structured.flashDay };
+      delete flashDayWithoutSlug.eventSlug;
+      structured.flashDay = flashDayWithoutSlug;
+    }
+  }
+
+  return { structured, hasLinkedEvent: isFlashDay, linkedEvent };
 }
 
 function toSocialLinkView(link: SubprofileSocialLink): SocialLinkView {
@@ -421,7 +523,13 @@ export function toSubprofileDTO(
   // populate a field nothing reads there would be a query for nothing. The
   // two reads where order IS observable both pass the real member position.
   memberPosition?: number,
+  // The public event each `flash_days` item links to, keyed by item id.
+  linkedEventsByItemId: ReadonlyMap<string, FlashDayEventRef> = new Map(),
 ): SubprofileView {
+  const ownerReadContext: ItemReadContext = {
+    isOwnerAudience: true,
+    linkedEventsByItemId,
+  };
   return {
     id: subprofile.id,
     kind: subprofile.kind,
@@ -443,7 +551,7 @@ export function toSubprofileDTO(
     status: subprofile.status,
     position: memberPosition ?? subprofile.position,
     items: sortItems(items).map((item) =>
-      toItemView(item, collaboratorsByHandle, crops),
+      toItemView(item, collaboratorsByHandle, crops, ownerReadContext),
     ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
     endorsementCount,
@@ -479,7 +587,15 @@ export function toPublicDTO(
   viewerIsMember = false,
   // Pre-loaded crop lookup — see `toSubprofileDTO`'s param doc.
   crops: Map<string, CropRect> = new Map(),
+  // Loaded by the caller (`loadWorksAt`) after its visibility decision.
+  worksAt: ListingWorksAt[] = [],
+  // The public event each `flash_days` item links to, keyed by item id.
+  linkedEventsByItemId: ReadonlyMap<string, FlashDayEventRef> = new Map(),
 ): SubprofilePublicView {
+  const visitorReadContext: ItemReadContext = {
+    isOwnerAudience: false,
+    linkedEventsByItemId,
+  };
   const view: SubprofilePublicView = {
     id: subprofile.id,
     kind: subprofile.kind,
@@ -504,7 +620,7 @@ export function toPublicDTO(
     visibility: subprofile.visibility,
     status: subprofile.status,
     items: sortItems(items).map((item) =>
-      toItemView(item, collaboratorsByHandle, crops),
+      toItemView(item, collaboratorsByHandle, crops, visitorReadContext),
     ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
     // endorsementCount/viewerEndorsed/followerCount/viewerFollowing are
@@ -517,6 +633,7 @@ export function toPublicDTO(
     followerCount,
     viewerFollowing,
     affiliations,
+    worksAt,
     viewerIsMember,
     skinData: subprofile.skinData ?? null,
   };

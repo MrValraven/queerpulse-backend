@@ -147,7 +147,17 @@ import {
   type FormatDetails,
 } from './gathering-family';
 import { toCsvRow } from '../common/csv';
-import { EVENT_DELETING, type EventDeletingEvent } from './event.events';
+import {
+  EVENT_CANCELLED,
+  EVENT_DELETING,
+  type EventCancelledEvent,
+  type EventDeletingEvent,
+} from './event.events';
+import {
+  eventHasAdultsRounds,
+  readEventQuizshowSummary,
+} from '../quizshow/quizshow-event-reads';
+import { quizshowError } from '../quizshow/quizshow-errors';
 import { RsvpService } from './rsvp.service';
 import { seatHostAsGoing } from './host-seat';
 import { occurrenceStartAt } from './series-occurrences';
@@ -523,6 +533,7 @@ export class EventsService {
         formatDetails: stripDisallowedDetails(
           dto.gatheringFamily ?? null,
           dto.formatDetails ?? null,
+          EventsService.blankToNull(dto.eventType),
         ),
         // Always a COMPLETE six-question map on write, so a reader never has
         // to tell an absent key from an unanswered question — the whole point
@@ -963,6 +974,8 @@ export class EventsService {
         : event.endAt;
     this.assertScheduleValid(nextStartAt, nextEndAt, { rejectPast: false });
 
+    const wasAdultsOnly = event.formatDetails?.isAdultsOnly === true;
+
     Object.assign(event, {
       ...(dto.title !== undefined ? { title: dto.title } : {}),
       ...(dto.description !== undefined
@@ -1079,7 +1092,11 @@ export class EventsService {
     // one patch, without resending the bag, must not keep "bring a dish" on a
     // gathering that no longer asks. Runs whenever either half moved, and only
     // then, so an unrelated title edit leaves the column untouched.
-    if (dto.gatheringFamily !== undefined || dto.formatDetails !== undefined) {
+    if (
+      dto.gatheringFamily !== undefined ||
+      dto.formatDetails !== undefined ||
+      dto.eventType !== undefined
+    ) {
       const nextDetails =
         dto.formatDetails !== undefined
           ? (dto.formatDetails ?? null)
@@ -1087,7 +1104,19 @@ export class EventsService {
       event.formatDetails = stripDisallowedDetails(
         event.gatheringFamily,
         nextDetails,
+        event.eventType,
       );
+      // An adults round needs an 18+ event, so the flag cannot go while the
+      // Live game tab holds one. Runs per occurrence, so a series edit stops on
+      // the first occurrence it would break. The query is skipped when the
+      // event was never 18+.
+      if (
+        wasAdultsOnly &&
+        event.formatDetails?.isAdultsOnly !== true &&
+        (await eventHasAdultsRounds(manager ?? this.events.manager, event.id))
+      ) {
+        throw quizshowError('quizshow_quiz_has_adults_rounds');
+      }
     }
 
     // A free gathering stores no price, checked against the EFFECTIVE kind
@@ -1508,6 +1537,12 @@ export class EventsService {
     // WRITE, and thirty writes are thirty pushes whether or not the rows merge.
     // Cancelling a series is one act, so it is one message.
     await this.notifyEventCancelled(cancelled, userId);
+
+    // Pulse Live ends an open session as abandoned; its listener catches its
+    // own errors.
+    this.eventEmitter.emit(EVENT_CANCELLED, {
+      eventIds: cancelled.map((occurrence) => occurrence.id),
+    } satisfies EventCancelledEvent);
 
     return this.buildDetail(event, userId);
   }
@@ -3113,6 +3148,14 @@ export class EventsService {
     // would hand the headcount back (the waitlist tally, each announcement's
     // fan-out size). Organisers, co-hosts included, keep every number.
     const isCountWithheld = areAttendeeCountsWithheld(event, isOrganizer);
+    const quizshow = await readEventQuizshowSummary(this.events.manager, {
+      eventId: event.id,
+      hostUserId: event.hostId,
+      viewerId,
+      isOrganizer: preview ? false : isOrganizer,
+      hasGoingRsvp: myRsvp?.status === RsvpStatus.Going,
+      now: new Date(),
+    });
     const summary = withholdHiddenAttendeeCounts(
       event,
       toEventSummary(
@@ -3212,6 +3255,7 @@ export class EventsService {
           : null,
       goingAttendeesPreview: attendeesPreview.attendees,
       goingAttendeesPreviewTotal: attendeesPreview.total,
+      quizshow,
     };
   }
 

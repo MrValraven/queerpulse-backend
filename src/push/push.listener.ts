@@ -49,6 +49,12 @@ import { NotificationPreferencesService } from '../notifications/notification-pr
 import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { isStorageKey } from '../storage/storage-key';
+import {
+  findStudioShareLinkMatch,
+  studioShareOrigins,
+  textWithoutStudioShareLink,
+  type StudioShareKind,
+} from '../studio/studio-share-link';
 import { Profile } from '../users/entities/profile.entity';
 import { GENERIC_PUSH_COPY } from './generic-push-copy';
 import { PushPreviewPrivacyService } from './push-preview-privacy.service';
@@ -150,6 +156,148 @@ function attachmentCaptionText(message: MessageView): string {
     : '';
 }
 
+/**
+ * Studio rich cards: the copy for a member message whose text carries a
+ * Studio link. The push says what kind of thing was shared and shows the
+ * note around it. The track, release or playlist title stays out of every
+ * push, because each reader's own Studio access decides what their card
+ * shows. The keys pair with the service worker catalog
+ * (queerpulse/src/pushMessages.ts) and the Portuguese table in
+ * rich-push-copy.ts; the English phrases here stay word for word the
+ * catalog's EN values.
+ */
+interface StudioSharePushCopy {
+  /** The DM body: "Shared a track from Studio". */
+  directPhrase: string;
+  /** Follows the sender's name in a group: "shared a track from Studio". */
+  groupPhrase: string;
+  directBodyKey: string;
+  directNoteBodyKey: string;
+  groupBodyKey: string;
+  groupNoteBodyKey: string;
+  mentionBodyKey: string;
+  mentionNoteBodyKey: string;
+}
+
+const STUDIO_SHARE_PUSH_COPY: Record<StudioShareKind, StudioSharePushCopy> = {
+  track: {
+    directPhrase: 'Shared a track from Studio',
+    groupPhrase: 'shared a track from Studio',
+    directBodyKey: 'push:messages.studio.track',
+    directNoteBodyKey: 'push:messages.studio.trackWithNote',
+    groupBodyKey: 'push:messages.group.studio.track',
+    groupNoteBodyKey: 'push:messages.group.studio.trackWithNote',
+    mentionBodyKey: 'push:messages.group.mention.studio.track',
+    mentionNoteBodyKey: 'push:messages.group.mention.studio.trackWithNote',
+  },
+  release: {
+    directPhrase: 'Shared a release from Studio',
+    groupPhrase: 'shared a release from Studio',
+    directBodyKey: 'push:messages.studio.release',
+    directNoteBodyKey: 'push:messages.studio.releaseWithNote',
+    groupBodyKey: 'push:messages.group.studio.release',
+    groupNoteBodyKey: 'push:messages.group.studio.releaseWithNote',
+    mentionBodyKey: 'push:messages.group.mention.studio.release',
+    mentionNoteBodyKey: 'push:messages.group.mention.studio.releaseWithNote',
+  },
+  playlist: {
+    directPhrase: 'Shared a playlist from Studio',
+    groupPhrase: 'shared a playlist from Studio',
+    directBodyKey: 'push:messages.studio.playlist',
+    directNoteBodyKey: 'push:messages.studio.playlistWithNote',
+    groupBodyKey: 'push:messages.group.studio.playlist',
+    groupNoteBodyKey: 'push:messages.group.studio.playlistWithNote',
+    mentionBodyKey: 'push:messages.group.mention.studio.playlist',
+    mentionNoteBodyKey: 'push:messages.group.mention.studio.playlistWithNote',
+  },
+};
+
+/** The two things a Studio share push reads off a message. */
+interface StudioShareInMessage {
+  kind: StudioShareKind;
+  /** The text with the link taken out, cut for the lock screen; '' when the link stood alone. */
+  note: string;
+}
+
+function studioShareInMessage(
+  message: MessageView,
+  studioOrigins: readonly string[],
+): StudioShareInMessage | null {
+  if (message.kind !== MessageKind.User) {
+    return null;
+  }
+  const match = findStudioShareLinkMatch(message.body, studioOrigins);
+  if (!match) {
+    return null;
+  }
+  return {
+    kind: match.link.kind,
+    note: preview(textWithoutStudioShareLink(message.body, match)),
+  };
+}
+
+function withNote(phrase: string, note: string): string {
+  return note === '' ? phrase : `${phrase}: ${note}`;
+}
+
+/** The DM and group shapes of a Studio share push, for `buildMessagePushCopy`. */
+function buildStudioSharePushCopy(
+  studioShare: StudioShareInMessage,
+  title: string,
+  senderName: string,
+  isGroup: boolean,
+): MessagePushCopy {
+  const studioCopy = STUDIO_SHARE_PUSH_COPY[studioShare.kind];
+  const { note } = studioShare;
+  const hasNote = note !== '';
+  if (isGroup) {
+    return {
+      title,
+      body: withNote(`${senderName} ${studioCopy.groupPhrase}`, note),
+      l10n: hasNote
+        ? {
+            bodyKey: studioCopy.groupNoteBodyKey,
+            params: { name: senderName, note },
+          }
+        : { bodyKey: studioCopy.groupBodyKey, params: { name: senderName } },
+      isGroup,
+    };
+  }
+  return {
+    title,
+    body: withNote(studioCopy.directPhrase, note),
+    l10n: hasNote
+      ? { bodyKey: studioCopy.directNoteBodyKey, params: { note } }
+      : { bodyKey: studioCopy.directBodyKey },
+    isGroup,
+  };
+}
+
+/** The mention-aware Studio share push, for `buildGroupMentionPushCopy`. */
+function buildStudioShareMentionPushCopy(
+  studioShare: StudioShareInMessage,
+  groupTitle: string,
+  senderName: string,
+): MessagePushCopy {
+  const studioCopy = STUDIO_SHARE_PUSH_COPY[studioShare.kind];
+  const { note } = studioShare;
+  const hasNote = note !== '';
+  return {
+    title: groupTitle,
+    body: withNote(
+      `${senderName} mentioned you and ${studioCopy.groupPhrase}`,
+      note,
+    ),
+    l10n: hasNote
+      ? {
+          bodyKey: studioCopy.mentionNoteBodyKey,
+          params: { name: senderName, note },
+        }
+      : { bodyKey: studioCopy.mentionBodyKey, params: { name: senderName } },
+    isGroup: true,
+  };
+}
+
 /** The content-bearing half of a message push: who/where, and what was said. */
 interface MessagePushCopy {
   title: string;
@@ -175,11 +323,16 @@ interface MessagePushCopy {
  * when none was typed). So the rule needs no placeholder matching: an
  * attachment kind with a non-blank `attachment.caption` previews the caption,
  * and an attachment kind without one ignores the body and sends the kind copy.
+ *
+ * Studio rule (Studio rich cards): a member message whose text holds a
+ * Studio link pushes what was shared and the note around it, through
+ * `STUDIO_SHARE_PUSH_COPY`. The Studio title stays out.
  */
 function buildMessagePushCopy(
   message: MessageView,
   conversation: Conversation,
   senderName: string,
+  studioOrigins: readonly string[],
 ): MessagePushCopy {
   const groupTitle =
     conversation.kind === ConversationKind.Group
@@ -207,6 +360,11 @@ function buildMessagePushCopy(
           l10n: { bodyKey: attachmentCopy.directBodyKey },
           isGroup,
         };
+  }
+
+  const studioShare = studioShareInMessage(message, studioOrigins);
+  if (studioShare) {
+    return buildStudioSharePushCopy(studioShare, title, senderName, isGroup);
   }
 
   const previewText = preview(
@@ -248,6 +406,7 @@ function buildGroupMentionPushCopy(
   message: MessageView,
   groupTitle: string,
   senderName: string,
+  studioOrigins: readonly string[],
 ): MessagePushCopy {
   const captionText = attachmentCaptionText(message);
   if (isAttachmentMessageKind(message.kind) && captionText === '') {
@@ -261,6 +420,10 @@ function buildGroupMentionPushCopy(
       },
       isGroup: true,
     };
+  }
+  const studioShare = studioShareInMessage(message, studioOrigins);
+  if (studioShare) {
+    return buildStudioShareMentionPushCopy(studioShare, groupTitle, senderName);
   }
   const previewText = preview(
     isAttachmentMessageKind(message.kind) ? captionText : message.body,
@@ -425,10 +588,13 @@ export class PushMessageListener {
         conversation,
         message,
       );
+      // Studio rich cards: a Studio link in the text pushes what was shared.
+      const studioOrigins = studioShareOrigins();
       const messageCopy = buildMessagePushCopy(
         copyMessage,
         conversation,
         senderName,
+        studioOrigins,
       );
       const pushableUserIds = Array.from(pushable);
       // PRD-336: fold a `@`-mention of a fellow GROUP participant into THIS
@@ -451,6 +617,7 @@ export class PushMessageListener {
               copyMessage,
               messageCopy.title,
               senderName,
+              studioOrigins,
             )
           : undefined;
       // Every lookup happens BEFORE the pacing reservation below, so the

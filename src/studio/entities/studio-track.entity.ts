@@ -53,6 +53,8 @@ export const numericColumnToNumber = {
  * Migration `1830900000000-AddStudio`; the five listening columns and their
  * checks come from `1832500000000-AddStudioListeningFields`.
  * The episode columns (`notes`, `sources`, `published_at`, `followers_notified_at`) come from `1833000100000-AddStudioTrackEpisodeColumns`.
+ * Studio safety and moderation adds the artist and staff content warnings,
+ * the explicit lock and the withheld stamp (`1834000100000-AddStudioSafety`).
  */
 @Entity('studio_tracks')
 @Unique('UQ_studio_tracks_release_position', ['releaseId', 'position'], {
@@ -101,6 +103,21 @@ export const numericColumnToNumber = {
 @Index('IDX_studio_tracks_published_at', ['publishedAt', 'id'], {
   where: '"published_at" IS NOT NULL',
 })
+// Studio safety and moderation: each warning list holds known theme ids
+// only, at most 8 (the CHECK mirrors `STUDIO_CONTENT_WARNING_IDS`), and an
+// explicit lock needs the explicit flag on.
+@Check(
+  'CHK_studio_tracks_content_warnings',
+  `cardinality("content_warnings") <= 8 AND "content_warnings" <@ ARRAY['medical', 'violence', 'substances', 'family-rejection', 'sexual-content', 'self-harm', 'housing-loss', 'police']::text[]`,
+)
+@Check(
+  'CHK_studio_tracks_staff_content_warnings',
+  `cardinality("staff_content_warnings") <= 8 AND "staff_content_warnings" <@ ARRAY['medical', 'violence', 'substances', 'family-rejection', 'sexual-content', 'self-harm', 'housing-loss', 'police']::text[]`,
+)
+@Check(
+  'CHK_studio_tracks_explicit_locked',
+  `"explicit_locked_at" IS NULL OR "is_explicit"`,
+)
 export class StudioTrack {
   @PrimaryGeneratedColumn('uuid', {
     primaryKeyConstraintName: 'PK_studio_tracks',
@@ -199,6 +216,26 @@ export class StudioTrack {
    *  publish sets it on every episode it carries, so those send nothing. */
   @Column({ type: 'timestamptz', precision: 3, nullable: true })
   followersNotifiedAt!: Date | null;
+
+  /** Studio safety: the artist's content warnings (theme ids, at most 8,
+   *  theme order). Only `PATCH /studio/tracks/:id` writes it. */
+  @Column({ type: 'text', array: true, default: () => "'{}'" })
+  contentWarnings!: string[];
+
+  /** Studio safety: warnings our team added. The artist's PATCH never
+   *  touches them; staff only add. */
+  @Column({ type: 'text', array: true, default: () => "'{}'" })
+  staffContentWarnings!: string[];
+
+  /** Studio safety: set when our team marks the track explicit. While set,
+   *  the explicit flag stays on. */
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  explicitLockedAt!: Date | null;
+
+  /** Studio safety: set while an accepted or countered copyright claim
+   *  holds the track offline for listeners. */
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  withheldAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

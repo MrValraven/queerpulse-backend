@@ -12,6 +12,7 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { FEATURE_KEY } from '../common/feature.decorator';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { SavedModule } from '../saved/saved.module';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminStudioAccessController } from './admin-studio-access.controller';
@@ -41,6 +42,9 @@ import { StudioModerationService } from './studio-moderation.service';
 import { StudioPlaybackPreferencesController } from './studio-playback-preferences.controller';
 import { StudioStaffReadsService } from './studio-staff-reads.service';
 import { StudioPlaylistListingsController } from './studio-playlist-listings.controller';
+import { StudioPlaylistEditorBlockListener } from './studio-playlist-editor-block.listener';
+import { StudioPlaylistEditorsController } from './studio-playlist-editors.controller';
+import { StudioPlaylistEditorsService } from './studio-playlist-editors.service';
 import { StudioPlaylistsController } from './studio-playlists.controller';
 import { StudioPressKitController } from './studio-press-kit.controller';
 import { StudioPressKitService } from './studio-press-kit.service';
@@ -88,6 +92,7 @@ const memberControllers = [
   StudioReleasesController,
   StudioTracksController,
   StudioPlaylistsController,
+  StudioPlaylistEditorsController,
   StudioPlaylistListingsController,
   StudioStatsController,
   StudioReleaseToolsController,
@@ -182,6 +187,8 @@ describe('Studio controllers', () => {
         'StudioTracksController.updateTrack',
         'StudioPlaylistsController.create',
         'StudioPlaylistsController.update',
+        'StudioPlaylistEditorsController.addEditors',
+        'StudioPlaylistEditorsController.respondToInvite',
         'StudioPersonaCreditsController.create',
         'StudioCreditsInboxController.accept',
         'StudioReleaseToolsController.schedule',
@@ -216,6 +223,63 @@ describe('Studio controllers', () => {
       handlerNames.indexOf('getPlaylist'),
     );
     expect(routePathOf(StudioPlaylistsController, 'listLiked')).toBe('liked');
+  });
+
+  // Collaborative playlists.
+  it('registers DELETE :id/editors/me before DELETE :id/editors/:editorId', () => {
+    const handlerNames = Object.getOwnPropertyNames(
+      StudioPlaylistEditorsController.prototype,
+    );
+    expect(handlerNames.indexOf('leave')).toBeLessThan(
+      handlerNames.indexOf('removeEditor'),
+    );
+    expect(routePathOf(StudioPlaylistEditorsController, 'leave')).toBe(
+      ':id/editors/me',
+    );
+    expect(routePathOf(StudioPlaylistEditorsController, 'removeEditor')).toBe(
+      ':id/editors/:editorId',
+    );
+  });
+
+  it('serves the editor routes under studio/playlists', () => {
+    expect(
+      Reflect.getMetadata(PATH_METADATA, StudioPlaylistEditorsController),
+    ).toBe('studio/playlists');
+    expect(routePathOf(StudioPlaylistEditorsController, 'listEditors')).toBe(
+      ':id/editors',
+    );
+    expect(routePathOf(StudioPlaylistEditorsController, 'addEditors')).toBe(
+      ':id/editors',
+    );
+    expect(
+      routePathOf(StudioPlaylistEditorsController, 'respondToInvite'),
+    ).toBe(':id/editor-invite');
+    expect(routePathOf(StudioPlaylistEditorsController, 'listCandidates')).toBe(
+      ':id/editor-candidates',
+    );
+  });
+
+  it('throttles editor invitations to ten a minute and answers them with 200', () => {
+    const handler = (
+      StudioPlaylistEditorsController.prototype as unknown as Record<
+        string,
+        object
+      >
+    ).addEditors!;
+    expect(Reflect.getMetadata(THROTTLE_LIMIT_KEY, handler)).toBe(10);
+    expect(Reflect.getMetadata(THROTTLE_TTL_KEY, handler)).toBe(60000);
+    expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(200);
+  });
+
+  it('registers the editors service and the block listener', () => {
+    expect(
+      Reflect.getMetadata(MODULE_METADATA.PROVIDERS, StudioModule),
+    ).toEqual(
+      expect.arrayContaining([
+        StudioPlaylistEditorsService,
+        StudioPlaylistEditorBlockListener,
+      ]),
+    );
   });
 
   // The profile page knows a member by slug only (contract revision).
@@ -297,6 +361,7 @@ describe('Studio controllers', () => {
       {} as StudioCatalogService,
       moderation as unknown as StudioModerationService,
       {} as StudioStaffReadsService,
+      {} as ModAuditService,
     );
     await controller.takedown(
       { userId: 'staff-1' } as CurrentUserData,
@@ -308,6 +373,72 @@ describe('Studio controllers', () => {
       'release-1',
       'Uploaded twice',
       'report-1',
+    );
+  });
+
+  describe('audits a staff read of a scheduled release and of a published show with a draft episode, and skips a published album', () => {
+    it.each([
+      [
+        'a scheduled release',
+        { status: 'scheduled', type: 'album', tracks: [] },
+        true,
+      ],
+      [
+        'a draft release',
+        { status: 'draft', type: 'single', tracks: [] },
+        true,
+      ],
+      [
+        'a published show with a draft episode',
+        {
+          status: 'published',
+          type: 'podcast',
+          tracks: [{ publishedAt: null }],
+        },
+        true,
+      ],
+      [
+        'a published album',
+        { status: 'published', type: 'album', tracks: [{ publishedAt: null }] },
+        false,
+      ],
+      [
+        'a taken-down release',
+        { status: 'taken_down', type: 'album', tracks: [] },
+        false,
+      ],
+    ])(
+      'audits a staff read of %s when it is unpublished',
+      async (_label, response, isAudited) => {
+        const catalog = {
+          getReleaseForStaff: jest.fn().mockResolvedValue(response),
+        };
+        const modAudit = {
+          writeAuditLog: jest.fn().mockResolvedValue('audit-1'),
+        };
+        const controller = new AdminStudioReleasesController(
+          catalog as never,
+          {} as never,
+          {} as never,
+          modAudit as never,
+        );
+        await expect(
+          controller.getRelease(
+            { userId: 'staff-1' } as CurrentUserData,
+            'release-1',
+          ),
+        ).resolves.toBe(response);
+        expect(modAudit.writeAuditLog).toHaveBeenCalledTimes(isAudited ? 1 : 0);
+        if (isAudited) {
+          expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+            null,
+            'staff-1',
+            'creator_draft_viewed',
+            undefined,
+            '{"v":1,"kind":"studio_release","draftId":"release-1","surface":"studio_staff"}',
+          );
+        }
+      },
     );
   });
 

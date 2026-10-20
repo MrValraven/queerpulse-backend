@@ -28,6 +28,12 @@ export enum NotificationPreferenceCategory {
    * and not the scarcity nudge (or the other way round) can have exactly that.
    */
   EventCapacity = 'event_capacity',
+  /**
+   * "Pulse Live": the one push when an event you are going to opens its live
+   * game. Push only, so the settings row shows the push switch alone. No
+   * `NotificationType` maps to it: the push is sent straight by the game.
+   */
+  Quizshow = 'quizshow',
   /** "New message" — a new direct message (delivered as push only, see below). */
   NewMessages = 'new_messages',
   /** "Connection request" — someone asked to connect, or accepted your request. */
@@ -200,6 +206,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Personas,
   [NotificationType.StudioCreditAccepted]:
     NotificationPreferenceCategory.Personas,
+  // Collaborative playlists: a pick as editor of a playlist shown as a
+  // persona you run, behind the same toggle.
+  [NotificationType.StudioPlaylistEditorAdded]:
+    NotificationPreferenceCategory.Personas,
+  // Meet the team: a listing invited a persona you run to join its team.
+  [NotificationType.ListingTeamInvite]: NotificationPreferenceCategory.Personas,
 
   // --- Personas you follow --------------------------------------------------
   // The only type a FOLLOWER ever receives, and the reason the category exists
@@ -222,6 +234,14 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Invitations,
   [NotificationType.CommunityInviteReceived]:
     NotificationPreferenceCategory.Invitations,
+  // Collaborative playlists: an invitation to edit a playlist and the answer
+  // the owner hears back.
+  [NotificationType.StudioPlaylistEditorInvite]:
+    NotificationPreferenceCategory.Invitations,
+  [NotificationType.StudioPlaylistEditorInviteAccepted]:
+    NotificationPreferenceCategory.Invitations,
+  [NotificationType.StudioPlaylistEditorInviteDeclined]:
+    NotificationPreferenceCategory.Invitations,
 
   // --- Listings you manage --------------------------------------------------
   [NotificationType.ListingPublicQuestion]:
@@ -235,6 +255,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   [NotificationType.ListingCoManagerInviteAccepted]:
     NotificationPreferenceCategory.Listings,
   [NotificationType.ListingCoManagerInviteDeclined]:
+    NotificationPreferenceCategory.Listings,
+  // Meet the team: a persona asked to join a listing you manage.
+  [NotificationType.ListingTeamRequest]:
+    NotificationPreferenceCategory.Listings,
+  // Meet the team: the other side confirmed a team link you started.
+  [NotificationType.ListingTeamAccepted]:
     NotificationPreferenceCategory.Listings,
   [NotificationType.ListingOwnerOffer]: NotificationPreferenceCategory.Listings,
 
@@ -288,6 +314,18 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   [NotificationType.MagazinePitchPassed]:
     NotificationPreferenceCategory.Magazine,
 };
+
+/** Studio safety and moderation: the six in-app claim and track notices,
+ *  in the order the enum migration adds them. None has a category, none
+ *  bundles, none is pushed. */
+export const STUDIO_SAFETY_NOTICE_TYPES: readonly NotificationType[] = [
+  NotificationType.StudioCopyrightClaimAccepted,
+  NotificationType.StudioCopyrightClaimDeclined,
+  NotificationType.StudioCopyrightClaimCountered,
+  NotificationType.StudioCopyrightClaimDecided,
+  NotificationType.StudioCopyrightClaimWithdrawn,
+  NotificationType.StudioTrackMarked,
+];
 
 /**
  * The `NotificationType`s that deliberately have NO member switch, grouped by
@@ -367,6 +405,11 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // learn it, so no content-volume switch may swallow it.
     NotificationType.StudioReleaseTakenDown,
     NotificationType.StudioReleaseDisputeDecided,
+    // Studio safety and moderation: our team's word on a copyright claim or
+    // a track the member runs or filed against, and the claimant's only
+    // record of the counter-notice. Group 1 (safety and moderation) and
+    // group 4 (a decision on something the member asked for).
+    ...STUDIO_SAFETY_NOTICE_TYPES,
     NotificationType.ConcernUpdate,
     NotificationType.SecurityNewSignIn,
     // A moderation queue crossing its warning or critical threshold, and its

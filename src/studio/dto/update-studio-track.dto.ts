@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -15,6 +16,11 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { STUDIO_LIMITS } from '../studio.constants';
+import {
+  STUDIO_CONTENT_WARNINGS_MAX,
+  STUDIO_CONTENT_WARNING_IDS,
+  StudioContentWarningId,
+} from '../studio-safety.constants';
 import { isPresentValue, trimStringValue } from './create-studio-release.dto';
 import {
   HasChapterTimeline,
@@ -134,6 +140,16 @@ export class UpdateStudioTrackDto {
   @ValidateIf(isPresentValue)
   @IsBoolean()
   isExplicit?: boolean;
+
+  /** Studio safety and moderation: the artist's content warnings, replacing
+   *  the artist list (our team's list is never touched here). An empty list
+   *  clears it; null and unknown ids are refused; duplicates are folded by
+   *  the service. Same route for episodes. */
+  @ValidateIf(isPresentValue)
+  @IsArray()
+  @ArrayMaxSize(STUDIO_CONTENT_WARNINGS_MAX)
+  @IsIn(STUDIO_CONTENT_WARNING_IDS, { each: true })
+  contentWarnings?: StudioContentWarningId[];
 
   @IsOptional()
   @IsArray()

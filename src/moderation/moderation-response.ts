@@ -100,6 +100,9 @@ const OUTCOME_LABEL: Record<string, string> = {
   community_member_removed: 'Removed from a community',
   // Studio open demo pages: the audit action a Studio takedown writes.
   studio_release_taken_down: 'Release taken down',
+  // Studio safety: the two staff actions on a track report.
+  studio_track_marked_explicit: 'Track marked explicit',
+  studio_track_warning_added: 'Content warning added',
 };
 
 export function outcomeLabelFor(

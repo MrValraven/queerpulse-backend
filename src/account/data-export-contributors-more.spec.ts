@@ -975,13 +975,14 @@ describe('ListingActivityExportContributor', () => {
 });
 
 describe('MemberPreferencesExportContributor, Studio player settings', () => {
-  it('exports the three Studio player settings with the other switches', async () => {
+  it('exports the four Studio player settings with the other switches', async () => {
     const findOne = jest.fn().mockResolvedValue({
       userId: MEMBER_ID,
       language: 'pt',
       studioAutoplayNext: false,
       studioHideExplicit: true,
       studioCrossfadeSeconds: 6,
+      studioAskBeforeWarnings: false,
       updatedAt: new Date('2026-10-13T09:00:00.000Z'),
     });
     const contributor = new MemberPreferencesExportContributor(
@@ -1000,6 +1001,7 @@ describe('MemberPreferencesExportContributor, Studio player settings', () => {
         studioAutoplayNext: false,
         studioHideExplicit: true,
         studioCrossfadeSeconds: 6,
+        studioAskBeforeWarnings: false,
         updatedAt: '2026-10-13T09:00:00.000Z',
       }),
     );

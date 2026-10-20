@@ -7,6 +7,10 @@ import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { matchNeighbourhood } from '../profiles/neighbourhoods';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
+import {
+  findStudioShareLinkMatch,
+  postTextWithoutStudioShareLink,
+} from '../studio/studio-share-link';
 
 // ── Frontend-contract shapes ─────────────────────────────────────────────
 // Mirror `AuthorSummary`/`FeedItem`/`FeedItemType` from the frontend's
@@ -192,6 +196,14 @@ export interface FeedItem extends FeedItemSignals {
    *  uses. Null when the OP is tombstoned, in which case the card shows no
    *  like affordance at all. */
   opPostId?: string | null;
+  /**
+   * Studio rich cards: the canonical root-relative path of the first Studio
+   * link in a `community_post` body (`/studio/track?id=<id>`, `&t=<s>` on a
+   * track), so the card can render it although `summary` is cut at 220
+   * characters; `summary` then leaves that URL out. Null on every other item
+   * type, on a post with no Studio link, and on a post whose body is blanked.
+   */
+  studioLink: string | null;
 }
 
 /**
@@ -241,12 +253,30 @@ function truncate(text: string, max = SUMMARY_MAX): string {
  * 3.2) has no community to link into, so it carries an empty title and
  * `/feed`: the permalink route is community-scoped, and a community-less post
  * has no other surface in the frontend to open.
+ *
+ * Studio rich cards: `studioOrigins` (from `studioShareOrigins()`) decides
+ * which absolute links count as this deployment's. The first Studio link
+ * becomes `studioLink` and leaves the summary.
  */
 export function communityPostToFeedItem(
   post: CommunityPost,
   community: Community | null,
   author: MemberRef | null,
+  studioOrigins: readonly string[],
 ): FeedItem {
+  // The tombstone case of `toCommunityPost`, mirrored here: a deleted post
+  // shows an empty body and carries no Studio link. Moderation takedowns
+  // stay out of the feed through its query (`cp.deletedAt IS NULL` and
+  // `excludeModerated` in `FeedService`), so this guards any later caller.
+  const isBodyBlanked = post.deletedAt != null;
+  const studioMatch = isBodyBlanked
+    ? null
+    : findStudioShareLinkMatch(post.body, studioOrigins);
+  const visibleBody = isBodyBlanked
+    ? ''
+    : studioMatch
+      ? postTextWithoutStudioShareLink(post.body, studioMatch)
+      : post.body;
   return {
     id: post.id,
     type: 'community_post',
@@ -254,9 +284,10 @@ export function communityPostToFeedItem(
     // A flat post has no community to name, so the title is empty and the
     // frontend supplies its own translated label.
     title: community ? community.name : '',
-    summary: truncate(post.body),
+    summary: truncate(visibleBody),
     link: community ? `/community/${community.slug}/post/${post.id}` : '/feed',
     actor: toAuthorSummary(author),
+    studioLink: studioMatch ? studioMatch.link.path : null,
   };
 }
 
@@ -370,6 +401,7 @@ export function forumThreadToFeedItem(
     opPostId: card ? card.opPostId : null,
     reactionCount: card ? card.opVoteCount : thread.opVoteCount,
     myReaction: card ? (card.hasViewerVoted ? 'like' : null) : null,
+    studioLink: null,
   };
 }
 
@@ -386,6 +418,7 @@ export function eventToFeedItem(
     link: `/gatherings/${event.slug}`,
     actor: toAuthorSummary(host),
     imageUrl: toImageUrl(event.coverImageUrl),
+    studioLink: null,
   };
 }
 
@@ -430,6 +463,7 @@ export function newMemberToFeedItem(
     interests: profile.tags,
     ...(mutualConnectionCount !== undefined ? { mutualConnectionCount } : {}),
     ...(sharedInterests !== undefined ? { sharedInterests } : {}),
+    studioLink: null,
   };
 }
 
@@ -476,6 +510,7 @@ export function communityNewMemberToFeedItem(
     actor: toAuthorSummary(member),
     ...(mutualConnectionCount !== undefined ? { mutualConnectionCount } : {}),
     ...(sharedInterests !== undefined ? { sharedInterests } : {}),
+    studioLink: null,
   };
 }
 
@@ -566,5 +601,6 @@ export function magazineArticleToFeedItem(
       toImageUrl(displayed.heroImageKey) ?? toImageUrl(displayed.socialImage),
     locale: displayed.locale,
     byline,
+    studioLink: null,
   };
 }

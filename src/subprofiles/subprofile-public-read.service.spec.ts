@@ -14,6 +14,7 @@ import {
 } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
+import { notAdultListingSql } from '../listings/listing-team-visibility';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
@@ -34,7 +35,10 @@ import {
   eligibilityKey,
   SubprofileAffiliationEligibilityService,
 } from './subprofile-affiliation-eligibility.service';
-import { SubprofileItem } from './entities/subprofile-item.entity';
+import {
+  SubprofileItem,
+  SubprofileSection,
+} from './entities/subprofile-item.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
@@ -75,6 +79,40 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     updatedAt: new Date(),
     ...overrides,
   };
+}
+
+const FLASH_DAY_EVENT_REF = {
+  slug: 'members-night',
+  title: 'Members night',
+  startsAt: '2026-11-07T18:00:00.000Z',
+  endsAt: '2026-11-07T22:00:00.000Z',
+  venue: 'The Hall',
+  neighbourhood: 'Alfama',
+  isOnline: false,
+  imageUrl: null,
+};
+
+function makeTattooItem(
+  overrides: Partial<SubprofileItem> = {},
+): SubprofileItem {
+  return {
+    id: 'item-1',
+    subprofileId: 'sp-linked',
+    section: SubprofileSection.FlashDays,
+    title: 'Friday flash',
+    subtitle: null,
+    description: null,
+    url: null,
+    imageUrl: null,
+    date: null,
+    meta: null,
+    tags: [],
+    isFeatured: false,
+    collaborators: [],
+    structured: null,
+    createdAt: new Date('2026-10-01T00:00:00.000Z'),
+    ...overrides,
+  } as SubprofileItem;
 }
 
 // Answers a TypeORM `findOne({ where })` from a fixed row list: a row matches
@@ -223,6 +261,8 @@ describe('SubprofilePublicReadService', () => {
     createQueryBuilder: jest.Mock;
     find: jest.Mock;
     findOne: jest.Mock;
+    // The works at read (`loadWorksAt`) runs on this manager.
+    manager: { query: jest.Mock; find: jest.Mock };
   };
   let socialLinks: { createQueryBuilder: jest.Mock; find: jest.Mock };
   let items: { find: jest.Mock };
@@ -248,6 +288,7 @@ describe('SubprofilePublicReadService', () => {
   let affiliationEligibility: {
     ownerIdsFor: jest.Mock;
     eligibleTargetKeys: jest.Mock;
+    resolveFlashDayEvents: jest.Mock;
   };
   let module: TestingModule;
 
@@ -256,6 +297,10 @@ describe('SubprofilePublicReadService', () => {
       createQueryBuilder: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
+      manager: {
+        query: jest.fn().mockResolvedValue([]),
+        find: jest.fn().mockResolvedValue([]),
+      },
     };
     // Neither `loadSocialCountsFor` nor its `socialLinks` dependency is
     // exercised unless a test's rows have at least one id — default to an
@@ -300,6 +345,7 @@ describe('SubprofilePublicReadService', () => {
     affiliationEligibility = {
       ownerIdsFor: jest.fn().mockResolvedValue(new Map<string, string[]>()),
       eligibleTargetKeys: jest.fn().mockResolvedValue(new Set<string>()),
+      resolveFlashDayEvents: jest.fn().mockResolvedValue(new Map()),
     };
 
     module = await Test.createTestingModule({
@@ -982,6 +1028,162 @@ describe('SubprofilePublicReadService', () => {
         );
       });
     });
+
+    // "Meet the team": the listings a persona works at.
+    describe('works at', () => {
+      function worksAtSqlCalls(): string[] {
+        return (subprofiles.manager.query.mock.calls as [string, unknown[]][])
+          .map(([sql]) => sql)
+          .filter((sql) => sql.includes('listing_team_members'));
+      }
+
+      function unlinkedOpenPersona(
+        overrides: Partial<Subprofile> = {},
+      ): Subprofile {
+        return makeSubprofile({
+          id: 'sp-unlinked',
+          userId: 'creator-1',
+          slug: 'nightform',
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          visibility: SubprofileVisibility.Open,
+          status: SubprofileStatus.Published,
+          ...overrides,
+        });
+      }
+
+      it('carries an empty works at list on a persona with no links', async () => {
+        personaRows.push(unlinkedOpenPersona());
+
+        const view = await service.getByHandle('nightform', activeViewer);
+
+        expect(view.worksAt).toEqual([]);
+        expect(worksAtSqlCalls()).toHaveLength(1);
+        expect(subprofiles.manager.find).not.toHaveBeenCalled();
+      });
+
+      it('reads works at for an active member with the 18+ listings included', async () => {
+        personaRows.push(unlinkedOpenPersona());
+
+        await service.getByHandle('nightform', activeViewer);
+        const memberSql = worksAtSqlCalls();
+        expect(memberSql).toHaveLength(1);
+        expect(memberSql[0]).not.toContain(notAdultListingSql('listing'));
+        expect(subprofiles.manager.query).toHaveBeenCalledWith(
+          expect.any(String),
+          ['sp-unlinked'],
+        );
+
+        subprofiles.manager.query.mockClear();
+        await service.getByHandle('nightform', undefined);
+        const anonymousSql = worksAtSqlCalls();
+        expect(anonymousSql).toHaveLength(1);
+        expect(anonymousSql[0]).toContain(notAdultListingSql('listing'));
+      });
+
+      it('reads no works at before the visibility check passes', async () => {
+        personaRows.push(
+          unlinkedOpenPersona({ visibility: SubprofileVisibility.Private }),
+        );
+        membership.isMember.mockResolvedValue(false);
+
+        const error = await rejectionOf(
+          service.getByHandle('nightform', activeViewer),
+        );
+
+        expect(error).toBeInstanceOf(ForbiddenException);
+        expect(worksAtSqlCalls()).toEqual([]);
+        expect(subprofiles.manager.find).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('flash day events', () => {
+      function tattooPersona(): Subprofile {
+        return linkedPersona({ kind: SubprofileKind.TattooArtist });
+      }
+
+      it('gives a visitor a healed item with photo isBlurred only', async () => {
+        personaRows.push(tattooPersona());
+        items.find.mockResolvedValue([
+          makeTattooItem({
+            id: 'item-healed',
+            section: SubprofileSection.Healed,
+            structured: { photo: { hasClientConsent: true, isBlurred: false } },
+          }),
+        ]);
+
+        const view = await service.getByHandle('ana-dj-set', activeViewer);
+
+        expect(view.items[0]?.structured?.photo).toEqual({ isBlurred: false });
+        expect(JSON.stringify(view)).not.toContain('hasClientConsent');
+      });
+
+      it('gives a visitor the linked event while it resolves', async () => {
+        personaRows.push(tattooPersona());
+        items.find.mockResolvedValue([
+          makeTattooItem({
+            structured: { flashDay: { eventSlug: 'members-night' } },
+          }),
+        ]);
+        affiliationEligibility.resolveFlashDayEvents.mockResolvedValue(
+          new Map([['item-1', FLASH_DAY_EVENT_REF]]),
+        );
+
+        const view = await service.getByHandle('ana-dj-set', activeViewer);
+
+        expect(view.items[0]?.linkedEvent).toEqual(FLASH_DAY_EVENT_REF);
+        expect(
+          affiliationEligibility.resolveFlashDayEvents,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('gives a visitor no trace of a flash day event that stopped resolving', async () => {
+        personaRows.push(tattooPersona());
+        items.find.mockResolvedValue([
+          makeTattooItem({
+            structured: { flashDay: { eventSlug: 'members-night' } },
+          }),
+        ]);
+        affiliationEligibility.resolveFlashDayEvents.mockResolvedValue(
+          new Map(),
+        );
+
+        const view = await service.getByHandle('ana-dj-set', activeViewer);
+
+        expect(view.items[0]?.linkedEvent).toBeNull();
+        expect(JSON.stringify(view)).not.toContain('members-night');
+      });
+
+      it('passes the signed in viewer id and the persona with its items', async () => {
+        personaRows.push(tattooPersona());
+        const storedItems = [makeTattooItem()];
+        items.find.mockResolvedValue(storedItems);
+
+        await service.getByHandle('ana-dj-set', activeViewer);
+
+        expect(
+          affiliationEligibility.resolveFlashDayEvents,
+        ).toHaveBeenCalledWith(
+          'viewer-1',
+          [expect.objectContaining({ id: 'sp-linked' })],
+          storedItems,
+        );
+      });
+
+      it('passes the anonymous viewer id for a signed-out visitor', async () => {
+        personaRows.push(tattooPersona());
+
+        await service.getByHandle('ana-dj-set', undefined);
+
+        expect(
+          affiliationEligibility.resolveFlashDayEvents,
+        ).toHaveBeenCalledWith(
+          '00000000-0000-0000-0000-000000000000',
+          expect.any(Array),
+          expect.any(Array),
+        );
+      });
+    });
   });
 
   // --- listForProfile applies the single-read visibility rule ---------------
@@ -1046,6 +1248,24 @@ describe('SubprofilePublicReadService', () => {
         SubprofileVisibility.Open,
         SubprofileVisibility.Network,
       ]);
+    });
+
+    it('resolves flash day events once per profile page with the viewer id', async () => {
+      rosterFor(false);
+
+      await service.listForProfile('ana', 'viewer-1');
+
+      expect(
+        affiliationEligibility.resolveFlashDayEvents,
+      ).toHaveBeenCalledTimes(1);
+      expect(affiliationEligibility.resolveFlashDayEvents).toHaveBeenCalledWith(
+        'viewer-1',
+        [
+          expect.objectContaining({ id: 'sp-open' }),
+          expect.objectContaining({ id: 'sp-network' }),
+        ],
+        [],
+      );
     });
 
     it('lists the private persona for its co-owner', async () => {
@@ -1740,6 +1960,77 @@ describe('SubprofilePublicReadService', () => {
       const result = await service.resolveAffiliationsFor('viewer-1', ['sp-1']);
 
       expect(result.get('sp-1')).toBeUndefined();
+    });
+  });
+
+  describe('staff draft reads', () => {
+    const draftRow = (overrides: Partial<Subprofile> = {}): Subprofile => ({
+      ...makeSubprofile(),
+      id: 'persona-1',
+      userId: 'creator-1',
+      status: SubprofileStatus.Draft,
+      removedAt: null,
+      visibility: SubprofileVisibility.Open,
+      handle: 'velvet',
+      bio: 'short',
+      avatarUrl: null,
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      Object.assign(handles, { isTaken: jest.fn().mockResolvedValue(false) });
+    });
+
+    it('assembles the anonymous public view of a draft with no owner flag', async () => {
+      subprofiles.findOne.mockResolvedValue(draftRow());
+      const view = await service.getDraftPreviewForStaff('persona-1');
+      // The public view carries the owner flag as `viewerIsMember`
+      // (`toPublicDTO`'s `viewerIsMember` argument is the `isOwner` the read
+      // passes).
+      expect(view).toEqual(
+        expect.objectContaining({ status: 'draft', viewerIsMember: false }),
+      );
+      expect(membership.isMember).not.toHaveBeenCalled();
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+      expect(followersService.viewerFollowingFor).toHaveBeenCalledWith(
+        '00000000-0000-0000-0000-000000000000',
+        ['persona-1'],
+      );
+    });
+
+    it('answers null for a published, removed, private or missing persona', async () => {
+      for (const row of [
+        draftRow({ status: SubprofileStatus.Published }),
+        draftRow({ removedAt: new Date() }),
+        draftRow({ visibility: SubprofileVisibility.Private }),
+        null,
+      ]) {
+        subprofiles.findOne.mockResolvedValueOnce(row);
+        await expect(
+          service.getDraftPreviewForStaff('persona-1'),
+        ).resolves.toBeNull();
+      }
+    });
+
+    it('lists what still blocks publishing for each persona, with the creator slug', async () => {
+      profiles.find.mockResolvedValue([
+        { userId: 'creator-1', slug: 'ana-silva' },
+      ]);
+      const gaps = await service.draftPublishGapsForStaff([
+        draftRow(),
+        draftRow({ id: 'persona-2', handle: 'ana-silva-tarot' }),
+      ]);
+      expect(gaps.get('persona-1')).toEqual([
+        'avatar_missing',
+        'bio_too_short',
+      ]);
+      expect(gaps.get('persona-2')).toEqual([
+        'handle_names_owner',
+        'avatar_missing',
+        'bio_too_short',
+      ]);
+      expect(profiles.find).toHaveBeenCalledTimes(1);
     });
   });
 });

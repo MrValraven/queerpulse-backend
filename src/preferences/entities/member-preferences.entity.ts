@@ -130,6 +130,8 @@ export const DEFAULT_SHARE_PRESENCE = true;
 export const DEFAULT_STUDIO_AUTOPLAY_NEXT = true;
 export const DEFAULT_STUDIO_HIDE_EXPLICIT = false;
 export const DEFAULT_STUDIO_CROSSFADE_SECONDS = 0;
+/** Studio safety and moderation: the player asks before a warned track. */
+export const DEFAULT_STUDIO_ASK_BEFORE_WARNINGS = true;
 /** The longest crossfade, in seconds. Also the column's CHECK bound. */
 export const STUDIO_CROSSFADE_MAX_SECONDS = 12;
 
@@ -394,6 +396,12 @@ export class MemberPreferences {
 
   @Column({ type: 'smallint', default: DEFAULT_STUDIO_CROSSFADE_SECONDS })
   studioCrossfadeSeconds!: number;
+
+  /** Studio safety and moderation: "Ask before warned tracks". The gate
+   *  itself runs in the browser; the server stores the switch only.
+   *  Migration `1834000100000-AddStudioSafety`. */
+  @Column({ type: 'boolean', default: DEFAULT_STUDIO_ASK_BEFORE_WARNINGS })
+  studioAskBeforeWarnings!: boolean;
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

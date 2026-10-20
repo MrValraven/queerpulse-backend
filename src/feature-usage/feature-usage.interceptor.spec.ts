@@ -7,11 +7,13 @@ import { FeatureUsageTallyService } from './feature-usage-tally.service';
 function contextFor(
   contextType = 'http',
   controllerClass: new () => unknown = class {},
+  url = '/v1/events',
 ) {
   return {
     getType: () => contextType,
     getHandler: () => () => undefined,
     getClass: () => controllerClass,
+    switchToHttp: () => ({ getRequest: () => ({ originalUrl: url, url }) }),
   } as unknown as ExecutionContext;
 }
 
@@ -84,5 +86,19 @@ describe('FeatureUsageInterceptor', () => {
 
     interceptor.intercept(contextFor('http', MagazineController), next);
     expect(tally.drain().get('magazine')).toBe(1);
+  });
+
+  it('records nothing for a creator draft route on a member controller', () => {
+    class CreatorDraftsController {}
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue('events');
+    interceptor.intercept(
+      contextFor(
+        'http',
+        CreatorDraftsController,
+        '/v1/me/creator-drafts/event',
+      ),
+      next,
+    );
+    expect(tally.drain().size).toBe(0);
   });
 });

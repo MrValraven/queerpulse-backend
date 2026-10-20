@@ -104,6 +104,8 @@ export const MOD_STAFF_ACTIONS: readonly string[] = [
   'account_reactivated_by_admin',
   'email_suppression_lifted',
   'member_verified',
+  // Creator drafts: an Admin opened one draft's detail.
+  'creator_draft_viewed',
 ];
 
 /** `mod_audit_logs` actions the platform writes itself, with a null actor. */

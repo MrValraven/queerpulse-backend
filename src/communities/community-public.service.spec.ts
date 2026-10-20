@@ -5,6 +5,7 @@ import { In, IsNull } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import { Event } from '../events/entities/event.entity';
+import { VolunteeringService } from '../volunteering/volunteering.service';
 import { CommunityPublicService } from './community-public.service';
 import { hasLivePendingInvite } from './community-invite-liveness';
 import { CommunityInvite } from './entities/community-invite.entity';
@@ -81,6 +82,7 @@ describe('CommunityPublicService', () => {
   let contentModeration: { stateFor: jest.Mock };
   let invites: Record<string, never>;
   let joinRequests: { findOne: jest.Mock };
+  let volunteering: { pageOpenByCommunity: jest.Mock };
 
   beforeEach(async () => {
     communities = {
@@ -114,6 +116,10 @@ describe('CommunityPublicService', () => {
     hasLivePendingInviteMock.mockResolvedValue(false);
     // No join request on file is the default: somebody who never applied.
     joinRequests = { findOne: jest.fn().mockResolvedValue(null) };
+    // An empty page is the default: a community with nothing open yet.
+    volunteering = {
+      pageOpenByCommunity: jest.fn().mockResolvedValue({ items: [], total: 0 }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -127,6 +133,7 @@ describe('CommunityPublicService', () => {
           provide: getRepositoryToken(CommunityJoinRequest),
           useValue: joinRequests,
         },
+        { provide: VolunteeringService, useValue: volunteering },
       ],
     }).compile();
     service = module.get(CommunityPublicService);
@@ -818,6 +825,161 @@ describe('CommunityPublicService', () => {
         slug: 'queerpulse-social',
         name: 'QueerPulse Social',
       });
+    });
+  });
+
+  // The community page's Volunteering tab. Same audience and 404 posture as
+  // `listUpcomingGatherings`, with the archive widened to the roster.
+  describe('listOpenOpportunities', () => {
+    const ARCHIVED_AT = new Date('2026-03-01T00:00:00.000Z');
+
+    it('404s an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.listOpenOpportunities('no-such-community', 'viewer-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(volunteering.pageOpenByCommunity).not.toHaveBeenCalled();
+    });
+
+    it('404s a private-tier community to a non-member and reads no opportunities', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.listOpenOpportunities('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(volunteering.pageOpenByCommunity).not.toHaveBeenCalled();
+    });
+
+    // A standing invitation opens the gate card and the rules. This tab asks
+    // for no invite carve-out, so the liveness helper is never consulted.
+    it('404s a private-tier community to an invited non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      hasLivePendingInviteMock.mockResolvedValue(true);
+
+      await expect(
+        service.listOpenOpportunities('queer-devs', 'invitee'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(hasLivePendingInviteMock).not.toHaveBeenCalled();
+      expect(volunteering.pageOpenByCommunity).not.toHaveBeenCalled();
+    });
+
+    it.each([AccessTier.Request, AccessTier.Invite])(
+      '404s a %s-tier community to a non-member',
+      async (accessTier) => {
+        communities.findOne.mockResolvedValue({ ...COMMUNITY, accessTier });
+        members.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.listOpenOpportunities('queer-devs', 'stranger'),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(volunteering.pageOpenByCommunity).not.toHaveBeenCalled();
+      },
+    );
+
+    it('serves a public-tier community to a non-member, read by its id', async () => {
+      const page = {
+        items: [{ slug: 'route-marshal' }],
+        total: 1,
+      };
+      volunteering.pageOpenByCommunity.mockResolvedValue(page);
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Public,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const response = await service.listOpenOpportunities(
+        'queer-devs',
+        'stranger',
+      );
+
+      expect(response).toBe(page);
+      expect(volunteering.pageOpenByCommunity).toHaveBeenCalledTimes(1);
+      expect(volunteering.pageOpenByCommunity).toHaveBeenCalledWith(
+        'community-1',
+      );
+    });
+
+    it('serves a request-tier community to a roster member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Request,
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+      await expect(
+        service.listOpenOpportunities('queer-devs', 'member-1'),
+      ).resolves.toEqual({ items: [], total: 0 });
+      expect(volunteering.pageOpenByCommunity).toHaveBeenCalledWith(
+        'community-1',
+      );
+    });
+
+    // PRD-143 parity: members keep reading an archived community.
+    it('serves an archived community to a plain roster member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        archivedAt: ARCHIVED_AT,
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+      await service.listOpenOpportunities('queer-devs', 'member-1');
+
+      expect(volunteering.pageOpenByCommunity).toHaveBeenCalledWith(
+        'community-1',
+      );
+    });
+
+    it('404s an archived community to a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        archivedAt: ARCHIVED_AT,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.listOpenOpportunities('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(volunteering.pageOpenByCommunity).not.toHaveBeenCalled();
+    });
+
+    // The archive widening reaches the roster; a takedown still stays with
+    // the community's staff.
+    it('404s a taken-down community to a plain member', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(
+        service.listOpenOpportunities('queer-devs', 'member-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(volunteering.pageOpenByCommunity).not.toHaveBeenCalled();
+    });
+
+    it('answers a space with an empty page and reads no opportunities', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        id: 'space-1',
+        slug: 'queer-devs-book-club',
+        parentId: 'community-1',
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+      await expect(
+        service.listOpenOpportunities('queer-devs-book-club', 'member-1'),
+      ).resolves.toEqual({ items: [], total: 0 });
+      expect(volunteering.pageOpenByCommunity).not.toHaveBeenCalled();
     });
   });
 });

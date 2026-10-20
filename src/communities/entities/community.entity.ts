@@ -374,4 +374,17 @@ export class Community {
   // own owner archived alone.
   @Column({ type: 'boolean', default: false })
   archivedWithParent!: boolean;
+
+  // One or two lines on what money or help given to this community goes to,
+  // shown above its giving methods. Plain text, owner or co-owner edited
+  // through `PUT /communities/:slug/giving`. Paired migration
+  // `1834200000000-AddCommunityGiving`.
+  //
+  // `update: false`: only `CommunityGivingService` writes this column, with a
+  // raw UPDATE under the community row lock. Every other path that loads a
+  // Community and later calls `save()` would otherwise write back an intro
+  // read before a concurrent giving PUT. TypeORM skips non-updatable columns
+  // in both `save()` and `repository.update()`; inserts still write it.
+  @Column({ type: 'varchar', length: 400, nullable: true, update: false })
+  givingIntro!: string | null;
 }

@@ -15,7 +15,11 @@ import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { Event } from '../events/entities/event.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
-import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
+import {
+  SubprofileItem,
+  SubprofileSection,
+} from '../subprofiles/entities/subprofile-item.entity';
+import { listItemImageRefs } from '../subprofiles/subprofile-item-images';
 import { SubprofileFeed } from '../subprofiles/entities/subprofile-feed.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
@@ -460,6 +464,69 @@ const PERSONA_ITEM_SOURCE: MediaReferenceSource = {
   },
 };
 
+// --- persona-item nested photos: a SPECIAL source, the sibling of
+// PERSONA_ITEM_SOURCE. A cover-up before photo and every work-in-progress
+// session photo live inside `SubprofileItem.structured` (jsonb), so the plain
+// `imageUrl` source never sees them. Prefilter with a LIKE ANY on the two
+// sections that carry them, attribute exact membership in JS through
+// `listItemImageRefs`, then look up the PARENT persona exactly as
+// PERSONA_ITEM_SOURCE does (`entityId` = persona id, `slug` = handle,
+// `label` = item title). The orphan sweep reads this resolver, so a live
+// nested photo is never collected.
+const PERSONA_ITEM_NESTED_SOURCE: MediaReferenceSource = {
+  type: 'persona-item',
+  field: 'SubprofileItem.structured',
+  async resolve(dataSource, candidateBareKeys, candidateStoredForms) {
+    if (candidateBareKeys.size === 0) return [];
+    const patterns = [...candidateBareKeys].map((bareKey) => `%${bareKey}%`);
+    const matchingItems = await dataSource
+      .getRepository(SubprofileItem)
+      .createQueryBuilder('item')
+      .select(['item.id', 'item.title', 'item.subprofileId', 'item.structured'])
+      .where('"item"."structured"::text LIKE ANY(:patterns)', { patterns })
+      .andWhere('"item"."section" IN (:...sections)', {
+        sections: [SubprofileSection.CoverUps, SubprofileSection.InProgress],
+      })
+      .getMany();
+    if (matchingItems.length === 0) return [];
+
+    const storedFormSet = new Set(candidateStoredForms);
+    const exactMatches = matchingItems.flatMap((item) => {
+      // One reference per bare key per item, so a repeated session photo
+      // yields a single pair.
+      const bareKeys = new Set(
+        listItemImageRefs({ structured: item.structured })
+          .filter((ref) => storedFormSet.has(ref))
+          .map((ref) => toBareKey(ref))
+          .filter((bareKey) => candidateBareKeys.has(bareKey)),
+      );
+      return [...bareKeys].map((bareKey) => ({ item, bareKey }));
+    });
+    if (exactMatches.length === 0) return [];
+
+    const parentSubprofileIds = [
+      ...new Set(exactMatches.map(({ item }) => item.subprofileId)),
+    ];
+    const parentSubprofiles = await dataSource.getRepository(Subprofile).find({
+      where: { id: In(parentSubprofileIds) },
+      select: ['id', 'handle'],
+    });
+    const parentHandleById = new Map(
+      parentSubprofiles.map((subprofile) => [subprofile.id, subprofile.handle]),
+    );
+
+    return exactMatches.map(({ item, bareKey }) => {
+      const reference: MediaReference = {
+        type: 'persona-item',
+        entityId: item.subprofileId,
+        label: item.title ?? '',
+        slug: parentHandleById.get(item.subprofileId) ?? '',
+      };
+      return [bareKey, reference] as [string, MediaReference];
+    });
+  },
+};
+
 // --- persona feed show art — SPECIAL source, shaped like PERSONA_ITEM_SOURCE.
 // `SubprofileFeed.imageKey` is OUR stored copy of a connected podcast's show
 // art (persona feed import): a `work-image` key the server wrote, which
@@ -841,12 +908,96 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
   }),
 ];
 
+// --- Pulse Live question images: a SPECIAL source over raw SQL. A question
+// row holds its image in `quizshow_questions.media_ref`, three joins away
+// from the event that names it (question, round, quiz, event), so the
+// reference links to the event's Live game tab through the event's slug and
+// is labelled with the event's title. Two places count as in use:
+// - every quiz question that references the key. An event import copies the
+//   source quiz with its keys unchanged, so one key can sit in the quizzes of
+//   many events and each of them is its own reference;
+// - the frozen `quiz_snapshot` of an OPEN session (lobby, running or paused).
+//   A host may edit the quiz during a live game while the screen still shows
+//   the snapshot, so the image stays in use until the game ends. At most one
+//   session per event is open, so the jsonb walk reads a handful of rows.
+// The two halves are one UNION so a live game lists its event once.
+const QUIZSHOW_QUESTION_MEDIA_SQL = `
+  SELECT
+    "referenced"."media_ref" AS "media_ref",
+    "event"."id" AS "event_id",
+    "event"."title" AS "event_title",
+    "event"."slug" AS "event_slug"
+  FROM (
+    SELECT
+      "question"."media_ref"::text AS "media_ref",
+      "quiz"."event_id" AS "event_id"
+    FROM "quizshow_questions" "question"
+    INNER JOIN "quizshow_rounds" "round" ON "round"."id" = "question"."round_id"
+    INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "round"."quiz_id"
+    WHERE "question"."media_ref" = ANY($1::text[])
+    UNION
+    SELECT
+      "snapshot_question"."value"->>'mediaRef' AS "media_ref",
+      "session"."event_id" AS "event_id"
+    FROM "quizshow_sessions" "session"
+    CROSS JOIN LATERAL jsonb_array_elements("session"."quiz_snapshot"->'rounds') AS "snapshot_round"
+    CROSS JOIN LATERAL jsonb_array_elements("snapshot_round"."value"->'questions') AS "snapshot_question"
+    WHERE "session"."status" IN ('lobby', 'running', 'paused')
+      AND "snapshot_question"."value"->>'mediaRef' = ANY($1::text[])
+  ) AS "referenced"
+  INNER JOIN "events" "event" ON "event"."id" = "referenced"."event_id"
+`;
+
+interface QuizshowQuestionMediaRow {
+  media_ref: string;
+  event_id: string;
+  event_title: string | null;
+  event_slug: string | null;
+}
+
+const QUIZSHOW_QUESTION_SOURCE: MediaReferenceSource = {
+  type: 'quizshow-question',
+  field: 'QuizshowQuestion.mediaRef',
+  async resolve(dataSource, candidateBareKeys, candidateStoredForms) {
+    if (candidateStoredForms.length === 0) return [];
+    const rows: QuizshowQuestionMediaRow[] = await dataSource.query(
+      QUIZSHOW_QUESTION_MEDIA_SQL,
+      [candidateStoredForms],
+    );
+    // One reference per key per event: the bare and the `/files/` form of a
+    // key in the same quiz, or a question in the quiz and the open session's
+    // snapshot, name the same event once.
+    const seenKeyAndEvent = new Set<string>();
+    const pairs: Array<[string, MediaReference]> = [];
+    for (const row of rows) {
+      const bareKey = toBareKey(String(row.media_ref));
+      if (!candidateBareKeys.has(bareKey)) continue;
+      // A uuid holds no colon, so the first colon ends the event id.
+      const dedupeKey = `${row.event_id}:${bareKey}`;
+      if (seenKeyAndEvent.has(dedupeKey)) continue;
+      seenKeyAndEvent.add(dedupeKey);
+      pairs.push([
+        bareKey,
+        {
+          type: 'quizshow-question',
+          entityId: row.event_id,
+          label: row.event_title ?? '',
+          slug: row.event_slug ?? '',
+        },
+      ]);
+    }
+    return pairs;
+  },
+};
+
 export const MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
   ...PLAIN_MEDIA_REFERENCE_SOURCES,
   PERSONA_ITEM_SOURCE,
+  PERSONA_ITEM_NESTED_SOURCE,
   PERSONA_FEED_SOURCE,
   ...CARD_PROGRAM_SOURCES,
   ...ARRAY_MEDIA_REFERENCE_SOURCES,
+  QUIZSHOW_QUESTION_SOURCE,
 ];
 
 /** `@IsImageReference` DTO fields that intentionally have NO resolver source
@@ -862,5 +1013,12 @@ export const RULED_OUT_IMAGE_FIELDS: string[] = [
   // out permanently undeletable. The CURRENT blocks are covered by
   // `MagazineArticle.blocks[].src`.
   'MagazineArticleVersion.blocks',
+  // `QuizshowSession.quizSnapshot` is the same kind of frozen copy: the quiz
+  // as it stood when a live game opened. Once the game ends, a key referenced
+  // only by that snapshot is history, and counting it would keep every image a
+  // host ever swapped out of a quiz undeletable. The live quiz is covered by
+  // `QuizshowQuestion.mediaRef`, and that source also reads the snapshot of an
+  // OPEN session, the one copy a screen is still showing.
+  'QuizshowSession.quizSnapshot',
   'Partner.logo',
 ];

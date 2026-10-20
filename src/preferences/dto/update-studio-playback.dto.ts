@@ -7,7 +7,7 @@ const isPresent = (_body: object, value: unknown): boolean =>
   value !== undefined;
 
 /**
- * `PUT /me/studio-playback`: the Studio player's three settings, a PARTIAL
+ * `PUT /me/studio-playback`: the Studio player's four settings, a PARTIAL
  * replace like `UpdateMessagingPrivacyDto`. Each Studio control saves on its
  * own the moment it changes, so a field absent from the body is left as
  * stored. An empty body changes nothing and echoes the stored state.
@@ -29,4 +29,10 @@ export class UpdateStudioPlaybackDto {
   @Min(0)
   @Max(STUDIO_CROSSFADE_MAX_SECONDS)
   crossfadeSeconds?: number;
+
+  /** Studio safety and moderation: pause before a track tagged with a
+   *  content warning and ask first. */
+  @ValidateIf(isPresent)
+  @IsBoolean()
+  askBeforeWarnings?: boolean;
 }

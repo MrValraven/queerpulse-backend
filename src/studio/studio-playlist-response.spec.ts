@@ -9,12 +9,18 @@ import {
   StudioPlaylistVisibility,
 } from './entities/studio-playlist.entity';
 import {
+  StudioPlaylistEditorSource,
+  StudioPlaylistEditorStatus,
+} from './entities/studio-playlist-editor.entity';
+import {
   EMPTY_PLAYLIST_STATS,
   StudioPlaylistCardSource,
   memberDisplayName,
   toStudioPlaylistCard,
   toStudioPlaylistCredit,
+  toStudioPlaylistEditorResponse,
   toStudioPlaylistMemberCredit,
+  toStudioPlaylistPerson,
   toStudioPlaylistResponse,
 } from './studio-playlist-response';
 import { StudioArtistPersona } from './studio-response';
@@ -212,5 +218,90 @@ describe('Studio playlist mappers', () => {
     );
     expect(viewerResponse.creditSubprofileId).toBeNull();
     expect(viewerResponse.description).toBe('For the N1');
+  });
+
+  // Collaborative playlists.
+  it('names a member to the owner and editors by slug, name and avatar, with no user id', () => {
+    expect(toStudioPlaylistPerson(member)).toEqual({
+      slug: 'ana-silva',
+      displayName: 'Ana Silva',
+      avatarUrl: null,
+    });
+    expect(toStudioPlaylistPerson(undefined)).toEqual({
+      slug: '',
+      displayName: 'Member',
+      avatarUrl: null,
+    });
+  });
+
+  it('gives the owner the owner role and the active editor count', () => {
+    const card = toStudioPlaylistCard(
+      source({ viewerId: OWNER_ID, activeEditorCount: 3 }),
+    );
+    expect(card.role).toBe('owner');
+    expect(card.isOwner).toBe(true);
+    expect(card.editorCount).toBe(3);
+  });
+
+  it('gives an editor the editor role and the count, and an invitee the role alone', () => {
+    const editorCard = toStudioPlaylistCard(
+      source({ editorRole: 'editor', activeEditorCount: 2 }),
+    );
+    expect(editorCard.role).toBe('editor');
+    expect(editorCard.isOwner).toBe(false);
+    expect(editorCard.editorCount).toBe(2);
+    expect(editorCard.visibility).toBeNull();
+
+    const inviteeCard = toStudioPlaylistCard(
+      source({ editorRole: 'invitee', activeEditorCount: 2 }),
+    );
+    expect(inviteeCard.role).toBe('invitee');
+    expect(inviteeCard.editorCount).toBeNull();
+  });
+
+  it('gives everyone else a null role and a null editor count', () => {
+    const card = toStudioPlaylistCard(source({ activeEditorCount: 4 }));
+    expect(card.role).toBeNull();
+    expect(card.editorCount).toBeNull();
+  });
+
+  it('carries the invitation for an invitee alone', () => {
+    const invite = {
+      invitedBy: toStudioPlaylistPerson(member),
+      invitedAt: '2026-10-14T09:00:00.000Z',
+    };
+    const inviteeCard = toStudioPlaylistCard(source({ editorRole: 'invitee' }));
+    expect(
+      toStudioPlaylistResponse(inviteeCard, playlist(), [], false, invite)
+        .invite,
+    ).toEqual(invite);
+    const editorCard = toStudioPlaylistCard(source({ editorRole: 'editor' }));
+    expect(
+      toStudioPlaylistResponse(editorCard, playlist(), [], false, invite)
+        .invite,
+    ).toBeNull();
+    expect(
+      toStudioPlaylistResponse(inviteeCard, playlist(), [], false).invite,
+    ).toBeNull();
+  });
+
+  it('maps an editor row to the wire shape', () => {
+    expect(
+      toStudioPlaylistEditorResponse(
+        {
+          id: 'editor-row-1',
+          status: StudioPlaylistEditorStatus.Invited,
+          source: StudioPlaylistEditorSource.MemberInvite,
+          invitedAt: new Date('2026-10-14T09:00:00.000Z'),
+        },
+        toStudioPlaylistPerson(member),
+      ),
+    ).toEqual({
+      editorId: 'editor-row-1',
+      member: { slug: 'ana-silva', displayName: 'Ana Silva', avatarUrl: null },
+      status: 'invited',
+      source: 'member_invite',
+      invitedAt: '2026-10-14T09:00:00.000Z',
+    });
   });
 });

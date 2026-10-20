@@ -13,8 +13,9 @@ import {
 } from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioReleaseDispute } from './entities/studio-release-dispute.entity';
+import { ownerClaimsForTracks } from './studio-claim-store';
 import { decodeStudioCursor, encodeStudioCursor } from './studio-cursor';
-import { episodeReleasedSql } from './studio-episode-rule';
+import { episodeReleasedSql, isDraftEpisode } from './studio-episode-rule';
 import {
   StudioAdminReleaseSummary,
   toStudioAdminReleaseSummary,
@@ -47,6 +48,8 @@ import {
   StudioUpcomingRelease,
   hasPlayableAudio,
   isListenerPlayableTrack,
+  isWithheldTrack,
+  toListenerTrackSummaries,
   toStudioFormatArtistRef,
   toStudioOwnerReleaseCard,
   toStudioReleaseCard,
@@ -56,6 +59,8 @@ import {
   toStudioTrackSummary,
 } from './studio-response';
 import { StudioReleaseExtrasService } from './studio-release-extras.service';
+import { notWithheldTrackSql } from './studio-playlist-visibility';
+import { studioSafetyError } from './studio-safety.constants';
 import {
   isReleaseWithdrawnForListeners,
   listenablePersonaSql,
@@ -151,6 +156,13 @@ function ownerStats(stats: CatalogReleaseStats): StudioReleaseStats {
 export const LISTENER_PLAYABLE_TRACK_FILTER_SQL = `"track"."audio_key" IS NOT NULL AND "track"."duration_seconds" IS NOT NULL AND ${episodeReleasedSql('track', 'release')}`;
 
 /**
+ * Studio safety: what a listener card's length adds up. A track a copyright
+ * claim holds keeps its row (so `playable_track_count` still counts it) and
+ * plays nothing, so its length stays out.
+ */
+export const LISTENER_HEARD_TRACK_FILTER_SQL = `${LISTENER_PLAYABLE_TRACK_FILTER_SQL} AND ${notWithheldTrackSql('track')}`;
+
+/**
  * Studio v1: every read. Listeners see published releases of listenable
  * personas whose creator is not blocked either way with them
  * (`listenablePersonaSql` plus `BlockFilterService`); owners also read their
@@ -164,6 +176,10 @@ export const LISTENER_PLAYABLE_TRACK_FILTER_SQL = `"track"."audio_key" IS NOT NU
  * published (the arm in `LISTENER_PLAYABLE_TRACK_FILTER_SQL`,
  * `isListenerPlayableTrack` and `playableTrackAudioSql`); the feed, search
  * and artists narrow by format.
+ * Studio safety and moderation: a withheld track drops out of search and
+ * listener card lengths, keeps a redacted row in a listener tracklist, and
+ * answers listeners 410 `studio_track_withheld` on its page and stream after
+ * every release-level answer; owners read it whole, with their claims.
  */
 @Injectable()
 export class StudioCatalogService {
@@ -348,6 +364,13 @@ export class StudioCatalogService {
       ownerDisputes,
       await this.releaseCreditSummary(viewerId, release.id),
       extras,
+      // Studio safety: the claim panel, for owners only.
+      isOwner
+        ? await ownerClaimsForTracks(
+            this.tracks.manager,
+            tracks.map((track) => track.id),
+          )
+        : [],
     );
   }
 
@@ -387,6 +410,56 @@ export class StudioCatalogService {
       await this.releaseCreditSummary(viewerId, release.id),
       extras,
     );
+  }
+
+  /**
+   * The Admin creator drafts detail: the same view a private preview link
+   * shows a listener, so the owner-only and staff-only fields read null or
+   * empty. An episode preview carries its one draft episode marked
+   * `isDraft`, so the frontend can render it apart from the public
+   * tracklist.
+   */
+  async getReleaseAsStaffDraftPreview(
+    releaseId: string,
+    episodeTrackId: string | null = null,
+  ): Promise<StudioReleaseResponse> {
+    const release = await this.loadReleaseWithPersona(releaseId);
+    if (!release?.subprofile) {
+      throw new NotFoundException('Release not found');
+    }
+    const [tracks, extras] = await Promise.all([
+      this.tracks.find({
+        where: { releaseId: release.id },
+        order: { position: 'ASC' },
+      }),
+      this.releaseExtras.forRelease(null, release),
+    ]);
+    const response = toStudioReleaseResponse(
+      release,
+      release.subprofile,
+      tracks,
+      { isOwner: false, isStaff: false, isPreview: true },
+      [],
+      await this.releaseCreditSummary(null, release.id),
+      extras,
+    );
+    if (episodeTrackId === null) {
+      return response;
+    }
+    const draftEpisode = tracks.find((track) => track.id === episodeTrackId);
+    if (!draftEpisode || !isDraftEpisode(draftEpisode, release)) {
+      throw new NotFoundException('Episode not found');
+    }
+    const publishedTracks = tracks.filter(
+      (track) => (track.publishedAt ?? null) !== null,
+    );
+    return {
+      ...response,
+      tracks: [
+        ...toListenerTrackSummaries(publishedTracks, release),
+        { ...toStudioTrackSummary(draftEpisode), isDraft: true },
+      ],
+    };
   }
 
   /** Any release in any status, for the admin routes. */
@@ -569,6 +642,12 @@ export class StudioCatalogService {
         'Track not found',
       );
     }
+    // Studio safety: after every release-level answer, a withheld track is
+    // a 410 for listeners that names nothing. Owners still read it, with
+    // its claims.
+    if (!isOwner && isWithheldTrack(track)) {
+      throw studioSafetyError('studio_track_withheld');
+    }
     const stats =
       (await this.statsFor([release.id])).get(release.id) ??
       EMPTY_CATALOG_STATS;
@@ -577,6 +656,9 @@ export class StudioCatalogService {
       toStudioReleaseCard(release, release.subprofile, listenerStats(stats)),
       await this.trackPublicCredits(viewerId, track.id),
       { isOwner },
+      isOwner
+        ? await ownerClaimsForTracks(this.tracks.manager, [track.id])
+        : [],
     );
   }
 
@@ -619,6 +701,11 @@ export class StudioCatalogService {
       !track.audioContentType
     ) {
       throw new NotFoundException('Track not found');
+    }
+    // Studio safety: owners stream a withheld track, so they can hear what
+    // was claimed; listeners get the 410 that names nothing.
+    if (!isOwner && isWithheldTrack(track)) {
+      throw studioSafetyError('studio_track_withheld');
     }
     const signedStream = await this.storage.createPresignedAudioStream(
       track.audioKey,
@@ -781,6 +868,8 @@ export class StudioCatalogService {
       .andWhere('"track"."duration_seconds" IS NOT NULL')
       // Studio artist kinds: a draft episode stays hidden.
       .andWhere(episodeReleasedSql('track', 'release'))
+      // Studio safety: so does a track a copyright claim holds offline.
+      .andWhere(notWithheldTrackSql('track'))
       .andWhere(
         `${foldedHaystack('track', ['title'])} LIKE ${foldedSearchTerm('studioSearchPattern')} ESCAPE '\\'`,
         { studioSearchPattern: searchPattern },
@@ -1001,7 +1090,7 @@ export class StudioCatalogService {
         'total_duration_seconds',
       )
       .addSelect(
-        `COALESCE(SUM("track"."duration_seconds") FILTER (WHERE ${LISTENER_PLAYABLE_TRACK_FILTER_SQL}), 0)::int`,
+        `COALESCE(SUM("track"."duration_seconds") FILTER (WHERE ${LISTENER_HEARD_TRACK_FILTER_SQL}), 0)::int`,
         'playable_duration_seconds',
       )
       .where('"track"."release_id" IN (:...releaseIds)', { releaseIds })

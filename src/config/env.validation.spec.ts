@@ -185,4 +185,20 @@ describe('env validate()', () => {
       }),
     ).not.toThrow();
   });
+
+  it('accepts a positive creator draft retention window', () => {
+    expect(
+      validate({ ...base, CREATOR_DRAFT_RETENTION_DAYS: '30' })
+        .CREATOR_DRAFT_RETENTION_DAYS,
+    ).toBe(30);
+  });
+
+  it.each(['0', '-5', '1.5', 'ninety'])(
+    'refuses CREATOR_DRAFT_RETENTION_DAYS=%s',
+    (value) => {
+      expect(() =>
+        validate({ ...base, CREATOR_DRAFT_RETENTION_DAYS: value }),
+      ).toThrow();
+    },
+  );
 });

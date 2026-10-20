@@ -4,6 +4,7 @@ import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ConnectionsModule } from '../connections/connections.module';
+import { CreatorDraftSlotsModule } from '../creator-drafts/creator-draft-slots.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { ListingLookupModule } from '../listings/listing-lookup.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
@@ -130,6 +131,9 @@ import { RsvpService } from './rsvp.service';
     // resolves+validates against a real, live directory listing before the
     // event's venue is linked to it. Read-only module; closes no cycle.
     ListingLookupModule,
+    // `CreatorDraftSlotsService`: a successful publish deletes the author's
+    // event draft. Repository-only module; closes no cycle.
+    CreatorDraftSlotsModule,
     // `MentionNotificationService`: tagging `@member`, `b/business` and the
     // other sigils in a gathering's description notifies them once it is
     // published. Plain import: `MentionsModule` imports none of the modules

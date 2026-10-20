@@ -94,6 +94,24 @@ describe('localizeRichPayload (PRD-325)', () => {
     ]);
   });
 
+  it('renders the Studio share copy with the sender and the note (Studio rich cards)', () => {
+    const payload = makePayload({
+      title: 'Terrace crew',
+      body: 'Alex Doe shared a track from Studio: for Saturday',
+      l10n: {
+        bodyKey: 'push:messages.group.studio.trackWithNote',
+        params: { name: 'Alex Doe', note: 'for Saturday' },
+      },
+    });
+
+    const localized = localizeRichPayload(payload, RICH_PUSH_COPY_PT);
+
+    expect(localized.title).toBe('Terrace crew');
+    expect(localized.body).toBe(
+      'Alex Doe partilhou uma faixa do Studio: for Saturday',
+    );
+  });
+
   it('reports a translated payload as rendering differently', () => {
     const payload = makePayload();
 

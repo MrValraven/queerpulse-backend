@@ -11,6 +11,11 @@ import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
  * Studio v2: who sees a playlist, spelled once.
  *
  * - The owner always opens their own playlist.
+ * - Collaborative playlists: a member with an `invited` or `active` row in
+ *   `studio_playlist_editors` opens it too, whatever its visibility and
+ *   whatever the owner's grant, while its credit stands, the owner's
+ *   account is active and no block holds with the owner. Lists stay as
+ *   they are: `publiclyListedPlaylistSql` never reads the editors table.
  * - Everyone else needs: no block either way with the owner, an active
  *   owner who still holds a Studio grant, and a credit that stands. A
  *   persona credit also needs no block either way with the member who
@@ -42,13 +47,17 @@ export const ARTIST_KIND_LIST = STUDIO_ARTIST_PERSONA_KINDS.map(
   (kind) => `'${kind}'`,
 ).join(', ');
 
-/** The release and audio half of `playableTrackSql`: published release,
- *  audio in place and (Studio artist kinds) a podcast episode that has been
- *  published (`episodeReleasedSql`). Studio discovery's related-artist score
- *  reads it and checks the persona once per candidate. It is a bare AND
- *  chain, so `playableTrackSql` keeps its exact text; a caller places it
- *  inside an AND list or wraps it in parentheses before any OR. */
-export function playableTrackAudioSql(
+/** Studio safety and moderation: a track no copyright claim holds offline. */
+export function notWithheldTrackSql(trackAlias: string): string {
+  return `"${trackAlias}"."withheld_at" IS NULL`;
+}
+
+/** Published release, audio in place and (Studio artist kinds) a podcast
+ *  episode that has been published (`episodeReleasedSql`), whether or not a
+ *  claim holds the track. Only claim filing reads it alone, so a second
+ *  rights holder can file while another claim holds the track. A bare AND
+ *  chain. */
+export function releasedTrackAudioSql(
   trackAlias: string,
   releaseAlias: string,
 ): string {
@@ -58,6 +67,21 @@ export function playableTrackAudioSql(
     AND ${track}."audio_key" IS NOT NULL
     AND ${track}."duration_seconds" IS NOT NULL
     AND ${episodeReleasedSql(trackAlias, releaseAlias)}`;
+}
+
+/** The release and audio half of `playableTrackSql`: the released rule
+ *  above, and (Studio safety) no copyright claim holding the track. Studio
+ *  discovery's related-artist score reads it and checks the persona once per
+ *  candidate. It is a bare AND chain, so `playableTrackSql` keeps its shape;
+ *  a caller places it inside an AND list or wraps it in parentheses before
+ *  any OR. The listener tracklist of a release reads the released rule and
+ *  redacts a withheld row in place (`toListenerTrackSummaries`). */
+export function playableTrackAudioSql(
+  trackAlias: string,
+  releaseAlias: string,
+): string {
+  return `${releasedTrackAudioSql(trackAlias, releaseAlias)}
+    AND ${notWithheldTrackSql(trackAlias)}`;
 }
 
 /** A track a listener can play: published release, audio in place, and a
@@ -104,6 +128,18 @@ export function ownerHoldsGrantSql(playlistAlias: string): string {
     )`;
 }
 
+/** The playlist owner's account is active (the same `users.status` check
+ *  `ownerHoldsGrantSql` and the single-playlist read make). A paused,
+ *  deletion pending or suspended owner closes the playlist to its editors
+ *  and invitees too. */
+export function playlistOwnerIsActiveSql(playlistAlias: string): string {
+  return `EXISTS (
+      SELECT 1 FROM "users" "playlist_active_owner"
+       WHERE "playlist_active_owner"."id" = "${playlistAlias}"."user_id"
+         AND "playlist_active_owner"."status" = '${UserStatus.Active}'
+    )`;
+}
+
 /** The user id of the member who created the persona a playlist is
  *  credited to, as a scalar subquery; NULL for a member credit. Pass it to
  *  `BlockFilterService.excludeBlocked` as the member column. */
@@ -128,8 +164,40 @@ export function publiclyListedPlaylistSql(playlistAlias: string): string {
     AND ${ownerHoldsGrantSql(playlistAlias)})`;
 }
 
+/** The two live editor statuses, quoted for an `IN (...)` list. */
+export const LIVE_EDITOR_STATUS_LIST = `'invited', 'active'`;
+
+/** The viewer holds an `invited` or `active` editor row on the playlist.
+ *  `viewerParameterName` is bound by the caller. */
+export function viewerHoldsLiveEditorRowSql(
+  playlistAlias: string,
+  viewerParameterName: string,
+): string {
+  return `EXISTS (
+      SELECT 1 FROM "studio_playlist_editors" "viewer_editor_row"
+       WHERE "viewer_editor_row"."playlist_id" = "${playlistAlias}"."id"
+         AND "viewer_editor_row"."user_id" = :${viewerParameterName}
+         AND "viewer_editor_row"."status" IN (${LIVE_EDITOR_STATUS_LIST})
+    )`;
+}
+
+/** The viewer actively edits the playlist (`GET /studio/playlists/mine`). */
+export function viewerEditsPlaylistSql(
+  playlistAlias: string,
+  viewerParameterName: string,
+): string {
+  return `EXISTS (
+      SELECT 1 FROM "studio_playlist_editors" "viewer_active_editor_row"
+       WHERE "viewer_active_editor_row"."playlist_id" = "${playlistAlias}"."id"
+         AND "viewer_active_editor_row"."user_id" = :${viewerParameterName}
+         AND "viewer_active_editor_row"."status" = 'active'
+    )`;
+}
+
 /** The direct-link rule in SQL, for bulk reads. `viewerParameterName` is
- *  bound by the caller (TypeORM replaces every occurrence). */
+ *  bound by the caller (TypeORM replaces every occurrence). A live editor
+ *  row opens the playlist while its credit stands and its owner's account
+ *  is active; blocks are applied by the caller as before. */
 export function playlistOpenToViewerSql(
   playlistAlias: string,
   viewerParameterName: string,
@@ -137,6 +205,9 @@ export function playlistOpenToViewerSql(
   const playlist = `"${playlistAlias}"`;
   const viewer = `:${viewerParameterName}`;
   return `(${playlist}."user_id" = ${viewer}
+    OR (${viewerHoldsLiveEditorRowSql(playlistAlias, viewerParameterName)}
+      AND ${creditStandsSql(playlistAlias)}
+      AND ${playlistOwnerIsActiveSql(playlistAlias)})
     OR (${ownerHoldsGrantSql(playlistAlias)}
       AND ${creditStandsSql(playlistAlias)}
       AND (${playlist}."visibility" = '${StudioPlaylistVisibility.Public}'
@@ -169,6 +240,9 @@ export interface PlaylistAudienceFacts {
   hasOwnerGrant: boolean;
   isBlockedEitherWay: boolean;
   isConnectedToOwner: boolean;
+  /** Collaborative playlists: the viewer holds an `invited` or `active`
+   *  editor row. Optional, so callers that predate editors read false. */
+  hasLiveEditorRow?: boolean;
 }
 
 /** The direct-link rule for one playlist. */
@@ -176,7 +250,15 @@ export function canViewerOpenPlaylist(facts: PlaylistAudienceFacts): boolean {
   if (facts.isOwner) {
     return true;
   }
-  if (facts.isBlockedEitherWay || !facts.hasOwnerGrant) {
+  if (facts.isBlockedEitherWay) {
+    return false;
+  }
+  // An editor or invitee opens any visibility, owner grant or none, while
+  // the credit stands.
+  if (facts.hasLiveEditorRow) {
+    return !facts.isCreditBroken;
+  }
+  if (!facts.hasOwnerGrant) {
     return false;
   }
   const visibility = effectivePlaylistVisibility(

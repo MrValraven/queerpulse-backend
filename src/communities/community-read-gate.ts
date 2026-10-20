@@ -4,9 +4,10 @@ import {
   ContentModerationService,
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
+import { isGatedTier, membersOnlyException } from './community-gate';
 import { isCommunityStaffRole } from './community-staff-access';
 import { RosterRole } from './entities/community-member.entity';
-import { Community } from './entities/community.entity';
+import { AccessTier, Community } from './entities/community.entity';
 
 /**
  * The moderation subject type a community itself is recorded under in
@@ -70,4 +71,34 @@ export async function assertCommunityInteriorReadable(input: {
       throw new NotFoundException('Community not found');
     }
   }
+}
+
+/**
+ * The full read gate of a community's post board: the takedown, archive and
+ * parent closures of `assertCommunityInteriorReadable`, then the access-tier
+ * gate. This is gate 4 of `CommunityPostsService.assertViewable` lifted into
+ * a shared helper for reads that must answer exactly like the post board
+ * (the giving section is the first). The posts service keeps its own private
+ * copy unchanged.
+ *
+ * The tier gate: a `public` community is readable by any signed-in viewer,
+ * roster or not. Every gated tier is readable only with an effective role.
+ * A viewer with none gets 404 `Community not found` on `private`, where the
+ * community's existence is the secret, and the 403 `membersOnlyException()`
+ * on `request` and `invite`, which discover already lists, so the client
+ * can show the gate card.
+ */
+export async function assertCommunityBoardReadable(input: {
+  community: Pick<Community, 'slug' | 'archivedAt' | 'parentId' | 'accessTier'>;
+  viewerRole: RosterRole | null;
+  communities: Repository<Community>;
+  contentModeration: Pick<ContentModerationService, 'stateFor'>;
+}): Promise<void> {
+  await assertCommunityInteriorReadable(input);
+  const { community, viewerRole } = input;
+  if (!isGatedTier(community.accessTier) || viewerRole !== null) return;
+  if (community.accessTier === AccessTier.Private) {
+    throw new NotFoundException('Community not found');
+  }
+  throw membersOnlyException();
 }

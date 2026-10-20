@@ -1,19 +1,25 @@
 import { StudioPlaylistVisibility } from './entities/studio-playlist.entity';
 import {
   ARTIST_KIND_LIST,
+  LIVE_EDITOR_STATUS_LIST,
   PlaylistAudienceFacts,
   canViewerOpenPlaylist,
   creditPersonaCreatorIdSql,
   creditStandsSql,
   effectivePlaylistVisibility,
   isPlaylistCreditBroken,
+  notWithheldTrackSql,
   ownerHoldsGrantSql,
   personaCreatorBlockExemptSql,
   personaCreditActiveSql,
   playableTrackAudioSql,
   playableTrackSql,
   playlistOpenToViewerSql,
+  playlistOwnerIsActiveSql,
   publiclyListedPlaylistSql,
+  releasedTrackAudioSql,
+  viewerEditsPlaylistSql,
+  viewerHoldsLiveEditorRowSql,
 } from './studio-playlist-visibility';
 import { episodeReleasedSql } from './studio-episode-rule';
 
@@ -105,6 +111,25 @@ describe('canViewerOpenPlaylist', () => {
       }),
       true,
     ],
+    [
+      'a private playlist to a live editor row whose owner holds no grant',
+      facts({
+        visibility: StudioPlaylistVisibility.Private,
+        hasOwnerGrant: false,
+        hasLiveEditorRow: true,
+      }),
+      true,
+    ],
+    [
+      'a playlist to a live editor row while its persona credit is broken',
+      facts({ isCreditBroken: true, hasLiveEditorRow: true }),
+      false,
+    ],
+    [
+      'a playlist to a live editor row blocked either way with the owner',
+      facts({ isBlockedEitherWay: true, hasLiveEditorRow: true }),
+      false,
+    ],
   ])('decides %s', (_description, audience, expected) => {
     expect(canViewerOpenPlaylist(audience)).toBe(expected);
   });
@@ -167,6 +192,26 @@ describe('playlist SQL predicates', () => {
     expect(audioHalf).toContain(`"artist_release"."type" <> 'podcast'`);
     expect(audioHalf).toContain(`"artist_track"."published_at" <= now()`);
     expect(audioHalf).toContain(`"artist_release"."status" = 'published'`);
+  });
+
+  // Studio safety: a track a copyright claim holds offline plays nowhere.
+  it('keeps a withheld track out of every playable read', () => {
+    expect(notWithheldTrackSql('track')).toBe('"track"."withheld_at" IS NULL');
+    expect(playableTrackAudioSql('artist_track', 'artist_release')).toContain(
+      '"artist_track"."withheld_at" IS NULL',
+    );
+    expect(playableTrackSql('track', 'release', 'persona')).toContain(
+      '"track"."withheld_at" IS NULL',
+    );
+  });
+
+  it('files a claim against a released track whether or not it is withheld', () => {
+    const releasedHalf = releasedTrackAudioSql('track', 'release');
+    expect(releasedHalf).toContain(`"release"."status" = 'published'`);
+    expect(releasedHalf).toContain('"track"."audio_key" IS NOT NULL');
+    expect(releasedHalf).toContain(episodeReleasedSql('track', 'release'));
+    expect(releasedHalf).not.toContain('withheld_at');
+    expect(playableTrackAudioSql('track', 'release')).toContain(releasedHalf);
   });
 
   it('lets a persona credit stand only for a listenable artist persona the owner still runs', () => {
@@ -239,5 +284,64 @@ describe('playlist SQL predicates', () => {
     expect(predicate).toContain(creditStandsSql('playlist'));
     expect(predicate).toContain(ownerHoldsGrantSql('playlist'));
     expect(predicate).not.toContain(`'private'`);
+  });
+});
+
+describe('Studio playlist editor predicates', () => {
+  it('spells the live statuses once', () => {
+    expect(LIVE_EDITOR_STATUS_LIST).toBe(`'invited', 'active'`);
+  });
+
+  it('finds an invited or active row of the viewer on the playlist', () => {
+    expect(viewerHoldsLiveEditorRowSql('playlist', 'savedViewerId')).toBe(
+      `EXISTS (
+      SELECT 1 FROM "studio_playlist_editors" "viewer_editor_row"
+       WHERE "viewer_editor_row"."playlist_id" = "playlist"."id"
+         AND "viewer_editor_row"."user_id" = :savedViewerId
+         AND "viewer_editor_row"."status" IN ('invited', 'active')
+    )`,
+    );
+  });
+
+  it('finds an active row of the viewer for the playlists they edit', () => {
+    const predicate = viewerEditsPlaylistSql('playlist', 'mineViewerId');
+    expect(predicate).toContain(
+      `"viewer_active_editor_row"."status" = 'active'`,
+    );
+    expect(predicate).toContain(
+      `"viewer_active_editor_row"."user_id" = :mineViewerId`,
+    );
+    expect(predicate).not.toContain(`'invited'`);
+  });
+
+  it('reads the owner account as active from the users status', () => {
+    expect(playlistOwnerIsActiveSql('playlist')).toBe(
+      `EXISTS (
+      SELECT 1 FROM "users" "playlist_active_owner"
+       WHERE "playlist_active_owner"."id" = "playlist"."user_id"
+         AND "playlist_active_owner"."status" = 'active'
+    )`,
+    );
+  });
+
+  it('opens a playlist by link to a live editor row while its credit stands and its owner is active', () => {
+    const predicate = playlistOpenToViewerSql('playlist', 'savedViewerId');
+    expect(predicate).toContain(
+      `(${viewerHoldsLiveEditorRowSql('playlist', 'savedViewerId')}
+      AND ${creditStandsSql('playlist')}
+      AND ${playlistOwnerIsActiveSql('playlist')})`,
+    );
+  });
+
+  it('keeps the editors table out of the public list predicate', () => {
+    expect(publiclyListedPlaylistSql('playlist')).not.toContain(
+      'studio_playlist_editors',
+    );
+  });
+
+  it('keeps the public list predicate on the grant check alone for the owner', () => {
+    expect(publiclyListedPlaylistSql('playlist')).not.toContain(
+      'playlist_active_owner',
+    );
   });
 });

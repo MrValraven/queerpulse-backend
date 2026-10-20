@@ -82,6 +82,22 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
   'push:studioCreditAccepted.title': 'Crédito aceite',
   'push:studioCreditAccepted.body':
     '{persona} aceitou o teu crédito em {track}',
+  // Studio collaborative playlists
+  'push:studioPlaylistEditorInvite.title': 'Convite para playlist',
+  'push:studioPlaylistEditorInvite.body':
+    '{name} convidou-te para editar {playlist}',
+  'push:studioPlaylistEditorAdded.title': 'Podes editar uma playlist',
+  'push:studioPlaylistEditorAdded.body':
+    '{name} deu-te acesso para editar {playlist} ({persona})',
+  // Business team
+  'push:listingTeamInvite.title': 'Convite para a equipa',
+  'push:listingTeamInvite.body': '{listing} convidou {persona} para a equipa',
+  'push:listingTeamRequest.title': 'Pedido para a equipa',
+  'push:listingTeamRequest.body':
+    '{persona} pediu para entrar na equipa de {listing}',
+  'push:listingTeamAccepted.title': 'Ligação à equipa confirmada',
+  'push:listingTeamAccepted.body':
+    '{persona} faz agora parte da equipa de {listing}',
   'push:housing.decision.approved.title': 'A tua casa está publicada',
   'push:housing.decision.approved.body':
     '{title} já está no quadro de alojamento.',
@@ -161,6 +177,42 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
     'Quem organiza desligou o Vamos juntes neste convívio',
   'push:goTogether.meetAgain.title': 'Vamos juntes',
   'push:goTogether.meetAgain.body': 'Queres voltar a encontrar o teu grupo?',
+  // Studio rich cards
+  'push:messages.studio.track': 'Partilhou uma faixa do Studio',
+  'push:messages.studio.trackWithNote': 'Partilhou uma faixa do Studio: {note}',
+  'push:messages.studio.release': 'Partilhou um lançamento do Studio',
+  'push:messages.studio.releaseWithNote':
+    'Partilhou um lançamento do Studio: {note}',
+  'push:messages.studio.playlist': 'Partilhou uma playlist do Studio',
+  'push:messages.studio.playlistWithNote':
+    'Partilhou uma playlist do Studio: {note}',
+  'push:messages.group.studio.track': '{name} partilhou uma faixa do Studio',
+  'push:messages.group.studio.trackWithNote':
+    '{name} partilhou uma faixa do Studio: {note}',
+  'push:messages.group.studio.release':
+    '{name} partilhou um lançamento do Studio',
+  'push:messages.group.studio.releaseWithNote':
+    '{name} partilhou um lançamento do Studio: {note}',
+  'push:messages.group.studio.playlist':
+    '{name} partilhou uma playlist do Studio',
+  'push:messages.group.studio.playlistWithNote':
+    '{name} partilhou uma playlist do Studio: {note}',
+  'push:messages.group.mention.studio.track':
+    '{name} mencionou-te e partilhou uma faixa do Studio',
+  'push:messages.group.mention.studio.trackWithNote':
+    '{name} mencionou-te e partilhou uma faixa do Studio: {note}',
+  'push:messages.group.mention.studio.release':
+    '{name} mencionou-te e partilhou um lançamento do Studio',
+  'push:messages.group.mention.studio.releaseWithNote':
+    '{name} mencionou-te e partilhou um lançamento do Studio: {note}',
+  'push:messages.group.mention.studio.playlist':
+    '{name} mencionou-te e partilhou uma playlist do Studio',
+  'push:messages.group.mention.studio.playlistWithNote':
+    '{name} mencionou-te e partilhou uma playlist do Studio: {note}',
+  // Pulse Live
+  'push:quizshow.starting.title': 'O Pulse Live está a começar',
+  'push:quizshow.starting.body':
+    'O jogo ao vivo de {event} está a começar, entra com o código {code}',
 };
 
 /** Mirrors `formatPushCopy`'s `{token}` interpolation in `pushMessages.ts`. */

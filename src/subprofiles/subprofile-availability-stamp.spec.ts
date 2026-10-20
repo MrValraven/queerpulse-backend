@@ -17,6 +17,11 @@ function therapistSkin(status: string): SkinData {
   return { therapist: { status } } as unknown as SkinData;
 }
 
+/** A skin with the tattoo books status block. */
+function tattooSkin(status: string): SkinData {
+  return { tattoo: { status } } as unknown as SkinData;
+}
+
 function row(overrides: Partial<StampFields> = {}): StampFields {
   return {
     availability: 'open_to_collabs',
@@ -41,6 +46,24 @@ describe('hasCapacityChanged', () => {
     expect(
       hasCapacityChanged(row(), row({ skinData: therapistSkin('wait') })),
     ).toBe(true);
+  });
+
+  it('is true when only the tattoo books status moves', () => {
+    expect(
+      hasCapacityChanged(
+        row({ skinData: tattooSkin('open') }),
+        row({ skinData: tattooSkin('waitlist') }),
+      ),
+    ).toBe(true);
+  });
+
+  it('reads a malformed tattoo block as no status', () => {
+    expect(
+      hasCapacityChanged(
+        row({ skinData: null }),
+        row({ skinData: { tattoo: 'open' } as unknown as SkinData }),
+      ),
+    ).toBe(false);
   });
 
   it('is true when the availability is cleared', () => {
@@ -96,6 +119,16 @@ describe('availabilityUpdatedAtAfterSave', () => {
       availabilityUpdatedAtAfterSave(
         row(),
         row({ skinData: therapistSkin('closed') }),
+        saveTime,
+      ),
+    ).toBe(saveTime);
+  });
+
+  it('stamps the save time when the books status changes', () => {
+    expect(
+      availabilityUpdatedAtAfterSave(
+        row({ skinData: tattooSkin('open') }),
+        row({ skinData: tattooSkin('closed') }),
         saveTime,
       ),
     ).toBe(saveTime);
