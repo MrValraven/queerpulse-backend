@@ -22,7 +22,9 @@ import { endEditorsOnPlaylist } from './studio-playlist-editor-endings';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
 import {
   StudioPlaylistEditorCandidateList,
+  StudioPlaylistEditorIneligibleReason,
   StudioPlaylistEditorList,
+  StudioPlaylistIneligibleMember,
   StudioPlaylistResponse,
   toStudioPlaylistEditorResponse,
   toStudioPlaylistPerson,
@@ -201,27 +203,45 @@ interface InviteAnswerOutcome {
   playlist: StudioPlaylist;
 }
 
-/** A member may edit: present, someone other than the owner, no block
- *  either way, a Studio grant, and the fit for the source (a connection of
- *  the owner for a member credit, a co-owner of the persona for a persona
- *  credit). */
-function isEligibleEditor(
+/** Why a member may not edit, or null when they may. A member may edit when
+ *  present, someone other than the owner, with no block either way, a
+ *  Studio grant, and the fit for the source (a connection of the owner for
+ *  a member credit, a co-owner of the persona for a persona credit). The
+ *  checks run in that order and the first that fails is the reason. */
+function ineligibilityReasonOf(
   facts: EditorFactsRow | undefined,
-  userId: string,
+  userId: string | undefined,
   ownerId: string,
   source: StudioPlaylistEditorSource,
-): boolean {
-  if (
-    !facts ||
-    userId === ownerId ||
-    facts.is_blocked ||
-    !facts.has_studio_access
-  ) {
-    return false;
+): StudioPlaylistEditorIneligibleReason | null {
+  if (!userId || !facts) {
+    return 'not_found';
   }
-  return source === StudioPlaylistEditorSource.PersonaCoOwner
-    ? facts.is_co_owner
-    : facts.is_connected;
+  if (userId === ownerId) {
+    return 'is_owner';
+  }
+  if (facts.is_blocked) {
+    return 'blocked';
+  }
+  if (!facts.has_studio_access) {
+    return 'no_studio_access';
+  }
+  if (source === StudioPlaylistEditorSource.PersonaCoOwner) {
+    return facts.is_co_owner ? null : 'not_co_owner';
+  }
+  return facts.is_connected ? null : 'not_connected';
+}
+
+/** The `studio_playlist_editor_ineligible` refusal: `memberSlugs` names the
+ *  members and `ineligibleMembers` gives each one's reason, both in request
+ *  order. */
+function editorIneligibleError(
+  ineligibleMembers: StudioPlaylistIneligibleMember[],
+): HttpException {
+  return studioErrorWithDetails('studio_playlist_editor_ineligible', {
+    memberSlugs: ineligibleMembers.map((member) => member.memberSlug),
+    ineligibleMembers,
+  });
 }
 
 /**
@@ -525,9 +545,12 @@ export class StudioPlaylistEditorsService {
       // Read under the roster lock: a persona whose credit stopped standing
       // takes no picks at all.
       if (!(await isPlaylistCreditStanding(manager, playlistId))) {
-        throw studioErrorWithDetails('studio_playlist_editor_ineligible', {
-          memberSlugs,
-        });
+        throw editorIneligibleError(
+          memberSlugs.map((memberSlug) => ({
+            memberSlug,
+            reason: 'persona_credit_lapsed',
+          })),
+        );
       }
     }
     const factsRows: EditorFactsRow[] = newUserIds.length
@@ -538,25 +561,23 @@ export class StudioPlaylistEditorsService {
         ])
       : [];
     const factsByUserId = new Map(factsRows.map((row) => [row.user_id, row]));
-    const ineligibleSlugs = memberSlugs.filter((slug) => {
-      const userId = userIdBySlug.get(slug);
-      if (!userId) {
-        return true;
-      }
-      if (liveUserIds.has(userId)) {
-        return false;
-      }
-      return !isEligibleEditor(
-        factsByUserId.get(userId),
-        userId,
-        ownerId,
-        source,
-      );
-    });
-    if (ineligibleSlugs.length) {
-      throw studioErrorWithDetails('studio_playlist_editor_ineligible', {
-        memberSlugs: ineligibleSlugs,
-      });
+    const ineligibleMembers = memberSlugs.flatMap(
+      (memberSlug): StudioPlaylistIneligibleMember[] => {
+        const userId = userIdBySlug.get(memberSlug);
+        if (userId && liveUserIds.has(userId)) {
+          return [];
+        }
+        const reason = ineligibilityReasonOf(
+          userId ? factsByUserId.get(userId) : undefined,
+          userId,
+          ownerId,
+          source,
+        );
+        return reason ? [{ memberSlug, reason }] : [];
+      },
+    );
+    if (ineligibleMembers.length) {
+      throw editorIneligibleError(ineligibleMembers);
     }
     if (
       liveUserIds.size + newUserIds.length >

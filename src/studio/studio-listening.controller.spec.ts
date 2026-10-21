@@ -25,8 +25,8 @@ describe('StudioListeningController', () => {
   beforeEach(() => {
     catalog = {
       listReleases: jest.fn().mockResolvedValue({ items: [] }),
-      listGenres: jest.fn().mockResolvedValue({ genres: ['fado'] }),
-      listMoods: jest.fn().mockResolvedValue({ moods: ['tender'] }),
+      listGenres: jest.fn().mockResolvedValue({ genres: ['fado'], covers: {} }),
+      listMoods: jest.fn().mockResolvedValue({ moods: ['tender'], covers: {} }),
       listFormats: jest
         .fn()
         .mockResolvedValue({ formats: ['music', 'podcast'] }),
@@ -60,6 +60,7 @@ describe('StudioListeningController', () => {
   it('serves the moods the viewer can hear', async () => {
     await expect(controller.listMoods(VIEWER)).resolves.toEqual({
       moods: ['tender'],
+      covers: {},
     });
     expect(catalog.listMoods).toHaveBeenCalledWith('viewer-1');
   });
@@ -67,6 +68,7 @@ describe('StudioListeningController', () => {
   it('serves the genres the viewer can hear', async () => {
     await expect(controller.listGenres(VIEWER)).resolves.toEqual({
       genres: ['fado'],
+      covers: {},
     });
   });
 

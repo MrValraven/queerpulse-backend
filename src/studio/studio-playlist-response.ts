@@ -65,6 +65,25 @@ export interface StudioPlaylistEditorCandidateList {
   items: StudioPlaylistEditorCandidate[];
 }
 
+/** Why a member cannot be added as an editor, in the order the checks run:
+ *  the first that fails is the reason. `persona_credit_lapsed` refuses the
+ *  whole request, so every requested member carries it. */
+export type StudioPlaylistEditorIneligibleReason =
+  | 'not_found'
+  | 'is_owner'
+  | 'blocked'
+  | 'no_studio_access'
+  | 'not_connected'
+  | 'not_co_owner'
+  | 'persona_credit_lapsed';
+
+/** One entry of `ineligibleMembers` on a `studio_playlist_editor_ineligible`
+ *  refusal. */
+export interface StudioPlaylistIneligibleMember {
+  memberSlug: string;
+  reason: StudioPlaylistEditorIneligibleReason;
+}
+
 export interface StudioPlaylistInvite {
   invitedBy: StudioPlaylistPerson;
   invitedAt: string;

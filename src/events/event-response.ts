@@ -631,6 +631,13 @@ export interface AttendeeView {
   pronouns?: string | null;
   /** The attendee's answer to the host's own question. Organisers only. */
   customAnswer?: string | null;
+  /**
+   * The member whose invite brought this attendee in, or null when nobody
+   * did. ORGANISERS ONLY: who invited whom is a social link the attendee
+   * never chose to publish, so `EventsService.attendees` sets this key for
+   * the host and co-hosts alone and leaves it off every other reader's row.
+   */
+  invitedBy?: EventOrganizerView | null;
 }
 
 /**

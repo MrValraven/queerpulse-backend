@@ -16,7 +16,10 @@ import {
 } from './event-response';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
-import { EventInvite } from './entities/event-invite.entity';
+import {
+  ADMITTING_INVITE_STATUSES,
+  EventInvite,
+} from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event } from './entities/event.entity';
 
@@ -185,7 +188,9 @@ export class EventAnnouncementsService {
           ]),
         },
       }),
-      this.invites.find({ where: { eventId } }),
+      this.invites.find({
+        where: { eventId, status: In(ADMITTING_INVITE_STATUSES) },
+      }),
     ]);
     return [
       ...new Set([
@@ -204,7 +209,13 @@ export class EventAnnouncementsService {
       },
     });
     if (hasLiveRsvp) return true;
-    return this.invites.exists({ where: { eventId, inviteeId: userId } });
+    return this.invites.exists({
+      where: {
+        eventId,
+        inviteeId: userId,
+        status: In(ADMITTING_INVITE_STATUSES),
+      },
+    });
   }
 
   private async isOrganizer(event: Event, userId: string): Promise<boolean> {

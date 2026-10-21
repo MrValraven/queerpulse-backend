@@ -115,6 +115,12 @@ export type RsvpCutoff = (typeof RSVP_CUTOFF_VALUES)[number];
 export const COST_KIND_VALUES = ['free', 'pay-what-you-can', 'fixed'] as const;
 export type CostKind = (typeof COST_KIND_VALUES)[number];
 
+/** Most guests one RSVP can bring. Counts the inviter's guest_count plus their
+ *  open member invites. Mirrors queerpulse/src/features/gatherings/rsvpGuestCap.ts. */
+export const MAX_RSVP_GUESTS = 3;
+export const RSVP_GUEST_CAP_MESSAGE =
+  'You can bring up to 3 people on one RSVP';
+
 export const MAX_HOUSE_RULES_LENGTH = 160;
 export const MAX_CUSTOM_RSVP_QUESTION_LENGTH = 120;
 export const MAX_RSVP_PRONOUNS_LENGTH = 60;

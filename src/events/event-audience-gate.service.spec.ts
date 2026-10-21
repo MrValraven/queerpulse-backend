@@ -1,5 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
-import { FindOperator } from 'typeorm';
+import { FindOperator, In } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { RosterRole } from '../communities/entities/community-member.entity';
 import { EventAudienceGateService } from './event-audience-gate.service';
@@ -205,6 +205,21 @@ describe('EventAudienceGateService', () => {
           service.assertViewable(event, VIEWER_ID, false),
         ).rejects.toBeInstanceOf(NotFoundException);
       });
+
+      it('invite_only admits only pending or accepted invites', async () => {
+        const { service, invites } = build();
+        invites.exists.mockResolvedValue(true);
+
+        await service.assertViewable(event, VIEWER_ID, false);
+
+        expect(invites.exists).toHaveBeenCalledWith({
+          where: {
+            eventId: EVENT_ID,
+            inviteeId: VIEWER_ID,
+            status: In(['pending', 'accepted']),
+          },
+        });
+      });
     });
 
     describe('network', () => {
@@ -305,6 +320,25 @@ describe('EventAudienceGateService', () => {
 
       const result = await service.filterViewable([event], VIEWER_ID);
       expect(result).toEqual([event]);
+    });
+
+    it('invite_only admits only pending or accepted invites', async () => {
+      const { service, invites } = build();
+      const event = baseEvent({
+        id: 'invite-only-event',
+        visibility: EventVisibility.InviteOnly,
+      });
+
+      await service.filterViewable([event], VIEWER_ID);
+
+      expect(invites.find).toHaveBeenCalledWith({
+        where: {
+          inviteeId: VIEWER_ID,
+          eventId: In(['invite-only-event']),
+          status: In(['pending', 'accepted']),
+        },
+        select: { eventId: true },
+      });
     });
 
     it("case 2: a 2nd-degree (mutual-only) member's bookmarked extended_network event appears", async () => {
@@ -517,6 +551,24 @@ describe('EventAudienceGateService', () => {
       );
       expect(invites.find).toHaveBeenCalledTimes(1);
       expect(rsvps.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('invite_only admits only pending or accepted invites', async () => {
+      const { service, invites } = build();
+
+      await service.audienceAmong(
+        baseEvent({ visibility: EventVisibility.InviteOnly }),
+        CANDIDATES,
+      );
+
+      expect(invites.find).toHaveBeenCalledWith({
+        where: {
+          eventId: EVENT_ID,
+          inviteeId: In(['cohost-1', 'member-a', 'member-b']),
+          status: In(['pending', 'accepted']),
+        },
+        select: { inviteeId: true },
+      });
     });
 
     it('admits the host connections and mutuals of an extended-network gathering', async () => {

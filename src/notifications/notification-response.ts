@@ -124,6 +124,10 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // organizer's bell. Each emit site passes the same id as `create`'s
   // `actorId` argument, so block and mute apply either way.
   [NotificationType.EventLineupInvite]: 'actorId',
+  // The inviter on a request to the organisers, and the invitee on an accepted
+  // reply. The declined reply names no one.
+  [NotificationType.EventInviteRequest]: 'actorId',
+  [NotificationType.EventInviteAccepted]: 'actorId',
   [NotificationType.EventLineupAccepted]: 'actorId',
   [NotificationType.EventLineupDeclined]: 'actorId',
   // Guest communities. The organiser who invited the community, resolved for
@@ -362,6 +366,11 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // the client offers a closed set of labels while the server accepts any
     // short label. The invite deep link uses
     // `inviteId` (the lineup row id) from COMMON_PAYLOAD_KEYS.
+    // Member-sent event invites: the event title for the copy. `actorId` stays
+    // off the wire; the actor resolves separately.
+    [NotificationType.EventInviteRequest]: ['eventTitle'],
+    [NotificationType.EventInviteRequestDeclined]: ['eventTitle'],
+    [NotificationType.EventInviteAccepted]: ['eventTitle'],
     [NotificationType.EventLineupInvite]: ['role'],
     [NotificationType.EventLineupAccepted]: ['role'],
     [NotificationType.EventLineupDeclined]: ['role'],

@@ -1,14 +1,29 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { ConnectionsService } from '../connections/connections.service';
 import { Profile } from '../users/entities/profile.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventCapacityAlertsService } from './event-capacity-alerts.service';
+import {
+  EventInvite,
+  EventInviteSource,
+  EventInviteStatus,
+} from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus, EventVisibility } from './entities/event.entity';
+import { EVENT_INVITE_ACCEPTED } from './event.events';
+import {
+  RSVP_GUEST_CAP_MESSAGE,
+  RSVPS_CLOSED_MESSAGE,
+} from './gathering-extras';
 import { RsvpService } from './rsvp.service';
 
 describe('RsvpService', () => {
@@ -56,10 +71,43 @@ describe('RsvpService', () => {
   // under the `pessimistic_write` lock (ENG-431): see
   // `raiseGuestCountAndSave`.
   let eventRepo: { findOne: jest.Mock };
+  // `removeAttendee` resolves the target member's slug to a user id here.
+  let profileRepo: { findOne: jest.Mock };
+  // The invite writes (auto-accept on RSVP, withdraw on cancel or removal)
+  // run as `manager.createQueryBuilder().update(EventInvite)...execute()`.
+  // A builder of their own keeps them apart from the RSVP probes above.
+  let managerQueryBuilder: {
+    update: jest.Mock;
+    set: jest.Mock;
+    where: jest.Mock;
+    andWhere: jest.Mock;
+    returning: jest.Mock;
+    execute: jest.Mock;
+  };
+  // Spec decision 7: a `connections` accept reaches the inviter only while
+  // the two are still connected.
+  let connectionsService: { areConnected: jest.Mock };
+  let managerUpdate: jest.Mock;
+  // The guest cap's count of the inviter's open member invites.
+  let managerCount: jest.Mock;
+  let dataSourceTransaction: jest.Mock;
 
   beforeEach(async () => {
     managerFindOne = jest.fn();
     managerExists = jest.fn().mockResolvedValue(false);
+    profileRepo = { findOne: jest.fn().mockResolvedValue(null) };
+    const chainStep = (): jest.Mock => jest.fn(() => managerQueryBuilder);
+    managerQueryBuilder = {
+      update: chainStep(),
+      set: chainStep(),
+      where: chainStep(),
+      andWhere: chainStep(),
+      returning: chainStep(),
+      execute: jest.fn().mockResolvedValue({ affected: 0 }),
+    };
+    connectionsService = { areConnected: jest.fn().mockResolvedValue(true) };
+    managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
+    managerCount = jest.fn().mockResolvedValue(0);
     goingSeats = 0;
     maxWaitlistPosition = 0;
     rsvpQueryBuilder = {};
@@ -110,12 +158,16 @@ describe('RsvpService', () => {
       getRepository: () => rsvpRepo,
       findOne: managerFindOne,
       exists: managerExists,
+      createQueryBuilder: jest.fn(() => managerQueryBuilder),
+      update: managerUpdate,
+      count: managerCount,
     };
+    dataSourceTransaction = jest.fn(
+      (runInTransaction: (entityManager: unknown) => unknown) =>
+        runInTransaction(manager),
+    );
     const dataSource = {
-      transaction: jest.fn(
-        (runInTransaction: (entityManager: unknown) => unknown) =>
-          runInTransaction(manager),
-      ),
+      transaction: dataSourceTransaction,
       // `updateRsvpDetails` takes no lock, so its organiser lookup reads
       // through the plain data-source manager. The same stub answers it, so
       // `managerExists` drives the co-host answer on both paths.
@@ -129,12 +181,10 @@ describe('RsvpService', () => {
         { provide: EventAudienceGateService, useValue: audienceGate },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: EventCapacityAlertsService, useValue: capacityAlerts },
+        { provide: ConnectionsService, useValue: connectionsService },
         // `removeAttendee`/`promoteAttendee`/`updateRsvpDetails` (P1-9/MSG-5)
-        // read these two directly (not through `dataSource.transaction`'s
-        // manager) — unused by the tests below, which only exercise
-        // `rsvp`/`cancelRsvp`/`reconcileWaitlist`, but required for the
-        // module to compile/resolve.
-        { provide: getRepositoryToken(Profile), useValue: {} },
+        // read these directly, outside `dataSource.transaction`'s manager.
+        { provide: getRepositoryToken(Profile), useValue: profileRepo },
         { provide: getRepositoryToken(Event), useValue: eventRepo },
         { provide: getRepositoryToken(EventRsvp), useValue: rsvpRepo },
       ],
@@ -788,5 +838,374 @@ describe('RsvpService', () => {
       'host',
       true,
     );
+  });
+
+  // Member invites to an event. An invitee who RSVPs from the event page
+  // answers their pending invite, accepting from an invite writes the RSVP
+  // and its details together, a member who leaves takes their open invites
+  // with them, and the guest cap counts open invites on a raise.
+  describe('member invites', () => {
+    const HOUR_IN_MILLISECONDS = 60 * 60 * 1000;
+    const openEvent = (overrides: Record<string, unknown> = {}) => ({
+      id: 'e1',
+      slug: 'e',
+      hostId: 'host-1',
+      title: 'Picnic',
+      visibility: EventVisibility.InviteOnly,
+      status: EventStatus.Published,
+      capacity: null as number | null,
+      allowWaitlist: true,
+      startAt: new Date(Date.now() + 72 * HOUR_IN_MILLISECONDS),
+      endAt: null,
+      rsvpCutoff: 'day-before' as const,
+      ...overrides,
+    });
+    const invite = (status: EventInviteStatus) => ({
+      id: 'i1',
+      eventId: 'e1',
+      inviterId: 'u2',
+      inviteeId: 'u1',
+      status,
+      source: EventInviteSource.Member,
+    });
+    // One `managerFindOne` answers both the locked event read and the
+    // invite re-read inside `acceptInviteRsvp`, keyed on the entity asked for.
+    const answerReads = (
+      event: ReturnType<typeof openEvent>,
+      inviteRow: ReturnType<typeof invite> | null,
+    ) => {
+      managerFindOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === Event ? event : entity === EventInvite ? inviteRow : null,
+        ),
+      );
+    };
+    const goingRsvp = (userId: string, guestCount: number) => ({
+      id: 'r1',
+      eventId: 'e1',
+      userId,
+      status: RsvpStatus.Going,
+      guestCount,
+      waitlistPosition: null,
+      removedByHostAt: null,
+      checkedInAt: null,
+      accessNeeds: null,
+      dietaryNeeds: null,
+      visibility: null,
+      pronouns: null,
+      customAnswer: null,
+    });
+
+    const expectOpenMemberInvitesWithdrawn = (inviterId: string) => {
+      expect(managerQueryBuilder.update).toHaveBeenCalledWith(EventInvite);
+      expect(managerQueryBuilder.set).toHaveBeenCalledWith({
+        status: 'withdrawn',
+      });
+      expect(managerQueryBuilder.where).toHaveBeenCalledWith(
+        'event_id = :eventId',
+        { eventId: 'e1' },
+      );
+      expect(managerQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'inviter_id = :inviterId',
+        { inviterId },
+      );
+      expect(managerQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'source = :member',
+        { member: 'member' },
+      );
+      expect(managerQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'status IN (:...openStatuses)',
+        { openStatuses: ['pending', 'awaiting_host'] },
+      );
+      expect(managerQueryBuilder.execute).toHaveBeenCalled();
+      expect(dataSourceTransaction).toHaveBeenCalledTimes(1);
+      // Written after the RSVP row, inside the same transaction. A missing
+      // save defaults to infinity, so the comparison fails when it is absent.
+      const [withdrawOrder = 0] =
+        managerQueryBuilder.execute.mock.invocationCallOrder;
+      const [saveOrder = Number.POSITIVE_INFINITY] =
+        rsvpRepo.save.mock.invocationCallOrder;
+      expect(withdrawOrder).toBeGreaterThan(saveOrder);
+    };
+
+    it("rsvp marks the caller's pending invite to this event accepted", async () => {
+      answerReads(openEvent(), null);
+      const result = await service.rsvp('e', 'u1', 'going');
+      expect(result.status).toBe(RsvpStatus.Going);
+      expect(managerQueryBuilder.update).toHaveBeenCalledWith(EventInvite);
+      expect(managerQueryBuilder.set).toHaveBeenCalledWith({
+        status: 'accepted',
+      });
+      expect(managerQueryBuilder.where).toHaveBeenCalledWith(
+        'event_id = :eventId',
+        { eventId: 'e1' },
+      );
+      expect(managerQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'invitee_id = :inviteeId',
+        { inviteeId: 'u1' },
+      );
+      expect(managerQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'status = :pending',
+        { pending: 'pending' },
+      );
+      expect(managerQueryBuilder.execute).toHaveBeenCalled();
+    });
+
+    it('acceptInviteRsvp writes the details in the same transaction as the RSVP', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Accepted));
+      const result = await service.acceptInviteRsvp('e', 'u1', 'i1', {
+        visibility: 'justMe',
+        accessNeeds: 'step-free',
+      });
+      expect(dataSourceTransaction).toHaveBeenCalledTimes(1);
+      expect(managerUpdate).toHaveBeenCalledWith(
+        EventRsvp,
+        { eventId: 'e1', userId: 'u1' },
+        { visibility: 'justMe', accessNeeds: 'step-free' },
+      );
+      expect(result).toEqual({ status: 'going', waitlistPosition: null });
+    });
+
+    it('acceptInviteRsvp throws Conflict when the invite is no longer pending', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Withdrawn));
+      await expect(
+        service.acceptInviteRsvp('e', 'u1', 'i1', { visibility: 'everyone' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(managerUpdate).not.toHaveBeenCalledWith(
+        EventRsvp,
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('acceptInviteRsvp waitlists on a full event', async () => {
+      answerReads(
+        openEvent({ capacity: 2 }),
+        invite(EventInviteStatus.Accepted),
+      );
+      goingSeats = 2;
+      const result = await service.acceptInviteRsvp('e', 'u1', 'i1', {
+        visibility: 'everyone',
+      });
+      expect(result.status).toBe('waitlisted');
+    });
+
+    it('acceptInviteRsvp refuses a full event without a waitlist', async () => {
+      answerReads(
+        openEvent({ capacity: 2, allowWaitlist: false }),
+        invite(EventInviteStatus.Accepted),
+      );
+      goingSeats = 2;
+      const attempt = service.acceptInviteRsvp('e', 'u1', 'i1', {
+        visibility: 'everyone',
+      });
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow('This event is full');
+    });
+
+    it('acceptInviteRsvp refuses after the cutoff', async () => {
+      answerReads(
+        openEvent({ startAt: new Date(Date.now() + 2 * HOUR_IN_MILLISECONDS) }),
+        invite(EventInviteStatus.Accepted),
+      );
+      await expect(
+        service.acceptInviteRsvp('e', 'u1', 'i1', { visibility: 'everyone' }),
+      ).rejects.toThrow(RSVPS_CLOSED_MESSAGE);
+    });
+
+    // The invite auto-accept's RETURNING rows: the invite a direct RSVP or an
+    // accept just flipped, as Postgres names the columns.
+    const acceptedInviteRows = (source: EventInviteSource) => {
+      managerQueryBuilder.execute.mockResolvedValueOnce({
+        affected: 1,
+        raw: [{ id: 'i1', inviter_id: 'u2', source }],
+      });
+    };
+    const inviteAcceptedPayload = {
+      eventId: 'e1',
+      eventSlug: 'e',
+      eventTitle: 'Picnic',
+      inviteId: 'i1',
+      inviterId: 'u2',
+      inviteeId: 'u1',
+    };
+
+    it('acceptInviteRsvp tells the member inviter when visibility is everyone', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Accepted));
+      acceptedInviteRows(EventInviteSource.Member);
+      await service.acceptInviteRsvp('e', 'u1', 'i1', {
+        visibility: 'everyone',
+      });
+      expect(emitter.emit).toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        inviteAcceptedPayload,
+      );
+      expect(connectionsService.areConnected).not.toHaveBeenCalled();
+    });
+
+    it('acceptInviteRsvp tells a still-connected inviter under connections visibility', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Accepted));
+      acceptedInviteRows(EventInviteSource.Member);
+      connectionsService.areConnected.mockResolvedValue(true);
+      await service.acceptInviteRsvp('e', 'u1', 'i1', {
+        visibility: 'connections',
+      });
+      expect(connectionsService.areConnected).toHaveBeenCalledWith('u2', 'u1');
+      expect(emitter.emit).toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        inviteAcceptedPayload,
+      );
+    });
+
+    it('acceptInviteRsvp tells a disconnected inviter nothing under connections visibility', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Accepted));
+      acceptedInviteRows(EventInviteSource.Member);
+      connectionsService.areConnected.mockResolvedValue(false);
+      await service.acceptInviteRsvp('e', 'u1', 'i1', {
+        visibility: 'connections',
+      });
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        expect.anything(),
+      );
+    });
+
+    it('acceptInviteRsvp tells the inviter nothing under justMe visibility', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Accepted));
+      acceptedInviteRows(EventInviteSource.Member);
+      await service.acceptInviteRsvp('e', 'u1', 'i1', { visibility: 'justMe' });
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        expect.anything(),
+      );
+    });
+
+    it('acceptInviteRsvp sends no inviter notice for a host invite', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Accepted));
+      acceptedInviteRows(EventInviteSource.Host);
+      await service.acceptInviteRsvp('e', 'u1', 'i1', {
+        visibility: 'everyone',
+      });
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        expect.anything(),
+      );
+    });
+
+    it('acceptInviteRsvp announces nothing when the accept rolls back', async () => {
+      answerReads(openEvent(), invite(EventInviteStatus.Withdrawn));
+      acceptedInviteRows(EventInviteSource.Member);
+      await expect(
+        service.acceptInviteRsvp('e', 'u1', 'i1', { visibility: 'everyone' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        expect.anything(),
+      );
+    });
+
+    it('a direct first RSVP that answers a member invite tells the inviter (NULL visibility reads as everyone)', async () => {
+      answerReads(openEvent(), null);
+      acceptedInviteRows(EventInviteSource.Member);
+      await service.rsvp('e', 'u1', 'going');
+      expect(emitter.emit).toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        inviteAcceptedPayload,
+      );
+    });
+
+    it('a direct RSVP keeps the row visibility: justMe tells the inviter nothing', async () => {
+      answerReads(openEvent(), null);
+      rsvpRepo.findOne.mockResolvedValue({
+        ...goingRsvp('u1', 0),
+        status: RsvpStatus.Cancelled,
+        visibility: 'justMe',
+      });
+      acceptedInviteRows(EventInviteSource.Member);
+      await service.rsvp('e', 'u1', 'going');
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        expect.anything(),
+      );
+    });
+
+    it('a direct RSVP under connections visibility tells a disconnected inviter nothing', async () => {
+      answerReads(openEvent(), null);
+      rsvpRepo.findOne.mockResolvedValue({
+        ...goingRsvp('u1', 0),
+        status: RsvpStatus.Cancelled,
+        visibility: 'connections',
+      });
+      acceptedInviteRows(EventInviteSource.Member);
+      connectionsService.areConnected.mockResolvedValue(false);
+      await service.rsvp('e', 'u1', 'maybe');
+      expect(connectionsService.areConnected).toHaveBeenCalledWith('u2', 'u1');
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        expect.anything(),
+      );
+    });
+
+    it('a direct RSVP that answers a host invite tells nobody', async () => {
+      answerReads(openEvent(), null);
+      acceptedInviteRows(EventInviteSource.Host);
+      await service.rsvp('e', 'u1', 'going');
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        EVENT_INVITE_ACCEPTED,
+        expect.anything(),
+      );
+    });
+
+    it("cancelRsvp withdraws the canceller's open member invites", async () => {
+      answerReads(openEvent(), null);
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp('u1', 0));
+      await service.cancelRsvp('e', 'u1');
+      expectOpenMemberInvitesWithdrawn('u1');
+    });
+
+    it("removeAttendee withdraws the removed member's open member invites", async () => {
+      answerReads(openEvent(), null);
+      profileRepo.findOne.mockResolvedValue({ slug: 'sam', userId: 'u2' });
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp('u2', 0));
+      await service.removeAttendee('e', 'host-1', 'sam');
+      expectOpenMemberInvitesWithdrawn('u2');
+    });
+
+    it('updateRsvpDetails refuses a raise past the cap counting open invites', async () => {
+      eventRepo.findOne.mockResolvedValue(openEvent());
+      answerReads(openEvent(), null);
+      rsvpRepo.findOne.mockImplementation(() =>
+        Promise.resolve(goingRsvp('u1', 1)),
+      );
+      managerCount.mockResolvedValue(2);
+      const attempt = service.updateRsvpDetails('e', 'u1', { guestCount: 2 });
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow(RSVP_GUEST_CAP_MESSAGE);
+      expect(managerCount).toHaveBeenCalledWith(EventInvite, {
+        where: expect.objectContaining({
+          eventId: 'e1',
+          inviterId: 'u1',
+          source: EventInviteSource.Member,
+        }) as Record<string, unknown>,
+      });
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('updateRsvpDetails keeps a grandfathered count', async () => {
+      eventRepo.findOne.mockResolvedValue(openEvent());
+      answerReads(openEvent(), null);
+      rsvpRepo.findOne.mockImplementation(() =>
+        Promise.resolve(goingRsvp('u1', 5)),
+      );
+      await expect(
+        service.updateRsvpDetails('e', 'u1', { guestCount: 5 }),
+      ).resolves.toEqual(expect.objectContaining({ guestCount: 5 }));
+      await expect(
+        service.updateRsvpDetails('e', 'u1', { guestCount: 4 }),
+      ).resolves.toEqual(expect.objectContaining({ guestCount: 4 }));
+      await expect(
+        service.updateRsvpDetails('e', 'u1', { guestCount: 6 }),
+      ).rejects.toThrow(RSVP_GUEST_CAP_MESSAGE);
+    });
   });
 });

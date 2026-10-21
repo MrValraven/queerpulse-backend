@@ -302,15 +302,20 @@ export interface StudioSearchResult {
 }
 
 /** `GET /studio/genres`: genres with at least one release the caller can
- *  hear, in `STUDIO_GENRES` order. No counts. */
+ *  hear, in `STUDIO_GENRES` order. No counts. `covers` maps a listed genre
+ *  to the card `coverUrl` of its newest such release with a cover; a genre
+ *  with no cover is absent, so the object may be empty. */
 export interface StudioGenres {
   genres: StudioGenre[];
+  covers: Record<string, string>;
 }
 
 /** `GET /studio/moods`: moods with at least one release the caller can
- *  hear, in `STUDIO_MOODS` order. No counts. */
+ *  hear, in `STUDIO_MOODS` order. No counts. `covers` reads as on
+ *  `StudioGenres`, keyed by mood. */
 export interface StudioMoods {
   moods: StudioMood[];
+  covers: Record<string, string>;
 }
 
 /** `GET /studio/formats`: formats with at least one release the caller can

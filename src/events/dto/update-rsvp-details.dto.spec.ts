@@ -44,3 +44,20 @@ describe('UpdateRsvpDetailsDto question answers', () => {
     );
   });
 });
+
+// `@Max(10)` is the absolute bound. The guest cap of 3 lives in
+// `RsvpService.raiseGuestCountAndSave`, so a grandfathered count above it
+// still passes validation when a modal resends it unchanged.
+describe('UpdateRsvpDetailsDto guest count bound', () => {
+  it('rejects guestCount 11', async () => {
+    const dto = plainToInstance(UpdateRsvpDetailsDto, { guestCount: 11 });
+    const errors = await validate(dto);
+    expect(errors.some((error) => error.property === 'guestCount')).toBe(true);
+  });
+
+  it('accepts guestCount 5', async () => {
+    const dto = plainToInstance(UpdateRsvpDetailsDto, { guestCount: 5 });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+  });
+});

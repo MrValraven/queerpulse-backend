@@ -22,6 +22,10 @@ import {
  * optional so the modal can save a partial edit without clobbering the rest.
  */
 export class UpdateRsvpDetailsDto {
+  // The absolute bound only. The real guest cap is `MAX_RSVP_GUESTS` (3),
+  // enforced in `RsvpService.raiseGuestCountAndSave` on a raise alone: both
+  // RSVP modals resend an unchanged count, so a grandfathered count above 3
+  // has to pass validation here.
   @IsOptional()
   @IsInt()
   @Min(0)

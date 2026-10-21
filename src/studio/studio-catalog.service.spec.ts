@@ -342,18 +342,30 @@ describe('StudioCatalogService', () => {
     it('lists the genres of releases the viewer can hear, in the contract order', async () => {
       const queryBuilder = queryBuilderMock();
       queryBuilder.getRawMany.mockResolvedValue([
-        { genre: 'rock' },
-        { genre: 'fado' },
-        { genre: 'polka' },
+        { genre: 'rock', cover_key: null },
+        { genre: 'fado', cover_key: 'https://covers.example/fado.jpg' },
+        { genre: 'polka', cover_key: 'https://covers.example/polka.jpg' },
       ]);
       releases.createQueryBuilder.mockReturnValue(queryBuilder);
 
       const result = await service.listGenres(VIEWER_ID);
 
-      expect(result).toEqual({ genres: ['fado', 'rock'] });
+      expect(result).toEqual({
+        genres: ['fado', 'rock'],
+        covers: { fado: 'https://covers.example/fado.jpg' },
+      });
       expect(queryBuilder.select).toHaveBeenCalledWith(
-        'DISTINCT "release"."genre"',
+        'DISTINCT ON ("release"."genre") "release"."genre"',
         'genre',
+      );
+      expect(queryBuilder.addOrderBy).toHaveBeenCalledWith(
+        '"release"."cover_key" IS NULL',
+        'ASC',
+      );
+      expect(queryBuilder.addOrderBy).toHaveBeenCalledWith(
+        '"release"."published_at"',
+        'DESC',
+        'NULLS LAST',
       );
       expect(andWherePredicates(queryBuilder)).toContain(
         '"release"."genre" IS NOT NULL',
@@ -370,17 +382,20 @@ describe('StudioCatalogService', () => {
     it('lists the moods of releases the viewer can hear, in the contract order', async () => {
       const queryBuilder = queryBuilderMock();
       queryBuilder.getRawMany.mockResolvedValue([
-        { mood: 'tender' },
-        { mood: 'late-night' },
-        { mood: 'gloomy' },
+        { mood: 'tender', cover_key: 'https://covers.example/tender.jpg' },
+        { mood: 'late-night', cover_key: null },
+        { mood: 'gloomy', cover_key: null },
       ]);
       releases.createQueryBuilder.mockReturnValue(queryBuilder);
 
       const result = await service.listMoods(VIEWER_ID);
 
-      expect(result).toEqual({ moods: ['late-night', 'tender'] });
+      expect(result).toEqual({
+        moods: ['late-night', 'tender'],
+        covers: { tender: 'https://covers.example/tender.jpg' },
+      });
       expect(queryBuilder.select).toHaveBeenCalledWith(
-        'DISTINCT "release"."mood"',
+        'DISTINCT ON ("release"."mood") "release"."mood"',
         'mood',
       );
       expect(andWherePredicates(queryBuilder)).toContain(

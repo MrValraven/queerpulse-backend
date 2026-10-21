@@ -12,7 +12,10 @@ import {
   EventCommunity,
   EventCommunityStatus,
 } from './entities/event-community.entity';
-import { EventInvite } from './entities/event-invite.entity';
+import {
+  ADMITTING_INVITE_STATUSES,
+  EventInvite,
+} from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventVisibility } from './entities/event.entity';
 import { acceptedGuestExistsSql } from './event-community-hosting';
@@ -213,7 +216,11 @@ export class EventAudienceGateService {
     const [invitedRows, rsvpedRows] = await Promise.all([
       inviteOnlyEventIds.length
         ? this.invites.find({
-            where: { inviteeId: viewerId, eventId: In(inviteOnlyEventIds) },
+            where: {
+              inviteeId: viewerId,
+              eventId: In(inviteOnlyEventIds),
+              status: In(ADMITTING_INVITE_STATUSES),
+            },
             select: { eventId: true },
           })
         : Promise.resolve([]),
@@ -396,7 +403,11 @@ export class EventAudienceGateService {
       case EventVisibility.InviteOnly: {
         const [invitedRows, rsvpedRows] = await Promise.all([
           this.invites.find({
-            where: { eventId: event.id, inviteeId: In(candidateUserIds) },
+            where: {
+              eventId: event.id,
+              inviteeId: In(candidateUserIds),
+              status: In(ADMITTING_INVITE_STATUSES),
+            },
             select: { inviteeId: true },
           }),
           this.rsvps.find({
@@ -637,7 +648,11 @@ export class EventAudienceGateService {
       case EventVisibility.InviteOnly: {
         const [invited, rsvped] = await Promise.all([
           this.invites.exists({
-            where: { eventId: event.id, inviteeId: viewerId },
+            where: {
+              eventId: event.id,
+              inviteeId: viewerId,
+              status: In(ADMITTING_INVITE_STATUSES),
+            },
           }),
           this.rsvps.exists({
             where: {

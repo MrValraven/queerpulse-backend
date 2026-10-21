@@ -248,6 +248,13 @@ export enum NotificationType {
   // answered. See migration `AddEventCommunityNotificationTypes1831300100000`.
   EventCommunityInvite = 'event_community_invite',
   EventCommunityInviteResponse = 'event_community_invite_response',
+  // Member-sent event invites. `EventInviteRequest` reaches the organisers of
+  // an invite-only event, `EventInviteRequestDeclined` the inviter, and
+  // `EventInviteAccepted` the inviter when their invitee says yes. See
+  // migration `AddMemberEventInvites1837041000000`.
+  EventInviteRequest = 'event_invite_request',
+  EventInviteRequestDeclined = 'event_invite_request_declined',
+  EventInviteAccepted = 'event_invite_accepted',
   // Sent to a magazine writer applicant when an admin approves or declines
   // their application (SDD 2026-08-18 "magazine writer applications").
   // System-driven — no actor — payload carries `{ reviewNote }`. See

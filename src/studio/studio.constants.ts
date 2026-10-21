@@ -826,7 +826,8 @@ export function studioError(code: StudioErrorCode): HttpException {
 }
 
 /** `studioError` with extra body fields, for the refusals that name members
- *  (`studio_playlist_editor_ineligible` carries `memberSlugs`,
+ *  (`studio_playlist_editor_ineligible` carries `memberSlugs` and
+ *  `ineligibleMembers`, each member with the reason it cannot edit,
  *  `studio_playlist_credit_change_removes_editors` carries `editors`). The
  *  code, the status and the message always win over a detail of that name. */
 export function studioErrorWithDetails(

@@ -104,6 +104,7 @@ describe('NotificationsListener', () => {
   it('notifies an invitee on an event invite, carrying the invite id', async () => {
     await listener.onEventInvited({
       eventId: 'e1',
+      eventSlug: 'e1-slug',
       inviteId: 'i1',
       inviterId: 'host',
       inviteeId: 'u2',

@@ -28,6 +28,7 @@ import { CreateEventAnnouncementDto } from './dto/create-event-announcement.dto'
 import { CreateEventBanDto } from './dto/create-event-ban.dto';
 import { CreateEventDto } from './dto/create-event.dto';
 import { CreateLineupInviteDto } from './dto/create-lineup-invite.dto';
+import { CreateMemberInvitesDto } from './dto/create-member-invites.dto';
 import { InviteEventDto } from './dto/invite-event.dto';
 import { ListAttendeesQuery } from './dto/list-attendees.query';
 import { ListEventsQuery } from './dto/list-events.query';
@@ -46,6 +47,7 @@ import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventLineupService } from './event-lineup.service';
 import { EventsService } from './events.service';
+import { MemberEventInvitesService } from './member-event-invites.service';
 import { RsvpService } from './rsvp.service';
 import {
   ApiBadRequestResponse,
@@ -82,6 +84,9 @@ export class EventsController {
     private readonly eventLineupService: EventLineupService,
     // Creator drafts: a publish deletes the caller's draft for it.
     private readonly creatorDraftSlots: CreatorDraftSlotsService,
+    // Member invites (2026-10-21). Last, so the positional constructor in
+    // `creator-draft-publish-paths.spec.ts` keeps its earlier slots.
+    private readonly memberEventInvitesService: MemberEventInvitesService,
   ) {}
 
   @Get()
@@ -469,6 +474,75 @@ export class EventsController {
     return this.eventInvitesService.createInvites(slug, user.userId, dto.slugs);
   }
 
+  @Post(':slug/rsvp/invites')
+  @UseGuards(NotRestrictedGuard)
+  // Each invite lands in someone's bell, so a burst of them is rate-limited
+  // the same way lineup invites are.
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
+  @ApiOperation({
+    summary: 'Invite your connections to an event you RSVPed going or maybe.',
+  })
+  @ApiCreatedResponse({
+    description:
+      'The invites created, each with its inviter-facing status, plus the ' +
+      'slugs refused as `already_invited` or `not_invitable`.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'The event is not published or has ended, RSVPs have closed, or the ' +
+      'guest cap of 3 would be passed.',
+  })
+  @ApiForbiddenResponse({
+    description: 'You need a going or maybe RSVP to invite connections.',
+  })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  inviteConnections(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CreateMemberInvitesDto,
+  ) {
+    return this.memberEventInvitesService.createMemberInvites(
+      slug,
+      user.userId,
+      dto.slugs,
+    );
+  }
+
+  @Get(':slug/rsvp/invites')
+  @ApiOperation({
+    summary: 'List the connections you invited to an event.',
+  })
+  @ApiOkResponse({
+    description:
+      'Your member invites, newest first, each with a server-computed status.',
+  })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  listMyMemberInvites(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.memberEventInvitesService.listMyInvites(slug, user.userId);
+  }
+
+  @Get(':slug/invite-requests')
+  @ApiOperation({
+    summary:
+      'List member invites waiting for approval on an event you organize.',
+  })
+  @ApiOkResponse({
+    description: 'Requests awaiting a host, oldest first, naming the inviter.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  listInviteRequests(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.memberEventInvitesService.listRequests(slug, user.userId);
+  }
+
   @Post(':slug/cohost-invites')
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
@@ -786,7 +860,10 @@ export class EventsController {
 @Controller('event-invites')
 @UseGuards(ActiveMemberGuard)
 export class EventInvitesController {
-  constructor(private readonly eventInvitesService: EventInvitesService) {}
+  constructor(
+    private readonly eventInvitesService: EventInvitesService,
+    private readonly memberEventInvitesService: MemberEventInvitesService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List your pending event invites.' })
@@ -808,7 +885,61 @@ export class EventInvitesController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: RespondEventInviteDto,
   ) {
-    return this.eventInvitesService.respondInvite(id, user.userId, dto.action);
+    return this.eventInvitesService.respondInvite(
+      id,
+      user.userId,
+      dto.action,
+      dto.details,
+    );
+  }
+
+  @Post(':id/withdraw')
+  @ApiOperation({ summary: 'Withdraw a member invite you sent.' })
+  @ApiCreatedResponse({ description: 'The invite id and its new status.' })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  @ApiConflictResponse({ description: 'This invite is no longer open.' })
+  withdraw(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.memberEventInvitesService.withdraw(id, user.userId);
+  }
+
+  @Post(':id/approve')
+  @ApiOperation({
+    summary: 'Approve a member invite request on an event you organize.',
+  })
+  @ApiCreatedResponse({ description: 'The invite id and its new status.' })
+  @ApiBadRequestResponse({
+    description: 'Only a published event can send invites.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  @ApiConflictResponse({ description: 'This invite is no longer open.' })
+  approve(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.memberEventInvitesService.approve(id, user.userId);
+  }
+
+  @Post(':id/decline-request')
+  @ApiOperation({
+    summary: 'Decline a member invite request on an event you organize.',
+  })
+  @ApiCreatedResponse({ description: 'The invite id and its new status.' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  @ApiConflictResponse({ description: 'This invite is no longer open.' })
+  declineRequest(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.memberEventInvitesService.declineRequest(id, user.userId);
   }
 }
 

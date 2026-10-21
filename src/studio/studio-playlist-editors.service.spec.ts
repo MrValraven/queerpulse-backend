@@ -290,6 +290,11 @@ describe('StudioPlaylistEditorsService', () => {
         expect.objectContaining({
           code: 'studio_playlist_editor_ineligible',
           memberSlugs: ['stranger', 'ghost', 'owner'],
+          ineligibleMembers: [
+            { memberSlug: 'stranger', reason: 'not_connected' },
+            { memberSlug: 'ghost', reason: 'not_found' },
+            { memberSlug: 'owner', reason: 'is_owner' },
+          ],
         }),
       );
       expect(statementsMatching(UPSERT_EDITORS_SQL)).toEqual([]);
@@ -297,16 +302,51 @@ describe('StudioPlaylistEditorsService', () => {
     });
 
     it.each([
-      ['blocked either way', { is_blocked: true }],
-      ['without Studio access', { has_studio_access: false }],
-    ])('refuses a connection %s', async (_label, overrides) => {
+      ['blocked either way', { is_blocked: true }, 'blocked'],
+      [
+        'without Studio access',
+        { has_studio_access: false },
+        'no_studio_access',
+      ],
+      [
+        'both blocked and without Studio access, naming the block',
+        { is_blocked: true, has_studio_access: false },
+        'blocked',
+      ],
+    ])('refuses a connection %s', async (_label, overrides, reason) => {
       factsByUserId.set(FRIEND_ID, facts(FRIEND_ID, overrides));
       const refusal = await refusalOf(
         service.addEditors(OWNER_ID, PLAYLIST_ID, { memberSlugs: ['friend'] }),
       );
       expect(refusal.body).toEqual(
-        expect.objectContaining({ memberSlugs: ['friend'] }),
+        expect.objectContaining({
+          memberSlugs: ['friend'],
+          ineligibleMembers: [{ memberSlug: 'friend', reason }],
+        }),
       );
+    });
+
+    it('names a member with no Studio access as no_studio_access before the missing connection', async () => {
+      factsByUserId.set(
+        STRANGER_ID,
+        facts(STRANGER_ID, { is_connected: false, has_studio_access: false }),
+      );
+      const refusal = await refusalOf(
+        service.addEditors(OWNER_ID, PLAYLIST_ID, {
+          memberSlugs: ['stranger', 'friend'],
+        }),
+      );
+      expect(refusal.status).toBe(422);
+      expect(refusal.body).toEqual(
+        expect.objectContaining({
+          code: 'studio_playlist_editor_ineligible',
+          memberSlugs: ['stranger'],
+          ineligibleMembers: [
+            { memberSlug: 'stranger', reason: 'no_studio_access' },
+          ],
+        }),
+      );
+      expect(statementsMatching(UPSERT_EDITORS_SQL)).toEqual([]);
     });
 
     it('skips a member who is already invited or editing, with no second notification', async () => {
@@ -431,6 +471,10 @@ describe('StudioPlaylistEditorsService', () => {
         expect.objectContaining({
           code: 'studio_playlist_editor_ineligible',
           memberSlugs: ['co-owner', 'friend'],
+          ineligibleMembers: [
+            { memberSlug: 'co-owner', reason: 'persona_credit_lapsed' },
+            { memberSlug: 'friend', reason: 'persona_credit_lapsed' },
+          ],
         }),
       );
       expect(statementsMatching(LOCK_PICKED_CO_OWNER_ROWS_SQL)).toEqual([
@@ -476,7 +520,12 @@ describe('StudioPlaylistEditorsService', () => {
             }),
           )
         ).body,
-      ).toEqual(expect.objectContaining({ memberSlugs: ['friend'] }));
+      ).toEqual(
+        expect.objectContaining({
+          memberSlugs: ['friend'],
+          ineligibleMembers: [{ memberSlug: 'friend', reason: 'not_co_owner' }],
+        }),
+      );
     });
   });
 

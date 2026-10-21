@@ -6,6 +6,7 @@ export const EVENT_RSVPED = 'event.rsvped';
 
 export interface EventInvitedEvent {
   eventId: string;
+  eventSlug: string;
   inviteId: string;
   inviterId: string;
   inviteeId: string;
@@ -36,6 +37,40 @@ export interface EventRsvpedEvent {
   // ignores both.
   eventTitle: string;
   eventVisibility: EventVisibility;
+}
+
+export const EVENT_INVITE_REQUESTED = 'event.invite_requested';
+
+/** A member invited someone and the event is invite-only, so the organisers decide. */
+export interface EventInviteRequestedEvent {
+  eventId: string;
+  eventSlug: string;
+  eventTitle: string;
+  inviteId: string;
+  inviterId: string;
+  inviteeId: string;
+  organiserIds: string[];
+}
+
+export const EVENT_INVITE_REQUEST_DECLINED = 'event.invite_request_declined';
+
+export interface EventInviteRequestDeclinedEvent {
+  eventId: string;
+  eventSlug: string;
+  eventTitle: string;
+  inviteId: string;
+  inviterId: string;
+}
+
+export const EVENT_INVITE_ACCEPTED = 'event.invite_accepted';
+
+export interface EventInviteAcceptedEvent {
+  eventId: string;
+  eventSlug: string;
+  eventTitle: string;
+  inviteId: string;
+  inviterId: string;
+  inviteeId: string;
 }
 
 export const EVENT_COHOST_INVITED = 'event.cohost_invited';

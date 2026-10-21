@@ -69,6 +69,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { invitedByByInvitee } from './attendee-invited-by';
 import { restrictToAttendeesVisibleTo } from './attendee-roster-visibility';
 import {
   AttendeeArrivalFilter,
@@ -120,7 +121,12 @@ import {
   isPrivateCommunityWithheld,
   toCommunityHostingFields,
 } from './event-community-hosting';
-import { EventInvite, EventInviteStatus } from './entities/event-invite.entity';
+import {
+  ADMITTING_INVITE_STATUSES,
+  EventInvite,
+  EventInviteSource,
+  EventInviteStatus,
+} from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import {
   PREVIEW_STAND_IN_VIEWER_ID,
@@ -1464,7 +1470,9 @@ export class EventsService {
           ]),
         },
       }),
-      this.invites.find({ where: { eventId: event.id } }),
+      this.invites.find({
+        where: { eventId: event.id, status: In(ADMITTING_INVITE_STATUSES) },
+      }),
     ]);
     const recipientIds = [
       ...new Set([
@@ -2315,7 +2323,13 @@ export class EventsService {
 
     const mapAttendeeRows = async (rows: EventRsvp[]) => {
       if (!rows.length) return [];
-      const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
+      const rowUserIds = rows.map((r) => r.userId);
+      const [profiles, inviterByInviteeId] = await Promise.all([
+        this.profilesByUserIds(rowUserIds),
+        isOrganizer
+          ? this.loadInvitedByForPage(event.id, rowUserIds)
+          : Promise.resolve(null),
+      ]);
       return rows
         .filter((r) => profiles.has(r.userId)) // drop profile-less ghost rows
         .map((r) => {
@@ -2330,6 +2344,11 @@ export class EventsService {
           // Waitlist ordering is organizer-only; hide positions from regular viewers.
           if (!isOrganizer) {
             view.waitlistPosition = null;
+          }
+          // ORGANISERS ONLY: the key is set solely when the map was loaded,
+          // which happens for the host and co-hosts alone.
+          if (inviterByInviteeId) {
+            view.invitedBy = inviterByInviteeId.get(r.userId) ?? null;
           }
           return view;
         });
@@ -3371,6 +3390,31 @@ export class EventsService {
       .map((r) => toOrganizerView(profiles.get(r.userId)))
       .filter((view): view is NonNullable<typeof view> => view !== null);
     return { attendees, total };
+  }
+
+  /**
+   * The organiser's "Invited by" lookup for one attendee page: one invite
+   * query for the page's accepted member invites, then one profile query for
+   * their inviters. Called for organisers only, so no other reader triggers
+   * either query or learns who invited whom.
+   */
+  private async loadInvitedByForPage(
+    eventId: string,
+    rowUserIds: string[],
+  ): Promise<Map<string, EventOrganizerView>> {
+    const acceptedMemberInvites = await this.invites.find({
+      where: {
+        eventId,
+        inviteeId: In(rowUserIds),
+        source: EventInviteSource.Member,
+        status: EventInviteStatus.Accepted,
+      },
+    });
+    if (!acceptedMemberInvites.length) return new Map();
+    const inviterProfiles = await this.profilesByUserIds([
+      ...new Set(acceptedMemberInvites.map((invite) => invite.inviterId)),
+    ]);
+    return invitedByByInvitee(acceptedMemberInvites, inviterProfiles);
   }
 
   private async profilesByUserIds(

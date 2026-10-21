@@ -1,18 +1,23 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, EntityManager, MoreThan, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, MoreThan, Repository } from 'typeorm';
+import { ConnectionsService } from '../connections/connections.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import type { AcceptInviteDetailsDto } from './dto/accept-invite-details.dto';
 import type { UpdateRsvpDetailsDto } from './dto/update-rsvp-details.dto';
 import {
+  EVENT_INVITE_ACCEPTED,
   EVENT_RSVPED,
   EVENT_WAITLIST_PROMOTED,
+  EventInviteAcceptedEvent,
   EventRsvpedEvent,
   EventWaitlistPromotedEvent,
 } from './event.events';
@@ -21,16 +26,68 @@ import { RsvpDetailsView, toRsvpDetailsView } from './event-response';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBan } from './entities/event-ban.entity';
 import { EventCohost } from './entities/event-cohost.entity';
-import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
-import { Event, EventStatus } from './entities/event.entity';
+import {
+  EventInvite,
+  EventInviteSource,
+  EventInviteStatus,
+  OPEN_MEMBER_INVITE_STATUSES,
+} from './entities/event-invite.entity';
+import {
+  EventRsvp,
+  RsvpDetailsVisibility,
+  RsvpStatus,
+} from './entities/event-rsvp.entity';
+import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { hasEnded } from './event-timing';
-import { assertRsvpsOpen } from './gathering-extras';
+import {
+  assertRsvpsOpen,
+  MAX_RSVP_GUESTS,
+  RSVP_GUEST_CAP_MESSAGE,
+} from './gathering-extras';
+
+/** What an RSVP resolved to, as every RSVP route answers it. */
+export interface RsvpResult {
+  status: RsvpStatus;
+  waitlistPosition: number | null;
+}
+
+/** A member invite this RSVP just answered, and who sent it. */
+interface AcceptedMemberInvite {
+  inviteId: string;
+  inviterId: string;
+}
+
+/** One RSVP's result plus what its post-commit emits need, carried out of
+ *  the transaction so nothing is announced before it commits. */
+interface RsvpOutcome {
+  result: RsvpResult;
+  eventId: string;
+  promoted: string[];
+  notifyHost: boolean;
+  hostId: string | null;
+  eventSlug: string;
+  eventTitle: string;
+  eventVisibility: EventVisibility;
+  // The member invite this RSVP accepted. `keepInviterNoticeIfVisible`
+  // clears it inside the transaction when the inviter may not hear about it
+  // (spec decision 7); what is left is announced after commit.
+  acceptedMemberInvite: AcceptedMemberInvite | null;
+  // The caller's RSVP visibility before this RSVP, NULL for a first RSVP.
+  priorVisibility: RsvpDetailsVisibility | null;
+}
 
 // Raw row shape from the unlimited-capacity promotion UPDATE's RETURNING
 // clause — column names are the actual (snake_case) DB columns, not the
 // entity's camelCase.
 interface PromotedRsvpRow {
   user_id: string;
+}
+
+// Raw RETURNING row of the invite auto-accept, in snake_case column names.
+interface AcceptedInviteRow {
+  id: string;
+  inviter_id: string;
+  source: EventInviteSource;
 }
 
 /** One occurrence's cancel result, carried back out of the series transaction
@@ -80,187 +137,325 @@ export class RsvpService {
     // freed. Owns its own at-most-once claim and swallows its own failures, so
     // an alert can never fail somebody's RSVP.
     private readonly capacityAlerts: EventCapacityAlertsService,
+    // Spec decision 7: an inviter hears that their member invite was accepted
+    // under `connections` visibility only while the two are still connected.
+    private readonly connectionsService: ConnectionsService,
   ) {}
 
   async rsvp(
     slug: string,
     userId: string,
     status: 'going' | 'maybe',
-  ): Promise<{ status: RsvpStatus; waitlistPosition: number | null }> {
+  ): Promise<RsvpResult> {
     const outcome = await this.dataSource.transaction(async (manager) => {
-      const event = await manager.findOne(Event, {
-        where: { slug },
-        lock: { mode: 'pessimistic_write' },
+      const rsvpOutcome = await this.rsvpInManager(
+        manager,
+        slug,
+        userId,
+        status,
+      );
+      // A direct RSVP that answered a member invite keeps the visibility the
+      // row already had. A first RSVP has none yet, and NULL reads as
+      // everyone.
+      return this.keepInviterNoticeIfVisible(
+        rsvpOutcome,
+        userId,
+        rsvpOutcome.priorVisibility,
+      );
+    });
+    this.emitRsvpOutcome(outcome, userId);
+    return outcome.result;
+  }
+
+  /**
+   * An invitee accepting an invite from My Events or the event page: the RSVP
+   * and the details they filled in commit together or not at all, so a
+   * failed details write never leaves a bare RSVP behind.
+   *
+   * The RSVP runs first so the event lock is always taken before the invite
+   * is read, the same order every other write on this event uses. That RSVP
+   * flips the caller's pending invite to accepted; an invite that did not
+   * flip (withdrawn, declined, or for another event) was no longer open, and
+   * the whole transaction rolls back with a 409.
+   */
+  async acceptInviteRsvp(
+    slug: string,
+    userId: string,
+    inviteId: string,
+    details: AcceptInviteDetailsDto,
+  ): Promise<RsvpResult> {
+    const outcome = await this.dataSource.transaction(async (manager) => {
+      const rsvpOutcome = await this.rsvpInManager(
+        manager,
+        slug,
+        userId,
+        'going',
+      );
+      const invite = await manager.findOne(EventInvite, {
+        where: { id: inviteId, inviteeId: userId },
       });
-      if (!event) {
-        throw new NotFoundException('Event not found');
-      }
-      if (event.status !== EventStatus.Published) {
-        throw new BadRequestException('Event is not open for RSVPs');
-      }
-      // A gathering that has already happened takes no more RSVPs (PRD-183).
-      // Nothing checked the clock here, so the roster kept growing after the
-      // night: a member reading a past gathering's page could still press the
-      // button, the host's door list gained a name nobody saw, and the seat
-      // count for an event that is over went up. `hasEnded` reads `endAt` when
-      // the host set one and falls back to `startAt`, so a gathering with no
-      // stated end closes at its start time rather than staying open forever.
-      if (hasEnded(event)) {
-        throw new BadRequestException('This event has already happened');
-      }
-      const isOrganizer = await this.assertMayRsvp(manager, event, userId);
-      // The HOST (never a co-host, who RSVPs like anyone else) always holds
-      // a 'going' seat on their own gathering: `EventsService.create` gives
-      // them one. 'maybe' would hand that seat back, so it is refused, and
-      // 'going' below skips the capacity check and the waitlist entirely.
-      const isHost = event.hostId === userId;
-      if (isHost && status === 'maybe') {
-        throw new BadRequestException(RsvpService.HOST_ALWAYS_GOING_MESSAGE);
-      }
-
-      const rsvpRepo = manager.getRepository(EventRsvp);
-      const existing = await rsvpRepo.findOne({
-        where: { eventId: event.id, userId },
-      });
-
-      // The host's RSVP cutoff (create-gathering v2). Once it passes, nobody
-      // new joins the roster: no first RSVP, no revived cancelled one, and no
-      // step up to going from maybe or from the waitlist, both of which claim
-      // a seat the host has already stopped counting on. A member already
-      // holding a live RSVP can still step DOWN to maybe or re-press what they
-      // already hold, and cancelling runs through its own method. Organisers
-      // are exempt, like every other host action on their own gathering.
-      const holdsLiveRsvp = existing
-        ? existing.status !== RsvpStatus.Cancelled
-        : false;
-      const isStepUpToGoing =
-        status === 'going' &&
-        (existing?.status === RsvpStatus.Maybe ||
-          existing?.status === RsvpStatus.Waitlisted);
-      if (!isOrganizer && (!holdsLiveRsvp || isStepUpToGoing)) {
-        assertRsvpsOpen(event);
-      }
-
-      // Notify the host only on a member's *first* RSVP to this event (no row
-      // yet, or a previously cancelled one being revived) — never on a
-      // going↔maybe toggle of a live row, which would spam the host. A host
-      // RSVPing to their own event notifies no one.
-      // A NULL `hostId` is a gathering whose host erased their account
-      // (`SetNullContentAuthorFksOnUserErasure1794610000000`): there is
-      // nobody left to tell, so the notify path is skipped entirely.
-      const notifyHost =
-        event.hostId !== null &&
-        event.hostId !== userId &&
-        (!existing || existing.status === RsvpStatus.Cancelled);
-      const hostRsvp = {
-        notifyHost,
-        hostId: event.hostId,
-        eventSlug: event.slug,
-        // Carried through `outcome` so the post-commit EVENT_RSVPED emit can
-        // title + visibility-gate the profile activity row (see event.events.ts).
-        eventTitle: event.title,
-        eventVisibility: event.visibility,
-      };
-
-      if (status === 'maybe') {
-        // Stepping down from 'going' to 'maybe' frees a seat — pull the waitlist
-        // up just as a cancellation would.
-        const wasGoing = existing?.status === RsvpStatus.Going;
-        await this.persistRsvp(rsvpRepo, existing, event.id, userId, {
-          status: RsvpStatus.Maybe,
-          waitlistPosition: null,
-        });
-        const promoted = wasGoing
-          ? await this.promoteWaitlist(manager, event)
-          : [];
-        return {
-          result: { status: RsvpStatus.Maybe, waitlistPosition: null },
-          eventId: event.id,
-          promoted,
-          ...hostRsvp,
-        };
-      }
-
-      // 'going' — apply capacity → waitlist.
-      //
-      // SEATS, NOT ROWS (LOC-07). `guest_count` is the extra people an
-      // attendee said they are bringing, and it never counted against
-      // capacity: a 20-seat gathering where ten members each brought a
-      // plus-one reported ten free seats while thirty people arrived. The
-      // capacity check now measures the same number the response reports as
-      // `seatsTaken`: one seat per going member, plus their declared guests.
-      const seatsTaken = await this.goingSeatCount(rsvpRepo, event.id);
-      // An existing 'going' row for this user shouldn't count against
-      // capacity — neither their own seat nor the guests they already
-      // declared, which are about to be re-counted below.
-      const alreadyGoing = existing?.status === RsvpStatus.Going;
-      const mySeats = 1 + (existing?.guestCount ?? 0);
-      const effectiveSeats = alreadyGoing ? seatsTaken - mySeats : seatsTaken;
-
-      let resolved: RsvpStatus;
-      let waitlistPosition: number | null = null;
-
-      // The host is exempt: their seat is theirs by right of running the
-      // gathering, so they are seated even on a full roster (a host whose
-      // row was lost, or who reached here from an older gathering made before
-      // hosts were seated automatically) and are never waitlisted or turned
-      // away by the "Allow waitlist" toggle below.
       if (
-        !isHost &&
-        event.capacity !== null &&
-        effectiveSeats + mySeats > event.capacity
+        !invite ||
+        invite.status !== EventInviteStatus.Accepted ||
+        invite.eventId !== rsvpOutcome.eventId
       ) {
-        // Full. A re-RSVP by someone already waitlisted keeps their spot — never
-        // send them to the back of the line for pressing the button again.
-        if (existing?.status === RsvpStatus.Waitlisted) {
-          return {
-            result: {
-              status: RsvpStatus.Waitlisted,
-              waitlistPosition: existing.waitlistPosition,
-            },
-            eventId: event.id,
-            promoted: [] as string[],
-            // Already waitlisted — `notifyHost` is already false here (existing
-            // row), so re-pressing the button never re-notifies the host.
-            ...hostRsvp,
-          };
-        }
-        // The host turned off the manage-dashboard "Allow waitlist" toggle
-        // (`Event.allowWaitlist`) — a full event stays full rather than
-        // silently enqueueing someone the host doesn't want to run a
-        // waitlist for. Strictly `=== false` (not falsy): a row loaded before
-        // this column existed, or a test/mock fixture that never sets it,
-        // must keep the historical "always waitlist" behavior rather than
-        // silently start rejecting.
-        if (event.allowWaitlist === false) {
-          throw new BadRequestException('This event is full');
-        }
-        resolved = RsvpStatus.Waitlisted;
-        const maxPos = await rsvpRepo
-          .createQueryBuilder('r')
-          .select('MAX(r.waitlist_position)', 'max')
-          .where('r.event_id = :id AND r.status = :s', {
-            id: event.id,
-            s: RsvpStatus.Waitlisted,
-          })
-          .getRawOne<{ max: number | null }>();
-        waitlistPosition = (maxPos?.max ?? 0) + 1;
-      } else {
-        resolved = RsvpStatus.Going;
+        throw new ConflictException('This invite is no longer open');
       }
+      await manager.update(
+        EventRsvp,
+        { eventId: rsvpOutcome.eventId, userId },
+        this.rsvpDetailsPatch(details),
+      );
+      // The inviter hears about the accept by the visibility chosen on it.
+      return this.keepInviterNoticeIfVisible(
+        rsvpOutcome,
+        userId,
+        details.visibility,
+      );
+    });
+    this.emitRsvpOutcome(outcome, userId);
+    return outcome.result;
+  }
 
-      await this.persistRsvp(rsvpRepo, existing, event.id, userId, {
-        status: resolved,
-        waitlistPosition,
-      });
-      return {
-        result: { status: resolved, waitlistPosition },
-        eventId: event.id,
-        promoted: [] as string[],
-        ...hostRsvp,
-      };
+  /**
+   * Spec decision 7: the member who sent the invite hears it was accepted
+   * when the invitee lets them see it. `everyone` (or NULL, which reads as
+   * everyone) always tells them, `connections` tells them only while the two
+   * are still accepted connections, and `justMe` never does. Host invites
+   * carry no notice at all.
+   */
+  private async keepInviterNoticeIfVisible(
+    outcome: RsvpOutcome,
+    inviteeId: string,
+    visibility: RsvpDetailsVisibility | null,
+  ): Promise<RsvpOutcome> {
+    const accepted = outcome.acceptedMemberInvite;
+    if (accepted === null) {
+      return outcome;
+    }
+    const hidden = { ...outcome, acceptedMemberInvite: null };
+    if (visibility === 'justMe') {
+      return hidden;
+    }
+    if (visibility === 'connections') {
+      const isConnected = await this.connectionsService.areConnected(
+        accepted.inviterId,
+        inviteeId,
+      );
+      return isConnected ? outcome : hidden;
+    }
+    return outcome;
+  }
+
+  // The body of an RSVP, run on the caller's transaction so `rsvp` and
+  // `acceptInviteRsvp` share one set of rules. Emits nothing itself: the
+  // caller hands the outcome to `emitRsvpOutcome` once the transaction has
+  // committed.
+  private async rsvpInManager(
+    manager: EntityManager,
+    slug: string,
+    userId: string,
+    status: 'going' | 'maybe',
+  ): Promise<RsvpOutcome> {
+    const event = await manager.findOne(Event, {
+      where: { slug },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+    if (event.status !== EventStatus.Published) {
+      throw new BadRequestException('Event is not open for RSVPs');
+    }
+    // A gathering that has already happened takes no more RSVPs (PRD-183).
+    // Nothing checked the clock here, so the roster kept growing after the
+    // night: a member reading a past gathering's page could still press the
+    // button, the host's door list gained a name nobody saw, and the seat
+    // count for an event that is over went up. `hasEnded` reads `endAt` when
+    // the host set one and falls back to `startAt`, so a gathering with no
+    // stated end closes at its start time rather than staying open forever.
+    if (hasEnded(event)) {
+      throw new BadRequestException('This event has already happened');
+    }
+    const isOrganizer = await this.assertMayRsvp(manager, event, userId);
+    // The HOST (never a co-host, who RSVPs like anyone else) always holds
+    // a 'going' seat on their own gathering: `EventsService.create` gives
+    // them one. 'maybe' would hand that seat back, so it is refused, and
+    // 'going' below skips the capacity check and the waitlist entirely.
+    const isHost = event.hostId === userId;
+    if (isHost && status === 'maybe') {
+      throw new BadRequestException(RsvpService.HOST_ALWAYS_GOING_MESSAGE);
+    }
+
+    const rsvpRepo = manager.getRepository(EventRsvp);
+    const existing = await rsvpRepo.findOne({
+      where: { eventId: event.id, userId },
     });
 
+    // The host's RSVP cutoff (create-gathering v2). Once it passes, nobody
+    // new joins the roster: no first RSVP, no revived cancelled one, and no
+    // step up to going from maybe or from the waitlist, both of which claim
+    // a seat the host has already stopped counting on. A member already
+    // holding a live RSVP can still step DOWN to maybe or re-press what they
+    // already hold, and cancelling runs through its own method. Organisers
+    // are exempt, like every other host action on their own gathering.
+    const holdsLiveRsvp = existing
+      ? existing.status !== RsvpStatus.Cancelled
+      : false;
+    const isStepUpToGoing =
+      status === 'going' &&
+      (existing?.status === RsvpStatus.Maybe ||
+        existing?.status === RsvpStatus.Waitlisted);
+    if (!isOrganizer && (!holdsLiveRsvp || isStepUpToGoing)) {
+      assertRsvpsOpen(event);
+    }
+
+    // Notify the host only on a member's *first* RSVP to this event (no row
+    // yet, or a previously cancelled one being revived) — never on a
+    // going↔maybe toggle of a live row, which would spam the host. A host
+    // RSVPing to their own event notifies no one.
+    // A NULL `hostId` is a gathering whose host erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`): there is
+    // nobody left to tell, so the notify path is skipped entirely.
+    const notifyHost =
+      event.hostId !== null &&
+      event.hostId !== userId &&
+      (!existing || existing.status === RsvpStatus.Cancelled);
+    const hostRsvp = {
+      notifyHost,
+      hostId: event.hostId,
+      eventSlug: event.slug,
+      // Carried through `outcome` so the post-commit EVENT_RSVPED emit can
+      // title + visibility-gate the profile activity row (see event.events.ts).
+      eventTitle: event.title,
+      eventVisibility: event.visibility,
+      // Read before the write below, which never touches visibility.
+      priorVisibility: existing?.visibility ?? null,
+    };
+
+    if (status === 'maybe') {
+      // Stepping down from 'going' to 'maybe' frees a seat — pull the waitlist
+      // up just as a cancellation would.
+      const wasGoing = existing?.status === RsvpStatus.Going;
+      await this.persistRsvp(rsvpRepo, existing, event.id, userId, {
+        status: RsvpStatus.Maybe,
+        waitlistPosition: null,
+      });
+      const acceptedMemberInvite = await this.acceptPendingInvite(
+        manager,
+        event.id,
+        userId,
+      );
+      const promoted = wasGoing
+        ? await this.promoteWaitlist(manager, event)
+        : [];
+      return {
+        result: { status: RsvpStatus.Maybe, waitlistPosition: null },
+        eventId: event.id,
+        promoted,
+        ...hostRsvp,
+        acceptedMemberInvite,
+      };
+    }
+
+    // 'going' — apply capacity → waitlist.
+    //
+    // SEATS, NOT ROWS (LOC-07). `guest_count` is the extra people an
+    // attendee said they are bringing, and it never counted against
+    // capacity: a 20-seat gathering where ten members each brought a
+    // plus-one reported ten free seats while thirty people arrived. The
+    // capacity check now measures the same number the response reports as
+    // `seatsTaken`: one seat per going member, plus their declared guests.
+    const seatsTaken = await this.goingSeatCount(rsvpRepo, event.id);
+    // An existing 'going' row for this user shouldn't count against
+    // capacity — neither their own seat nor the guests they already
+    // declared, which are about to be re-counted below.
+    const alreadyGoing = existing?.status === RsvpStatus.Going;
+    const mySeats = 1 + (existing?.guestCount ?? 0);
+    const effectiveSeats = alreadyGoing ? seatsTaken - mySeats : seatsTaken;
+
+    let resolved: RsvpStatus;
+    let waitlistPosition: number | null = null;
+
+    // The host is exempt: their seat is theirs by right of running the
+    // gathering, so they are seated even on a full roster (a host whose
+    // row was lost, or who reached here from an older gathering made before
+    // hosts were seated automatically) and are never waitlisted or turned
+    // away by the "Allow waitlist" toggle below.
+    if (
+      !isHost &&
+      event.capacity !== null &&
+      effectiveSeats + mySeats > event.capacity
+    ) {
+      // Full. A re-RSVP by someone already waitlisted keeps their spot — never
+      // send them to the back of the line for pressing the button again.
+      if (existing?.status === RsvpStatus.Waitlisted) {
+        // Nothing is written for a re-press, but a pending invite still
+        // counts as answered, so accepting one from here stays possible.
+        const acceptedMemberInvite = await this.acceptPendingInvite(
+          manager,
+          event.id,
+          userId,
+        );
+        return {
+          result: {
+            status: RsvpStatus.Waitlisted,
+            waitlistPosition: existing.waitlistPosition,
+          },
+          eventId: event.id,
+          promoted: [] as string[],
+          // Already waitlisted — `notifyHost` is already false here (existing
+          // row), so re-pressing the button never re-notifies the host.
+          ...hostRsvp,
+          acceptedMemberInvite,
+        };
+      }
+      // The host turned off the manage-dashboard "Allow waitlist" toggle
+      // (`Event.allowWaitlist`) — a full event stays full rather than
+      // silently enqueueing someone the host doesn't want to run a
+      // waitlist for. Strictly `=== false` (not falsy): a row loaded before
+      // this column existed, or a test/mock fixture that never sets it,
+      // must keep the historical "always waitlist" behavior rather than
+      // silently start rejecting.
+      if (event.allowWaitlist === false) {
+        throw new BadRequestException('This event is full');
+      }
+      resolved = RsvpStatus.Waitlisted;
+      const maxPos = await rsvpRepo
+        .createQueryBuilder('r')
+        .select('MAX(r.waitlist_position)', 'max')
+        .where('r.event_id = :id AND r.status = :s', {
+          id: event.id,
+          s: RsvpStatus.Waitlisted,
+        })
+        .getRawOne<{ max: number | null }>();
+      waitlistPosition = (maxPos?.max ?? 0) + 1;
+    } else {
+      resolved = RsvpStatus.Going;
+    }
+
+    await this.persistRsvp(rsvpRepo, existing, event.id, userId, {
+      status: resolved,
+      waitlistPosition,
+    });
+    const acceptedMemberInvite = await this.acceptPendingInvite(
+      manager,
+      event.id,
+      userId,
+    );
+    return {
+      result: { status: resolved, waitlistPosition },
+      eventId: event.id,
+      promoted: [] as string[],
+      ...hostRsvp,
+      acceptedMemberInvite,
+    };
+  }
+
+  // The post-commit half of an RSVP: waitlist promotions, the "last few
+  // spots" check and the host's notice. Never called before the transaction
+  // that produced `outcome` has committed.
+  private emitRsvpOutcome(outcome: RsvpOutcome, userId: string): void {
     this.emitPromotions(outcome.eventId, outcome.eventSlug, outcome.promoted);
     // A seat was taken (going) or handed back (maybe), so the gathering may
     // have just crossed into its last few spots, or back out of them. After
@@ -280,7 +475,19 @@ export class RsvpService {
         eventVisibility: outcome.eventVisibility,
       } satisfies EventRsvpedEvent);
     }
-    return outcome.result;
+    // After commit: tell the member who sent the invite this RSVP answered.
+    // Set only when spec decision 7 lets them see it.
+    const accepted = outcome.acceptedMemberInvite;
+    if (accepted !== null) {
+      this.eventEmitter.emit(EVENT_INVITE_ACCEPTED, {
+        eventId: outcome.eventId,
+        eventSlug: outcome.eventSlug,
+        eventTitle: outcome.eventTitle,
+        inviteId: accepted.inviteId,
+        inviterId: accepted.inviterId,
+        inviteeId: userId,
+      } satisfies EventInviteAcceptedEvent);
+    }
   }
 
   /**
@@ -396,6 +603,9 @@ export class RsvpService {
     mine.removedByHostAt = null;
     mine.checkedInAt = null;
     await rsvpRepo.save(mine);
+    // Leaving takes the member's open invites with them. Invitees who already
+    // accepted keep their own RSVP.
+    await this.withdrawOpenMemberInvites(manager, event.id, userId);
 
     // A freed 'going' seat pulls the head(s) of the waitlist up.
     const promoted = wasGoing ? await this.promoteWaitlist(manager, event) : [];
@@ -478,6 +688,9 @@ export class RsvpService {
       target.removedByHostAt = new Date();
       target.checkedInAt = null;
       await rsvpRepo.save(target);
+      // A removed member can no longer bring anyone, so their open invites
+      // go with them, exactly as when they cancel themselves.
+      await this.withdrawOpenMemberInvites(manager, event.id, targetUserId);
 
       const promoted = wasGoing
         ? await this.promoteWaitlist(manager, event)
@@ -641,6 +854,24 @@ export class RsvpService {
       !(await this.isOrganizerOf(manager, event, userId))
     ) {
       assertRsvpsOpen(event);
+    }
+    // The guest cap counts the unnamed guests plus the member's open invites
+    // (pending, awaiting the host), so a raise and an invite created at the
+    // same moment cannot together pass it: both hold this event lock. Only a
+    // raise is checked, so a saved count above the cap from before it existed
+    // can be resent or lowered.
+    if (isGuestCountRaise && dto.guestCount !== undefined) {
+      const openInvites = await manager.count(EventInvite, {
+        where: {
+          eventId: event.id,
+          inviterId: userId,
+          source: EventInviteSource.Member,
+          status: In(OPEN_MEMBER_INVITE_STATUSES),
+        },
+      });
+      if (dto.guestCount + openInvites > MAX_RSVP_GUESTS) {
+        throw new BadRequestException(RSVP_GUEST_CAP_MESSAGE);
+      }
     }
     // Raising the guest count is a capacity change (LOC-07): every extra
     // guest occupies a seat, so an unchecked edit here would walk straight
@@ -946,6 +1177,54 @@ export class RsvpService {
         }),
       );
     }
+  }
+
+  // A direct RSVP answers any pending invite the caller holds for this event,
+  // so "Invited by" and the inviter's guest cap read the same as if they had
+  // pressed accept. Runs under the caller's event lock. Returns the invite it
+  // accepted when a member sent it, so the inviter can be told after commit.
+  private async acceptPendingInvite(
+    manager: EntityManager,
+    eventId: string,
+    inviteeId: string,
+  ): Promise<AcceptedMemberInvite | null> {
+    const result = await manager
+      .createQueryBuilder()
+      .update(EventInvite)
+      .set({ status: EventInviteStatus.Accepted })
+      .where('event_id = :eventId', { eventId })
+      .andWhere('invitee_id = :inviteeId', { inviteeId })
+      .andWhere('status = :pending', { pending: EventInviteStatus.Pending })
+      .returning('*')
+      .execute();
+    const rows = (result.raw as AcceptedInviteRow[] | undefined) ?? [];
+    const memberRow = rows.find(
+      (row) => row.source === EventInviteSource.Member,
+    );
+    return memberRow
+      ? { inviteId: memberRow.id, inviterId: memberRow.inviter_id }
+      : null;
+  }
+
+  // Withdraws every invite this member sent that is still open (pending, or
+  // awaiting the host). Accepted invites stay as they are. Runs on the
+  // caller's transaction, under its event lock.
+  private async withdrawOpenMemberInvites(
+    manager: EntityManager,
+    eventId: string,
+    inviterId: string,
+  ): Promise<void> {
+    await manager
+      .createQueryBuilder()
+      .update(EventInvite)
+      .set({ status: EventInviteStatus.Withdrawn })
+      .where('event_id = :eventId', { eventId })
+      .andWhere('inviter_id = :inviterId', { inviterId })
+      .andWhere('source = :member', { member: EventInviteSource.Member })
+      .andWhere('status IN (:...openStatuses)', {
+        openStatuses: [...OPEN_MEMBER_INVITE_STATUSES],
+      })
+      .execute();
   }
 
   private emitPromotions(

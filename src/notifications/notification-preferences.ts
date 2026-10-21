@@ -118,6 +118,13 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventLineupInvite]:
     NotificationPreferenceCategory.EventActivity,
+  // Member-sent event invites: the organiser request and the inviter's replies.
+  [NotificationType.EventInviteRequest]:
+    NotificationPreferenceCategory.EventActivity,
+  [NotificationType.EventInviteRequestDeclined]:
+    NotificationPreferenceCategory.EventActivity,
+  [NotificationType.EventInviteAccepted]:
+    NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventLineupAccepted]:
     NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventLineupDeclined]:

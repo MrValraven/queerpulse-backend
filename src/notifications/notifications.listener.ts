@@ -12,6 +12,9 @@ import {
   EVENT_COHOST_INVITED,
   EVENT_COMMUNITY_INVITE_RESPONDED,
   EVENT_COMMUNITY_INVITED,
+  EVENT_INVITE_ACCEPTED,
+  EVENT_INVITE_REQUEST_DECLINED,
+  EVENT_INVITE_REQUESTED,
   EVENT_INVITED,
   EVENT_LINEUP_ANSWERED,
   EVENT_LINEUP_INVITED,
@@ -20,6 +23,9 @@ import {
   EventCohostInvitedEvent,
   EventCommunityInviteRespondedEvent,
   EventCommunityInvitedEvent,
+  EventInviteAcceptedEvent,
+  EventInviteRequestDeclinedEvent,
+  EventInviteRequestedEvent,
   EventInvitedEvent,
   EventLineupAnsweredEvent,
   EventLineupInvitedEvent,
@@ -152,8 +158,67 @@ export class NotificationsListener {
     await this.notifications.create(
       e.inviteeId,
       NotificationType.EventInvite,
-      { eventId: e.eventId, inviteId: e.inviteId, inviterId: e.inviterId },
+      {
+        source: 'event_invite',
+        eventId: e.eventId,
+        eventSlug: e.eventSlug,
+        inviteId: e.inviteId,
+        inviterId: e.inviterId,
+      },
       e.inviterId,
+    );
+  }
+
+  // An invite-only event: the organisers decide, so each one gets a request
+  // with the inviter as actor (block and mute apply through `actorId`).
+  @OnEvent(EVENT_INVITE_REQUESTED)
+  async onEventInviteRequested(e: EventInviteRequestedEvent): Promise<void> {
+    await this.notifications.createForRecipients(
+      e.organiserIds,
+      NotificationType.EventInviteRequest,
+      {
+        source: 'member_invite_request',
+        actorId: e.inviterId,
+        eventSlug: e.eventSlug,
+        eventTitle: e.eventTitle,
+        inviteId: e.inviteId,
+      },
+      e.inviterId,
+    );
+  }
+
+  // The host declined the request. The inviter hears it with no actor, so the
+  // organiser who decided stays unnamed.
+  @OnEvent(EVENT_INVITE_REQUEST_DECLINED)
+  async onEventInviteRequestDeclined(
+    e: EventInviteRequestDeclinedEvent,
+  ): Promise<void> {
+    await this.notifications.create(
+      e.inviterId,
+      NotificationType.EventInviteRequestDeclined,
+      {
+        source: 'member_invite_reply',
+        eventSlug: e.eventSlug,
+        eventTitle: e.eventTitle,
+        inviteId: e.inviteId,
+      },
+    );
+  }
+
+  // The invitee said yes; the inviter hears it with the invitee as actor.
+  @OnEvent(EVENT_INVITE_ACCEPTED)
+  async onEventInviteAccepted(e: EventInviteAcceptedEvent): Promise<void> {
+    await this.notifications.create(
+      e.inviterId,
+      NotificationType.EventInviteAccepted,
+      {
+        source: 'member_invite_reply',
+        actorId: e.inviteeId,
+        eventSlug: e.eventSlug,
+        eventTitle: e.eventTitle,
+        inviteId: e.inviteId,
+      },
+      e.inviteeId,
     );
   }
 

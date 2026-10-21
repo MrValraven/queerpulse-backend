@@ -57,6 +57,7 @@ import { EventReminderPreferencesService } from './event-reminder-preferences.se
 import { EventAttendanceRetentionService } from './event-attendance-retention.service';
 import { EventRemindersService } from './event-reminders.service';
 import { EventsService } from './events.service';
+import { MemberEventInvitesService } from './member-event-invites.service';
 import { RsvpService } from './rsvp.service';
 
 @Module({
@@ -159,6 +160,9 @@ import { RsvpService } from './rsvp.service';
     EventCapacityAlertsService,
     RsvpService,
     EventInvitesService,
+    // Member invites to an event (2026-10-21). Injects `EventsService` one
+    // way only, like `EventInvitesService`, so it closes no cycle.
+    MemberEventInvitesService,
     EventCohostInvitesService,
     EventCommunitiesService,
     EventLineupService,

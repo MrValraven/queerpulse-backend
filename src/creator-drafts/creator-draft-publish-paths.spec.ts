@@ -17,6 +17,8 @@ const buildEventsController = (eventsService: object, slots: object) =>
     {} as never,
     {} as never,
     slots as never,
+    // MemberEventInvitesService
+    {} as never,
   );
 
 const buildCommunitiesController = (

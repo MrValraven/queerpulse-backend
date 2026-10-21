@@ -90,7 +90,8 @@ export class StudioPlaylistEditorsController {
   @ApiNotFoundResponse({ description: '`studio_playlist_not_found`.' })
   @ApiConflictResponse({ description: '`studio_playlist_editor_cap`.' })
   @ApiUnprocessableEntityResponse({
-    description: '`studio_playlist_editor_ineligible` with `memberSlugs`.',
+    description:
+      '`studio_playlist_editor_ineligible` with `memberSlugs` and `ineligibleMembers` ({ memberSlug, reason }[], request order). `reason` is the first failing check: `not_found`, `is_owner`, `blocked`, `no_studio_access`, then `not_connected` (member invite) or `not_co_owner` (persona pick); `persona_credit_lapsed` marks every member when the persona credit stopped standing.',
   })
   addEditors(
     @CurrentUser() user: CurrentUserData,

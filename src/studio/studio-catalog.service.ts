@@ -1,6 +1,7 @@
 import { HttpException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
+import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
 import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -248,19 +249,26 @@ export class StudioCatalogService {
   /**
    * Studio v2: the genres with at least one release this viewer can hear
    * (blocks apply), in `STUDIO_GENRES` order. A genre stored before the list
-   * changed is dropped. No counts reach the wire.
+   * changed is dropped. No counts reach the wire. `covers` carries the
+   * browse tile art: the newest such release with a cover, per genre.
    */
   async listGenres(viewerId: string): Promise<StudioGenres> {
-    return {
-      genres: await this.presentVocabulary(viewerId, 'genre', STUDIO_GENRES),
-    };
+    const { values, covers } = await this.presentVocabulary(
+      viewerId,
+      'genre',
+      STUDIO_GENRES,
+    );
+    return { genres: values, covers };
   }
 
   /** Studio discovery: the same read for moods, in `STUDIO_MOODS` order. */
   async listMoods(viewerId: string): Promise<StudioMoods> {
-    return {
-      moods: await this.presentVocabulary(viewerId, 'mood', STUDIO_MOODS),
-    };
+    const { values, covers } = await this.presentVocabulary(
+      viewerId,
+      'mood',
+      STUDIO_MOODS,
+    );
+    return { moods: values, covers };
   }
 
   /**
@@ -285,21 +293,45 @@ export class StudioCatalogService {
 
   /**
    * The values of one release column that at least one release this viewer
-   * can hear carries, in the order of `vocabulary`. A stored value outside
-   * the vocabulary is dropped. `column` is a literal from this file; the
-   * output alias is the column name, so each raw row reads `row[column]`.
+   * can hear carries, in the order of `vocabulary`, with the cover of the
+   * newest such release that has one. A stored value outside the vocabulary
+   * is dropped. `column` is a literal from this file; the output alias is the
+   * column name, so each raw row reads `row[column]`.
+   *
+   * One query per facet: `DISTINCT ON` keeps one row per value, and the
+   * order puts releases with a cover first, then the feed order, so the kept
+   * row is the newest covered release, or an uncovered one when the value
+   * has no cover at all. The cover URL is the one the release cards serve.
    */
   private async presentVocabulary<Value extends string>(
     viewerId: string,
     column: 'genre' | 'mood',
     vocabulary: readonly Value[],
-  ): Promise<Value[]> {
+  ): Promise<{ values: Value[]; covers: Record<string, string> }> {
     const rows = await this.listenableReleases(viewerId)
-      .select(`DISTINCT "release"."${column}"`, column)
+      .select(
+        `DISTINCT ON ("release"."${column}") "release"."${column}"`,
+        column,
+      )
+      .addSelect('"release"."cover_key"', 'cover_key')
       .andWhere(`"release"."${column}" IS NOT NULL`)
-      .getRawMany<Record<string, string>>();
-    const presentValues = new Set(rows.map((row) => row[column]));
-    return vocabulary.filter((value) => presentValues.has(value));
+      .orderBy(`"release"."${column}"`, 'ASC')
+      .addOrderBy('"release"."cover_key" IS NULL', 'ASC')
+      .addOrderBy('"release"."published_at"', 'DESC', 'NULLS LAST')
+      .addOrderBy('"release"."id"', 'DESC')
+      .getRawMany<Record<string, string | null>>();
+    const coverKeyByValue = new Map(
+      rows.map((row) => [row[column], row.cover_key]),
+    );
+    const values = vocabulary.filter((value) => coverKeyByValue.has(value));
+    const covers: Record<string, string> = {};
+    for (const value of values) {
+      const coverUrl = toImageUrl(coverKeyByValue.get(value));
+      if (coverUrl) {
+        covers[value] = coverUrl;
+      }
+    }
+    return { values, covers };
   }
 
   /** Releases, tracks and artists. Playlists are merged in by the listening

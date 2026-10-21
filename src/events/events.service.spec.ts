@@ -557,6 +557,80 @@ describe('EventsService', () => {
       expect(page.capacity).toBe(20);
     });
 
+    it('attaches invitedBy for organisers only', async () => {
+      const attendeeRow = {
+        eventId: 'e1',
+        userId: 'guest-1',
+        status: 'going',
+        waitlistPosition: null,
+      };
+      const profileRows = [
+        {
+          userId: 'guest-1',
+          slug: 'guest-slug',
+          firstName: 'Ana',
+          lastName: 'Costa',
+          photoVisible: true,
+          avatarUrl: null,
+        },
+        {
+          userId: 'inviter-1',
+          slug: 'inviter-slug',
+          firstName: 'Bea',
+          lastName: 'Lopes',
+          photoVisible: true,
+          avatarUrl: null,
+        },
+      ];
+      profiles.find.mockImplementation(
+        ({ where }: { where: { userId: { _value: string[] } } }) =>
+          Promise.resolve(
+            profileRows.filter((row) =>
+              where.userId._value.includes(row.userId),
+            ),
+          ),
+      );
+      invites.find.mockResolvedValue([
+        {
+          eventId: 'e1',
+          inviterId: 'inviter-1',
+          inviteeId: 'guest-1',
+          status: 'accepted',
+          source: 'member',
+        },
+      ]);
+      events.findOne.mockResolvedValue(publishedEvent);
+
+      const organiserQb = attendeesQbStub();
+      organiserQb.getManyAndCount!.mockResolvedValue([[attendeeRow], 1]);
+      rsvps.createQueryBuilder.mockReturnValue(organiserQb);
+      const organiserPage = await service.attendees('party', 'host-1', 'going');
+
+      expect(invites.find).toHaveBeenCalledWith({
+        where: {
+          eventId: 'e1',
+          inviteeId: In(['guest-1']),
+          source: 'member',
+          status: 'accepted',
+        },
+      });
+      expect(organiserPage.items[0]!.invitedBy?.slug).toBe('inviter-slug');
+
+      invites.find.mockClear();
+      const memberQb = attendeesQbStub();
+      memberQb.getManyAndCount!.mockResolvedValue([[attendeeRow], 1]);
+      rsvps.createQueryBuilder.mockReturnValue(memberQb);
+      const memberPage = await service.attendees(
+        'party',
+        'stranger-1',
+        'going',
+      );
+
+      expect(memberPage.items).toHaveLength(1);
+      expect('invitedBy' in memberPage.items[0]!).toBe(false);
+      expect(invites.find).not.toHaveBeenCalled();
+    });
+
     // PRD-414: each attendee's "Who can see you're going?" answer, applied
     // in-query for every viewer who is not an organiser.
     describe('who can see an attendee is going', () => {
