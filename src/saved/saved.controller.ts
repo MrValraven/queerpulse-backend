@@ -52,7 +52,10 @@ export class SavedController {
   constructor(private readonly savedService: SavedService) {}
 
   @ApiOperation({ summary: "List the member's saved items." })
-  @ApiOkResponse({ description: 'The saved items, filtered by the query.' })
+  @ApiOkResponse({
+    description:
+      'The saved items, filtered by the query, with `nextCursor` for the next page.',
+  })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Not an active member.' })
   @Get()

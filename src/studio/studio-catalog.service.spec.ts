@@ -22,6 +22,7 @@ import {
   StudioCatalogService,
 } from './studio-catalog.service';
 import { encodeStudioCursor } from './studio-cursor';
+import { encodeStudioSearchCursor } from './studio-search-cursor';
 import { episodeReleasedSql } from './studio-episode-rule';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { notWithheldTrackSql } from './studio-playlist-visibility';
@@ -59,6 +60,7 @@ interface QueryBuilderMock {
   orderBy: jest.Mock;
   addOrderBy: jest.Mock;
   limit: jest.Mock;
+  offset: jest.Mock;
   groupBy: jest.Mock;
   getMany: jest.Mock;
   getOne: jest.Mock;
@@ -80,6 +82,7 @@ function queryBuilderMock(
     'orderBy',
     'addOrderBy',
     'limit',
+    'offset',
     'groupBy',
   ] as const) {
     queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
@@ -500,6 +503,88 @@ describe('StudioCatalogService', () => {
       expect(result).toEqual({ releases: [], tracks: [], artists: [] });
       expect(releases.createQueryBuilder).not.toHaveBeenCalled();
       expect(subprofiles.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('keeps the multi-type search at 20 per type with no offset', async () => {
+      const releaseSearch = queryBuilderMock();
+      releases.createQueryBuilder.mockReturnValue(releaseSearch);
+      await service.search(VIEWER_ID, 'night', 'releases');
+      expect(releaseSearch.limit).toHaveBeenCalledWith(20);
+      expect(releaseSearch.offset).not.toHaveBeenCalled();
+    });
+  });
+
+  // ENG-05: one type pages past its first 20 rows.
+  describe('searchPage', () => {
+    it('reads one probe row past the page and hands back the next cursor', async () => {
+      const rows = Array.from({ length: 21 }, (_unused, index) =>
+        releaseRow(21 - index),
+      );
+      const releaseSearch = queryBuilderMock({ many: rows });
+      releases.createQueryBuilder.mockReturnValue(releaseSearch);
+
+      const page = await service.searchPage(
+        VIEWER_ID,
+        'night',
+        'releases',
+        {},
+        20,
+      );
+
+      expect(releaseSearch.limit).toHaveBeenCalledWith(21);
+      expect(releaseSearch.offset).toHaveBeenCalledWith(20);
+      expect(page.releases).toHaveLength(20);
+      expect(page.tracks).toEqual([]);
+      expect(page.artists).toEqual([]);
+      expect(page.nextCursor).toBe(encodeStudioSearchCursor(40));
+    });
+
+    it('answers a null cursor on the last page', async () => {
+      releases.createQueryBuilder.mockReturnValue(
+        queryBuilderMock({ many: [releaseRow(1)] }),
+      );
+      const page = await service.searchPage(
+        VIEWER_ID,
+        'night',
+        'releases',
+        {},
+        0,
+      );
+      expect(page.releases).toHaveLength(1);
+      expect(page.nextCursor).toBeNull();
+    });
+
+    it('breaks artist name ties by id so pages never overlap', async () => {
+      const artistSearch = queryBuilderMock();
+      subprofiles.createQueryBuilder.mockReturnValue(artistSearch);
+      await service.searchPage(VIEWER_ID, 'night', 'artists', {}, 40);
+      expect(artistSearch.orderBy).toHaveBeenCalledWith(
+        'persona.displayName',
+        'ASC',
+      );
+      expect(artistSearch.addOrderBy).toHaveBeenCalledWith('persona.id', 'ASC');
+      expect(artistSearch.offset).toHaveBeenCalledWith(40);
+      expect(releases.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('pages tracks with the filters and leaves the other types unread', async () => {
+      const trackSearch = queryBuilderMock();
+      tracks.createQueryBuilder.mockReturnValueOnce(trackSearch);
+      const page = await service.searchPage(
+        VIEWER_ID,
+        'noite',
+        'tracks',
+        { genre: 'fado' },
+        0,
+      );
+      expect(trackSearch.limit).toHaveBeenCalledWith(21);
+      expect(trackSearch.offset).not.toHaveBeenCalled();
+      expect(trackSearch.andWhere).toHaveBeenCalledWith(
+        '"release"."genre" = :studioGenre',
+        { studioGenre: 'fado' },
+      );
+      expect(subprofiles.createQueryBuilder).not.toHaveBeenCalled();
+      expect(page.nextCursor).toBeNull();
     });
   });
 

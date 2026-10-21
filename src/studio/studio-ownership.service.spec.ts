@@ -6,7 +6,10 @@ import {
   StudioRelease,
   StudioReleaseStatus,
 } from './entities/studio-release.entity';
-import { StudioOwnershipService } from './studio-ownership.service';
+import {
+  OPEN_COUNTER_WINDOWS_SQL,
+  StudioOwnershipService,
+} from './studio-ownership.service';
 import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
 
 const USER_ID = '7d000000-0000-4000-8000-000000000001';
@@ -28,7 +31,7 @@ const releaseWith = (status: StudioReleaseStatus) =>
 describe('StudioOwnershipService', () => {
   let members: { exists: jest.Mock };
   let subprofiles: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
-  let releases: { findOne: jest.Mock };
+  let releases: { findOne: jest.Mock; query: jest.Mock };
   let manager: { findOne: jest.Mock; exists: jest.Mock };
   let service: StudioOwnershipService;
 
@@ -42,6 +45,7 @@ describe('StudioOwnershipService', () => {
       findOne: jest
         .fn()
         .mockResolvedValue(releaseWith(StudioReleaseStatus.Draft)),
+      query: jest.fn().mockResolvedValue([{ count: 2 }]),
     };
     manager = {
       findOne: jest.fn((entity: unknown) =>
@@ -58,6 +62,24 @@ describe('StudioOwnershipService', () => {
       subprofiles as unknown as Repository<Subprofile>,
       releases as unknown as Repository<StudioRelease>,
     );
+  });
+
+  it('counts the open counter-notice windows across every persona the member runs', async () => {
+    expect(await service.countOpenCounterWindows(USER_ID)).toBe(2);
+    expect(releases.query).toHaveBeenCalledWith(OPEN_COUNTER_WINDOWS_SQL, [
+      USER_ID,
+    ]);
+    expect(OPEN_COUNTER_WINDOWS_SQL).toContain(`"claim"."status" = 'accepted'`);
+    expect(OPEN_COUNTER_WINDOWS_SQL).toContain(
+      '"claim"."counter_note" IS NULL',
+    );
+    expect(OPEN_COUNTER_WINDOWS_SQL).toContain('"persona"."user_id" = $1 OR');
+    expect(OPEN_COUNTER_WINDOWS_SQL).toContain('"member"."user_id" = $1');
+  });
+
+  it('reads no rows as no open windows', async () => {
+    releases.query.mockResolvedValueOnce([]);
+    expect(await service.countOpenCounterWindows(USER_ID)).toBe(0);
   });
 
   it('counts any roster row as ownership, co-owners included', async () => {

@@ -4,6 +4,7 @@ import {
   isOwnOriginStudioUrl,
   parseStudioShareLink,
   postTextWithoutStudioShareLink,
+  STUDIO_SHARE_MAX_LINE_INDEX,
   STUDIO_SHARE_MAX_START_SECONDS,
   studioShareOrigins,
   textWithoutStudioShareLink,
@@ -180,6 +181,112 @@ describe('parseStudioShareLink', () => {
         ORIGINS,
       )?.path,
     ).toBe(`/studio/track?id=${TRACK_ID}&t=12`);
+  });
+});
+
+// Lyric links (PRD-13). `queerpulse/src/features/studio/share/
+// studioLyricLinkParity.test.ts` holds this same table, row for row: the
+// query typed after the track id, the line and start both readers take, and
+// the canonical path both build. Change a row here and there together.
+const LYRIC_PARITY_ROWS: readonly {
+  query: string;
+  lineIndex: number | null;
+  startAtSeconds: number | null;
+  path: string;
+}[] = [
+  {
+    query: '&line=7&t=42',
+    lineIndex: 7,
+    startAtSeconds: 42,
+    path: '&t=42&line=7',
+  },
+  { query: '&line=0', lineIndex: 0, startAtSeconds: null, path: '&line=0' },
+  {
+    query: '&t=5&line=499',
+    lineIndex: 499,
+    startAtSeconds: 5,
+    path: '&t=5&line=499',
+  },
+  { query: '&line=007', lineIndex: 7, startAtSeconds: null, path: '&line=7' },
+  {
+    query: '&line=3&line=5',
+    lineIndex: 3,
+    startAtSeconds: null,
+    path: '&line=3',
+  },
+  { query: '&t=5&line=500', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+  { query: '&t=5&line=1000', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+  { query: '&t=5&line=-1', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+  { query: '&t=5&line=1.5', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+  { query: '&t=5&line=abc', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+  { query: '&t=5&line=', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+  { query: '&t=5&line=+3', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+  { query: '&t=5&line=1e2', lineIndex: null, startAtSeconds: 5, path: '&t=5' },
+];
+
+describe('lyric link parity rows', () => {
+  it('caps the line at 499', () => {
+    expect(STUDIO_SHARE_MAX_LINE_INDEX).toBe(499);
+  });
+
+  it.each(LYRIC_PARITY_ROWS)(
+    'reads $query as the frontend does',
+    ({ query, lineIndex, startAtSeconds, path }) => {
+      const link = parseStudioShareLink(`${TRACK_URL}${query}`, ORIGINS);
+      expect(link?.kind).toBe('track');
+      expect(link?.id).toBe(TRACK_ID);
+      expect(link?.startAtSeconds).toBe(startAtSeconds);
+      expect(link?.lineIndex ?? null).toBe(lineIndex);
+      expect(link?.path).toBe(`/studio/track?id=${TRACK_ID}${path}`);
+    },
+  );
+});
+
+describe('parseStudioShareLink lyric lines', () => {
+  it('reads line on a track link and keeps it in the canonical path', () => {
+    expect(parseStudioShareLink(`${TRACK_URL}&line=7&t=42`, ORIGINS)).toEqual({
+      kind: 'track',
+      id: TRACK_ID,
+      startAtSeconds: 42,
+      lineIndex: 7,
+      path: `/studio/track?id=${TRACK_ID}&t=42&line=7`,
+    });
+  });
+
+  it('reads line without t', () => {
+    expect(parseStudioShareLink(`${TRACK_URL}&line=0`, ORIGINS)?.path).toBe(
+      `/studio/track?id=${TRACK_ID}&line=0`,
+    );
+  });
+
+  it.each(['500', '1000', '-1', '1.5', 'abc', '', '+3', '1e2'])(
+    'ignores line=%s and still parses the track link',
+    (rawLine) => {
+      const link = parseStudioShareLink(
+        `${TRACK_URL}&t=5&line=${rawLine}`,
+        ORIGINS,
+      );
+      expect(link?.lineIndex).toBeUndefined();
+      expect(link?.path).toBe(`/studio/track?id=${TRACK_ID}&t=5`);
+    },
+  );
+
+  it('ignores line on a release link', () => {
+    const link = parseStudioShareLink(
+      `https://queerpulse.test/studio/album?id=${TRACK_ID}&line=3`,
+      ORIGINS,
+    );
+    expect(link?.lineIndex).toBeUndefined();
+    expect(link?.path).toBe(`/studio/album?id=${TRACK_ID}`);
+  });
+
+  it('takes a lyric link out of a note like any track link', () => {
+    const body = `this line (${TRACK_URL}&t=42&line=7) tonight`;
+    const match = findStudioShareLinkMatch(body, ORIGINS);
+    expect(match?.url).toBe(`${TRACK_URL}&t=42&line=7`);
+    expect(match && textWithoutStudioShareLink(body, match)).toBe(
+      'this line tonight',
+    );
   });
 });
 

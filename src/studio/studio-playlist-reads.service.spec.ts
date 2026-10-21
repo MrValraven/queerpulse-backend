@@ -66,6 +66,7 @@ interface QueryBuilderMock {
   orderBy: jest.Mock;
   addOrderBy: jest.Mock;
   limit: jest.Mock;
+  offset: jest.Mock;
   groupBy: jest.Mock;
   addGroupBy: jest.Mock;
   getMany: jest.Mock;
@@ -85,6 +86,7 @@ function queryBuilderMock(
     'orderBy',
     'addOrderBy',
     'limit',
+    'offset',
     'groupBy',
     'addGroupBy',
   ] as const) {
@@ -897,11 +899,27 @@ describe('StudioPlaylistReadsService', () => {
         publiclyListedPlaylistSql('playlist'),
       );
       expect(listing.limit).toHaveBeenCalledWith(20);
+      expect(listing.offset).not.toHaveBeenCalled();
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         listing,
         VIEWER_ID,
         ...personaCreatorFilterCall,
       );
+    });
+
+    // ENG-05: a playlists-only search pages by cursor offset.
+    it('pages a playlists-only search with one probe row and the offset', async () => {
+      const listing = queryBuilderMock();
+      queueBuilders(playlists, [listing]);
+
+      const page = await service.searchPlaylistsPage(VIEWER_ID, 'noite', 20);
+
+      expect(listing.limit).toHaveBeenCalledWith(21);
+      expect(listing.offset).toHaveBeenCalledWith(20);
+      expect(predicatesOf(listing)).toContain(
+        publiclyListedPlaylistSql('playlist'),
+      );
+      expect(page).toEqual({ items: [], nextCursor: null });
     });
 
     it('keeps the persona creator filter off a member profile, which lists member credits only', async () => {

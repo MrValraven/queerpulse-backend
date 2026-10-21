@@ -2,6 +2,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioListeningController } from './studio-listening.controller';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
+import { encodeStudioSearchCursor } from './studio-search-cursor';
 
 const VIEWER = { userId: 'viewer-1' } as CurrentUserData;
 const PERSONA_ID = 'b1000000-0000-4000-8000-000000000001';
@@ -14,10 +15,13 @@ describe('StudioListeningController', () => {
     listMoods: jest.Mock;
     listFormats: jest.Mock;
     search: jest.Mock;
+    searchPage: jest.Mock;
     getArtist: jest.Mock;
+    getTracks: jest.Mock;
   };
   let playlistReads: {
     searchPlaylists: jest.Mock;
+    searchPlaylistsPage: jest.Mock;
     listForArtistView: jest.Mock;
   };
   let controller: StudioListeningController;
@@ -33,16 +37,36 @@ describe('StudioListeningController', () => {
       search: jest
         .fn()
         .mockResolvedValue({ releases: [], tracks: [], artists: [] }),
+      searchPage: jest.fn().mockResolvedValue({
+        releases: [],
+        tracks: [],
+        artists: [],
+        nextCursor: 'next-page',
+      }),
       getArtist: jest.fn().mockResolvedValue({ artist: { id: PERSONA_ID } }),
+      getTracks: jest.fn().mockResolvedValue({ items: [] }),
     };
     playlistReads = {
       searchPlaylists: jest.fn().mockResolvedValue([playlistCard]),
+      searchPlaylistsPage: jest
+        .fn()
+        .mockResolvedValue({ items: [playlistCard], nextCursor: null }),
       listForArtistView: jest.fn().mockResolvedValue([playlistCard]),
     };
     controller = new StudioListeningController(
       catalog as unknown as StudioCatalogService,
       playlistReads as unknown as StudioPlaylistReadsService,
     );
+  });
+
+  it('reads a batch of tracks for the viewer, in the order asked', async () => {
+    await expect(
+      controller.getTracks(VIEWER, { ids: ['track-b', 'track-a'] }),
+    ).resolves.toEqual({ items: [] });
+    expect(catalog.getTracks).toHaveBeenCalledWith('viewer-1', [
+      'track-b',
+      'track-a',
+    ]);
   });
 
   it('passes the genre and the mood to the home feed', async () => {
@@ -72,25 +96,46 @@ describe('StudioListeningController', () => {
     });
   });
 
-  it.each(['all', 'playlists'] as const)(
-    'adds public playlists to a %s search',
-    async (type) => {
-      const result = await controller.search(VIEWER, {
-        q: 'night',
-        type,
-        genre: 'fado',
-      });
-      expect(catalog.search).toHaveBeenCalledWith('viewer-1', 'night', type, {
-        genre: 'fado',
-        mood: undefined,
-      });
-      expect(playlistReads.searchPlaylists).toHaveBeenCalledWith(
-        'viewer-1',
-        'night',
-      );
-      expect(result.playlists).toEqual([playlistCard]);
-    },
-  );
+  it('adds public playlists to an all search, with no cursor', async () => {
+    const result = await controller.search(VIEWER, {
+      q: 'night',
+      type: 'all',
+      genre: 'fado',
+    });
+    expect(catalog.search).toHaveBeenCalledWith('viewer-1', 'night', 'all', {
+      genre: 'fado',
+      mood: undefined,
+    });
+    expect(playlistReads.searchPlaylists).toHaveBeenCalledWith(
+      'viewer-1',
+      'night',
+    );
+    expect(result.playlists).toEqual([playlistCard]);
+    expect(result).not.toHaveProperty('nextCursor');
+  });
+
+  // ENG-05: a single type pages by cursor.
+  it('pages a playlists search on its own, with the cursor offset', async () => {
+    const result = await controller.search(VIEWER, {
+      q: 'night',
+      type: 'playlists',
+      cursor: encodeStudioSearchCursor(20),
+    });
+    expect(playlistReads.searchPlaylistsPage).toHaveBeenCalledWith(
+      'viewer-1',
+      'night',
+      20,
+    );
+    expect(catalog.search).not.toHaveBeenCalled();
+    expect(catalog.searchPage).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      releases: [],
+      tracks: [],
+      artists: [],
+      playlists: [playlistCard],
+      nextCursor: null,
+    });
+  });
 
   it('answers an empty playlist list for a release search, without asking for playlists', async () => {
     const result = await controller.search(VIEWER, {
@@ -98,7 +143,31 @@ describe('StudioListeningController', () => {
       type: 'releases',
     });
     expect(playlistReads.searchPlaylists).not.toHaveBeenCalled();
+    expect(playlistReads.searchPlaylistsPage).not.toHaveBeenCalled();
+    expect(catalog.searchPage).toHaveBeenCalledWith(
+      'viewer-1',
+      'night',
+      'releases',
+      { genre: undefined, mood: undefined, format: undefined },
+      0,
+    );
     expect(result.playlists).toEqual([]);
+    expect(result.nextCursor).toBe('next-page');
+  });
+
+  it('reads a malformed cursor as the first page', async () => {
+    await controller.search(VIEWER, {
+      q: 'night',
+      type: 'tracks',
+      cursor: 'not-a-cursor',
+    });
+    expect(catalog.searchPage).toHaveBeenCalledWith(
+      'viewer-1',
+      'night',
+      'tracks',
+      expect.any(Object),
+      0,
+    );
   });
 
   it('reads a search with no type as all', async () => {
@@ -142,7 +211,7 @@ describe('StudioListeningController', () => {
       type: 'artists',
       format: 'spoken_word',
     });
-    expect(catalog.search).toHaveBeenCalledWith(
+    expect(catalog.searchPage).toHaveBeenCalledWith(
       'viewer-1',
       'lisbon',
       'artists',
@@ -151,6 +220,7 @@ describe('StudioListeningController', () => {
         mood: undefined,
         format: 'spoken_word',
       },
+      0,
     );
   });
 });

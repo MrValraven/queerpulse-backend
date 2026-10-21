@@ -5,6 +5,11 @@ import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { SavedAvailabilityService } from './saved-availability.service';
+import {
+  SAVED_AFTER_CURSOR_SQL,
+  decodeSavedCursor,
+  encodeSavedCursor,
+} from './saved-cursor';
 import { SavedListsService } from './saved-lists.service';
 import { SavedService } from './saved.service';
 
@@ -12,12 +17,16 @@ import { SavedService } from './saved.service';
 // `qbStub`) whose terminal method resolves to an empty page by default.
 const qbStub = () => {
   const qb: Record<string, jest.Mock> = {};
-  for (const m of ['where', 'andWhere', 'orderBy']) {
+  for (const m of ['where', 'andWhere', 'orderBy', 'addOrderBy']) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.skip = jest.fn().mockReturnValue(qb);
   qb.take = jest.fn().mockReturnValue(qb);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+  // ENG-04: the cursor path counts on a clone and reads with `getMany`.
+  qb.getCount = jest.fn().mockResolvedValue(0);
+  qb.getMany = jest.fn().mockResolvedValue([]);
+  qb.clone = jest.fn(() => ({ getCount: qb.getCount }));
   return qb;
 };
 
@@ -104,6 +113,7 @@ describe('SavedService', () => {
         userId: 'u1',
       });
       expect(qb.orderBy).toHaveBeenCalledWith('saved.createdAt', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('saved.id', 'DESC');
       expect(qb.andWhere).not.toHaveBeenCalled();
 
       // Page-number envelope — matches the frontend's `Paginated<T>` from
@@ -127,6 +137,7 @@ describe('SavedService', () => {
         total: 1,
         page: 1,
         pageSize: 20,
+        nextCursor: null,
       });
     });
 
@@ -270,6 +281,78 @@ describe('SavedService', () => {
       expect(qb.andWhere).toHaveBeenCalledWith('saved.subjectType = :kind', {
         kind: SavedKind.Job,
       });
+    });
+
+    // ENG-04: cursor paging for one kind.
+    it('hands back a cursor at the last item when more pages exist', async () => {
+      const qb = qbStub();
+      const rows = Array.from({ length: 20 }, (_unused, index) =>
+        row({ id: `row-${index}`, subjectId: `item-${index}` }),
+      );
+      qb.getManyAndCount!.mockResolvedValue([rows, 45]);
+      repo.createQueryBuilder.mockReturnValue(qb);
+
+      const result = await service.list('u1', {
+        kind: SavedKind.StudioRelease,
+      });
+
+      expect(result.nextCursor).toBe(encodeSavedCursor(rows[19]!));
+      expect(decodeSavedCursor(result.nextCursor!)).toEqual({
+        savedAt: now,
+        ref: { subjectType: SavedKind.Article, subjectId: 'item-19' },
+      });
+    });
+
+    it('pages after the cursor by keyset, with one probe row and the whole count', async () => {
+      const qb = qbStub();
+      const rows = Array.from({ length: 21 }, (_unused, index) =>
+        row({ id: `row-${index}`, subjectId: `item-${index}` }),
+      );
+      qb.getMany!.mockResolvedValue(rows);
+      qb.getCount!.mockResolvedValue(60);
+      repo.createQueryBuilder.mockReturnValue(qb);
+      const cursor = encodeSavedCursor(row({ subjectId: 'before' }));
+
+      const result = await service.list('u1', {
+        kind: SavedKind.StudioPlaylist,
+        cursor,
+        page: 3,
+      });
+
+      expect(qb.andWhere).toHaveBeenCalledWith(SAVED_AFTER_CURSOR_SQL, {
+        cursorSubjectType: SavedKind.Article,
+        cursorSubjectId: 'before',
+        cursorSavedAt: now.toISOString(),
+      });
+      expect(qb.take).toHaveBeenCalledWith(21);
+      // `page` never turns into an OFFSET on the cursor path.
+      expect(qb.skip).not.toHaveBeenCalled();
+      expect(result.items).toHaveLength(20);
+      expect(result.total).toBe(60);
+      expect(result.nextCursor).toBe(encodeSavedCursor(rows[19]!));
+    });
+
+    it('answers a null cursor on the last keyset page', async () => {
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([row()]);
+      repo.createQueryBuilder.mockReturnValue(qb);
+
+      const result = await service.list('u1', {
+        cursor: encodeSavedCursor(row({ subjectId: 'before' })),
+      });
+
+      expect(result.items).toHaveLength(1);
+      expect(result.nextCursor).toBeNull();
+    });
+
+    it('reads a malformed cursor as the first page', async () => {
+      const qb = qbStub();
+      repo.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('u1', { cursor: 'not-a-cursor' });
+
+      expect(qb.skip).toHaveBeenCalledWith(0);
+      expect(qb.getMany).not.toHaveBeenCalled();
     });
 
     it('normalizes a missing/invalid page to 1', async () => {
@@ -440,6 +523,65 @@ describe('SavedService', () => {
       await expect(service.remove('u1', 'nope')).rejects.toThrow(
         BadRequestException,
       );
+    });
+  });
+
+  describe('re-saving keeps the original saved time', () => {
+    const body: SavedItemBodyDto = {
+      kind: SavedKind.Film,
+      title: 'Pride',
+    };
+    const firstSavedAt = new Date('2026-07-01T09:00:00.000Z');
+
+    beforeEach(() => {
+      jest.useFakeTimers({ now: new Date('2026-07-15T12:00:00.000Z') });
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    async function unsaveThenSaveAfter(milliseconds: number) {
+      repo.findOne.mockResolvedValueOnce(
+        row({
+          subjectType: SavedKind.Film,
+          subjectId: 'pride-1994',
+          createdAt: firstSavedAt,
+        }),
+      );
+      await service.remove('u1', 'film:pride-1994');
+      jest.advanceTimersByTime(milliseconds);
+      await service.put('u1', 'film:pride-1994', body);
+    }
+
+    it('restores the first createdAt on a re-save within ten minutes', async () => {
+      await unsaveThenSaveAfter(9 * 60_000);
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ createdAt: firstSavedAt }),
+      );
+    });
+
+    it('saves with a fresh time once ten minutes have passed', async () => {
+      await unsaveThenSaveAfter(11 * 60_000);
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({ createdAt: firstSavedAt }),
+      );
+    });
+
+    it('restores the time once only', async () => {
+      await unsaveThenSaveAfter(60_000);
+      repo.create.mockClear();
+      await service.put('u1', 'film:pride-1994', body);
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({ createdAt: firstSavedAt }),
+      );
+    });
+
+    it('remembers nothing for a subject that was not saved', async () => {
+      repo.delete.mockResolvedValueOnce({ affected: 0 });
+      await service.remove('u1', 'film:pride-1994');
+      await service.put('u1', 'film:pride-1994', body);
+      const [createdRow] = repo.create.mock.calls[0] as [Partial<SavedItem>];
+      expect(createdRow).not.toHaveProperty('createdAt');
     });
   });
 });

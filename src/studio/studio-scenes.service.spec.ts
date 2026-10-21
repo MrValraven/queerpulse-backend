@@ -2,9 +2,14 @@ import { HttpException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { StudioSceneState } from './entities/studio-scene.entity';
 import { StudioCatalogService } from './studio-catalog.service';
-import { openUpcomingEventSql } from './studio-discovery-sql';
 import {
+  LISTENABLE_ARTIST_SQL,
+  openUpcomingEventSql,
+} from './studio-discovery-sql';
+import {
+  ARTIST_UPCOMING_EVENTS_SQL,
   SCENE_ARTISTS_SQL,
+  standingPerformanceAffiliationSql,
   SCENE_UPCOMING_EVENTS_SQL,
   StudioScenesService,
 } from './studio-scenes.service';
@@ -211,5 +216,110 @@ describe('StudioScenesService', () => {
       'ORDER BY "event"."start_at" ASC, "event"."id" ASC',
     );
     expect(SCENE_UPCOMING_EVENTS_SQL).toContain(openUpcomingEventSql('event'));
+  });
+
+  it('unions only performing and hosting artist links an owner still stands behind', () => {
+    expect(SCENE_UPCOMING_EVENTS_SQL).toContain(
+      standingPerformanceAffiliationSql(
+        'affiliation',
+        'affiliated_event',
+        'scene_affiliation',
+      ),
+    );
+    expect(SCENE_UPCOMING_EVENTS_SQL).toContain(
+      `"affiliation"."role" IN ('performing', 'hosting')`,
+    );
+    expect(SCENE_UPCOMING_EVENTS_SQL).not.toContain('event_rsvps');
+  });
+
+  describe('standingPerformanceAffiliationSql (the flash day owner rule)', () => {
+    const sql = standingPerformanceAffiliationSql('link', 'gig', 'probe');
+
+    it('takes the performing and hosting roles only', () => {
+      expect(sql).toContain(`"link"."role" IN ('performing', 'hosting')`);
+      expect(sql).not.toContain('attending');
+    });
+
+    it('reads the creator and every co-owner as owners', () => {
+      expect(sql).toContain('FROM "subprofiles" "probe_creator"');
+      expect(sql).toContain('"probe_creator"."id" = "link"."subprofile_id"');
+      expect(sql).toContain('FROM "subprofile_members" "probe_member"');
+      expect(sql).toContain(
+        '"probe_member"."subprofile_id" = "link"."subprofile_id"',
+      );
+    });
+
+    it('qualifies an owner who hosts, co-hosts or holds an accepted lineup entry, never a going RSVP', () => {
+      expect(sql).toContain('"probe_owner"."user_id" = "gig"."host_id"');
+      expect(sql).toContain('FROM "event_cohosts" "probe_cohost"');
+      expect(sql).toContain('"probe_cohost"."event_id" = "gig"."id"');
+      expect(sql).toContain('FROM "event_lineup_entries" "probe_lineup"');
+      expect(sql).toContain(`"probe_lineup"."status" = 'accepted'`);
+      expect(sql).not.toContain('event_rsvps');
+    });
+  });
+
+  describe('listArtistEvents (PRD-15)', () => {
+    const ARTIST_ID = 'f6000000-0000-4000-8000-000000000011';
+
+    it('reads up to four upcoming events of a listenable artist, soonest first', async () => {
+      const result = await service.listArtistEvents(VIEWER_ID, ARTIST_ID);
+      expect(query).toHaveBeenNthCalledWith(1, LISTENABLE_ARTIST_SQL, [
+        VIEWER_ID,
+        ARTIST_ID,
+      ]);
+      expect(query).toHaveBeenNthCalledWith(2, ARTIST_UPCOMING_EVENTS_SQL, [
+        VIEWER_ID,
+        ARTIST_ID,
+        4,
+      ]);
+      expect(result.items).toEqual([
+        expect.objectContaining({
+          slug: 'ballroom-night',
+          startAt: '2026-10-20T21:00:00.000Z',
+        }),
+      ]);
+    });
+
+    it('answers 404 for an artist the viewer cannot hear, and reads no events', async () => {
+      query.mockResolvedValueOnce([]);
+      await expect(
+        service.listArtistEvents(VIEWER_ID, ARTIST_ID),
+      ).rejects.toThrow('Artist not found');
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads the persona's own event affiliations under the scene page's event rule", () => {
+      expect(ARTIST_UPCOMING_EVENTS_SQL).toContain(
+        '"affiliation"."subprofile_id" = $2',
+      );
+      expect(ARTIST_UPCOMING_EVENTS_SQL).toContain(
+        `"affiliation"."target_type" = 'event'`,
+      );
+      expect(ARTIST_UPCOMING_EVENTS_SQL).toContain(
+        openUpcomingEventSql('event'),
+      );
+      expect(ARTIST_UPCOMING_EVENTS_SQL).toContain(
+        'FROM "blocks" "event_host_block"',
+      );
+      expect(ARTIST_UPCOMING_EVENTS_SQL).toContain(
+        'ORDER BY "event"."start_at" ASC, "event"."id" ASC',
+      );
+    });
+
+    it('keeps performing and hosting links an owner still stands behind', () => {
+      expect(ARTIST_UPCOMING_EVENTS_SQL).toContain(
+        standingPerformanceAffiliationSql(
+          'affiliation',
+          'event',
+          'artist_affiliation',
+        ),
+      );
+      expect(ARTIST_UPCOMING_EVENTS_SQL).toContain(
+        `"affiliation"."role" IN ('performing', 'hosting')`,
+      );
+      expect(ARTIST_UPCOMING_EVENTS_SQL).not.toContain(`'attending'`);
+      expect(ARTIST_UPCOMING_EVENTS_SQL).not.toContain('event_rsvps');
+    });
   });
 });

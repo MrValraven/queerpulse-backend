@@ -1,9 +1,18 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { MAX_PAGE } from '../../common/pagination';
 import { SavedKind } from '../entities/saved-item.entity';
 
-/** `GET /me/saved?kind=&listId=&page=` query params (`getSaved` in
+/** `GET /me/saved?kind=&listId=&page=&cursor=` query params (`getSaved` in
  *  `saved.api.ts`). */
 export class ListSavedQuery {
   @IsOptional()
@@ -27,4 +36,14 @@ export class ListSavedQuery {
   @Min(1)
   @Max(MAX_PAGE)
   page?: number;
+
+  /**
+   * ENG-04: the `nextCursor` of the page before. Opaque; a malformed value
+   * reads as the first page. When present, `page` is ignored and the page
+   * starts right after the item the cursor names.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  cursor?: string;
 }

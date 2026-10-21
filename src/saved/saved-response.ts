@@ -1,5 +1,6 @@
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { toSavedId } from './saved-ref.util';
+import { SAVED_KINDS_WITH_COVER } from './saved-studio-covers';
 
 /**
  * Whether the thing a saved item points at is still there for THIS viewer
@@ -69,6 +70,13 @@ export interface ResolvedSavedItemDTO extends SavedItemDTO {
    * release page renders a withdrawn view in place.
    */
   unavailableReason?: SavedUnavailableReason;
+  /**
+   * Studio Library cards: present on every `studio_release` and
+   * `studio_playlist` row of the member's own list, the release cover or the
+   * playlist's first playable cover. `null` when it has none, and always
+   * `null` on an unavailable row, so a lost card shows no artwork.
+   */
+  coverUrl?: string | null;
 }
 
 /**
@@ -119,19 +127,29 @@ export function toResolvedSavedItemDTO(
 }
 
 /** Maps a whole page against the set of composite refs that resolved and,
- *  for the member's own library, the set `withdrawnRefs` found. */
+ *  for the member's own library, the set `withdrawnRefs` found and the
+ *  Studio covers `savedStudioCoverUrls` found. */
 export function toResolvedSavedItemDTOs(
   rows: readonly SavedItem[],
   availableRefs: ReadonlySet<string>,
   withdrawnRefs: ReadonlySet<string> = new Set(),
+  coverUrlBySavedId?: ReadonlyMap<string, string>,
 ): ResolvedSavedItemDTO[] {
   return rows.map((row) => {
     const savedId = toSavedId(row.subjectType, row.subjectId);
-    return toResolvedSavedItemDTO(
+    const isAvailable = availableRefs.has(savedId);
+    const dto = toResolvedSavedItemDTO(
       row,
-      availableRefs.has(savedId),
+      isAvailable,
       withdrawnRefs.has(savedId),
     );
+    if (!coverUrlBySavedId || !SAVED_KINDS_WITH_COVER.has(row.subjectType)) {
+      return dto;
+    }
+    return {
+      ...dto,
+      coverUrl: isAvailable ? (coverUrlBySavedId.get(savedId) ?? null) : null,
+    };
   });
 }
 

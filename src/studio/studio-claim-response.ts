@@ -119,6 +119,8 @@ export interface StudioAdminClaim {
 export interface StudioAdminClaimCounts {
   submitted: number;
   countered: number;
+  /** DES-82: artist disputes about a takedown still open for our team. */
+  disputesWaiting: number;
 }
 
 /** Staff read of one track: the reports tab track card and the answer of

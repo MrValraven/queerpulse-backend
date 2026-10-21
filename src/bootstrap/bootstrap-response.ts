@@ -3,7 +3,7 @@ import {
   FullProfileResponse,
   LimitedProfileResponse,
 } from '../profiles/profile-response';
-import { SavedItemDTO } from '../saved/saved-response';
+import { SavedPage } from '../saved/saved-cursor';
 import { BlockDTO, MuteDTO } from '../social/social-response';
 
 /**
@@ -23,8 +23,8 @@ export interface BootstrapResponse {
   /** As GET /profiles/:slug, for the caller's own slug. Always `limited: false`
    *  — a member is never limited against themselves. */
   profile: FullProfileResponse | LimitedProfileResponse;
-  /** As GET /me/saved, page 1. */
-  saved: Paginated<SavedItemDTO>;
+  /** As GET /me/saved, page 1, with its `nextCursor` (ENG-04). */
+  saved: SavedPage;
   /** As GET /blocks, page 1. */
   blocks: Paginated<BlockDTO>;
   /** As GET /mutes, page 1. */

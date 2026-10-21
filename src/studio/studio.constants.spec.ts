@@ -352,6 +352,7 @@ describe('Studio vocabulary', () => {
       sceneSlugMaxLength: 60,
       sceneArtistsShown: 24,
       sceneUpcomingEvents: 6,
+      artistUpcomingEvents: 4,
       sceneReleasesPerPage: 24,
       personaCreditsPerTrack: 20,
       creditHandleMaxLength: 60,

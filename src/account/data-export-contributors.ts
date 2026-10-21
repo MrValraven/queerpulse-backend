@@ -70,6 +70,7 @@ import {
   StudioCopyrightClaimsExportContributor,
   StudioPersonaCreditsExportContributor,
   StudioPlaylistAdditionsExportContributor,
+  StudioPlaylistFoldersExportContributor,
   StudioPlaylistSeatsExportContributor,
   StudioPlaylistsExportContributor,
   StudioReleaseRemindersExportContributor,
@@ -1109,6 +1110,8 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   // tracks added there (data-export-contributors-studio.ts).
   StudioPlaylistSeatsExportContributor,
   StudioPlaylistAdditionsExportContributor,
+  // Studio playlist folders: the member's folders and what they filed.
+  StudioPlaylistFoldersExportContributor,
   // Studio safety and moderation: the copyright claims the member filed.
   StudioCopyrightClaimsExportContributor,
   // Creator drafts: the member's own event, listing edit and community wizard drafts.

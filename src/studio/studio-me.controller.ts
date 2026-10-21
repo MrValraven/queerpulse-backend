@@ -33,15 +33,22 @@ export class StudioMeController {
   @Get('me')
   @ApiOperation({
     summary:
-      'Whether the caller has Studio access, and the personas they can upload for.',
+      'Whether the caller has Studio access, the personas they can upload for, and their open counter-notice windows.',
   })
   @ApiOkResponse({ description: '`StudioMe`.' })
   async me(@CurrentUser() user: CurrentUserData): Promise<StudioMe> {
     const hasAccess = await this.access.hasAccess(user.userId);
     if (!hasAccess) {
-      return { hasAccess, uploadablePersonas: [] };
+      return { hasAccess, uploadablePersonas: [], counterWindowsOpen: 0 };
     }
-    const personas = await this.ownership.listUploadablePersonas(user.userId);
-    return { hasAccess, uploadablePersonas: personas.map(toStudioArtistRef) };
+    const [personas, counterWindowsOpen] = await Promise.all([
+      this.ownership.listUploadablePersonas(user.userId),
+      this.ownership.countOpenCounterWindows(user.userId),
+    ]);
+    return {
+      hasAccess,
+      uploadablePersonas: personas.map(toStudioArtistRef),
+      counterWindowsOpen,
+    };
   }
 }

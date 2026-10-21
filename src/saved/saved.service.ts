@@ -1,15 +1,25 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, SelectQueryBuilder } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { Paginated, normalizePage, paginate } from '../common/pagination';
+import { PAGE_SIZE, normalizePage, paginate } from '../common/pagination';
 import { runWithConcurrency } from '../common/run-with-concurrency';
 import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { SavedAvailabilityService } from './saved-availability.service';
+import {
+  SAVED_AFTER_CURSOR_SQL,
+  SavedCursor,
+  SavedPage,
+  decodeSavedCursor,
+  encodeSavedCursor,
+  savedCursorParameters,
+} from './saved-cursor';
 import { SavedListsService } from './saved-lists.service';
 import { parseSavedRef, toSavedId } from './saved-ref.util';
+import { savedStudioCoverUrls } from './saved-studio-covers';
+import { SavedUnsaveMemory } from './saved-unsave-memory';
 import {
   ResolvedSavedItemDTO,
   toResolvedSavedItemDTOs,
@@ -18,6 +28,9 @@ import {
 @Injectable()
 export class SavedService {
   private readonly logger = new Logger(SavedService.name);
+  // Re-liking keeps the original saved time (ten minutes, process memory
+  // only, see `SavedUnsaveMemory`).
+  private readonly unsaveMemory = new SavedUnsaveMemory();
 
   constructor(
     @InjectRepository(SavedItem)
@@ -34,15 +47,17 @@ export class SavedService {
   // Page-number pagination (`{items,total,page,pageSize}`) — matches the
   // frontend's `Paginated<T>` from `shared/api/refs.ts`, which is what
   // `getSaved` in `saved.api.ts` actually imports and unwraps (`res.items`).
-  async list(
-    userId: string,
-    query: ListSavedQuery,
-  ): Promise<Paginated<ResolvedSavedItemDTO>> {
+  // ENG-04: every page also answers `nextCursor`, and `?cursor=` pages by
+  // keyset from there (`page` is then ignored), so a Library walking one
+  // kind never skips an item when an earlier one is unsaved.
+  async list(userId: string, query: ListSavedQuery): Promise<SavedPage> {
     const page = normalizePage(query.page);
     const qb = this.savedItems
       .createQueryBuilder('saved')
       .where('saved.userId = :userId', { userId })
-      .orderBy('saved.createdAt', 'DESC');
+      .orderBy('saved.createdAt', 'DESC')
+      // The id breaks save-time ties, so the keyset order is total.
+      .addOrderBy('saved.id', 'DESC');
 
     if (query.kind) {
       qb.andWhere('saved.subjectType = :kind', { kind: query.kind });
@@ -77,19 +92,79 @@ export class SavedService {
     // take it out themselves. Dropping those rows would also make `total`
     // disagree with the page and silently shorten every page under an OFFSET,
     // which is the failure `BlockFilterService.excludeHidden` documents.
-    return paginate(qb, page, async (rows) => {
-      const availableRefs = await this.availability.availableRefs(rows, userId);
-      // Studio open demo pages: of the rows that did not resolve, the Studio
-      // ones staff took down read "withdrawn". No query when none is Studio.
-      const withdrawnRefs = await this.availability.withdrawnRefs(
-        rows.filter(
-          (row) =>
-            !availableRefs.has(toSavedId(row.subjectType, row.subjectId)),
-        ),
-        userId,
-      );
-      return toResolvedSavedItemDTOs(rows, availableRefs, withdrawnRefs);
+    const cursor = decodeSavedCursor(query.cursor);
+    if (cursor) {
+      return this.listAfterCursor(qb, userId, page, cursor);
+    }
+    // A holder the map fills, since `paginate` hands back mapped items only.
+    const pageRowsRead: SavedItem[] = [];
+    const result = await paginate(qb, page, (rows) => {
+      pageRowsRead.push(...rows);
+      return this.resolvePage(rows, userId);
     });
+    const lastPageRow: SavedItem | undefined =
+      pageRowsRead[pageRowsRead.length - 1];
+    const hasMore = page * PAGE_SIZE < result.total;
+    return {
+      ...result,
+      nextCursor:
+        hasMore && lastPageRow ? encodeSavedCursor(lastPageRow) : null,
+    };
+  }
+
+  /** ENG-04: one keyset page after `cursor`, read with one probe row that
+   *  only says more exist. `total` still counts the whole filtered set. */
+  private async listAfterCursor(
+    qb: SelectQueryBuilder<SavedItem>,
+    userId: string,
+    page: number,
+    cursor: SavedCursor,
+  ): Promise<SavedPage> {
+    const total = await qb.clone().getCount();
+    const rows = await qb
+      .andWhere(SAVED_AFTER_CURSOR_SQL, savedCursorParameters(cursor))
+      .take(PAGE_SIZE + 1)
+      .getMany();
+    const hasMore = rows.length > PAGE_SIZE;
+    const pageRows = hasMore ? rows.slice(0, PAGE_SIZE) : rows;
+    const lastPageRow = pageRows[pageRows.length - 1];
+    return {
+      items: await this.resolvePage(pageRows, userId),
+      total,
+      page,
+      pageSize: PAGE_SIZE,
+      nextCursor:
+        hasMore && lastPageRow ? encodeSavedCursor(lastPageRow) : null,
+    };
+  }
+
+  private async resolvePage(
+    rows: SavedItem[],
+    userId: string,
+  ): Promise<ResolvedSavedItemDTO[]> {
+    const availableRefs = await this.availability.availableRefs(rows, userId);
+    // Studio open demo pages: of the rows that did not resolve, the Studio
+    // ones staff took down read "withdrawn". No query when none is Studio.
+    const withdrawnRefs = await this.availability.withdrawnRefs(
+      rows.filter(
+        (row) => !availableRefs.has(toSavedId(row.subjectType, row.subjectId)),
+      ),
+      userId,
+    );
+    // Studio Library cards: the cover of each available saved release and
+    // playlist, in at most two queries. None for a page without one.
+    const coverUrlBySavedId = await savedStudioCoverUrls(
+      this.savedItems.manager,
+      rows,
+      availableRefs,
+      userId,
+    );
+    return toResolvedSavedItemDTOs(
+      rows,
+      availableRefs,
+      withdrawnRefs,
+      coverUrlBySavedId,
+    );
   }
 
   // Upsert: PUT is idempotent per (user, subject) — re-saving the same
@@ -125,6 +200,15 @@ export class SavedService {
       return;
     }
 
+    // A re-save within ten minutes of the unsave (Undo on the Library toast)
+    // takes back the first save time, so the item returns to its old place.
+    // TypeORM 0.3 writes an explicit `createdAt` as given: the column's
+    // `now()` is only its DEFAULT, used when the value is undefined.
+    const originalCreatedAt = this.unsaveMemory.take(
+      userId,
+      subjectType,
+      subjectId,
+    );
     try {
       const saved = await this.savedItems.save(
         this.savedItems.create({
@@ -132,6 +216,7 @@ export class SavedService {
           subjectType,
           subjectId,
           ...snapshot,
+          ...(originalCreatedAt ? { createdAt: originalCreatedAt } : {}),
         }),
       );
       await this.fileInDefaultListBestEffort(userId, saved.id);
@@ -156,7 +241,23 @@ export class SavedService {
     // meaning of "I no longer want this saved", and it is why removing
     // something from the DEFAULT list routes here rather than quietly
     // unlinking it (see `SavedListsService.removeItemFromList`).
-    await this.savedItems.delete({ userId, subjectType, subjectId });
+    const existing = await this.savedItems.findOne({
+      where: { userId, subjectType, subjectId },
+      select: { id: true, createdAt: true },
+    });
+    const result = await this.savedItems.delete({
+      userId,
+      subjectType,
+      subjectId,
+    });
+    if (existing && result.affected) {
+      this.unsaveMemory.remember(
+        userId,
+        subjectType,
+        subjectId,
+        existing.createdAt,
+      );
+    }
   }
 
   /**

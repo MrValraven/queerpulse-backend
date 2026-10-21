@@ -16,6 +16,25 @@ import {
 
 export type StudioWritablePersona = Pick<Subprofile, 'id' | 'kind'>;
 
+/**
+ * DES-84, `$1` the member: claims on the releases of any persona they
+ * created or co-own (the owner rule of `RELEASE_OWNER_SQL`) that they can
+ * still answer with a counter-notice, the rule
+ * `canCounterClaim` applies (accepted, no counter-notice yet). One row with
+ * the count; the claims themselves stay on the track page.
+ */
+export const OPEN_COUNTER_WINDOWS_SQL = `SELECT COUNT("claim"."id")::int AS "count"
+  FROM "studio_copyright_claims" "claim"
+  INNER JOIN "studio_releases" "release" ON "release"."id" = "claim"."release_id"
+  INNER JOIN "subprofiles" "persona" ON "persona"."id" = "release"."subprofile_id"
+ WHERE "claim"."status" = 'accepted'
+   AND "claim"."counter_note" IS NULL
+   AND ("persona"."user_id" = $1 OR EXISTS (
+     SELECT 1 FROM "subprofile_members" "member"
+      WHERE "member"."subprofile_id" = "persona"."id"
+        AND "member"."user_id" = $1
+   ))`;
+
 export interface ReleaseWriteContext {
   release: StudioRelease;
   persona: StudioWritablePersona;
@@ -39,6 +58,15 @@ export class StudioOwnershipService {
 
   isPersonaMember(userId: string, subprofileId: string): Promise<boolean> {
     return this.members.exists({ where: { userId, subprofileId } });
+  }
+
+  /** DES-84: how many counter-notice windows the member has open. */
+  async countOpenCounterWindows(userId: string): Promise<number> {
+    const rows: { count: number | string }[] = await this.releases.query(
+      OPEN_COUNTER_WINDOWS_SQL,
+      [userId],
+    );
+    return Number(rows[0]?.count ?? 0);
   }
 
   /** The persona a new release is created for. An unknown persona reads as

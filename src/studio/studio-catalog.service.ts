@@ -1,7 +1,13 @@
-import { HttpException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
+import { runWithConcurrency } from '../common/run-with-concurrency';
 import { escapeLikeTerm } from '../common/like-escape';
 import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -18,6 +24,15 @@ import { ownerClaimsForTracks } from './studio-claim-store';
 import { decodeStudioCursor, encodeStudioCursor } from './studio-cursor';
 import { episodeReleasedSql, isDraftEpisode } from './studio-episode-rule';
 import { findGaplessAfterTrackId } from './studio-gapless';
+import {
+  STUDIO_SEARCH_FIRST_WINDOW,
+  StudioSearchSlice,
+  StudioSearchWindow,
+  nextStudioSearchCursor,
+  sliceStudioSearchRows,
+  studioSearchRowLimit,
+  studioSearchWindowAt,
+} from './studio-search-cursor';
 import {
   StudioAdminReleaseSummary,
   toStudioAdminReleaseSummary,
@@ -135,6 +150,27 @@ const EMPTY_CATALOG_STATS: CatalogReleaseStats = {
   playableDurationSeconds: 0,
 };
 
+/** ENG-05: the search types the catalog pages itself. */
+export type StudioCatalogSearchType = Exclude<
+  StudioSearchType,
+  'all' | 'playlists'
+>;
+
+const EMPTY_SEARCH_SLICE: StudioSearchSlice<never> = {
+  items: [],
+  hasMore: false,
+};
+
+/** The first page adds no OFFSET, so the multi-type search reads as before. */
+function applySearchOffset<Entity extends ObjectLiteral>(
+  queryBuilder: SelectQueryBuilder<Entity>,
+  window: StudioSearchWindow,
+): void {
+  if (window.offset > 0) {
+    queryBuilder.offset(window.offset);
+  }
+}
+
 function listenerStats(stats: CatalogReleaseStats): StudioReleaseStats {
   return {
     trackCount: stats.playableTrackCount,
@@ -163,6 +199,15 @@ export const LISTENER_PLAYABLE_TRACK_FILTER_SQL = `"track"."audio_key" IS NOT NU
  * plays nothing, so its length stays out.
  */
 export const LISTENER_HEARD_TRACK_FILTER_SQL = `${LISTENER_PLAYABLE_TRACK_FILTER_SQL} AND ${notWithheldTrackSql('track')}`;
+
+/** Track reads one batch runs at once (`runWithConcurrency`). */
+const STUDIO_TRACK_BATCH_CONCURRENCY = 4;
+/** The single-read answers a batch skips: not found (missing or hidden from
+ *  the viewer) and gone (withheld or withdrawn). */
+const BATCH_SKIPPED_TRACK_STATUSES: ReadonlySet<number> = new Set([
+  HttpStatus.NOT_FOUND,
+  HttpStatus.GONE,
+]);
 
 /**
  * Studio v1: every read. Listeners see published releases of listenable
@@ -344,18 +389,79 @@ export class StudioCatalogService {
     filters: Pick<StudioReleaseFilters, 'genre' | 'mood' | 'format'> = {},
   ): Promise<StudioSearchResult> {
     const searchPattern = `%${escapeLikeTerm(query.trim())}%`;
+    const window = STUDIO_SEARCH_FIRST_WINDOW;
     const [releases, tracks, artists] = await Promise.all([
       type === 'all' || type === 'releases'
-        ? this.searchReleases(viewerId, searchPattern, filters)
-        : Promise.resolve([]),
+        ? this.searchReleases(viewerId, searchPattern, filters, window)
+        : Promise.resolve(EMPTY_SEARCH_SLICE),
       type === 'all' || type === 'tracks'
-        ? this.searchTracks(viewerId, searchPattern, filters)
-        : Promise.resolve([]),
+        ? this.searchTracks(viewerId, searchPattern, filters, window)
+        : Promise.resolve(EMPTY_SEARCH_SLICE),
       type === 'all' || type === 'artists'
-        ? this.searchArtists(viewerId, searchPattern, filters.format)
-        : Promise.resolve([]),
+        ? this.searchArtists(viewerId, searchPattern, filters.format, window)
+        : Promise.resolve(EMPTY_SEARCH_SLICE),
     ]);
-    return { releases, tracks, artists };
+    return {
+      releases: releases.items,
+      tracks: tracks.items,
+      artists: artists.items,
+    };
+  }
+
+  /** ENG-05: one page of a single-type search, from `offset` (the decoded
+   *  cursor). The other two arrays stay empty, and `nextCursor` is null on
+   *  the last page. Playlists page in `StudioPlaylistReadsService`. */
+  async searchPage(
+    viewerId: string,
+    query: string,
+    type: StudioCatalogSearchType,
+    filters: Pick<StudioReleaseFilters, 'genre' | 'mood' | 'format'>,
+    offset: number,
+  ): Promise<StudioSearchResult & { nextCursor: string | null }> {
+    const searchPattern = `%${escapeLikeTerm(query.trim())}%`;
+    const window = studioSearchWindowAt(offset);
+    const emptyResult: StudioSearchResult = {
+      releases: [],
+      tracks: [],
+      artists: [],
+    };
+    if (type === 'releases') {
+      const slice = await this.searchReleases(
+        viewerId,
+        searchPattern,
+        filters,
+        window,
+      );
+      return {
+        ...emptyResult,
+        releases: slice.items,
+        nextCursor: nextStudioSearchCursor(window, slice.hasMore),
+      };
+    }
+    if (type === 'tracks') {
+      const slice = await this.searchTracks(
+        viewerId,
+        searchPattern,
+        filters,
+        window,
+      );
+      return {
+        ...emptyResult,
+        tracks: slice.items,
+        nextCursor: nextStudioSearchCursor(window, slice.hasMore),
+      };
+    }
+    const slice = await this.searchArtists(
+      viewerId,
+      searchPattern,
+      filters.format,
+      window,
+    );
+    return {
+      ...emptyResult,
+      artists: slice.items,
+      nextCursor: nextStudioSearchCursor(window, slice.hasMore),
+    };
   }
 
   /** Studio v3: a scheduled release answers granted listeners too, with no
@@ -647,6 +753,46 @@ export class StudioCatalogService {
     };
   }
 
+  /**
+   * A batch of `getTrack` for the Continue listening shelf. Every id runs
+   * the single read, so the guards, the owner view and every listener rule
+   * match it exactly. A track the single read answers 404 or 410 for
+   * (missing, hidden from the viewer, withheld, withdrawn) drops out
+   * quietly; any other failure fails the batch. Request order, a few reads
+   * at a time so one batch never holds the pool.
+   */
+  async getTracks(
+    viewerId: string,
+    trackIds: readonly string[],
+  ): Promise<{ items: StudioTrackResponse[] }> {
+    const tracks = await runWithConcurrency(
+      trackIds.map((trackId) => () => this.getTrackOrNull(viewerId, trackId)),
+      STUDIO_TRACK_BATCH_CONCURRENCY,
+    );
+    return {
+      items: tracks.filter(
+        (track): track is StudioTrackResponse => track !== null,
+      ),
+    };
+  }
+
+  private async getTrackOrNull(
+    viewerId: string,
+    trackId: string,
+  ): Promise<StudioTrackResponse | null> {
+    try {
+      return await this.getTrack(viewerId, trackId);
+    } catch (error) {
+      if (
+        error instanceof HttpException &&
+        BATCH_SKIPPED_TRACK_STATUSES.has(error.getStatus())
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async getTrack(
     viewerId: string,
     trackId: string,
@@ -870,7 +1016,8 @@ export class StudioCatalogService {
     viewerId: string,
     searchPattern: string,
     filters: Pick<StudioReleaseFilters, 'genre' | 'mood' | 'format'>,
-  ): Promise<StudioReleaseCard[]> {
+    window: StudioSearchWindow,
+  ): Promise<StudioSearchSlice<StudioReleaseCard>> {
     const queryBuilder = this.withCardColumns(
       this.listenableReleases(viewerId),
     ).andWhere(
@@ -879,19 +1026,24 @@ export class StudioCatalogService {
       { studioSearchPattern: searchPattern },
     );
     this.applyReleaseFilters(queryBuilder, filters);
-    const rows = await queryBuilder
+    queryBuilder
       .orderBy('release.publishedAt', 'DESC')
       .addOrderBy('release.id', 'DESC')
-      .limit(STUDIO_LIMITS.searchResultsPerType)
-      .getMany();
-    return this.toCards(rows);
+      .limit(studioSearchRowLimit(window));
+    applySearchOffset(queryBuilder, window);
+    const { pageRows, hasMore } = sliceStudioSearchRows(
+      await queryBuilder.getMany(),
+      window,
+    );
+    return { items: await this.toCards(pageRows), hasMore };
   }
 
   private async searchTracks(
     viewerId: string,
     searchPattern: string,
     filters: Pick<StudioReleaseFilters, 'genre' | 'mood' | 'format'>,
-  ): Promise<StudioSearchResult['tracks']> {
+    window: StudioSearchWindow,
+  ): Promise<StudioSearchSlice<StudioSearchResult['tracks'][number]>> {
     const queryBuilder = this.tracks
       .createQueryBuilder('track')
       .innerJoin('track.release', 'release')
@@ -914,30 +1066,38 @@ export class StudioCatalogService {
       .orderBy('release.publishedAt', 'DESC')
       .addOrderBy('release.id', 'DESC')
       .addOrderBy('track.position', 'ASC')
-      .limit(STUDIO_LIMITS.searchResultsPerType);
+      .limit(studioSearchRowLimit(window));
+    applySearchOffset(queryBuilder, window);
     this.applyReleaseFilters(queryBuilder, filters);
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
     );
-    const matchedTracks = await queryBuilder.getMany();
+    // The probe row comes off before the cards are read, so a track whose
+    // card is missing never hides that more rows exist.
+    const { pageRows: matchedTracks, hasMore } = sliceStudioSearchRows(
+      await queryBuilder.getMany(),
+      window,
+    );
     const cardsByReleaseId = await this.cardsByReleaseId([
       ...new Set(matchedTracks.map((track) => track.releaseId)),
     ]);
-    return matchedTracks.flatMap((track) => {
+    const items = matchedTracks.flatMap((track) => {
       const releaseCard = cardsByReleaseId.get(track.releaseId);
       return releaseCard
         ? [{ ...toStudioTrackSummary(track), release: releaseCard }]
         : [];
     });
+    return { items, hasMore };
   }
 
   private async searchArtists(
     viewerId: string,
     searchPattern: string,
-    format?: StudioFormat,
-  ): Promise<StudioSearchResult['artists']> {
+    format: StudioFormat | undefined,
+    window: StudioSearchWindow,
+  ): Promise<StudioSearchSlice<StudioSearchResult['artists'][number]>> {
     const queryBuilder = this.subprofiles
       .createQueryBuilder('persona')
       .select(ARTIST_PERSONA_COLUMNS)
@@ -961,13 +1121,20 @@ export class StudioCatalogService {
         { studioSearchPattern: searchPattern },
       )
       .orderBy('persona.displayName', 'ASC')
-      .limit(STUDIO_LIMITS.searchResultsPerType);
+      // ENG-05: the id breaks display-name ties, so an offset page is stable.
+      .addOrderBy('persona.id', 'ASC')
+      .limit(studioSearchRowLimit(window));
+    applySearchOffset(queryBuilder, window);
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
     );
-    return (await queryBuilder.getMany()).map(toStudioFormatArtistRef);
+    const { pageRows, hasMore } = sliceStudioSearchRows(
+      await queryBuilder.getMany(),
+      window,
+    );
+    return { items: pageRows.map(toStudioFormatArtistRef), hasMore };
   }
 
   /** Cards for releases already known to be readable by the caller. Public

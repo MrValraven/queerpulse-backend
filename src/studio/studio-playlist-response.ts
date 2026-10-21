@@ -159,6 +159,9 @@ export interface StudioPlaylistList {
 
 export type StudioSearchResultWithPlaylists = StudioSearchResult & {
   playlists: StudioPlaylistCard[];
+  /** ENG-05: present on a single-type search only (`type` other than
+   *  `all`); null on the last page. The multi-type search omits it. */
+  nextCursor?: string | null;
 };
 
 export type StudioArtistWithPlaylists = StudioArtistResponse & {

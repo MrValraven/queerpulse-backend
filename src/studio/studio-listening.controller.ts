@@ -23,6 +23,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { ListStudioReleasesQuery } from './dto/list-studio-releases.query';
+import { ListStudioTracksQuery } from './dto/list-studio-tracks.query';
 import { SearchStudioQuery } from './dto/search-studio.query';
 import { StudioAccessGuard } from './studio-access.guard';
 import { StudioCatalogService } from './studio-catalog.service';
@@ -32,6 +33,8 @@ import {
   StudioSearchResultWithPlaylists,
 } from './studio-playlist-response';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
+import { decodeStudioSearchCursor } from './studio-search-cursor';
+import { StudioSearchType } from './studio.constants';
 import {
   StudioFormats,
   StudioGenres,
@@ -96,15 +99,22 @@ export class StudioListeningController {
   }
 
   // Playlists are merged here so the catalog never depends on the playlist
-  // reads, which depend on it.
+  // reads, which depend on it. ENG-05: a single type pages by `cursor` and
+  // answers `nextCursor`; the multi-type search keeps its 20 per type.
   @Get('search')
   @ApiOperation({ summary: 'Search releases, tracks, artists and playlists.' })
-  @ApiOkResponse({ description: '`StudioSearchResult`.' })
+  @ApiOkResponse({
+    description:
+      '`StudioSearchResult`, plus `nextCursor` when `type` names one type.',
+  })
   async search(
     @CurrentUser() user: CurrentUserData,
     @Query() query: SearchStudioQuery,
   ): Promise<StudioSearchResultWithPlaylists> {
     const type = query.type ?? 'all';
+    if (type !== 'all') {
+      return this.searchOneType(user.userId, query, type);
+    }
     const [catalogResult, playlists] = await Promise.all([
       this.catalog.search(user.userId, query.q, type, {
         genre: query.genre,
@@ -116,6 +126,36 @@ export class StudioListeningController {
         : Promise.resolve<StudioPlaylistCard[]>([]),
     ]);
     return { ...catalogResult, playlists };
+  }
+
+  private async searchOneType(
+    viewerId: string,
+    query: SearchStudioQuery,
+    type: Exclude<StudioSearchType, 'all'>,
+  ): Promise<StudioSearchResultWithPlaylists> {
+    const offset = decodeStudioSearchCursor(query.cursor);
+    if (type === 'playlists') {
+      const playlistPage = await this.playlistReads.searchPlaylistsPage(
+        viewerId,
+        query.q,
+        offset,
+      );
+      return {
+        releases: [],
+        tracks: [],
+        artists: [],
+        playlists: playlistPage.items,
+        nextCursor: playlistPage.nextCursor,
+      };
+    }
+    const catalogPage = await this.catalog.searchPage(
+      viewerId,
+      query.q,
+      type,
+      { genre: query.genre, mood: query.mood, format: query.format },
+      offset,
+    );
+    return { ...catalogPage, playlists: [] };
   }
 
   @Get('releases/:id')
@@ -145,6 +185,21 @@ export class StudioListeningController {
       subprofileId,
     );
     return { ...artist, playlists };
+  }
+
+  @Get('tracks')
+  @ApiOperation({
+    summary:
+      'Up to 20 tracks by id, each read as GET /studio/tracks/:id reads it.',
+    description:
+      'A track that read would answer 404 or 410 for is left out; the rest come back in request order. Nothing about the request is recorded.',
+  })
+  @ApiOkResponse({ description: '`{ items: StudioTrack[] }`.' })
+  getTracks(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListStudioTracksQuery,
+  ): Promise<{ items: StudioTrackResponse[] }> {
+    return this.catalog.getTracks(user.userId, query.ids);
   }
 
   @Get('tracks/:id')

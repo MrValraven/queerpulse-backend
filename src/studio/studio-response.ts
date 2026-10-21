@@ -288,6 +288,9 @@ export interface StudioArtistResponse {
 export interface StudioMe {
   hasAccess: boolean;
   uploadablePersonas: StudioArtistRef[];
+  /** DES-84: accepted claims on the member's releases they can still
+   *  counter. 0 without a grant. */
+  counterWindowsOpen: number;
 }
 
 export interface StudioPage<Item> {

@@ -24,6 +24,8 @@ import { Feature } from '../common/feature.decorator';
 import { StudioAccessGuard } from './studio-access.guard';
 import { StudioRelatedArtistsService } from './studio-related-artists.service';
 import { StudioArtistRef } from './studio-response';
+import { StudioSceneEvent } from './studio-scene-response';
+import { StudioScenesService } from './studio-scenes.service';
 
 @Feature('studio')
 @ApiTags('Studio')
@@ -33,7 +35,10 @@ import { StudioArtistRef } from './studio-response';
 @Controller('studio/artists')
 @UseGuards(ActiveMemberGuard, StudioAccessGuard)
 export class StudioRelatedArtistsController {
-  constructor(private readonly related: StudioRelatedArtistsService) {}
+  constructor(
+    private readonly related: StudioRelatedArtistsService,
+    private readonly scenes: StudioScenesService,
+  ) {}
 
   // The score moves slowly and reads nothing personal, so a short private
   // cache matches the frontend's five-minute staleTime.
@@ -47,5 +52,22 @@ export class StudioRelatedArtistsController {
     @Param('subprofileId', ParseUUIDPipe) subprofileId: string,
   ): Promise<{ items: StudioArtistRef[] }> {
     return this.related.listRelated(user.userId, subprofileId);
+  }
+
+  // PRD-15: public events only, read with the viewer's blocks, so the same
+  // short private cache as Related artists.
+  @Get(':subprofileId/events')
+  @Header('Cache-Control', 'private, max-age=300')
+  @ApiOperation({
+    summary:
+      'Up to four upcoming public events the artist lists, soonest first.',
+  })
+  @ApiOkResponse({ description: '`{ items: StudioSceneEvent[] }`.' })
+  @ApiNotFoundResponse({ description: 'The artist is not listenable.' })
+  listEvents(
+    @CurrentUser() user: CurrentUserData,
+    @Param('subprofileId', ParseUUIDPipe) subprofileId: string,
+  ): Promise<{ items: StudioSceneEvent[] }> {
+    return this.scenes.listArtistEvents(user.userId, subprofileId);
   }
 }

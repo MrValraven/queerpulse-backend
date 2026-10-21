@@ -64,7 +64,10 @@ export class AdminStudioCopyrightClaimsController {
 
   // Declared before the `:id` routes.
   @Get('counts')
-  @ApiOperation({ summary: 'Submitted and countered claims, for the badge.' })
+  @ApiOperation({
+    summary:
+      'Submitted and countered claims and open disputes, for the badges.',
+  })
   @ApiOkResponse({ description: '`StudioAdminClaimCounts`.' })
   countClaims(): Promise<StudioAdminClaimCounts> {
     return this.adminClaims.counts();

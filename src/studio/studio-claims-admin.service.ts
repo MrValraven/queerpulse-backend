@@ -8,6 +8,10 @@ import {
   StudioCopyrightClaim,
   StudioCopyrightClaimStatus,
 } from './entities/studio-copyright-claim.entity';
+import {
+  StudioReleaseDispute,
+  StudioReleaseDisputeStatus,
+} from './entities/studio-release-dispute.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import {
   StudioAdminClaim,
@@ -85,6 +89,9 @@ export class StudioClaimsAdminService {
     private readonly catalog: StudioCatalogService,
     private readonly modAudit: ModAuditService,
     private readonly notices: StudioSafetyNoticesService,
+    // DES-82: the review badges count open disputes beside the claims.
+    @InjectRepository(StudioReleaseDispute)
+    private readonly disputes: Repository<StudioReleaseDispute>,
   ) {}
 
   async list(
@@ -121,9 +128,29 @@ export class StudioClaimsAdminService {
     );
   }
 
-  /** The badge: one grouped count, no paging. */
+  /** The badges: one grouped claim count and one open-dispute count, no
+   *  paging. `disputesWaiting` (DES-82) counts disputes still open, which
+   *  `IDX_studio_release_disputes_status_created_at` answers. */
   async counts(): Promise<StudioAdminClaimCounts> {
-    const rows = await this.claims
+    const [rows, disputesWaiting] = await Promise.all([
+      this.countQueueClaims(),
+      this.disputes.count({
+        where: { status: StudioReleaseDisputeStatus.Open },
+      }),
+    ]);
+    const countOf = (claimStatus: string): number =>
+      Number(rows.find((row) => row.status === claimStatus)?.claim_count ?? 0);
+    return {
+      submitted: countOf(StudioCopyrightClaimStatus.Submitted),
+      countered: countOf(StudioCopyrightClaimStatus.Countered),
+      disputesWaiting,
+    };
+  }
+
+  private countQueueClaims(): Promise<
+    { status: string; claim_count: number | string }[]
+  > {
+    return this.claims
       .createQueryBuilder('claim')
       .select('"claim"."status"::text', 'status')
       .addSelect('COUNT(*)::int', 'claim_count')
@@ -132,12 +159,6 @@ export class StudioClaimsAdminService {
       })
       .groupBy('"claim"."status"')
       .getRawMany<{ status: string; claim_count: number | string }>();
-    const countOf = (claimStatus: string): number =>
-      Number(rows.find((row) => row.status === claimStatus)?.claim_count ?? 0);
-    return {
-      submitted: countOf(StudioCopyrightClaimStatus.Submitted),
-      countered: countOf(StudioCopyrightClaimStatus.Countered),
-    };
   }
 
   accept(actorId: string, claimId: string): Promise<StudioAdminClaim> {

@@ -27,6 +27,15 @@ import {
   encodePlaylistCursor,
 } from './studio-playlist-cursor';
 import {
+  STUDIO_SEARCH_FIRST_WINDOW,
+  StudioSearchSlice,
+  StudioSearchWindow,
+  nextStudioSearchCursor,
+  sliceStudioSearchRows,
+  studioSearchRowLimit,
+  studioSearchWindowAt,
+} from './studio-search-cursor';
+import {
   EMPTY_PLAYLIST_STATS,
   StudioPlaylistCard,
   StudioPlaylistEntryResponse,
@@ -347,6 +356,34 @@ export class StudioPlaylistReadsService {
     viewerId: string,
     query: string,
   ): Promise<StudioPlaylistCard[]> {
+    const slice = await this.searchPlaylistSlice(
+      viewerId,
+      query,
+      STUDIO_SEARCH_FIRST_WINDOW,
+    );
+    return slice.items;
+  }
+
+  /** ENG-05: one page of a playlists-only search, from `offset` (the
+   *  decoded cursor); `nextCursor` is null on the last page. */
+  async searchPlaylistsPage(
+    viewerId: string,
+    query: string,
+    offset: number,
+  ): Promise<{ items: StudioPlaylistCard[]; nextCursor: string | null }> {
+    const window = studioSearchWindowAt(offset);
+    const slice = await this.searchPlaylistSlice(viewerId, query, window);
+    return {
+      items: slice.items,
+      nextCursor: nextStudioSearchCursor(window, slice.hasMore),
+    };
+  }
+
+  private async searchPlaylistSlice(
+    viewerId: string,
+    query: string,
+    window: StudioSearchWindow,
+  ): Promise<StudioSearchSlice<StudioPlaylistCard>> {
     const searchPattern = `%${escapeLikeTerm(query.trim())}%`;
     const queryBuilder = this.playlists
       .createQueryBuilder('playlist')
@@ -361,12 +398,18 @@ export class StudioPlaylistReadsService {
       '"playlist"."user_id"',
     );
     this.excludeBlockedPersonaCreator(queryBuilder, viewerId);
-    const rows = await queryBuilder
+    queryBuilder
       .orderBy('playlist.updatedAt', 'DESC')
       .addOrderBy('playlist.id', 'DESC')
-      .limit(STUDIO_LIMITS.searchResultsPerType)
-      .getMany();
-    return this.toCards(viewerId, rows);
+      .limit(studioSearchRowLimit(window));
+    if (window.offset > 0) {
+      queryBuilder.offset(window.offset);
+    }
+    const { pageRows, hasMore } = sliceStudioSearchRows(
+      await queryBuilder.getMany(),
+      window,
+    );
+    return { items: await this.toCards(viewerId, pageRows), hasMore };
   }
 
   /** The ids among `trackIds` this viewer can play right now. */

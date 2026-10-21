@@ -237,6 +237,8 @@ export const STUDIO_DISCOVERY_LIMITS = {
   sceneSlugMaxLength: 60,
   sceneArtistsShown: 24,
   sceneUpcomingEvents: 6,
+  /** PRD-15: where an artist plays next, on the artist page. */
+  artistUpcomingEvents: 4,
   sceneReleasesPerPage: 24,
   personaCreditsPerTrack: 20,
   creditHandleMaxLength: 60,

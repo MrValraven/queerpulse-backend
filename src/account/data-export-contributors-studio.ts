@@ -397,3 +397,67 @@ export class StudioCopyrightClaimsExportContributor implements DataExportContrib
     }));
   }
 }
+
+interface PlaylistFolderExportRow {
+  id: string;
+  name: string;
+  position: number;
+  created_at: Date;
+}
+
+interface PlaylistFilingExportRow {
+  folder_id: string;
+  playlist_id: string;
+  filed_at: Date;
+}
+
+/**
+ * `saved` -> `studioPlaylistFolders` (Studio playlist folders): the
+ * member's folders in their order, each with the playlists they filed in
+ * it, by playlist id and the time they filed it. Playlist names are left
+ * out: a folder can hold another member's playlist, whose name is theirs.
+ * Folders and filings are private to the member, so nothing else is read.
+ */
+@Injectable()
+export class StudioPlaylistFoldersExportContributor implements DataExportContribution {
+  readonly category = 'saved';
+  readonly archiveKey = 'studioPlaylistFolders';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const folders: PlaylistFolderExportRow[] = await this.dataSource.query(
+      `SELECT "folder"."id" AS "id",
+              "folder"."name" AS "name",
+              "folder"."position" AS "position",
+              "folder"."created_at" AS "created_at"
+         FROM "studio_playlist_folders" "folder"
+        WHERE "folder"."user_id" = $1
+        ORDER BY "folder"."position" ASC, "folder"."id" ASC`,
+      [userId],
+    );
+    if (!folders.length) {
+      return [];
+    }
+    const filings: PlaylistFilingExportRow[] = await this.dataSource.query(
+      `SELECT "item"."folder_id" AS "folder_id",
+              "item"."playlist_id" AS "playlist_id",
+              "item"."created_at" AS "filed_at"
+         FROM "studio_playlist_folder_items" "item"
+        WHERE "item"."user_id" = $1
+        ORDER BY "item"."created_at" ASC, "item"."id" ASC`,
+      [userId],
+    );
+    return folders.map((folder) => ({
+      name: folder.name,
+      position: folder.position,
+      createdAt: folder.created_at.toISOString(),
+      playlists: filings
+        .filter((filing) => filing.folder_id === folder.id)
+        .map((filing) => ({
+          playlistId: filing.playlist_id,
+          filedAt: filing.filed_at.toISOString(),
+        })),
+    }));
+  }
+}

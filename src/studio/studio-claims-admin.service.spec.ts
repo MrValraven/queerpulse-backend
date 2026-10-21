@@ -7,6 +7,10 @@ import {
   StudioCopyrightClaim,
   StudioCopyrightClaimStatus,
 } from './entities/studio-copyright-claim.entity';
+import {
+  StudioReleaseDispute,
+  StudioReleaseDisputeStatus,
+} from './entities/studio-release-dispute.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import {
@@ -90,6 +94,7 @@ describe('StudioClaimsAdminService', () => {
   let profiles: { find: jest.Mock };
   let catalog: { staffSummariesByReleaseId: jest.Mock };
   let modAudit: { writeAuditLog: jest.Mock };
+  let disputes: { count: jest.Mock };
   let notices: {
     claimAccepted: jest.Mock;
     claimDeclined: jest.Mock;
@@ -161,6 +166,7 @@ describe('StudioClaimsAdminService', () => {
       ),
     };
     modAudit = { writeAuditLog: jest.fn().mockResolvedValue('audit-1') };
+    disputes = { count: jest.fn().mockResolvedValue(0) };
     notices = {
       claimAccepted: jest.fn().mockResolvedValue(undefined),
       claimDeclined: jest.fn().mockResolvedValue(undefined),
@@ -183,6 +189,7 @@ describe('StudioClaimsAdminService', () => {
       catalog as unknown as StudioCatalogService,
       modAudit as unknown as ModAuditService,
       notices as unknown as StudioSafetyNoticesService,
+      disputes as unknown as Repository<StudioReleaseDispute>,
     );
   });
 
@@ -245,11 +252,20 @@ describe('StudioClaimsAdminService', () => {
       );
     });
 
-    it('counts the submitted and countered claims for the badge', async () => {
+    it('counts the submitted and countered claims and the open disputes for the badges', async () => {
       claims.createQueryBuilder.mockReturnValue(
         queryBuilderMock([], [{ status: 'countered', claim_count: '2' }]),
       );
-      expect(await service.counts()).toEqual({ submitted: 0, countered: 2 });
+      disputes.count.mockResolvedValue(3);
+      expect(await service.counts()).toEqual({
+        submitted: 0,
+        countered: 2,
+        disputesWaiting: 3,
+      });
+      // DES-82: only disputes still open wait for our team.
+      expect(disputes.count).toHaveBeenCalledWith({
+        where: { status: StudioReleaseDisputeStatus.Open },
+      });
     });
   });
 

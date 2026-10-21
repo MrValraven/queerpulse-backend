@@ -23,7 +23,14 @@ export interface StudioShareLink {
   id: string;
   /** Track links only: the `t` timestamp in whole seconds, else null. */
   startAtSeconds: number | null;
-  /** The canonical root-relative form, `/studio/track?id=<id>` plus `&t=<s>` when set. */
+  /**
+   * Lyric links (PRD-13): a track link with `line`, the index of one timed
+   * lyric line, 0 to 499. Set only when the link carries a usable one; the
+   * frontend reads such a link as its `lyric` kind. The URL holds the index
+   * only, never the words.
+   */
+  lineIndex?: number;
+  /** The canonical root-relative form, `/studio/track?id=<id>` plus `&t=<s>` when set, then `&line=<n>` when set. */
   path: string;
 }
 
@@ -53,6 +60,11 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const WHOLE_SECONDS_PATTERN = /^\d{1,5}$/;
+
+/** The largest `line` a lyric link carries: a track holds 500 timed lines. */
+export const STUDIO_SHARE_MAX_LINE_INDEX = 499;
+
+const LINE_INDEX_PATTERN = /^\d{1,3}$/;
 
 const RELATIVE_PATH_PREFIX = '/studio/';
 
@@ -300,13 +312,28 @@ function parseWithOriginSet(
   const startAtSeconds =
     kind === 'track' ? parseStartAtSeconds(parsed.searchParams.get('t')) : null;
   const basePath = `${PATH_BY_KIND[kind]}?id=${id}`;
+  const timedPath =
+    startAtSeconds === null ? basePath : `${basePath}&t=${startAtSeconds}`;
+  const lineIndex =
+    kind === 'track' ? parseLineIndex(parsed.searchParams.get('line')) : null;
+  if (lineIndex === null) {
+    return { kind, id, startAtSeconds, path: timedPath };
+  }
   return {
     kind,
     id,
     startAtSeconds,
-    path:
-      startAtSeconds === null ? basePath : `${basePath}&t=${startAtSeconds}`,
+    lineIndex,
+    path: `${timedPath}&line=${lineIndex}`,
   };
+}
+
+function parseLineIndex(rawValue: string | null): number | null {
+  if (rawValue === null || !LINE_INDEX_PATTERN.test(rawValue)) {
+    return null;
+  }
+  const lineIndex = Number(rawValue);
+  return lineIndex <= STUDIO_SHARE_MAX_LINE_INDEX ? lineIndex : null;
 }
 
 function parsedOnOwnOrigin(

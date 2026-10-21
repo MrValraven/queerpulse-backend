@@ -32,6 +32,8 @@ import { StudioSceneEvent } from './entities/studio-scene-event.entity';
 import { StudioScene } from './entities/studio-scene.entity';
 import { StudioPlaylistTrack } from './entities/studio-playlist-track.entity';
 import { StudioPlaylistEditor } from './entities/studio-playlist-editor.entity';
+import { StudioPlaylistFolderItem } from './entities/studio-playlist-folder-item.entity';
+import { StudioPlaylistFolder } from './entities/studio-playlist-folder.entity';
 import { StudioPressKit } from './entities/studio-press-kit.entity';
 import { StudioReleaseReminder } from './entities/studio-release-reminder.entity';
 import { StudioReleaseVersion } from './entities/studio-release-version.entity';
@@ -72,6 +74,8 @@ import { StudioPlaylistWritesService } from './studio-playlist-writes.service';
 import { StudioPlaylistEditorBlockListener } from './studio-playlist-editor-block.listener';
 import { StudioPlaylistEditorsController } from './studio-playlist-editors.controller';
 import { StudioPlaylistEditorsService } from './studio-playlist-editors.service';
+import { StudioPlaylistFoldersController } from './studio-playlist-folders.controller';
+import { StudioPlaylistFoldersService } from './studio-playlist-folders.service';
 import { StudioPlaylistsController } from './studio-playlists.controller';
 import { StudioPressKitController } from './studio-press-kit.controller';
 import { StudioPressKitService } from './studio-press-kit.service';
@@ -144,6 +148,8 @@ import { StudioTracksService } from './studio-tracks.service';
       StudioPlaylist,
       StudioPlaylistTrack,
       StudioPlaylistEditor,
+      StudioPlaylistFolder,
+      StudioPlaylistFolderItem,
       StudioReleaseReminder,
       StudioReleaseVersion,
       StudioPressKit,
@@ -180,6 +186,9 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioListeningController,
     StudioReleasesController,
     StudioTracksController,
+    // Playlist folders before the playlists controller: `GET
+    // studio/playlists/folders` must match here, never `GET :id`.
+    StudioPlaylistFoldersController,
     StudioPlaylistsController,
     StudioPlaylistEditorsController,
     StudioPlaylistListingsController,
@@ -216,6 +225,7 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioModerationService,
     StudioPlaylistReadsService,
     StudioPlaylistWritesService,
+    StudioPlaylistFoldersService,
     StudioStatsService,
     StudioReleaseAlertsListener,
     StudioReleaseExtrasService,
