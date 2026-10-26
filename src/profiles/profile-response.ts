@@ -6,6 +6,7 @@ import { cropFor } from '../media-crops/crop-response';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { directoryBlurb } from './directory-blurb';
 import { FeaturedCommunityRefView } from './featured-communities';
+import { ActivityAction, describeActivity } from './activity-describe';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
@@ -209,6 +210,12 @@ export interface ActivityView {
   title: string;
   sub: string | null;
   to: string | null;
+  // ISO timestamp of when the action happened, for a relative "2 days ago".
+  occurredAt: string;
+  // The title split into a verb and its subject (see `describeActivity`).
+  // Both null when the title does not parse; the frontend then shows `title`.
+  action: ActivityAction | null;
+  subject: string | null;
 }
 
 export interface ProfileRelations {
@@ -699,6 +706,8 @@ export function toFullProfile(
       title: a.title,
       sub: a.sub,
       to: a.toLink,
+      occurredAt: a.occurredAt.toISOString(),
+      ...describeActivity(a),
     })),
     related: rels.related,
     featuredCommunities: rels.featuredCommunities,

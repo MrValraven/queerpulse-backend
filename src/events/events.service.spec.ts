@@ -2459,7 +2459,28 @@ describe('EventsService', () => {
       events.findOne.mockResolvedValue(editableEvent());
       const detail = await service.getBySlug('x', 'u1');
       expect(detail.community).toBeNull();
+      expect(detail.hostingCommunity).toBeNull();
       expect(membership.hostingRefById).not.toHaveBeenCalled();
+    });
+
+    it('names the hosting community on the detail summary by id, slug and name', async () => {
+      events.findOne.mockResolvedValue(hostedEvent());
+      membership.hostingRefById.mockResolvedValue(ref(AccessTier.Public));
+      const detail = await service.getBySlug('x', 'stranger');
+      expect(detail.hostingCommunity).toEqual({
+        id: 'community-9',
+        slug: 'queer-devs',
+        name: 'Queer Devs',
+      });
+    });
+
+    it('withholds the hosting community summary with the rest of a private lead', async () => {
+      events.findOne.mockResolvedValue(hostedEvent());
+      membership.hostingRefById.mockResolvedValue(ref(AccessTier.Private));
+      membership.isMember.mockResolvedValue(false);
+      const detail = await service.getBySlug('x', 'stranger');
+      expect(detail.hostingCommunity).toBeNull();
+      expect(detail.communityId).toBeNull();
     });
   });
 
@@ -3674,6 +3695,21 @@ describe('EventsService', () => {
         const detail = await service.getBySlug('x', 'stranger');
 
         expect(detail.guestCommunities).toEqual([]);
+        // Co-hosted still reads true: a boolean that names no guest.
+        expect(detail.isCoHosted).toBe(true);
+      });
+
+      it('marks the detail co-hosted when an accepted guest is shown', async () => {
+        eventCommunities.find.mockResolvedValue([
+          { id: 'row-1', communityId: 'guest-a' },
+        ]);
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([['guest-a', tierRef('guest-a', AccessTier.Public)]]),
+        );
+
+        const detail = await service.getBySlug('x', 'stranger');
+
+        expect(detail.isCoHosted).toBe(true);
       });
 
       it('names a private guest to a plain member of it', async () => {
@@ -3718,6 +3754,7 @@ describe('EventsService', () => {
         const detail = await service.getBySlug('x', 'stranger');
 
         expect(detail.guestCommunities).toEqual([]);
+        expect(detail.isCoHosted).toBe(false);
         expect(membership.tierRefsByIds).not.toHaveBeenCalled();
       });
     });
@@ -3934,6 +3971,306 @@ describe('EventsService', () => {
       });
     });
   });
+
+  // Hidden event communities: the upcoming browse leaves out an event whose
+  // every hosting community the viewer hid, read through one raw query on the
+  // events repository's manager. No other branch reads the hidden list.
+  describe('hidden event communities filter', () => {
+    const HIDDEN_IDS_SQL =
+      'SELECT "community_id" FROM "hidden_event_communities" WHERE "user_id" = $1';
+
+    const hiddenPredicateCalls = (recordedWhereCalls: RecordedWhereCall[]) =>
+      recordedWhereCalls.filter((call) =>
+        call.clause.includes(':...hiddenCommunityIds'),
+      );
+
+    const runUpcoming = async (options?: { includeHidden?: boolean }) => {
+      const { queryBuilder, recordedWhereCalls } = recordingListQueryBuilder();
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+      await service.list('viewer-1', 'upcoming', 1, options);
+      return recordedWhereCalls;
+    };
+
+    it('drops events whose every hosting community the viewer hid', async () => {
+      events.manager.query.mockResolvedValue([{ community_id: 'c-1' }]);
+
+      const recordedWhereCalls = await runUpcoming();
+
+      expect(events.manager.query).toHaveBeenCalledTimes(1);
+      expect(events.manager.query).toHaveBeenCalledWith(HIDDEN_IDS_SQL, [
+        'viewer-1',
+      ]);
+      const hiddenCalls = hiddenPredicateCalls(recordedWhereCalls);
+      expect(hiddenCalls).toHaveLength(1);
+      expect(hiddenCalls[0]!.clause).toContain('"hidden_guest"');
+      expect(hiddenCalls[0]!.clause).toContain('"hidden_any_guest"');
+      expect(hiddenCalls[0]!.parameters).toEqual({
+        hiddenCommunityIds: ['c-1'],
+      });
+    });
+
+    it('adds no predicate when the viewer hides nothing', async () => {
+      events.manager.query.mockResolvedValue([]);
+
+      const recordedWhereCalls = await runUpcoming();
+
+      expect(events.manager.query).toHaveBeenCalledTimes(1);
+      expect(hiddenPredicateCalls(recordedWhereCalls)).toHaveLength(0);
+    });
+
+    it('reads nothing and adds no predicate when includeHidden is set', async () => {
+      events.manager.query.mockResolvedValue([{ community_id: 'c-1' }]);
+
+      const recordedWhereCalls = await runUpcoming({ includeHidden: true });
+
+      expect(events.manager.query).not.toHaveBeenCalled();
+      expect(hiddenPredicateCalls(recordedWhereCalls)).toHaveLength(0);
+    });
+
+    it.each(['going', 'waitlisted', 'past', 'saved', 'hosting'] as const)(
+      'never reads the hidden list on the %s branch',
+      async (filter) => {
+        events.manager.query.mockResolvedValue([{ community_id: 'c-1' }]);
+        const { queryBuilder, recordedWhereCalls } =
+          recordingListQueryBuilder();
+        events.createQueryBuilder.mockReturnValue(queryBuilder);
+
+        await service.list('viewer-1', filter, 1);
+
+        expect(events.manager.query).not.toHaveBeenCalled();
+        expect(hiddenPredicateCalls(recordedWhereCalls)).toHaveLength(0);
+      },
+    );
+  });
+
+  // Every list card names its lead community (`hostingCommunity`) from one
+  // batched read per page, under the detail's private-naming rule: a private
+  // lead is withheld, its id included, from a viewer who is neither an
+  // organiser nor on its roster.
+  describe('list cards name the hosting community', () => {
+    const LEAD_ID = 'lead-community';
+
+    const listedRow = (overrides: Partial<Event>): Event =>
+      ({
+        id: 'listed-1',
+        slug: 'listed-gathering',
+        title: 'Listed gathering',
+        hostId: 'host-1',
+        startAt: new Date(Date.now() + 3_600_000),
+        endAt: null,
+        timezone: 'Europe/Lisbon',
+        venue: null,
+        isOnline: false,
+        coverImageUrl: null,
+        visibility: EventVisibility.Public,
+        status: EventStatus.Published,
+        capacity: null,
+        communityId: LEAD_ID,
+        listingId: null,
+        runByListingId: null,
+        neighbourhood: null,
+        eventType: null,
+        gatheringFamily: GatheringFamily.Care,
+        formatDetails: {},
+        cost: null,
+        themes: [],
+        costKind: null,
+        seriesId: null,
+        seriesIndex: null,
+        showAttendeeCount: true,
+        ...overrides,
+      }) as unknown as Event;
+
+    const leadRef = (accessTier: AccessTier) => ({
+      id: LEAD_ID,
+      parentId: null,
+      slug: 'queer-runners',
+      name: 'Queer Runners Lisboa',
+      accessTier,
+      avatarImageUrl: null,
+    });
+
+    // `summarize`'s grouped tally: nobody going yet.
+    const emptyTallyQueryBuilder = () => {
+      const queryBuilder: Record<string, jest.Mock> = {};
+      for (const method of [
+        'select',
+        'addSelect',
+        'where',
+        'andWhere',
+        'groupBy',
+      ]) {
+        queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+      }
+      queryBuilder.getRawMany = jest.fn().mockResolvedValue([]);
+      return queryBuilder;
+    };
+
+    const browseRowsFor = async (viewerId: string, rows: Event[]) => {
+      const { queryBuilder } = recordingListQueryBuilder();
+      queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+      rsvps.createQueryBuilder.mockImplementation(emptyTallyQueryBuilder);
+      return service.list(viewerId, 'upcoming', 1);
+    };
+
+    it('names a public lead by id, slug and name', async () => {
+      membership.tierRefsByIds.mockResolvedValue(
+        new Map([[LEAD_ID, leadRef(AccessTier.Public)]]),
+      );
+
+      const [card] = await browseRowsFor('viewer-1', [listedRow({})]);
+
+      expect(card?.hostingCommunity).toEqual({
+        id: LEAD_ID,
+        slug: 'queer-runners',
+        name: 'Queer Runners Lisboa',
+      });
+      expect(card?.communityId).toBe(LEAD_ID);
+      expect(membership.effectiveRolesFor).not.toHaveBeenCalled();
+      expect(cohosts.find).not.toHaveBeenCalled();
+    });
+
+    it('reads every lead on the page in one batched call', async () => {
+      membership.tierRefsByIds.mockResolvedValue(
+        new Map([[LEAD_ID, leadRef(AccessTier.Public)]]),
+      );
+
+      await browseRowsFor('viewer-1', [
+        listedRow({}),
+        listedRow({ id: 'listed-2', slug: 'second-gathering' }),
+      ]);
+
+      expect(membership.tierRefsByIds).toHaveBeenCalledTimes(1);
+      expect(membership.tierRefsByIds).toHaveBeenCalledWith([LEAD_ID, LEAD_ID]);
+    });
+
+    it('carries no community and reads none for a gathering without a lead', async () => {
+      const [card] = await browseRowsFor('viewer-1', [
+        listedRow({ communityId: null }),
+      ]);
+
+      expect(card?.hostingCommunity).toBeNull();
+      expect(card?.communityId).toBeNull();
+      expect(membership.tierRefsByIds).not.toHaveBeenCalled();
+    });
+
+    it('withholds a private lead, its id included, from a viewer off its roster', async () => {
+      membership.tierRefsByIds.mockResolvedValue(
+        new Map([[LEAD_ID, leadRef(AccessTier.Private)]]),
+      );
+
+      const [card] = await browseRowsFor('viewer-1', [listedRow({})]);
+
+      expect(card?.hostingCommunity).toBeNull();
+      expect(card?.communityId).toBeNull();
+      expect(membership.effectiveRolesFor).toHaveBeenCalledWith(
+        [leadRef(AccessTier.Private)],
+        'viewer-1',
+      );
+      expect(cohosts.find).toHaveBeenCalledWith({
+        where: { userId: 'viewer-1', eventId: In(['listed-1']) },
+        select: { eventId: true },
+      });
+    });
+
+    it('names a private lead to a member of its roster', async () => {
+      membership.tierRefsByIds.mockResolvedValue(
+        new Map([[LEAD_ID, leadRef(AccessTier.Private)]]),
+      );
+      membership.effectiveRolesFor.mockResolvedValue(
+        new Map([[LEAD_ID, RosterRole.Member]]),
+      );
+
+      const [card] = await browseRowsFor('viewer-1', [listedRow({})]);
+
+      expect(card?.hostingCommunity).toEqual(
+        expect.objectContaining({ id: LEAD_ID, slug: 'queer-runners' }),
+      );
+      expect(card?.communityId).toBe(LEAD_ID);
+      expect(cohosts.find).not.toHaveBeenCalled();
+    });
+
+    it('names a private lead to the gathering host', async () => {
+      membership.tierRefsByIds.mockResolvedValue(
+        new Map([[LEAD_ID, leadRef(AccessTier.Private)]]),
+      );
+
+      const [card] = await browseRowsFor('host-1', [listedRow({})]);
+
+      expect(card?.hostingCommunity).toEqual(
+        expect.objectContaining({ id: LEAD_ID }),
+      );
+      expect(card?.communityId).toBe(LEAD_ID);
+      expect(cohosts.find).not.toHaveBeenCalled();
+    });
+
+    it('names a private lead to a co-host off its roster', async () => {
+      membership.tierRefsByIds.mockResolvedValue(
+        new Map([[LEAD_ID, leadRef(AccessTier.Private)]]),
+      );
+      cohosts.find.mockResolvedValue([{ eventId: 'listed-1' }]);
+
+      const [card] = await browseRowsFor('cohost-1', [listedRow({})]);
+
+      expect(card?.hostingCommunity).toEqual(
+        expect.objectContaining({ id: LEAD_ID }),
+      );
+      expect(card?.communityId).toBe(LEAD_ID);
+    });
+
+    it('reuses the hosting roster for a co-host and asks about co-hosts once', async () => {
+      membership.tierRefsByIds.mockResolvedValue(
+        new Map([[LEAD_ID, leadRef(AccessTier.Private)]]),
+      );
+      events.find.mockResolvedValue([listedRow({})]);
+      cohosts.find.mockResolvedValue([
+        { eventId: 'listed-1', userId: 'cohost-1' },
+      ]);
+      rsvps.createQueryBuilder.mockImplementation(emptyTallyQueryBuilder);
+
+      const [card] = await service.list('cohost-1', 'hosting', 1);
+
+      expect(card?.hostingCommunity).toEqual(
+        expect.objectContaining({ id: LEAD_ID }),
+      );
+      expect(cohosts.find).toHaveBeenCalledTimes(1);
+      expect(cohosts.find).toHaveBeenCalledWith({
+        where: { userId: 'cohost-1' },
+      });
+    });
+
+    it('marks a co-hosted row true and a plain row false from one batched read', async () => {
+      eventCommunities.find.mockResolvedValue([
+        { eventId: 'listed-1' },
+        { eventId: 'listed-1' },
+      ]);
+
+      const [coHostedCard, plainCard] = await browseRowsFor('viewer-1', [
+        listedRow({}),
+        listedRow({ id: 'listed-2', slug: 'second-gathering' }),
+      ]);
+
+      expect(coHostedCard?.isCoHosted).toBe(true);
+      expect(plainCard?.isCoHosted).toBe(false);
+      expect(eventCommunities.find).toHaveBeenCalledTimes(1);
+      expect(eventCommunities.find).toHaveBeenCalledWith({
+        where: {
+          eventId: In(['listed-1', 'listed-2']),
+          status: EventCommunityStatus.Accepted,
+        },
+        select: { eventId: true },
+      });
+    });
+
+    it('reads no guest rows for an empty page', async () => {
+      const cards = await browseRowsFor('viewer-1', []);
+
+      expect(cards).toEqual([]);
+      expect(eventCommunities.find).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Pulse Live rules', () => {
     let manager: {
       query: jest.Mock;

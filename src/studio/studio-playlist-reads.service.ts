@@ -274,6 +274,7 @@ export class StudioPlaylistReadsService {
     viewerId: string,
     memberSlug: string,
     cursor: string | undefined,
+    onlyPlaylistIds?: readonly string[],
   ): Promise<StudioPage<StudioPlaylistCard>> {
     const memberUserId = await new MemberLookup(this.profiles).userIdForSlug(
       memberSlug,
@@ -286,6 +287,11 @@ export class StudioPlaylistReadsService {
         .createQueryBuilder('playlist')
         .where('"playlist"."user_id" = :ownerId', { ownerId: memberUserId })
         .andWhere(`NOT ${personaCreditActiveSql('playlist')}`);
+      if (onlyPlaylistIds) {
+        ownerQueryBuilder.andWhere('"playlist"."id" IN (:...onlyPlaylistIds)', {
+          onlyPlaylistIds,
+        });
+      }
       return this.pageOfCards(viewerId, ownerQueryBuilder, cursor);
     }
     const [hasOwnerGrant, isBlockedEitherWay] = await Promise.all([
@@ -316,7 +322,27 @@ export class StudioPlaylistReadsService {
       viewerId,
       '"playlist"."user_id"',
     );
+    if (onlyPlaylistIds) {
+      queryBuilder.andWhere('"playlist"."id" IN (:...onlyPlaylistIds)', {
+        onlyPlaylistIds,
+      });
+    }
     return this.pageOfCards(viewerId, queryBuilder, cursor);
+  }
+
+  /** Every playlist a member may put on their profile: the ones that read
+   *  as theirs, private included (a member holds at most
+   *  `STUDIO_LIMITS.playlistsPerMember`). */
+  async listFeaturableByMember(userId: string): Promise<StudioPlaylistCard[]> {
+    const rows = await this.playlists
+      .createQueryBuilder('playlist')
+      .where('"playlist"."user_id" = :ownerId', { ownerId: userId })
+      .andWhere(`NOT ${personaCreditActiveSql('playlist')}`)
+      .orderBy('playlist.updatedAt', 'DESC')
+      .addOrderBy('playlist.id', 'DESC')
+      .limit(STUDIO_LIMITS.playlistsPerMember)
+      .getMany();
+    return this.toCards(userId, rows);
   }
 
   /** "In these playlists" on a track page: up to six public playlists. */

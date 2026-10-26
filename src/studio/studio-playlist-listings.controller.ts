@@ -24,6 +24,7 @@ import { Feature } from '../common/feature.decorator';
 import { ListStudioPlaylistsQuery } from './dto/list-studio-playlists.query';
 import { StudioAccessGuard } from './studio-access.guard';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
+import { StudioProfilePlaylistsService } from './studio-profile-playlists.service';
 import {
   StudioPlaylistCard,
   StudioPlaylistList,
@@ -41,7 +42,10 @@ import { StudioPage } from './studio-response';
 @Controller('studio')
 @UseGuards(ActiveMemberGuard, StudioAccessGuard)
 export class StudioPlaylistListingsController {
-  constructor(private readonly playlistReads: StudioPlaylistReadsService) {}
+  constructor(
+    private readonly playlistReads: StudioPlaylistReadsService,
+    private readonly profilePlaylists: StudioProfilePlaylistsService,
+  ) {}
 
   @Get('artists/:subprofileId/playlists')
   @ApiOperation({ summary: 'Public playlists credited to a persona.' })
@@ -69,7 +73,7 @@ export class StudioPlaylistListingsController {
     @Param('slug') memberSlug: string,
     @Query() query: ListStudioPlaylistsQuery,
   ): Promise<StudioPage<StudioPlaylistCard>> {
-    return this.playlistReads.listCreditedToMember(
+    return this.profilePlaylists.listForMember(
       user.userId,
       memberSlug,
       query.cursor,

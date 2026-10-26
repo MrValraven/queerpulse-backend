@@ -1,7 +1,7 @@
 // Loaded by @nestjs/core in the app; this spec imports validate() directly,
 // so the decorator metadata polyfill must be registered here.
 import 'reflect-metadata';
-import { validate } from './env.validation';
+import { DEV_SETUP_HINT, validate } from './env.validation';
 
 describe('env validate()', () => {
   // All required vars as of the current EnvironmentVariables class.
@@ -113,6 +113,10 @@ describe('env validate()', () => {
       AWS_SECRET_ACCESS_KEY: 'secret',
       CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
       CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+      RESEND_API_KEY: 're_test_key',
+      RESEND_FROM: 'QueerPulse <hello@queerpulse.com>',
+      RESEND_SIGNIN_TEMPLATE_ID_EN: 'template-en',
+      RESEND_SIGNIN_TEMPLATE_ID_PT: 'template-pt',
     };
 
     expect(errorFor(production)).toBe('');
@@ -144,6 +148,10 @@ describe('env validate()', () => {
       AWS_SECRET_ACCESS_KEY: 'secret',
       CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
       CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+      RESEND_API_KEY: 're_test_key',
+      RESEND_FROM: 'QueerPulse <hello@queerpulse.com>',
+      RESEND_SIGNIN_TEMPLATE_ID_EN: 'template-en',
+      RESEND_SIGNIN_TEMPLATE_ID_PT: 'template-pt',
     };
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -201,4 +209,126 @@ describe('env validate()', () => {
       ).toThrow();
     },
   );
+
+  // Without the RESEND_* values the email-code sign-in is simply switched off
+  // (see email.config.ts), so production boots and hides the feature.
+  it('boots in production without any Resend variable', () => {
+    const production: Record<string, string> = {
+      ...base,
+      NODE_ENV: 'production',
+      FRONTEND_URL: 'https://queerpulse.com',
+      API_URL: 'https://api.queerpulse.com',
+      METRICS_TOKEN: 'metrics-token-sixteen-plus-chars',
+      AWS_ENDPOINT_URL: 'https://bucket.example',
+      AWS_DEFAULT_REGION: 'auto',
+      AWS_S3_BUCKET_NAME: 'bucket',
+      AWS_ACCESS_KEY_ID: 'key',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
+      CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+    };
+
+    expect(() => validate(production)).not.toThrow();
+    expect(() =>
+      validate({ ...production, EMAIL_CODE_DEV_LOG: 'true' }),
+    ).not.toThrow();
+  });
+
+  it('boots in development without any Resend variable', () => {
+    expect(() => validate(base)).not.toThrow();
+  });
+
+  it('accepts EMAIL_CODE_DEV_LOG as an optional string', () => {
+    expect(() =>
+      validate({ ...base, EMAIL_CODE_DEV_LOG: 'true' }),
+    ).not.toThrow();
+    expect(() =>
+      validate({ ...base, EMAIL_CODE_DEV_LOG: 'false' }),
+    ).not.toThrow();
+  });
+
+  it('rejects an EMAIL_CODE_SECRET shorter than 32 characters', () => {
+    expect(() => validate({ ...base, EMAIL_CODE_SECRET: 'too-short' })).toThrow(
+      /EMAIL_CODE_SECRET/,
+    );
+  });
+
+  it('accepts production without EMAIL_CODE_SECRET (derived from JWT_ACCESS_SECRET)', () => {
+    const production: Record<string, string> = {
+      ...base,
+      NODE_ENV: 'production',
+      FRONTEND_URL: 'https://queerpulse.com',
+      API_URL: 'https://api.queerpulse.com',
+      METRICS_TOKEN: 'metrics-token-sixteen-plus-chars',
+      AWS_ENDPOINT_URL: 'https://bucket.example',
+      AWS_DEFAULT_REGION: 'auto',
+      AWS_S3_BUCKET_NAME: 'bucket',
+      AWS_ACCESS_KEY_ID: 'key',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
+      CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+      RESEND_API_KEY: 're_test_key',
+      RESEND_FROM: 'QueerPulse <hello@queerpulse.com>',
+      RESEND_SIGNIN_TEMPLATE_ID_EN: 'template-en',
+      RESEND_SIGNIN_TEMPLATE_ID_PT: 'template-pt',
+    };
+    expect(() => validate(production)).not.toThrow();
+  });
+
+  describe('local development helpers', () => {
+    const errorFor = (env: Record<string, string>): string => {
+      try {
+        validate(env);
+        return '';
+      } catch (err) {
+        return (err as Error).message;
+      }
+    };
+    const production: Record<string, string> = {
+      ...base,
+      NODE_ENV: 'production',
+      FRONTEND_URL: 'https://queerpulse.com',
+      API_URL: 'https://api.queerpulse.com',
+      METRICS_TOKEN: 'metrics-token-sixteen-plus-chars',
+      AWS_ENDPOINT_URL: 'https://bucket.example',
+      AWS_DEFAULT_REGION: 'auto',
+      AWS_S3_BUCKET_NAME: 'bucket',
+      AWS_ACCESS_KEY_ID: 'key',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
+      CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+    };
+
+    it('accepts AWS_PUBLIC_ENDPOINT_URL in development', () => {
+      expect(() =>
+        validate({ ...base, AWS_PUBLIC_ENDPOINT_URL: 'http://localhost:9000' }),
+      ).not.toThrow();
+    });
+
+    it('refuses AWS_PUBLIC_ENDPOINT_URL in production, naming it', () => {
+      expect(errorFor(production)).toBe('');
+      expect(
+        errorFor({
+          ...production,
+          AWS_PUBLIC_ENDPOINT_URL: 'http://localhost:9000',
+        }),
+      ).toMatch(/AWS_PUBLIC_ENDPOINT_URL is for the local MinIO bucket only/);
+    });
+
+    it('ends a development failure with the dev:setup hint', () => {
+      const message = errorFor({ ...base, JWT_REFRESH_TTL: '1 month' });
+      expect(message).toMatch(/JWT_REFRESH_TTL/);
+      expect(message.split('\n').at(-1)).toBe(DEV_SETUP_HINT);
+
+      const rest: Record<string, string> = { ...base };
+      delete rest.DATABASE_URL;
+      expect(errorFor(rest).split('\n').at(-1)).toBe(DEV_SETUP_HINT);
+    });
+
+    it('leaves the production failure message without the hint', () => {
+      const message = errorFor({ ...production, JWT_REFRESH_TTL: '1 month' });
+      expect(message).toMatch(/JWT_REFRESH_TTL/);
+      expect(message).not.toContain('dev:setup');
+    });
+  });
 });

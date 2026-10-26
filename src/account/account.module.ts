@@ -112,6 +112,7 @@ import { EventBookmark } from '../events/entities/event-bookmark.entity';
 import { EventCohostInvite } from '../events/entities/event-cohost-invite.entity';
 import { EventLineupEntry } from '../events/entities/event-lineup-entry.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
+import { HiddenEventCommunity } from '../events/entities/hidden-event-community.entity';
 import { MemberEventReminderPreferences } from '../events/entities/member-event-reminder-preferences.entity';
 import { FeedSourceMute } from '../feed/entities/feed-source-mute.entity';
 import { ForumPollVote } from '../forum/entities/forum-poll-vote.entity';
@@ -411,6 +412,7 @@ import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affili
       EventLineupEntry,
       EventPhoto,
       MemberEventReminderPreferences,
+      HiddenEventCommunity,
       FeedSourceMute,
       ForumPollVote,
       ForumPostEdit,

@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AmbassadorsModule } from '../ambassadors/ambassadors.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
+import { Invite } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { ReportsModule } from '../reports/reports.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -43,6 +44,9 @@ import { AdminMembersService } from './admin-members.service';
       Vouch,
       ModAuditLog,
       UserStaffRole,
+      // `Invite` (the detail view's `pendingInviteCount`) follows the same
+      // own-registration precedent.
+      Invite,
       // The identity-recovery levers' own entities (PRD-06/11/13). Registered
       // here rather than by importing `AccountModule`, following the precedent
       // `AuthModule` already sets for exactly these three: `AccountModule`

@@ -42,6 +42,21 @@ import {
 
 export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+/** Reason code for a member whose invites an admin has paused
+ *  (`User.hasInviteAccess` false). */
+export const INVITE_ACCESS_DISABLED_CODE = 'INVITE_ACCESS_DISABLED';
+
+// TYPED refusal in the same `{ statusCode, error, code, message }` shape as
+// `INVITE_QUOTA_EXCEEDED`, so the frontend branches on `code`.
+function inviteAccessDisabledError(): ForbiddenException {
+  return new ForbiddenException({
+    statusCode: 403,
+    error: 'Forbidden',
+    code: INVITE_ACCESS_DISABLED_CODE,
+    message: 'Invites are paused on your account.',
+  });
+}
+
 /**
  * PRD-02. How long an approval-minted invite sits on the shelf BEFORE the
  * applicant has been told it exists.
@@ -272,6 +287,9 @@ export class InvitesService {
       note: string | null;
       vouch: string | null;
       privateNote: string | null;
+      /** Skips the quota check, and with it the invite-access check that runs
+       *  inside it. Only admin-side mints (approval, genesis) set this, and
+       *  those must go through for a member whose invites are paused. */
       skipQuota: boolean;
       personal: boolean;
       /** How long from now the invite lapses. `INVITE_TTL_MS` for a member's
@@ -526,6 +544,8 @@ export class InvitesService {
    * reclaimed — it stays counted exactly once, in the month it was first minted.
    *
    * Only an EXPIRED invite is resendable. Guards, all returning a mapped view:
+   *  - 403 `INVITE_ACCESS_DISABLED` while an admin has paused the member's
+   *    invites, checked before the code lookup;
    *  - 404 if no invite with that code exists FOR THIS MEMBER (the lookup is
    *    scoped to `{ code, inviterId }`, so another member's code is
    *    indistinguishable from a code that does not exist);
@@ -540,6 +560,13 @@ export class InvitesService {
    * re-reads the true terminal state to report (mirrors `revokeInvite`).
    */
   async resendInvite(inviterId: string, code: string): Promise<MyInviteView> {
+    // A paused member cannot bring a lapsed invite back either. Checked here
+    // and never in `refreshExpiredInvite`, which also serves the admin reissue
+    // and the applicant's own refresh of an approval invite.
+    const inviter = await this.usersService.findById(inviterId);
+    if (inviter?.hasInviteAccess === false) {
+      throw inviteAccessDisabledError();
+    }
     const now = new Date();
     const invite = await this.invites.findOne({ where: { code, inviterId } });
     if (!invite) {
@@ -715,7 +742,14 @@ export class InvitesService {
       levelBonus,
       ambassadorBonus,
     );
-    return toInviteQuotaView(limit, used, nextMonthStart(now), memberCount);
+    const hasInviteAccess = inviter?.hasInviteAccess ?? true;
+    return toInviteQuotaView(
+      limit,
+      used,
+      nextMonthStart(now),
+      memberCount,
+      hasInviteAccess,
+    );
   }
 
   /**
@@ -861,6 +895,11 @@ export class InvitesService {
       where: { id: inviterId },
       lock: { mode: 'pessimistic_write' },
     });
+    // Paused invite access refuses before the quota is even counted. Only an
+    // explicit false refuses, so a missing inviter row falls through as before.
+    if (inviter?.hasInviteAccess === false) {
+      throw inviteAccessDisabledError();
+    }
     const limit = this.resolveMonthlyLimit(
       inviter,
       levelBonus,

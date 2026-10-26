@@ -23,7 +23,36 @@ FROM base AS prod-deps
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 
+# ---- Dev: local development image for `docker compose up` ------------------
+# The `api` service in docker-compose.yml builds this stage. It carries the
+# toolchain only: the repo is bind-mounted at /app, node_modules and the pnpm
+# store live in named volumes, and `scripts/dev-setup.mjs --container` installs
+# dependencies, prepares the databases and the bucket, then runs
+# `pnpm start:dev` with hot reload.
+#
+# KEEP THIS STAGE ABOVE `runtime`. Railway builds this Dockerfile with no
+# target (railway.json), and a build with no target produces the LAST stage, so
+# `runtime` has to stay the final stage. Nothing in `runtime` reads from `dev`,
+# so BuildKit skips this stage entirely on a production build.
+FROM base AS dev
+# psql and pg_dump 16 match the postgres:16 service, for the database import
+# and setup scripts. tini as PID 1 forwards Ctrl-C and `docker compose stop` to
+# node and reaps the watcher's child processes.
+RUN apk add --no-cache postgresql16-client tini
+# Corepack fetches the pnpm version pinned in package.json on first use; skip
+# its interactive "download pnpm?" prompt inside the container.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# The pnpm store sits in its own named volume (`pnpm-store` in
+# docker-compose.yml), so a recreated container reinstalls from the cache.
+ENV npm_config_store_dir=/pnpm/store
+WORKDIR /app
+# 3000 is the API. 9229 is the Node inspector, for a debugger attached to
+# `nest start --debug 0.0.0.0:9229 --watch`.
+EXPOSE 3000 9229
+ENTRYPOINT ["/sbin/tini", "--"]
+
 # ---- Runtime: minimal image running the compiled output --------------------
+# The LAST stage on purpose: Railway builds with no target (see `dev` above).
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 # Silence npm's "new version available" notice. The deploy steps below invoke

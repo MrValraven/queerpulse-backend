@@ -36,6 +36,8 @@ import {
   DeletionRequestStatus,
 } from '../account/entities/deletion-request.entity';
 import { SignupRejectedError } from './errors/signup-rejected.error';
+import { EmailCodeRefusedError } from './email-code/email-code-refusal';
+import { EMAIL_CODE_UNKNOWN_CHALLENGE_ATTEMPTS_LEFT } from './email-code/email-code.constants';
 import { RefreshToken } from './entities/refresh-token.entity';
 import {
   IdentityRelinkCandidate,
@@ -76,6 +78,37 @@ export interface GoogleUserInput {
   lastName: string;
   avatarUrl?: string | null;
 }
+
+/**
+ * What an email-code sign-in carries for the new-account gates. A returning
+ * member needs none of it; a stranger needs an invite, the 18+ attestation
+ * and a first name, because an email address carries no profile.
+ */
+export interface EmailSignupInput {
+  inviteCode?: string;
+  ageAttested?: boolean;
+  termsVersion?: string;
+  firstName?: string;
+  lastName?: string;
+}
+
+/**
+ * Who a brand-new account is being created for. Both sign-in methods pass the
+ * same gates in `createInvitedAccount`; only the row they create differs.
+ */
+type NewAccountIdentity =
+  | {
+      source: 'google';
+      googleId: string;
+      email: string;
+      firstName: string;
+      lastName: string;
+      avatarUrl: string | null;
+    }
+  | { source: 'email'; email: string; firstName: string; lastName: string };
+
+/** The longest first or last name an email-code signup may store. */
+const EMAIL_SIGNUP_NAME_MAX_LENGTH = 100;
 
 export interface TokenPair {
   accessToken: string;
@@ -449,14 +482,136 @@ export class AuthService {
       profile.email,
     );
     if (collidingUserId) {
-      await this.recordRelinkCandidate(collidingUserId, profile.googleId);
-      throw new SignupRejectedError('email_in_use');
+      // AN EMAIL-ONLY ACCOUNT TAKES THIS GOOGLE IDENTITY. A member who joined
+      // with an email code holds no Google subject (`google_id` is NULL), and
+      // Google has just proven this subject controls the same address the
+      // account was created from. Attaching is the same person adding a second
+      // way in. The write only lands over a NULL `google_id`, so an account
+      // already keyed to a different subject keeps the PRD-06 path below.
+      if (await this.attachGoogleIdentity(collidingUserId, profile.googleId)) {
+        this.logger.log(
+          `Attached a Google identity to email-code account userId=${collidingUserId}`,
+        );
+        const attached = await this.usersService.findByGoogleId(
+          profile.googleId,
+        );
+        if (attached) {
+          return this.reactivateIfDeactivated(attached);
+        }
+        // The row vanished between the write and the read (an erasure landing
+        // in the same instant). The address is free again, so the new-account
+        // gates below answer for it, the suppression list included.
+      } else {
+        await this.recordRelinkCandidate(collidingUserId, profile.googleId);
+        throw new SignupRejectedError('email_in_use');
+      }
     }
+    return this.createInvitedAccount(
+      { source: 'google', ...profile, avatarUrl: profile.avatarUrl ?? null },
+      inviteCode,
+      attestation,
+    );
+  }
+
+  /**
+   * Put this Google subject on an account that holds no Google identity yet.
+   * True when this call wrote it. A unique violation means another account
+   * already holds this subject (a concurrent sign-in won the race), which is
+   * the same answer as "this account already has one": false.
+   */
+  private async attachGoogleIdentity(
+    userId: string,
+    googleId: string,
+  ): Promise<boolean> {
+    try {
+      return await this.usersService.attachGoogleIdIfUnset(userId, googleId);
+    } catch (err) {
+      if (isUniqueViolation(err)) return false;
+      throw err;
+    }
+  }
+
+  /**
+   * Sign in the account that holds `email`, or create one through the shared
+   * new-account gates. Called only after a sign-in code sent to `email` was
+   * entered correctly, so `email` is already normalized and its mailbox is
+   * proven.
+   *
+   * A pending or dismissed relink candidate blocks code sign-in. Such a row
+   * means a different Google identity presented this account's address: a
+   * recycled mailbox now owned by someone new, or an impostor an admin already
+   * turned away. Mailbox control alone is too weak a proof there, so the
+   * account waits for our team's review (`account_recovery_review`).
+   *
+   * A system account answers exactly like an unknown challenge, so a guess at
+   * the house address learns nothing about it.
+   */
+  async signInWithVerifiedEmail(
+    email: string,
+    signup: EmailSignupInput,
+  ): Promise<User> {
+    const existing = await this.usersService.findByEmailForSignIn(email);
+    if (existing) {
+      if (existing.isSystem) {
+        throw new EmailCodeRefusedError('code_incorrect', {
+          attemptsLeft: EMAIL_CODE_UNKNOWN_CHALLENGE_ATTEMPTS_LEFT,
+        });
+      }
+      if (await this.hasBlockingRelinkCandidate(existing.id)) {
+        throw new EmailCodeRefusedError('account_recovery_review');
+      }
+      // Returning member: no invite, attestation or name needed. Signing in is
+      // also how a deactivated member comes back.
+      return this.reactivateIfDeactivated(existing);
+    }
+    return this.createInvitedAccount(
+      {
+        source: 'email',
+        email,
+        firstName: (signup.firstName ?? '')
+          .trim()
+          .slice(0, EMAIL_SIGNUP_NAME_MAX_LENGTH),
+        lastName: (signup.lastName ?? '')
+          .trim()
+          .slice(0, EMAIL_SIGNUP_NAME_MAX_LENGTH),
+      },
+      signup.inviteCode,
+      { ageAttested: signup.ageAttested, termsVersion: signup.termsVersion },
+    );
+  }
+
+  /**
+   * True while an undecided (`pending`) or turned-away (`dismissed`) relink
+   * candidate stands against `userId`. `applied` and `superseded` rows are
+   * settled history and block nothing.
+   */
+  private async hasBlockingRelinkCandidate(userId: string): Promise<boolean> {
+    return this.relinkCandidates.exists({
+      where: {
+        userId,
+        status: In([
+          IdentityRelinkCandidateStatus.Pending,
+          IdentityRelinkCandidateStatus.Dismissed,
+        ]),
+      },
+    });
+  }
+
+  /**
+   * The gates and the write every brand-new account goes through, whichever
+   * way the person signed in. Callers have already returned any account that
+   * holds this identity, so everything here is new-account only.
+   */
+  private async createInvitedAccount(
+    identity: NewAccountIdentity,
+    inviteCode: string | undefined,
+    attestation: { ageAttested?: boolean; termsVersion?: string } | undefined,
+  ): Promise<User> {
     // Registration kill switch. Placed first among the new-account checks so a
     // closed platform reports itself as closed, rather than telling applicants
     // they need an invite that could not be redeemed right now anyway. The
-    // `existing` return above means this never affects a member who already
-    // has an account.
+    // callers' returning-member short-circuit means this never affects a
+    // member who already has an account.
     //
     // A LOCKDOWN CLOSES THIS PATH TOO. `AuthController` is `@LockdownExempt()`
     // — correctly, since an admin has to be able to authenticate in order to
@@ -467,8 +622,9 @@ export class AuthService {
     // Both conditions reuse the `registration_disabled` reason rather than
     // inventing a lockdown-specific one: the frontend already handles it, and
     // the applicant's situation is identical either way — signups are closed,
-    // try later. It must stay AFTER the `existing` short-circuit above, or an
-    // admin enabling lockdown would lock themselves out of signing back in.
+    // try later. It must stay AFTER the callers' returning-member short-circuit,
+    // or an admin enabling lockdown would lock themselves out of signing back
+    // in.
     const settings = await this.platformSettings.get();
     if (!settings.registrationEnabled || settings.lockdownEnabled) {
       throw new SignupRejectedError('registration_disabled');
@@ -477,12 +633,12 @@ export class AuthService {
       throw new SignupRejectedError('invite_required');
     }
     // Erasure suppression list. Checked on the NEW-account path only: the
-    // `existing` short-circuit above already returned, so a member who still
-    // has an account is never affected. Without this, a member who exercised
+    // callers' returning-member short-circuit already returned, so an existing
+    // member is never affected. Without this, a member who exercised
     // their right to erasure and then signed in with the same Google account
     // would silently get a brand-new account — exactly the "accidentally
     // re-create your account" outcome the delete-account UI promises against.
-    if (await this.isEmailSuppressed(profile.email)) {
+    if (await this.isEmailSuppressed(identity.email)) {
       throw new SignupRejectedError('account_suppressed');
     }
     // 18+ gate (Terms §eligibility). New accounts only: existing members
@@ -490,10 +646,18 @@ export class AuthService {
     if (!attestation?.ageAttested) {
       throw new SignupRejectedError('age_attestation_required');
     }
-    // (The email-collision check that used to sit here now runs BEFORE the
-    // invite/suppression/age gates above, so a locked-out member reaches it
-    // without an invite code. The unique-violation backstop at the insert
-    // below still catches the race either check can lose.)
+    // Email-code signups carry only the name the person typed. Checked last
+    // among the gates, so an applicant hears about a missing invite, an erased
+    // account or the 18+ attestation first. The sign-in code stays open on
+    // this refusal, so the corrected request verifies with the same code.
+    if (identity.source === 'email' && !identity.firstName) {
+      throw new SignupRejectedError('name_required');
+    }
+    // (The email-collision check that used to sit here now runs in
+    // `validateOrCreateGoogleUser`, BEFORE these invite/suppression/age gates,
+    // so a locked-out member reaches it without an invite code. The
+    // unique-violation backstop at the insert below still catches the race
+    // either check can lose.)
     const attestedAt = new Date();
 
     const { user, vouched, inviterId } = await this.dataSource.transaction(
@@ -502,31 +666,44 @@ export class AuthService {
           await this.invitesService.validateInviteForSignup(
             manager,
             inviteCode,
-            profile.email,
+            identity.email,
           );
+        // The revision the client actually showed them wins; the server's
+        // own current revision is the fallback so a signup can never land
+        // with a NULL Terms version just because the OAuth state lost the
+        // query param (ID-14), or an email-code request left it out.
+        const termsVersion = attestation.termsVersion ?? CURRENT_TERMS_VERSION;
         let created: User;
         try {
-          created = await this.usersService.createGoogleUser(manager, {
-            googleId: profile.googleId,
-            email: profile.email,
-            firstName: profile.firstName,
-            lastName: profile.lastName,
-            avatarUrl: profile.avatarUrl ?? null,
-            status: UserStatus.Active,
-            invitedBy: inviterId,
-            ageAttestedAt: attestedAt,
-            // The revision the client actually showed them wins; the
-            // server's own current revision is the fallback so a signup can
-            // never land with a NULL Terms version just because the OAuth
-            // state lost the query param (ID-14).
-            termsVersion: attestation.termsVersion ?? CURRENT_TERMS_VERSION,
-          });
+          created =
+            identity.source === 'google'
+              ? await this.usersService.createGoogleUser(manager, {
+                  googleId: identity.googleId,
+                  email: identity.email,
+                  firstName: identity.firstName,
+                  lastName: identity.lastName,
+                  avatarUrl: identity.avatarUrl,
+                  status: UserStatus.Active,
+                  invitedBy: inviterId,
+                  ageAttestedAt: attestedAt,
+                  termsVersion,
+                })
+              : await this.usersService.createEmailUser(manager, {
+                  email: identity.email,
+                  firstName: identity.firstName,
+                  lastName: identity.lastName,
+                  status: UserStatus.Active,
+                  invitedBy: inviterId,
+                  ageAttestedAt: attestedAt,
+                  termsVersion,
+                });
         } catch (err) {
           // Backstop for the check above losing a race. `createGoogleUser`
-          // already absorbs slug/handle collisions internally (savepoint +
-          // retry), so a 23505 escaping to here is an identity collision on
-          // `users.email` / `users.google_id`. Either way a redirect to the
-          // sign-in page beats a raw 500 the member cannot act on.
+          // and `createEmailUser` already absorb slug/handle collisions
+          // internally (savepoint + retry), so a 23505 escaping to here is an
+          // identity collision on `users.email` / `users.google_id`. Either
+          // way a redirect to the sign-in page beats a raw 500 the member
+          // cannot act on.
           if (isUniqueViolation(err)) {
             throw new SignupRejectedError('email_in_use');
           }

@@ -1,5 +1,6 @@
 import {
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
@@ -42,6 +43,28 @@ export class GenesisController {
   constructor(private readonly genesis: GenesisService) {}
 
   /**
+   * Public for the same reason as `invite`: the founder has no account yet.
+   * The genesis page calls this on every load to decide whether to offer the
+   * flow at all, so it gets a looser bucket than the POSTs. It only reads.
+   */
+  @Public()
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @Get('status')
+  @ApiOperation({ summary: 'Whether genesis is still open' })
+  @ApiOkResponse({
+    description:
+      '`{ open: boolean }`. False once genesis is disabled, consumed, or any admin exists.',
+    schema: {
+      type: 'object',
+      properties: { open: { type: 'boolean' } },
+      required: ['open'],
+    },
+  })
+  status(): Promise<{ open: boolean }> {
+    return this.genesis.getStatus();
+  }
+
+  /**
    * Public by necessity — the founder has no account yet, so there is no
    * credential to present. Safe because the minted invite is pinned to
    * `GENESIS_EMAIL` and nobody else can redeem it.
@@ -75,7 +98,8 @@ export class GenesisController {
     description: 'Not authenticated as an active member.',
   })
   @ApiForbiddenResponse({
-    description: 'Not the genesis account, or genesis is already closed.',
+    description:
+      'Body carries `code`: `genesis_not_founder_account` for the wrong account, `genesis_closed` once genesis is closed.',
   })
   @ApiNotFoundResponse({ description: 'Genesis is disabled.' })
   claim(@CurrentUser() user: CurrentUserData): Promise<void> {

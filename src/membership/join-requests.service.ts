@@ -18,6 +18,7 @@ import {
   setQueueAssignment,
 } from '../common/queue-assignment';
 import { joinRequestDueAt } from './join-request-sla';
+import { PRIVATE_PARAMETERS_COMMENT } from '../database/private-parameters-logger';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
 import { Invite, InviteStatus } from './entities/invite.entity';
@@ -515,34 +516,32 @@ export class JoinRequestsService {
    * an address whose owner has already been PROVEN, by the caller, to be the
    * person asking.
    *
-   * THE ENTRY CONDITION IS THE WHOLE SECURITY MODEL. There is no channel that
-   * can deliver a re-issued token to an applicant: QueerPulse sends no email,
-   * and an applicant has no account, so no in-app notification reaches them
-   * either. A recovery route keyed on a TYPED email would therefore have to
-   * answer the typist directly, which on an invite-gated platform for this
-   * audience means answering "has this person applied?" to anyone who asks.
-   * That route does not exist and must never be built.
+   * THE ENTRY CONDITION IS THE WHOLE SECURITY MODEL. The only email QueerPulse
+   * sends is a sign-in code the person asks for on screen, and an applicant
+   * has no account, so nothing carries a re-issued token to them. A recovery
+   * route keyed on a TYPED email would have to answer the typist directly,
+   * which on an invite-gated platform for this audience means answering "has
+   * this person applied?" to anyone who asks. That route does not exist and
+   * must never be built.
    *
-   * What does exist is Google sign-in, which already proves control of an
-   * address (`email_verified` is checked in `GoogleStrategy`, and
-   * `AuthService` rejects an unverified one outright) without sending
-   * anything. So this method takes an ALREADY-VERIFIED address and is
-   * deliberately not reachable from any controller in this module.
+   * Two things do prove control of an address: Google sign-in
+   * (`email_verified` is checked in `GoogleStrategy`) and a correct email
+   * sign-in code (`EmailCodeService.verifyChallenge`). So this method takes an
+   * ALREADY-VERIFIED address and is deliberately not reachable from any
+   * controller in this module.
    *
    * CALLER CONTRACT, and it is not optional: the caller must have authenticated
-   * the address it passes. The only intended caller is the Google callback's
-   * `invite_required` branch, where an applicant who lost their token signs in
-   * with the address they applied under and is carried to their own status page
-   * instead of a "you need an invite" notice.
+   * the address it passes. The two intended callers are the `invite_required`
+   * branches of the Google callback and of `POST /auth/email-code/verify`,
+   * where an applicant who lost their token signs in with the address they
+   * applied under and is carried straight to their own status page.
    *
-   * ROTATES rather than recovers, because it must: only the SHA-256 hash is
-   * stored, so the old plaintext is unrecoverable by construction. The previous
-   * token stops working the moment this returns, which is the correct
-   * behaviour for a recovery anyway.
+   * ROTATES on purpose: only the SHA-256 hash is stored, so the old plaintext
+   * is unrecoverable by construction. The previous token stops working the
+   * moment this returns, which is the correct behaviour for a recovery anyway.
    *
    * Returns `null` when the address has never applied. Callers must render that
-   * identically to their existing "no". See the Google callback, where it
-   * falls through to exactly the notice it showed before.
+   * identically to their existing "no".
    */
   async recoverStatusTokenForVerifiedEmail(
     verifiedEmail: string,
@@ -558,6 +557,9 @@ export class JoinRequestsService {
       .createQueryBuilder('jr')
       .where('lower(jr.email) = :email', { email })
       .orderBy('jr.createdAt', 'DESC')
+      // Runs on public sign-in routes: keeps the address out of the slow and
+      // failed query logs.
+      .comment(PRIVATE_PARAMETERS_COMMENT)
       .getOne();
     if (!request) {
       return null;

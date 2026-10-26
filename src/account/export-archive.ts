@@ -111,6 +111,7 @@ export const EXPORT_CSV_CATEGORIES = [
   'communityRequests',
   'feedPreferences',
   'eventPreferences',
+  'hiddenEventCommunities',
   'eventParticipation',
   'connectionNotes',
   'suggestionDismissals',

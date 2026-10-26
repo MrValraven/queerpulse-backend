@@ -238,6 +238,8 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   accessibilityNote: '',
   cost: null,
   costKind: null,
+  paymentUrl: null,
+  paymentInstructions: null,
   themes: [],
   contentNotes: [],
   houseRules: null,

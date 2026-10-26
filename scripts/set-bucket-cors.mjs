@@ -76,7 +76,10 @@ console.log(`Applying bucket CORS for origins: ${allowedOrigins.join(', ')}`);
 const client = new S3Client({
   endpoint: AWS_ENDPOINT_URL,
   region: AWS_DEFAULT_REGION,
-  forcePathStyle: false,
+  // Virtual-hosted-style for the Railway Bucket. The local MinIO container
+  // needs path-style, which AWS_S3_FORCE_PATH_STYLE=true (exactly `true`)
+  // turns on, matching src/config/storage.config.ts.
+  forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true',
   credentials: {
     accessKeyId: AWS_ACCESS_KEY_ID,
     secretAccessKey: AWS_SECRET_ACCESS_KEY,

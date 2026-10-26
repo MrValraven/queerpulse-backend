@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { BADGED_STAFF_ROLE_IDS } from '../users/staff-roles.registry';
@@ -51,6 +51,15 @@ export function notBadgedStaffClause(userIdColumn: string): string {
 }
 
 /**
+ * The one rule for the ambassador invite bonus, shared by the single and
+ * batched lookups so the two cannot drift: `AMBASSADOR_INVITE_BONUS` with an
+ * active grant, else 0.
+ */
+export function inviteBonusForGrant(hasActiveGrant: boolean): number {
+  return hasActiveGrant ? AMBASSADOR_INVITE_BONUS : 0;
+}
+
+/**
  * The cheap reads about ambassador status: whether a member has an active
  * grant, whether their tag is visible, and the invite bonus that follows.
  * Writes (grant/revoke/admin CRUD) live in the sibling `AmbassadorsModule`.
@@ -69,7 +78,32 @@ export class AmbassadorStatusService {
   }
 
   async getInviteBonus(userId: string): Promise<number> {
-    return (await this.findActive(userId)) ? AMBASSADOR_INVITE_BONUS : 0;
+    return inviteBonusForGrant(Boolean(await this.findActive(userId)));
+  }
+
+  /**
+   * `getInviteBonus` for many members at once, in one read of the active
+   * grants. Every requested id is in the map, at 0 without an active grant.
+   * Backs the admin invite quotas list.
+   */
+  async getInviteBonusForUserIds(
+    userIds: string[],
+  ): Promise<Map<string, number>> {
+    const bonusByUserId = new Map<string, number>();
+    const uniqueUserIds = [...new Set(userIds)];
+    if (!uniqueUserIds.length) return bonusByUserId;
+    const activeGrants = await this.ambassadors.find({
+      where: { userId: In(uniqueUserIds), revokedAt: IsNull() },
+      select: ['id', 'userId'],
+    });
+    const grantedUserIds = new Set(activeGrants.map((grant) => grant.userId));
+    for (const userId of uniqueUserIds) {
+      bonusByUserId.set(
+        userId,
+        inviteBonusForGrant(grantedUserIds.has(userId)),
+      );
+    }
+    return bonusByUserId;
   }
 
   /**

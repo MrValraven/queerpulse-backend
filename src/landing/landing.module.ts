@@ -13,6 +13,9 @@ import { AdminLandingController } from './admin-landing.controller';
 import { LandingFeature } from './entities/landing-feature.entity';
 import { LandingController } from './landing.controller';
 import { LandingService } from './landing.service';
+import { AdminLandingVisitsController } from './admin-landing-visits.controller';
+import { LandingVisitDaily } from './entities/landing-visit-daily.entity';
+import { LandingVisitsService } from './landing-visits.service';
 
 @Module({
   imports: [
@@ -30,6 +33,8 @@ import { LandingService } from './landing.service';
       UserStaffRole,
 
       LandingFeature,
+      // Own table, written by `LandingVisitsService` (anonymous visit counts).
+      LandingVisitDaily,
       Profile,
       Community,
       Changemaker,
@@ -40,7 +45,11 @@ import { LandingService } from './landing.service';
       ContentModeration,
     ]),
   ],
-  controllers: [LandingController, AdminLandingController],
-  providers: [LandingService],
+  controllers: [
+    LandingController,
+    AdminLandingController,
+    AdminLandingVisitsController,
+  ],
+  providers: [LandingService, LandingVisitsService],
 })
 export class LandingModule {}

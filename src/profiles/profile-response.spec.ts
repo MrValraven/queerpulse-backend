@@ -7,7 +7,11 @@ import { CommunityType } from '../communities/entities/community.entity';
 import { RosterRole } from '../communities/entities/community-member.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { DIRECTORY_BLURB_MAX_CHARS, truncateAtWord } from './directory-blurb';
-import { Activity, ActivityKind } from './entities/activity.entity';
+import {
+  Activity,
+  ActivityKind,
+  ActivitySubjectKind,
+} from './entities/activity.entity';
 import {
   BoardKind,
   BoardPost,
@@ -505,10 +509,21 @@ describe('profile-response mappers', () => {
       activity: [
         {
           kind: ActivityKind.Event,
-          title: "RSVP'd",
+          subjectKind: ActivitySubjectKind.Event,
+          title: "RSVP'd to Queer Poetry Night",
           sub: 'Anjos',
           toLink: '/gatherings/x',
-          occurredAt: new Date(),
+          occurredAt: new Date('2026-10-20T19:30:00.000Z'),
+        },
+        {
+          // A legacy title the parser does not recognise keeps both
+          // structured fields null so the frontend falls back to `title`.
+          kind: ActivityKind.Event,
+          subjectKind: null,
+          title: "RSVP'd",
+          sub: null,
+          toLink: null,
+          occurredAt: new Date('2026-10-01T10:00:00.000Z'),
         },
       ] as unknown as Activity[],
       featuredCommunities: [
@@ -553,9 +568,21 @@ describe('profile-response mappers', () => {
     expect(dto.groups[0]).toEqual({ name: 'Queer Devs', role: 'Member' });
     expect(dto.activity[0]).toEqual({
       kind: 'event',
-      title: "RSVP'd",
+      title: "RSVP'd to Queer Poetry Night",
       sub: 'Anjos',
       to: '/gatherings/x',
+      occurredAt: '2026-10-20T19:30:00.000Z',
+      action: 'rsvp',
+      subject: 'Queer Poetry Night',
+    });
+    expect(dto.activity[1]).toEqual({
+      kind: 'event',
+      title: "RSVP'd",
+      sub: null,
+      to: null,
+      occurredAt: '2026-10-01T10:00:00.000Z',
+      action: null,
+      subject: null,
     });
     // Featured communities pass through already resolved for display.
     expect(dto.featuredCommunities[0]).toEqual({

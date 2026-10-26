@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
 import {
   StudioRelease,
@@ -20,6 +21,7 @@ import {
   listenerStatsForTracks,
   statsForTracks,
   toListenerTrackSummaries,
+  toStudioArtistHeroFields,
   toStudioArtistRef,
   toStudioFormatArtistRef,
   toStudioOwnerReleaseCard,
@@ -1289,5 +1291,35 @@ describe('Studio safety on the response mappers', () => {
         ownerClaim,
       ]).claims,
     ).toEqual([]);
+  });
+});
+
+describe('Studio artist hero fields', () => {
+  it('returns the cover through toImageUrl and the stored layout', () => {
+    const fields = toStudioArtistHeroFields({
+      coverUrl: 'https://cdn.example/cover.jpg',
+      skinData: { studioHero: 'avatar' },
+    });
+    expect(fields.coverUrl).toBe(toImageUrl('https://cdn.example/cover.jpg'));
+    expect(fields.coverUrl).not.toBeNull();
+    expect(fields.studioHero).toBe('avatar');
+    expect(
+      toStudioArtistHeroFields({
+        coverUrl: 'https://cdn.example/cover.jpg',
+        skinData: { studioHero: 'full-bleed' },
+      }).studioHero,
+    ).toBe('full-bleed');
+  });
+
+  it('returns null for both fields when the persona has neither', () => {
+    expect(
+      toStudioArtistHeroFields({ coverUrl: null, skinData: null }),
+    ).toEqual({ coverUrl: null, studioHero: null });
+    expect(
+      toStudioArtistHeroFields({
+        coverUrl: null,
+        skinData: { coverBleed: true },
+      }).studioHero,
+    ).toBeNull();
   });
 });

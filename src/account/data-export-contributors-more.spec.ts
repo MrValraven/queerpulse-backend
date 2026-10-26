@@ -20,6 +20,7 @@ import {
   GovernanceActivityExportContributor,
   GroupListingsExportContributor,
   HandlesExportContributor,
+  HiddenEventCommunitiesExportContributor,
   InvitesSentExportContributor,
   JoinApplicationExportContributor,
   LandlordRecommendationsExportContributor,
@@ -241,6 +242,7 @@ describe('ENG-495b contributor registration', () => {
       ['communities', 'communityRequests'],
       ['communities', 'feedPreferences'],
       ['events', 'eventPreferences'],
+      ['events', 'hiddenEventCommunities'],
       ['events', 'eventParticipation'],
       ['connections', 'connectionNotes'],
       ['connections', 'suggestionDismissals'],
@@ -381,6 +383,7 @@ const OWNER_FILTERS: [
     [finds(byColumn('userId')), finds(byColumn('userId'))],
   ],
   [EventPreferencesExportContributor, [finds(byColumn('userId'))]],
+  [HiddenEventCommunitiesExportContributor, [finds(byColumn('userId'))]],
   [
     EventParticipationExportContributor,
     [
@@ -759,6 +762,49 @@ describe('EventParticipationExportContributor', () => {
         counterpartyId: 'member-3',
         message: null,
       }),
+    ]);
+  });
+});
+
+describe('HiddenEventCommunitiesExportContributor', () => {
+  it('lists each hidden community by id, oldest first', async () => {
+    const hiddenRowsFind = jest.fn().mockResolvedValue([
+      {
+        id: 'hidden-1',
+        userId: 'user-1',
+        communityId: 'community-1',
+        createdAt: new Date('2026-10-01T00:00:00.000Z'),
+      },
+      {
+        id: 'hidden-2',
+        userId: 'user-1',
+        communityId: 'community-2',
+        createdAt: new Date('2026-10-02T00:00:00.000Z'),
+      },
+    ]);
+    const contributor = new HiddenEventCommunitiesExportContributor(
+      repositoryWith({ find: hiddenRowsFind }),
+    );
+
+    const result = await contributor.buildContribution('user-1');
+
+    expect(hiddenRowsFind).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      order: { createdAt: 'ASC' },
+    });
+    expect(result).toEqual([
+      {
+        type: 'hiddenEventCommunity',
+        id: 'hidden-1',
+        communityId: 'community-1',
+        createdAt: '2026-10-01T00:00:00.000Z',
+      },
+      {
+        type: 'hiddenEventCommunity',
+        id: 'hidden-2',
+        communityId: 'community-2',
+        createdAt: '2026-10-02T00:00:00.000Z',
+      },
     ]);
   });
 });

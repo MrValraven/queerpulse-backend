@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { AdminMembersController } from './admin-members.controller';
 import { AdminMembersService } from './admin-members.service';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
@@ -9,6 +10,7 @@ describe('AdminMembersController', () => {
     list: jest.Mock;
     listFlagged: jest.Mock;
     getMember: jest.Mock;
+    updateInviteAccess: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -16,6 +18,7 @@ describe('AdminMembersController', () => {
       list: jest.fn(),
       listFlagged: jest.fn(),
       getMember: jest.fn(),
+      updateInviteAccess: jest.fn(),
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdminMembersController],
@@ -53,5 +56,33 @@ describe('AdminMembersController', () => {
 
     expect(service.getMember).toHaveBeenCalledWith('ines-martins');
     expect(result).toBe(memberDetail);
+  });
+
+  it('PATCH /:id/invite-access delegates with the slug, the flag and the acting admin', async () => {
+    const inviteAccess = {
+      userId: 'user-ines',
+      slug: 'ines-martins',
+      hasInviteAccess: false,
+    };
+    service.updateInviteAccess.mockResolvedValue(inviteAccess);
+    const currentUser: CurrentUserData = {
+      userId: 'user-admin',
+      email: 'admin@example.com',
+      status: 'active',
+      role: 'admin',
+    };
+
+    const result = await controller.updateInviteAccess(
+      currentUser,
+      'ines-martins',
+      { hasInviteAccess: false },
+    );
+
+    expect(service.updateInviteAccess).toHaveBeenCalledWith(
+      'ines-martins',
+      false,
+      'user-admin',
+    );
+    expect(result).toBe(inviteAccess);
   });
 });

@@ -63,7 +63,8 @@ export class InvitesController {
   @ApiCreatedResponse({ description: 'The newly created invite.' })
   @ApiForbiddenResponse({
     description:
-      'Monthly invite quota exceeded — body carries code "INVITE_QUOTA_EXCEEDED".',
+      'Invites paused on the account by an admin: body carries code "INVITE_ACCESS_DISABLED" (checked first). ' +
+      'Monthly invite quota exceeded: body carries code "INVITE_QUOTA_EXCEEDED".',
   })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
@@ -97,7 +98,10 @@ export class InvitesController {
   @Get('quota')
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: "Get the current member's monthly invite quota" })
-  @ApiOkResponse({ description: 'The invite quota and remaining allowance.' })
+  @ApiOkResponse({
+    description:
+      'The invite quota and remaining allowance, plus hasInviteAccess. remaining is 0 while hasInviteAccess is false.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -165,6 +169,10 @@ export class InvitesController {
     summary: "Resend (re-mint) one of the current member's expired invites",
   })
   @ApiOkResponse({ description: 'The refreshed invite.' })
+  @ApiForbiddenResponse({
+    description:
+      'Invites paused on the account by an admin: body carries code "INVITE_ACCESS_DISABLED".',
+  })
   @ApiNotFoundResponse({
     description: 'No invite with that code belongs to the caller.',
   })

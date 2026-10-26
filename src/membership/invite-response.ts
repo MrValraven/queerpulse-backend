@@ -189,6 +189,9 @@ export interface InviteQuotaView {
   resetsAt: string; // ISO — 00:00 UTC on the 1st of next month
   /** Current community size, for the compose page's share preview. */
   memberCount: number;
+  /** False while an admin has paused this member's invites. `remaining` is
+   *  then 0; `limit` and `used` keep their real values. */
+  hasInviteAccess: boolean;
 }
 
 export function toInviteQuotaView(
@@ -196,12 +199,14 @@ export function toInviteQuotaView(
   used: number,
   resetsAt: Date,
   memberCount: number,
+  hasInviteAccess: boolean,
 ): InviteQuotaView {
   return {
     limit,
     used,
-    remaining: Math.max(0, limit - used),
+    remaining: hasInviteAccess ? Math.max(0, limit - used) : 0,
     resetsAt: resetsAt.toISOString(),
     memberCount,
+    hasInviteAccess,
   };
 }

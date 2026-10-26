@@ -24,6 +24,7 @@ import { AdminMembersService } from './admin-members.service';
 import { GrantStaffRoleDto } from './dto/grant-staff-role.dto';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
 import { RevokeStaffRoleDto } from './dto/revoke-staff-role.dto';
+import { UpdateInviteAccessDto } from './dto/update-invite-access.dto';
 import { UpdateInviteQuotaDto } from './dto/update-invite-quota.dto';
 import { UpdatePlatformMemberRoleDto } from './dto/update-member-role.dto';
 import {
@@ -219,6 +220,30 @@ export class AdminMembersController {
     return this.adminMembers.updateInviteQuota(
       idOrSlug,
       body.quota,
+      currentUser.userId,
+    );
+  }
+
+  // Same resource lever as `invite-quota` above: pausing a member's invites
+  // leaves the rest of their account untouched, so there is no self-change or
+  // house-account guardrail. It IS audited (`invite_access_changed`) in the
+  // service. `idOrSlug` and the missing `ParseUUIDPipe` follow the sibling:
+  // the admin UI sends the member's slug.
+  @ApiOperation({
+    summary: "Pause or turn back on a member's ability to send invites.",
+  })
+  @ApiOkResponse({ description: "The member's updated invite access." })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'Member not found.' })
+  @Patch(':id/invite-access')
+  updateInviteAccess(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('id') idOrSlug: string,
+    @Body() body: UpdateInviteAccessDto,
+  ) {
+    return this.adminMembers.updateInviteAccess(
+      idOrSlug,
+      body.hasInviteAccess,
       currentUser.userId,
     );
   }

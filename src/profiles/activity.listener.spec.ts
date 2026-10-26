@@ -10,6 +10,7 @@ import {
   SubprofileLinkVisibility,
 } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { describeActivity } from './activity-describe';
 import { ActivityListener } from './activity.listener';
 import { ActivityService, RecordActivityInput } from './activity.service';
 import {
@@ -368,5 +369,109 @@ describe('ActivityListener write gate: personas', () => {
     // A row on the member's own profile announcing it would undo that with
     // the member's own byline.
     expect(record).not.toHaveBeenCalled();
+  });
+});
+
+describe('ActivityListener titles parse back into action and subject', () => {
+  // The listener and `describeActivity` share one set of prefix constants;
+  // these pin that every title it writes comes back as a structured action.
+  const describeRecorded = (record: jest.Mock) => {
+    const row = recorded(record);
+    return describeActivity({
+      kind: row.kind,
+      subjectKind: row.subjectKind ?? null,
+      title: row.title,
+    });
+  };
+
+  it('reads an RSVP title back as rsvp + the event title', async () => {
+    const { listener, record } = await buildListener();
+    await listener.onEventRsvped({
+      eventId: 'event-id',
+      eventSlug: 'poetry-night',
+      hostId: 'host-1',
+      rsvperId: 'member-1',
+      eventTitle: 'Queer Poetry Night',
+      eventVisibility: EventVisibility.Public,
+    });
+
+    expect(recorded(record).title).toBe("RSVP'd to Queer Poetry Night");
+    expect(describeRecorded(record)).toEqual({
+      action: 'rsvp',
+      subject: 'Queer Poetry Night',
+    });
+  });
+
+  it('reads a forum thread title back as thread + the thread title', async () => {
+    const { listener, record } = await buildListener();
+    await listener.onForumThreadCreated({
+      authorId: 'member-1',
+      threadSlug: 'finding-a-gp',
+      title: 'Finding a GP',
+    });
+
+    expect(describeRecorded(record)).toEqual({
+      action: 'thread',
+      subject: 'Finding a GP',
+    });
+  });
+
+  it('reads a community post title back as communityPost + the community name', async () => {
+    const { listener, record } = await buildListener();
+    await listener.onCommunityPostCreated({
+      authorId: 'member-1',
+      communitySlug: 'trans-joy',
+      communityName: 'Trans Joy',
+      accessTier: AccessTier.Public,
+      postId: 'post-9',
+      excerpt: 'hello',
+    });
+
+    expect(describeRecorded(record)).toEqual({
+      action: 'communityPost',
+      subject: 'Trans Joy',
+    });
+  });
+
+  it('reads a join title back as join + the community name', async () => {
+    const { listener, record, communities } = await buildListener();
+    communities.findOne.mockResolvedValue({
+      id: 'community-1',
+      slug: 'trans-joy',
+      name: 'Trans Joy',
+      accessTier: AccessTier.Public,
+      archivedAt: null,
+      parentId: null,
+    });
+    await listener.onCommunityMemberJoined({
+      communityId: 'community-1',
+      userId: 'member-1',
+    });
+
+    expect(describeRecorded(record)).toEqual({
+      action: 'join',
+      subject: 'Trans Joy',
+    });
+  });
+
+  it('reads a persona title back as persona + the display name', async () => {
+    const { listener, record, subprofiles } = await buildListener();
+    subprofiles.findOne.mockResolvedValue({
+      id: 'persona-1',
+      userId: 'member-1',
+      slug: 'dj-set',
+      handle: 'ana-dj-set',
+      displayName: 'DJ Set',
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    });
+    await listener.onSubprofilePublished({
+      subprofileId: 'persona-1',
+      ownerUserId: 'member-1',
+    });
+
+    expect(describeRecorded(record)).toEqual({
+      action: 'persona',
+      subject: 'DJ Set',
+    });
   });
 });

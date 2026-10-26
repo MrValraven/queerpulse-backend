@@ -5,6 +5,11 @@ The API for QueerPulse — an invite-only community platform. Built with
 [TypeORM](https://typeorm.io/), Google OAuth + JWT cookie sessions, WebSocket
 chat (socket.io), and Mux-backed video ("cinema").
 
+> **New here? Start with [SETUP.md](SETUP.md)** for this API on its own, or
+> the frontend's
+> [SETUP.md](https://github.com/MrValraven/queer-pulse/blob/main/SETUP.md) for
+> the whole stack running locally with you signed in.
+
 - [Prerequisites](#prerequisites)
 - [Quickstart](#quickstart)
 - [Running](#running)
@@ -27,29 +32,35 @@ chat (socket.io), and Mux-backed video ("cinema").
 - **pnpm** `>= 9` (this repo pins `pnpm@9.15.0` via `packageManager`; run
   `corepack enable` to have the right version selected automatically)
 - **PostgreSQL** `>= 14` (16 recommended)
+- **Docker Desktop** (recommended): `docker-compose.yml` runs Postgres 16 and a
+  local MinIO bucket for uploads
 
 ## Quickstart
 
+With Docker Desktop or OrbStack (Docker Compose 2.24 or newer):
+
 ```bash
-# 1. Install dependencies
-pnpm install
-
-# 2. Configure environment
-cp .env.example .env
-#    then edit .env — at minimum set DATABASE_URL and the JWT/Google values.
-
-# 3. Create the schema (migrations own the schema; `synchronize` is never on)
-pnpm run migration:run
-
-# 4. (Optional) seed local fixture members
-pnpm run seed
-
-# 5. Run the API
-pnpm run start:dev        # watch mode
+docker compose up         # Postgres + MinIO + the API with hot reload: install, .env, databases, migrations, seed, bucket
 ```
 
+Without Docker, or to run the API as a host process:
+
+```bash
+pnpm dev:setup            # install, Postgres + MinIO, .env, databases, migrations, seed, bucket, doctor
+pnpm start:dev            # watch mode
+```
+
+Both are idempotent. The `api` container never writes an existing `.env`;
+`pnpm dev:setup` reviews it on a terminal and changes it only with your
+consent, after a backup. `pnpm dev:doctor` re-checks everything read-only. Sign
+in locally as `admin@example.com` with the code the API logs
+(`docker compose logs -f api` on the Docker path). Already running a native
+setup? `pnpm dev:import-db` copies your database into Docker once.
+[SETUP.md](SETUP.md) explains each step, the generated `.env`, MinIO, the e2e
+database and troubleshooting.
+
 The server listens on `PORT` (default `3000`). Health check:
-`GET http://localhost:3000/health`.
+`GET http://localhost:3000/health/live`.
 
 ## Running
 
@@ -228,6 +239,9 @@ guard (`test/db-safety.ts`, wired via `test/jest-e2e.json`) refuses to run
 unless the target database name ends in `_test`, or a dedicated
 `TEST_DATABASE_URL` is set.
 
+`pnpm dev:setup` writes `.env.test`, creates `queerpulse_test` and migrates it.
+By hand, the same steps are:
+
 ```bash
 cp .env.test.example .env.test    # point DATABASE_URL at a *_test database
 createdb queerpulse_test          # (or however you provision it)
@@ -310,8 +324,15 @@ leave in the deploy chain of a storage-less environment.
 
 ### Docker
 
+`docker-compose.yml` is the local development stack. `docker compose up` starts
+Postgres 16, MinIO and the `api` service (the Dockerfile's `dev` stage, the repo
+bind-mounted, hot reload on port 3000). See [SETUP.md](SETUP.md).
+
+To check the production image (the `runtime` stage) locally, run the `app`
+service behind its profile. It listens on port 3001, migrates, then starts:
+
 ```bash
-docker compose up --build     # app + postgres; app migrates then starts
+docker compose --profile prod-image up app
 ```
 
 Or build just the image (multi-stage; runs `node dist/main`):

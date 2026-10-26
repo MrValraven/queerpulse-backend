@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AmbassadorStatusModule } from '../ambassadors/ambassador-status.module';
 import { Invite } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
+import { RecognitionEntitlementsModule } from '../recognition/recognition-entitlements.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { AdminInvitesController } from './admin-invites.controller';
@@ -18,7 +20,16 @@ import { AdminInvitesService } from './admin-invites.service';
   // the admin refresh writes an `invite_refreshed` row, each through the
   // transaction's own `EntityManager`, mirroring how `AdminMembersModule`
   // registers it for `updateRole`/`grantStaffRole`/`updateInviteQuota`.
-  imports: [TypeOrmModule.forFeature([Invite, ModAuditLog, Profile, User])],
+  // `RecognitionEntitlementsModule` and `AmbassadorStatusModule` are the same
+  // leaf modules `MembershipModule` imports for the level and ambassador
+  // invite bonuses, so `listQuotas` computes the effective monthly limit with
+  // the exact inputs enforcement uses. Neither imports anything beyond
+  // TypeORM, so no cycle can close through them.
+  imports: [
+    TypeOrmModule.forFeature([Invite, ModAuditLog, Profile, User]),
+    RecognitionEntitlementsModule,
+    AmbassadorStatusModule,
+  ],
   controllers: [AdminInvitesController],
   providers: [AdminInvitesService],
 })

@@ -1,6 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import {
+  In,
+  IsNull,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+  Not,
+  Repository,
+} from 'typeorm';
 import { AdminCommunityCardDTO } from '../admin-communities/admin-communities-response';
 import { AdminCommunitiesService } from '../admin-communities/admin-communities.service';
 import { MemberLookup, MemberRef } from '../common/member-ref';
@@ -158,9 +165,9 @@ export class AdminOverviewService {
     // to fold into the wave budget above.
     const communityHealthPromise = this.adminCommunities.listCommunities();
 
-    // 14 independent queries, run in 3 waves of at most 5 concurrent queries
+    // 15 independent queries, run in 3 waves of at most 5 concurrent queries
     // (mirroring `SearchService.MAX_CONCURRENT_QUERIES`) rather than one
-    // 14-way `Promise.all`, which would queue against `DATABASE_POOL_MAX`
+    // 15-way `Promise.all`, which would queue against `DATABASE_POOL_MAX`
     // (default 10) on its own and starve every other concurrent request.
     // None of these queries depend on one another, so the wave boundaries
     // below are purely about pool pressure, not sequencing.
@@ -217,6 +224,7 @@ export class AdminOverviewService {
       recentVouchesForFeed,
       recentCommunityMembersForFeed,
       recentJoinRequestsForFeed,
+      membersBeforeGrowthWindowCount,
     ] = await Promise.all([
       this.profiles.find({
         select: ['userId', 'firstName', 'lastName', 'joinedAt'],
@@ -245,6 +253,14 @@ export class AdminOverviewService {
       this.joinRequests.find({
         order: { createdAt: 'DESC' },
         take: FEED_SOURCE_FETCH_LIMIT,
+      }),
+      // The member-growth line's starting point: every profile that joined
+      // before the window opens. Counted over the same `joinedAt` population
+      // as `profilesForMemberGrowth`, so the running total only ever moves by
+      // the joins the chart itself shows. Inclusive because `weekBucketIndex`
+      // drops a join landing exactly on the window start from every bucket.
+      this.profiles.count({
+        where: { joinedAt: LessThanOrEqual(memberGrowthWindowStart) },
       }),
     ]);
 
@@ -329,31 +345,20 @@ export class AdminOverviewService {
       if (bucket === undefined) continue;
       bucket.value += 1;
     }
-    let spikeBucketIndex = 0;
-    for (
-      let bucketIndex = 1;
-      bucketIndex < memberGrowthBuckets.length;
-      bucketIndex += 1
-    ) {
-      const candidateBucket = memberGrowthBuckets[bucketIndex];
-      const currentSpikeBucket = memberGrowthBuckets[spikeBucketIndex];
-      if (
-        candidateBucket !== undefined &&
-        currentSpikeBucket !== undefined &&
-        candidateBucket.value > currentSpikeBucket.value
-      ) {
-        spikeBucketIndex = bucketIndex;
-      }
-    }
-    const hasAnyMemberGrowth = memberGrowthBuckets.some(
-      (bucket) => bucket.value > 0,
-    );
-    const memberGrowthPoints = memberGrowthBuckets.map((bucket, index) => ({
-      at: new Date(bucket.weekStartMs).toISOString(),
-      joined: bucket.value,
-      churned: null,
-      spike: hasAnyMemberGrowth && index === spikeBucketIndex,
-    }));
+    // Running total as of the END of each bucket: the pre-window baseline plus
+    // every join up to and including that week. It never dips, so the chart
+    // reads as the community's size over time, and the current partial week
+    // carries the latest total.
+    let runningMemberTotal = membersBeforeGrowthWindowCount;
+    const memberGrowthPoints = memberGrowthBuckets.map((bucket) => {
+      runningMemberTotal += bucket.value;
+      return {
+        at: new Date(bucket.weekStartMs).toISOString(),
+        joined: bucket.value,
+        total: runningMemberTotal,
+        churned: null,
+      };
+    });
 
     // --- feed ---
     const feed = await this.assembleFeed({

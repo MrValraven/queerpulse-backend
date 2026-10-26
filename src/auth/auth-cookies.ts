@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import { CookieOptions, Response } from 'express';
 
 // The OAuth `state` nonce only needs to survive the Google consent round-trip.
@@ -111,4 +112,37 @@ export function clearOAuthStateCookie(
 export function clearCsrfCookie(res: Response): void {
   res.clearCookie('csrf_token', { path: '/' });
   res.clearCookie('__Host-csrf_token', { path: '/', secure: true });
+}
+
+/** Name of the httpOnly cookie that identifies the browser asking for email codes. */
+export const EMAIL_CODE_REQUESTER_COOKIE = 'email_code_requester';
+
+/** The requester cookie lives 30 days, like the refresh token. */
+export const EMAIL_CODE_REQUESTER_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Session cookie options from config. The two `maxAge`s derive from the
+ * configured JWT TTLs so the cookie and the token expire together.
+ */
+export function sessionCookieOptsFromConfig(
+  config: ConfigService,
+): SessionCookieOpts {
+  return {
+    secure: config.get<string>('app.nodeEnv') === 'production',
+    domain: config.get<string>('auth.cookieDomain') || undefined,
+    accessMaxAge: config.getOrThrow<number>('auth.jwtAccessTtlMs'),
+    refreshMaxAge: config.getOrThrow<number>('auth.jwtRefreshTtlMs'),
+  };
+}
+
+/** Set the email-code requester cookie, scoped to `/auth` like the refresh token. */
+export function setEmailCodeRequesterCookie(
+  res: Response,
+  value: string,
+  opts: AuthCookieOpts,
+): void {
+  res.cookie(EMAIL_CODE_REQUESTER_COOKIE, value, {
+    ...refreshBase(opts),
+    maxAge: EMAIL_CODE_REQUESTER_MAX_AGE_MS,
+  });
 }

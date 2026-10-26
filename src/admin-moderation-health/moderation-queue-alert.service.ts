@@ -26,10 +26,11 @@ type AlertDecision = 'raise' | 'escalate' | 'recover' | 'silent';
  * half that reaches a person TODAY, on a platform that has no such consumer
  * yet and no pager either.
  *
- * QueerPulse delivers NO email and never will (there is no mailer in this
- * codebase and none is coming), so "raise an alert" here means exactly one
- * thing: write a notification into the bell of every active moderator and
- * admin. No copy anywhere may describe this as anything being sent.
+ * QueerPulse emails nothing about moderation (the only email it sends is a
+ * sign-in code a person asks for on screen), so "raise an alert" here means
+ * exactly one thing: write a notification into the bell of every active
+ * moderator and admin. No copy anywhere may describe this as anything being
+ * emailed.
  *
  * WHAT KEEPS IT FROM BECOMING NOISE: THE STATE ROW, AND NOTHING ELSE.
  *

@@ -63,6 +63,7 @@ describe('JoinRequestsService', () => {
     select: jest.Mock;
     addSelect: jest.Mock;
     groupBy: jest.Mock;
+    comment: jest.Mock;
     getOne: jest.Mock;
     getMany: jest.Mock;
     getRawMany: jest.Mock;
@@ -91,6 +92,7 @@ describe('JoinRequestsService', () => {
       select: jest.fn().mockReturnThis(),
       addSelect: jest.fn().mockReturnThis(),
       groupBy: jest.fn().mockReturnThis(),
+      comment: jest.fn().mockReturnThis(),
       getOne: jest.fn().mockResolvedValue(null),
       getMany: jest.fn().mockResolvedValue([]),
       getRawMany: jest.fn().mockResolvedValue([]),
@@ -871,6 +873,12 @@ describe('JoinRequestsService', () => {
       expect(qb.where).toHaveBeenCalledWith('lower(jr.email) = :email', {
         email: 'sam@example.com',
       });
+    });
+
+    it('tags the lookup so the address stays out of the query logs', async () => {
+      qb.getOne.mockResolvedValue(null);
+      await service.recoverStatusTokenForVerifiedEmail('sam@example.com');
+      expect(qb.comment).toHaveBeenCalledWith('private-parameters');
     });
 
     it('takes the most recent request, whatever its outcome', async () => {

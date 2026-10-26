@@ -110,6 +110,7 @@ import {
   toProfileCard,
 } from './profile-response';
 import { ActivityVisibilityService } from './activity-visibility.service';
+import { dedupeActivity } from './activity-describe';
 import { visibleBand } from './last-active';
 import { LastActiveService } from './last-active.service';
 import { NowInsightsService } from './now-insights.service';
@@ -674,6 +675,10 @@ export class ProfilesService {
    * anonymous public-profile endpoint reading the same table cannot serve them
    * either). Reading `ACTIVITY_READ_LIMIT` rows and slicing after the filter
    * keeps the page full when a few drop.
+   *
+   * Repeat rows about one subject (a persona published twice, an event
+   * RSVP'd twice) collapse to the newest before the slice, so older stacked
+   * copies already in the table never fill the page (see `dedupeActivity`).
    */
   private async loadVisibleActivity(
     userId: string,
@@ -688,7 +693,7 @@ export class ProfilesService {
       rows,
       viewerUserId,
     );
-    return visible.slice(0, ACTIVITY_LIMIT);
+    return dedupeActivity(visible).slice(0, ACTIVITY_LIMIT);
   }
 
   /**

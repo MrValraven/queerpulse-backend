@@ -68,6 +68,9 @@ import { StudioOwnershipService } from './studio-ownership.service';
 import { StudioPersonaCreditsController } from './studio-persona-credits.controller';
 import { StudioPersonaCreditsService } from './studio-persona-credits.service';
 import { StudioPlaybackPreferencesController } from './studio-playback-preferences.controller';
+import { StudioProfilePlaylistSetting } from './entities/studio-profile-playlist-setting.entity';
+import { StudioProfilePlaylistsController } from './studio-profile-playlists.controller';
+import { StudioProfilePlaylistsService } from './studio-profile-playlists.service';
 import { StudioPlaylistListingsController } from './studio-playlist-listings.controller';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
 import { StudioPlaylistWritesService } from './studio-playlist-writes.service';
@@ -149,6 +152,7 @@ import { StudioTracksService } from './studio-tracks.service';
       StudioPlaylistTrack,
       StudioPlaylistEditor,
       StudioPlaylistFolder,
+      StudioProfilePlaylistSetting,
       StudioPlaylistFolderItem,
       StudioReleaseReminder,
       StudioReleaseVersion,
@@ -192,6 +196,7 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioPlaylistsController,
     StudioPlaylistEditorsController,
     StudioPlaylistListingsController,
+    StudioProfilePlaylistsController,
     StudioStatsController,
     StudioReleaseToolsController,
     StudioPreviewsController,
@@ -224,6 +229,7 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioAudioConfirmService,
     StudioModerationService,
     StudioPlaylistReadsService,
+    StudioProfilePlaylistsService,
     StudioPlaylistWritesService,
     StudioPlaylistFoldersService,
     StudioStatsService,

@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
+import { DataSource, In, IsNull, MoreThan, Not, Or, Repository } from 'typeorm';
 import {
   AmbassadorsService,
   CIRCLE_STAFF_ROLE,
@@ -27,6 +27,7 @@ import {
 } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { topLevelOnly } from '../communities/subcommunity-rules';
+import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
   Report,
@@ -53,6 +54,7 @@ import {
   toAdminMemberRole,
   toFlaggedMember,
   AdminMemberDetailDTO,
+  AdminMemberInviteAccessDTO,
   AdminMemberListDTO,
   AdminMemberRoleDTO,
   AdminStaffGrantDTO,
@@ -68,6 +70,11 @@ import { staffRoleAuditNote } from './dto/staff-role-reason';
 
 /** One page of the admin members list, everywhere this feature paginates. */
 export const ADMIN_MEMBERS_PAGE_SIZE = 20;
+
+/** `ModAuditLog.action` for `updateInviteAccess` (pause or turn back on a
+ *  member's invites). `MOD_STAFF_ACTIONS` files it under "Staff & access"
+ *  in the platform log. */
+export const INVITE_ACCESS_CHANGED_ACTION = 'invite_access_changed';
 
 /** The `filter: 'new'` window on `list()` — "joined in the last week". */
 const NEW_MEMBER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -173,6 +180,7 @@ export class AdminMembersService {
     private readonly modAuditLogs: Repository<ModAuditLog>,
     @InjectRepository(UserStaffRole)
     private readonly staffRoles: Repository<UserStaffRole>,
+    @InjectRepository(Invite) private readonly invites: Repository<Invite>,
     private readonly vouchService: VouchService,
     private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
@@ -504,6 +512,7 @@ export class AdminMembersService {
       communityRows,
       vouchesGiven,
       staffRoleRows,
+      pendingInviteCount,
     ] = await Promise.all([
       this.users.findOne({
         where: { id: profile.userId },
@@ -513,7 +522,13 @@ export class AdminMembersService {
         // (`toAdminMemberDetail` is the only place it is touched) and never
         // reaches the wire in full: that is the reveal endpoint's job, and the
         // reveal records who asked.
-        select: { id: true, role: true, isSystem: true, email: true },
+        select: {
+          id: true,
+          role: true,
+          isSystem: true,
+          email: true,
+          hasInviteAccess: true,
+        },
       }),
       this.vouchService.getVouchCount(profile.userId),
       this.vouches.count({
@@ -552,6 +567,16 @@ export class AdminMembersService {
       this.staffRoles.find({
         where: { userId: profile.userId },
         select: ['role'],
+      }),
+      // Still-usable links this member sent: the same `where` as
+      // `InvitesService.myInvitesWhere('valid')` (pending, and a null expiry
+      // never lapses).
+      this.invites.count({
+        where: {
+          inviterId: profile.userId,
+          status: InviteStatus.Pending,
+          expiresAt: Or(IsNull(), MoreThan(new Date())),
+        },
       }),
     ]);
 
@@ -769,6 +794,8 @@ export class AdminMembersService {
         nodes: graphNodes,
       },
       staffRoles: staffRoleRows.map((staffRoleRow) => staffRoleRow.role),
+      hasInviteAccess: userRow?.hasInviteAccess ?? true,
+      pendingInviteCount,
     });
   }
 
@@ -1173,6 +1200,61 @@ export class AdminMembersService {
       userId: targetUserId,
       slug: profile.slug,
       inviteMonthlyQuota: quota,
+    };
+  }
+
+  /**
+   * Pause or turn back on one member's ability to send invites
+   * (`User.hasInviteAccess`). While it is false, `InvitesService` refuses
+   * create and resend with `INVITE_ACCESS_DISABLED`; the rest of the account
+   * is untouched. Same resource lever as `updateInviteQuota`, so the same
+   * shape: no self-change or house-account guardrail, the class-level
+   * Admin-only guard is the only gate.
+   *
+   * Audited (`INVITE_ACCESS_CHANGED_ACTION`) in the same transaction as the
+   * update, so the trail can never disagree with the column. A no-op writes
+   * no row and still returns the current state.
+   */
+  async updateInviteAccess(
+    idOrSlug: string,
+    hasInviteAccess: boolean,
+    actorUserId: string,
+  ): Promise<AdminMemberInviteAccessDTO> {
+    const profile = await this.resolveMemberProfile(idOrSlug);
+    const targetUserId = profile.userId;
+
+    await this.dataSource.transaction(async (manager) => {
+      const users = manager.getRepository(User);
+      const targetUser = await users.findOne({
+        where: { id: targetUserId },
+        select: ['id', 'hasInviteAccess'],
+      });
+      if (!targetUser) {
+        throw new NotFoundException('Member not found');
+      }
+      if (targetUser.hasInviteAccess === hasInviteAccess) return;
+
+      await users.update({ id: targetUserId }, { hasInviteAccess });
+
+      const auditLogs = manager.getRepository(ModAuditLog);
+      await auditLogs.save(
+        auditLogs.create({
+          reportId: null,
+          actorId: actorUserId,
+          targetUserId,
+          targetName: `${profile.firstName} ${profile.lastName}`.trim(),
+          action: INVITE_ACCESS_CHANGED_ACTION,
+          reasonCode: null,
+          note: hasInviteAccess ? 'Invites turned back on' : 'Invites paused',
+          duration: null,
+        }),
+      );
+    });
+
+    return {
+      userId: targetUserId,
+      slug: profile.slug,
+      hasInviteAccess,
     };
   }
 

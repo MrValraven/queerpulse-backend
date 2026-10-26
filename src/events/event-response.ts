@@ -36,6 +36,14 @@ export interface EventOrganizerView {
   avatarUrl: string | null;
 }
 
+/** The lead community a card names: "With {name}", and the target of the
+ *  card's "Hide events from {name}" action. */
+export interface EventSummaryCommunityRef {
+  id: string;
+  slug: string;
+  name: string;
+}
+
 export interface EventSummary {
   slug: string;
   title: string;
@@ -88,6 +96,26 @@ export interface EventSummary {
   // the detail view (unlike `communitySlug` below, which DOES need a join and
   // is detail-only — see `EventDetail`).
   communityId: string | null;
+  /**
+   * The lead community (`communityId`) resolved for the card: its id, slug
+   * and name, batch-read once per page in `EventsService.summarize`. Null
+   * when the gathering has no lead community, and null when the lead is
+   * withheld from this viewer: a `private` community, and the viewer neither
+   * one of the gathering's organisers nor on its roster (the rule
+   * `EventDetail.community` follows). A withheld lead takes `communityId`
+   * with it, so a card never names or identifies a private community the
+   * detail would keep quiet about.
+   */
+  hostingCommunity: EventSummaryCommunityRef | null;
+  /**
+   * Whether the gathering holds at least one ACCEPTED guest community
+   * (`event_communities`), so a card can explain why an event stays listed
+   * after its lead was hidden: the viewer still sees a co-hosting community.
+   * A boolean only, so it names no guest, private or otherwise. Batch-read
+   * once per page in `EventsService.summarize`; the detail answers it from
+   * its own guest read.
+   */
+  isCoHosted: boolean;
   // The directory listing this event's venue is linked to, or null for a
   // free-text venue — same plain-column-on-every-row precedent as
   // `communityId` above. Resolving it to a display name/slug (`venueListing`
@@ -214,6 +242,18 @@ export interface EventDetail extends EventSummary {
    * that happens to be a URL.
    */
   onlineUrl: string | null;
+  /**
+   * The host's https payment link, for a guest working out how to pay.
+   * Every reader of the detail gets it (a guest needs it before RSVPing), and
+   * it is null when the host gave none or the gathering is `free`. Display
+   * only: the platform takes no money. Detail only, so cards never carry it.
+   */
+  paymentUrl: string | null;
+  /**
+   * The host's own words on how to pay, with the same audience and the same
+   * null rules as `paymentUrl`.
+   */
+  paymentInstructions: string | null;
   /**
    * When the gathering was last edited. Organiser-facing: the manage
    * dashboard's "last edited N days ago" line used to be computed from a MOCK
@@ -753,6 +793,15 @@ export function toEventSummary(
   // (`summarize` and `buildDetail`) resolve it in one batched read and pass
   // it; the default keeps any other caller on the old shape.
   runByListing: RunByListingRef | null = null,
+  // The lead community as this viewer may see it (see
+  // `EventSummary.hostingCommunity`), resolved by the caller: one batched
+  // read per page in `summarize`, the detail's own lookup in `buildDetail`.
+  // The default keeps any other caller on a card that names no community.
+  hostingCommunity: EventSummaryCommunityRef | null = null,
+  // Whether an accepted guest community co-hosts it (see
+  // `EventSummary.isCoHosted`), resolved by the caller like
+  // `hostingCommunity`. The default reads as hosted alone.
+  isCoHosted = false,
 ): CountedEventSummary {
   return {
     slug: e.slug,
@@ -773,6 +822,8 @@ export function toEventSummary(
     myRsvpStatus: myRsvp ? myRsvp.status : null,
     isBookmarked,
     communityId: e.communityId,
+    hostingCommunity,
+    isCoHosted,
     listingId: e.listingId,
     neighbourhood: e.neighbourhood,
     eventType: e.eventType,

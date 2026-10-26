@@ -36,6 +36,7 @@ import {
   clearCsrfCookie,
   clearOAuthStateCookie,
   SessionCookieOpts,
+  sessionCookieOptsFromConfig,
 } from './auth-cookies';
 import { AuthService, GoogleUserInput } from './auth.service';
 import {
@@ -151,12 +152,7 @@ export class AuthController {
    * fields (a `maxAge` is meaningless on a deletion).
    */
   private cookieOpts(): SessionCookieOpts {
-    return {
-      secure: this.config.get<string>('app.nodeEnv') === 'production',
-      domain: this.config.get<string>('auth.cookieDomain') || undefined,
-      accessMaxAge: this.config.getOrThrow<number>('auth.jwtAccessTtlMs'),
-      refreshMaxAge: this.config.getOrThrow<number>('auth.jwtRefreshTtlMs'),
-    };
+    return sessionCookieOptsFromConfig(this.config);
   }
 
   /**
@@ -248,10 +244,8 @@ export class AuthController {
       const currentSession = rawAccessToken
         ? await this.authService.verifyAccessToken(rawAccessToken)
         : null;
-      // Resolve which account this Google login belongs to via the same
-      // lookup the ordinary sign-in path uses — never by reading `googleId`
-      // off a loaded `User` row (see that column's `select: false` doc
-      // comment on why it has no value-reader in app code).
+      // Resolve which account this Google login belongs to through
+      // `findByGoogleId`, the same lookup the ordinary sign-in path uses.
       const linkedUser = currentSession
         ? await this.usersService.findByGoogleId(profile.googleId)
         : null;
@@ -507,25 +501,33 @@ export class AuthController {
     // A suspended/banned member is locked out of every gated route, so the
     // account-suspended/banned page has no authed endpoint to call for the
     // reason — it rides on `me` (JWT-only) instead. Null for everyone else.
-    const [suspensionInfo, staffRoles, avatarCrops, earlyAccessFeatures] =
-      await Promise.all([
-        this.authService.suspensionInfoFor(user),
-        // Additive functional grants (STAFF_ROLES) on top of `role`; the
-        // frontend capability layer (useMyStaffRoles) reads this. Empty array
-        // for a member holding none; admins are a superset resolved client-side.
-        this.authService.staffRolesFor(user.id),
-        // Single-key batched lookup (mirrors every other surface's
-        // `MediaCropService.getMany` usage), a lone GET so `me` still fires one
-        // extra query at most, never per-field.
-        this.mediaCropService.getMany(
-          user.profile?.avatarUrl ? [user.profile.avatarUrl] : [],
-        ),
-        // Feature keys the member holds an early-access grant for, kept to
-        // registry entries flagged `earlyAccess: true` (launched or not). The
-        // frontend launch checks read this to open an unlaunched feature for a
-        // tester. Empty array for a member holding none.
-        this.featureAccess.earlyAccessFeaturesFor(user.id),
-      ]);
+    const [
+      suspensionInfo,
+      staffRoles,
+      avatarCrops,
+      earlyAccessFeatures,
+      hasGoogle,
+    ] = await Promise.all([
+      this.authService.suspensionInfoFor(user),
+      // Additive functional grants (STAFF_ROLES) on top of `role`; the
+      // frontend capability layer (useMyStaffRoles) reads this. Empty array
+      // for a member holding none; admins are a superset resolved client-side.
+      this.authService.staffRolesFor(user.id),
+      // Single-key batched lookup (mirrors every other surface's
+      // `MediaCropService.getMany` usage), a lone GET so `me` still fires one
+      // extra query at most, never per-field.
+      this.mediaCropService.getMany(
+        user.profile?.avatarUrl ? [user.profile.avatarUrl] : [],
+      ),
+      // Feature keys the member holds an early-access grant for, kept to
+      // registry entries flagged `earlyAccess: true` (launched or not). The
+      // frontend launch checks read this to open an unlaunched feature for a
+      // tester. Empty array for a member holding none.
+      this.featureAccess.earlyAccessFeaturesFor(user.id),
+      // Whether the account has a Google identity; the frontend offers Google
+      // step-up only when it works.
+      this.usersService.hasGoogleIdentity(user.id),
+    ]);
     return {
       id: user.id,
       // From the JWT (re-read from the DB every request by JwtStrategy), not the
@@ -567,6 +569,8 @@ export class AuthController {
           }
         : null,
       staffRoles,
+      // True when the account can step up with Google.
+      hasGoogle,
       // Early-access feature keys resolved above (`earlyAccessFeaturesFor`).
       earlyAccessFeatures,
       /**

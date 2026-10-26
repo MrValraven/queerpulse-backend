@@ -10,7 +10,10 @@ import { AccountDeactivation } from '../account/entities/account-deactivation.en
 import { DeletionRequest } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { AuthService } from '../auth/auth.service';
-import { IdentityRelinkCandidate } from '../auth/entities/identity-relink-candidate.entity';
+import {
+  IdentityRelinkCandidate,
+  IdentityRelinkCandidateStatus,
+} from '../auth/entities/identity-relink-candidate.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
@@ -207,6 +210,47 @@ describe('AdminIdentityService re-link guardrails (PRD-06)', () => {
     await expect(
       service.applyRelink(ACTOR_ID, MEMBER_ID, 'candidate-1', 'a good reason'),
     ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(mocks.auth.applyGoogleIdRelink).not.toHaveBeenCalled();
+  });
+
+  it('refuses with 409 when the member has no Google identity to replace', async () => {
+    // An account created with an email code carries a NULL `google_id`, and a
+    // pending candidate is still on file for that member.
+    // The write-time guardrail re-check reads staff roles and deletion
+    // requests through the manager; neither applies to this member.
+    const guardrailRepo = {
+      ...mocks.auditRepo,
+      exists: jest.fn().mockResolvedValue(false),
+    };
+    mocks.manager.getRepository.mockReturnValue(guardrailRepo);
+    mocks.manager.createQueryBuilder
+      .mockReturnValueOnce({
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(makeUser({ googleId: null })),
+      })
+      .mockReturnValueOnce({
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue({
+          id: 'candidate-1',
+          userId: MEMBER_ID,
+          status: IdentityRelinkCandidateStatus.Pending,
+          googleId: 'google-new-222222',
+        }),
+      });
+
+    const attempt = service.applyRelink(
+      ACTOR_ID,
+      MEMBER_ID,
+      'candidate-1',
+      'a good reason',
+    );
+
+    await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+    await expect(attempt).rejects.toThrow(
+      'This member signs in with an email code and has no Google identity to replace.',
+    );
     expect(mocks.auth.applyGoogleIdRelink).not.toHaveBeenCalled();
   });
 });

@@ -28,7 +28,7 @@ function normalizeName(value: string): string {
     .toLowerCase();
 }
 
-// Lisbon + Porto neighbourhood centroids (WGS84). Coarse by design — a
+// Greater Lisbon + Porto neighbourhood centroids (WGS84). Coarse by design — a
 // neighbourhood centre, never a street. Extend as new areas appear in listings.
 const NEIGHBOURHOOD_CENTROIDS: Record<string, Centroid> = {
   // ── Lisbon: the 24 official freguesias, mirroring the frontend's
@@ -57,6 +57,77 @@ const NEIGHBOURHOOD_CENTROIDS: Record<string, Centroid> = {
   'santo antonio': { latitude: 38.72147, longitude: -9.1471 },
   'sao domingos de benfica': { latitude: 38.74747, longitude: -9.17792 },
   'sao vicente': { latitude: 38.71832, longitude: -9.12607 },
+  // ── Oeiras, Cascais and the south bank of the Tejo: label points of the
+  //    36 freguesias added to the same frontend file, in its order ──
+  'costa de caparica': { latitude: 38.64194, longitude: -9.23063 },
+  'charneca de caparica e sobreda': { latitude: 38.62576, longitude: -9.19041 },
+  'almada, cova da piedade, pragal e cacilhas': {
+    latitude: 38.67408,
+    longitude: -9.16443,
+  },
+  'laranjeiro e feijo': { latitude: 38.65522, longitude: -9.16624 },
+  'caparica e trafaria': { latitude: 38.66001, longitude: -9.21711 },
+  alcabideche: { latitude: 38.74096, longitude: -9.42657 },
+  'sao domingos de rana': { latitude: 38.72533, longitude: -9.34181 },
+  'cascais e estoril': { latitude: 38.71502, longitude: -9.45905 },
+  'carcavelos e parede': { latitude: 38.68813, longitude: -9.33613 },
+  barcarena: { latitude: 38.73715, longitude: -9.28087 },
+  'porto salvo': { latitude: 38.72401, longitude: -9.30459 },
+  'alges, linda-a-velha e cruz quebrada-dafundo': {
+    latitude: 38.70962,
+    longitude: -9.24334,
+  },
+  'carnaxide e queijas': { latitude: 38.72552, longitude: -9.22955 },
+  'oeiras e sao juliao da barra, paco de arcos e caxias': {
+    latitude: 38.69913,
+    longitude: -9.30646,
+  },
+  alcochete: { latitude: 38.71329, longitude: -8.86826 },
+  samouco: { latitude: 38.72959, longitude: -9.01805 },
+  'sao francisco': { latitude: 38.7331, longitude: -8.97373 },
+  canha: { latitude: 38.77192, longitude: -8.68617 },
+  'sarilhos grandes': { latitude: 38.67264, longitude: -8.9604 },
+  'montijo e afonsoeiro': { latitude: 38.70842, longitude: -9.02525 },
+  'atalaia e alto estanqueiro-jardia': {
+    latitude: 38.67762,
+    longitude: -8.92742,
+  },
+  pegoes: { latitude: 38.68494, longitude: -8.60674 },
+  'santo antonio da charneca': { latitude: 38.61629, longitude: -9.01867 },
+  'barreiro e lavradio': { latitude: 38.66876, longitude: -9.05583 },
+  'palhais e coina': { latitude: 38.59993, longitude: -9.03419 },
+  'alto do seixalinho, santo andre e verderena': {
+    latitude: 38.64415,
+    longitude: -9.06099,
+  },
+  'alhos vedros': { latitude: 38.64821, longitude: -9.01284 },
+  moita: { latitude: 38.64327, longitude: -8.96277 },
+  'gaio-rosario e sarilhos pequenos': {
+    latitude: 38.6806,
+    longitude: -9.00528,
+  },
+  'baixa da banheira e vale da amoreira': {
+    latitude: 38.66079,
+    longitude: -9.04268,
+  },
+  amora: { latitude: 38.61707, longitude: -9.12756 },
+  corroios: { latitude: 38.63331, longitude: -9.15764 },
+  'fernao ferro': { latitude: 38.57245, longitude: -9.09661 },
+  'aldeia de paio pires': { latitude: 38.61677, longitude: -9.07454 },
+  arrentela: { latitude: 38.62816, longitude: -9.09786 },
+  seixal: { latitude: 38.64587, longitude: -9.09108 },
+  // ── Setúbal: label points of its 5 freguesias in the same frontend file ──
+  'gambia-pontes-alto da guerra': { latitude: 38.546, longitude: -8.77193 },
+  sado: { latitude: 38.4951, longitude: -8.80302 },
+  'setubal (sao sebastiao)': { latitude: 38.51758, longitude: -8.86716 },
+  'setubal (sao juliao, nossa senhora da anunciada e santa maria da graca)': {
+    latitude: 38.51348,
+    longitude: -8.94713,
+  },
+  'azeitao (sao lourenco e sao simao)': {
+    latitude: 38.50942,
+    longitude: -9.01032,
+  },
   // ── Porto (untouched) ──
   ribeira: { latitude: 41.1405, longitude: -8.6115 },
   cedofeita: { latitude: 41.156, longitude: -8.618 },

@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { EntityManager } from 'typeorm';
+import { EntityManager, IsNull, Not } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { UsersService } from './users.service';
@@ -145,26 +145,34 @@ describe('UsersService', () => {
   let usersRepo: {
     findOne: jest.Mock;
     save: jest.Mock;
+    exists: jest.Mock;
+    update: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   // `findByGoogleId` re-includes the `select: false` email column, so it goes
   // through the query builder rather than `findOne`. This stub captures that
   // fluent chain and lets each test drive its `getOne` terminal.
   let usersQueryBuilder: {
+    select: jest.Mock;
     addSelect: jest.Mock;
     where: jest.Mock;
+    comment: jest.Mock;
     getOne: jest.Mock;
   };
 
   beforeEach(async () => {
     usersQueryBuilder = {
+      select: jest.fn().mockReturnThis(),
       addSelect: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
+      comment: jest.fn().mockReturnThis(),
       getOne: jest.fn(),
     };
     usersRepo = {
       findOne: jest.fn(),
       save: jest.fn(),
+      exists: jest.fn(),
+      update: jest.fn(),
       createQueryBuilder: jest.fn(() => usersQueryBuilder),
     };
     const module: TestingModule = await Test.createTestingModule({
@@ -186,6 +194,151 @@ describe('UsersService', () => {
       'user.googleId = :googleId',
       { googleId: 'g-123' },
     );
+  });
+
+  describe('findIdByEmail', () => {
+    it('findIdByEmail matches the address case-insensitively', async () => {
+      usersQueryBuilder.getOne.mockResolvedValue({ id: 'u1' });
+
+      await expect(service.findIdByEmail('Sam@Example.com')).resolves.toBe(
+        'u1',
+      );
+      expect(usersQueryBuilder.where).toHaveBeenCalledWith(
+        'lower(user.email) = lower(:email)',
+        { email: 'Sam@Example.com' },
+      );
+      expect(usersQueryBuilder.comment).toHaveBeenCalledWith(
+        'private-parameters',
+      );
+    });
+  });
+
+  describe('findByEmailForSignIn', () => {
+    it('findByEmailForSignIn re-includes the email column and matches case-insensitively', async () => {
+      const user = {
+        id: 'u1',
+        status: UserStatus.Active,
+        isSystem: false,
+      } as User;
+      usersQueryBuilder.getOne.mockResolvedValue(user);
+
+      await expect(
+        service.findByEmailForSignIn('Sam@Example.com'),
+      ).resolves.toBe(user);
+      expect(usersRepo.createQueryBuilder).toHaveBeenCalledWith('user');
+      expect(usersQueryBuilder.addSelect).toHaveBeenCalledWith('user.email');
+      expect(usersQueryBuilder.where).toHaveBeenCalledWith(
+        'lower(user.email) = lower(:email)',
+        { email: 'Sam@Example.com' },
+      );
+      expect(usersQueryBuilder.comment).toHaveBeenCalledWith(
+        'private-parameters',
+      );
+    });
+  });
+
+  describe('hasGoogleIdentity', () => {
+    it('hasGoogleIdentity answers from google_id IS NOT NULL', async () => {
+      usersRepo.exists.mockResolvedValueOnce(true);
+      await expect(service.hasGoogleIdentity('u1')).resolves.toBe(true);
+
+      usersRepo.exists.mockResolvedValueOnce(false);
+      await expect(service.hasGoogleIdentity('u1')).resolves.toBe(false);
+
+      expect(usersRepo.exists).toHaveBeenCalledWith({
+        where: { id: 'u1', googleId: Not(IsNull()) },
+      });
+    });
+  });
+
+  describe('attachGoogleIdIfUnset', () => {
+    it('attachGoogleIdIfUnset writes only over a NULL google_id', async () => {
+      usersRepo.update.mockResolvedValueOnce({ affected: 1 });
+      await expect(service.attachGoogleIdIfUnset('u1', 'g-1')).resolves.toBe(
+        true,
+      );
+
+      usersRepo.update.mockResolvedValueOnce({ affected: 0 });
+      await expect(service.attachGoogleIdIfUnset('u1', 'g-1')).resolves.toBe(
+        false,
+      );
+
+      expect(usersRepo.update).toHaveBeenCalledWith(
+        { id: 'u1', googleId: IsNull() },
+        { googleId: 'g-1' },
+      );
+    });
+  });
+
+  describe('createEmailUser', () => {
+    // A manager whose `create` echoes its value, so the test can read both the
+    // user row and the profile row the sign-up built.
+    function emailSignupManager() {
+      let savedCount = 0;
+      const createMock = jest.fn(
+        (_entity: unknown, value: Record<string, unknown>) => value,
+      );
+      const saveMock = jest.fn((value: Record<string, unknown>) => {
+        const row = {
+          id: savedCount === 0 ? 'new-user' : 'new-profile',
+          ...value,
+        };
+        savedCount += 1;
+        return Promise.resolve(row);
+      });
+      const manager = {
+        create: createMock,
+        save: saveMock,
+        getRepository: jest.fn(() => handleRegistryRepoStub()),
+        insert: jest.fn().mockResolvedValue(undefined),
+        transaction: jest.fn((cb: (m: unknown) => Promise<void>) =>
+          cb(manager),
+        ),
+      } as unknown as EntityManager;
+      return { manager, createMock };
+    }
+
+    it('createEmailUser stores no Google id and builds the slug from the typed name', async () => {
+      const emailSignup = emailSignupManager();
+
+      const created = await service.createEmailUser(emailSignup.manager, {
+        email: 'sam@example.com',
+        firstName: 'Sam',
+        lastName: '',
+      });
+
+      expect(created).toEqual(expect.objectContaining({ id: 'new-user' }));
+      expect(emailSignup.createMock).toHaveBeenCalledWith(
+        User,
+        expect.objectContaining({
+          googleId: null,
+          email: 'sam@example.com',
+          isSystem: false,
+        }),
+      );
+      expect(emailSignup.createMock).toHaveBeenCalledWith(
+        Profile,
+        expect.objectContaining({
+          slug: 'sam',
+          firstName: 'Sam',
+          lastName: '',
+          avatarUrl: null,
+        }),
+      );
+
+      // The same typed name through the Google path lands on the same slug.
+      const googleSignup = emailSignupManager();
+      await service.createGoogleUser(googleSignup.manager, {
+        googleId: 'g-sam',
+        email: 'sam@example.com',
+        firstName: 'Sam',
+        lastName: '',
+      });
+      expect(googleSignup.createMock).toHaveBeenCalledWith(
+        Profile,
+        expect.objectContaining({ slug: 'sam' }),
+      );
+    });
   });
 
   it('slugify produces a url-safe base slug', () => {
@@ -237,6 +390,7 @@ describe('UsersService', () => {
       expect(user).toEqual(expect.objectContaining({ id: 'new-user' }));
       expect(saveMock).toHaveBeenCalledWith(
         expect.objectContaining({
+          googleId: 'g-1',
           status: UserStatus.Active,
           activatedAt: expect.any(Date) as unknown,
           invitedBy: { id: 'inviter-1' },

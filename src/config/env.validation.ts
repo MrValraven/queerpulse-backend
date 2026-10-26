@@ -141,6 +141,15 @@ export class EnvironmentVariables {
   @IsOptional() @IsString() AWS_S3_BUCKET_NAME?: string;
   @IsOptional() @IsString() AWS_ACCESS_KEY_ID?: string;
   @IsOptional() @IsString() AWS_SECRET_ACCESS_KEY?: string;
+  // Local development only: the MinIO container serves path-style URLs. Only
+  // the exact string `true` turns it on; the cross-field rule below refuses it
+  // when NODE_ENV=production.
+  @IsOptional() @IsString() AWS_S3_FORCE_PATH_STYLE?: string;
+  // Local development only: the bucket endpoint as a browser reaches it, used
+  // to sign presigned URLs when the API itself reaches MinIO at a Docker
+  // network name (`http://minio:9000`). The cross-field rule below refuses it
+  // when NODE_ENV=production.
+  @IsOptional() @IsString() AWS_PUBLIC_ENDPOINT_URL?: string;
 
   @IsOptional() @IsString() MUX_TOKEN_ID?: string;
   @IsOptional() @IsString() MUX_TOKEN_SECRET?: string;
@@ -171,6 +180,26 @@ export class EnvironmentVariables {
   // rotation; changing it re-keys every matched chat, so earlier `@` mention
   // tokens then render as raw text.
   @IsOptional() @IsString() @MinLength(32) MATCHED_MEMBER_KEY_SECRET?: string;
+
+  // Sign-in codes by email (Resend). Optional everywhere: the email-code
+  // sign-in is switched on only when RESEND_API_KEY and both template ids are
+  // set (see email.config.ts), so an API without them boots with the feature
+  // off and hidden.
+  @IsOptional() @IsString() RESEND_API_KEY?: string;
+  // Sender shown on the sign-in email, e.g. QueerPulse <hello@queerpulse.com>.
+  @IsOptional() @IsString() RESEND_FROM?: string;
+  // Resend template ids for the English and Portuguese sign-in emails.
+  @IsOptional() @IsString() RESEND_SIGNIN_TEMPLATE_ID_EN?: string;
+  @IsOptional() @IsString() RESEND_SIGNIN_TEMPLATE_ID_PT?: string;
+
+  // HMAC secret for stored sign-in codes. Optional: unset derives one from
+  // JWT_ACCESS_SECRET. Setting it decouples the codes from JWT rotation.
+  @IsOptional() @IsString() @MinLength(32) EMAIL_CODE_SECRET?: string;
+
+  // Local opt-in for the email-code sign-in without Resend. Only the exact
+  // string `true` turns it on, and NODE_ENV=production ignores it: the mailer
+  // then logs each code on one `[dev]` line and sends nothing.
+  @IsOptional() @IsString() EMAIL_CODE_DEV_LOG?: string;
 
   @IsOptional()
   @IsNumber()
@@ -289,6 +318,32 @@ export class EnvironmentVariables {
   ALLOW_COOKIE_DOMAIN?: string;
 }
 
+// Appended to a failed validation outside production, where the reader is an
+// engineer at a terminal. `pnpm dev:setup` reads .env
+// and offers to fill in each missing or invalid value. Each problem above it
+// still names its own cause.
+export const DEV_SETUP_HINT =
+  'Run `pnpm dev:setup`, which offers to fill in the missing or invalid values in .env.';
+
+// Builds the boot-refusal error. Production output is exactly `message`; any
+// other NODE_ENV (including a missing or misspelled one, which is itself one
+// of the reported problems) gets the dev:setup hint on its own final line.
+function envValidationError(
+  config: Record<string, unknown>,
+  message: string,
+): Error {
+  const isProduction = config.NODE_ENV === NodeEnv.Production;
+  if (isProduction) {
+    return new Error(message);
+  }
+  const error = new Error(`${message}\n${DEV_SETUP_HINT}`);
+  // main.ts prints a refused boot with `console.error(error)`, which shows the
+  // stack. Its frames all sit inside ConfigModule and say nothing about the
+  // .env, so drop them here and the hint stays the last line on the terminal.
+  error.stack = `${error.name}: ${error.message}`;
+  return error;
+}
+
 export function validate(
   config: Record<string, unknown>,
 ): EnvironmentVariables {
@@ -297,7 +352,7 @@ export function validate(
   });
   const errors = validateSync(validated, { skipMissingProperties: false });
   if (errors.length > 0) {
-    throw new Error(errors.toString());
+    throw envValidationError(config, errors.toString());
   }
 
   // Cross-field rules that class-validator decorators can't express cleanly.
@@ -350,6 +405,33 @@ export function validate(
         `${missingStorage.join(', ')} ${missingStorage.length === 1 ? 'is' : 'are'} required when NODE_ENV=production (uploads fail at runtime otherwise)`,
       );
     }
+  }
+
+  // Path-style bucket URLs exist for the local MinIO container in
+  // docker-compose.yml. The Railway Bucket rejects path-style requests, so a
+  // production deploy carrying a copied dev .env would fail every upload at
+  // runtime. Fail at boot with the variable named instead.
+  if (
+    validated.NODE_ENV === NodeEnv.Production &&
+    validated.AWS_S3_FORCE_PATH_STYLE === 'true'
+  ) {
+    problems.push(
+      'AWS_S3_FORCE_PATH_STYLE=true is for the local MinIO bucket only and is refused when NODE_ENV=production. Remove it from the production environment',
+    );
+  }
+
+  // A second signing endpoint exists for the Docker dev stack only, where the
+  // API reaches MinIO at `http://minio:9000` and the browser at
+  // `http://localhost:9000`. In production every presigned URL must name the
+  // real bucket endpoint; a copied dev value would point every upload and
+  // download at a host that is not the bucket. Fail at boot with it named.
+  if (
+    validated.NODE_ENV === NodeEnv.Production &&
+    validated.AWS_PUBLIC_ENDPOINT_URL
+  ) {
+    problems.push(
+      `AWS_PUBLIC_ENDPOINT_URL is for the local MinIO bucket only and is refused when NODE_ENV=production (every presigned upload and download URL would be signed for ${validated.AWS_PUBLIC_ENDPOINT_URL}, which is not the bucket at AWS_ENDPOINT_URL). Remove it from the production environment`,
+    );
   }
 
   // Membership card token signing is not optional in production either: left
@@ -570,7 +652,7 @@ export function validate(
   }
 
   if (problems.length > 0) {
-    throw new Error(problems.join('; '));
+    throw envValidationError(config, problems.join('; '));
   }
 
   return validated;

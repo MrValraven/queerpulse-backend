@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
+import { DEDUPED_ACTIVITY_KINDS } from './activity-describe';
 import {
   Activity,
   ActivityKind,
@@ -52,7 +53,7 @@ export class ActivityService {
 
   async record(input: RecordActivityInput): Promise<void> {
     try {
-      await this.activities.save(
+      const saved = await this.activities.save(
         this.activities.create({
           userId: input.userId,
           kind: input.kind,
@@ -64,6 +65,7 @@ export class ActivityService {
           occurredAt: input.occurredAt ?? new Date(),
         }),
       );
+      await this.replaceEarlierCopies(input, saved.id);
       await this.trim(input.userId);
     } catch (error) {
       // Swallow: a failed activity write must not break the member action that
@@ -74,6 +76,34 @@ export class ActivityService {
         }`,
       );
     }
+  }
+
+  /**
+   * A row that states a lasting fact about one subject (an RSVP to this event,
+   * a join of this community, a publish of this persona) replaces the member's
+   * earlier rows about that same subject, so re-publishing a persona or
+   * re-RSVPing an event moves the row to the top instead of stacking a copy.
+   * Posts are never collapsed: each post is its own fact. See
+   * `DEDUPED_ACTIVITY_KINDS`.
+   *
+   * Runs after the insert and spares the new row by id, so a failed insert
+   * leaves the earlier row in place and the feed never loses the fact.
+   */
+  private async replaceEarlierCopies(
+    input: RecordActivityInput,
+    newRowId: string,
+  ): Promise<void> {
+    const subjectId = input.subjectId;
+    if (!subjectId || !DEDUPED_ACTIVITY_KINDS.has(input.kind)) {
+      return;
+    }
+    await this.activities.delete({
+      id: Not(newRowId),
+      userId: input.userId,
+      kind: input.kind,
+      subjectKind: input.subjectKind ?? IsNull(),
+      subjectId,
+    });
   }
 
   /**

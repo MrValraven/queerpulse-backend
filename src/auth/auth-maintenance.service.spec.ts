@@ -1,7 +1,9 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { AuthMaintenanceService } from './auth-maintenance.service';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { EmailSignInChallenge } from './email-code/email-sign-in-challenge.entity';
 
 describe('AuthMaintenanceService.purgeExpiredRefreshTokens', () => {
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -30,6 +32,7 @@ describe('AuthMaintenanceService.purgeExpiredRefreshTokens', () => {
     const service = new AuthMaintenanceService(
       repo as unknown as Repository<RefreshToken>,
       buildConfig(),
+      {} as unknown as Repository<EmailSignInChallenge>,
     );
 
     await service.purgeExpiredRefreshTokens();
@@ -61,6 +64,7 @@ describe('AuthMaintenanceService.purgeExpiredRefreshTokens', () => {
     const service = new AuthMaintenanceService(
       repo as unknown as Repository<RefreshToken>,
       buildConfig(sevenDaysMs),
+      {} as unknown as Repository<EmailSignInChallenge>,
     );
 
     await service.purgeExpiredRefreshTokens();
@@ -77,7 +81,76 @@ describe('AuthMaintenanceService.purgeExpiredRefreshTokens', () => {
     const service = new AuthMaintenanceService(
       repo as unknown as Repository<RefreshToken>,
       buildConfig(),
+      {} as unknown as Repository<EmailSignInChallenge>,
     );
     await expect(service.purgeExpiredRefreshTokens()).resolves.toBeUndefined();
+  });
+});
+
+describe('AuthMaintenanceService.purgeExpiredEmailCodeChallenges', () => {
+  function buildQb(affected: number) {
+    return {
+      delete: jest.fn().mockReturnThis(),
+      from: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue({ affected }),
+    };
+  }
+
+  function buildService(qb: ReturnType<typeof buildQb>) {
+    const challenges = { createQueryBuilder: jest.fn().mockReturnValue(qb) };
+    const service = new AuthMaintenanceService(
+      {} as unknown as Repository<RefreshToken>,
+      { getOrThrow: jest.fn() } as unknown as ConfigService,
+      challenges as unknown as Repository<EmailSignInChallenge>,
+    );
+    return service;
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-26T12:00:00Z'));
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('deletes challenges whose expiry is more than 24 hours old', async () => {
+    const qb = buildQb(2);
+    const service = buildService(qb);
+
+    await service.purgeExpiredEmailCodeChallenges();
+
+    expect(qb.from).toHaveBeenCalledWith(EmailSignInChallenge);
+    expect(qb.where).toHaveBeenCalledWith('expires_at < :cutoff', {
+      cutoff: new Date('2026-10-25T12:00:00Z'),
+    });
+    expect(qb.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs only the count', async () => {
+    const qb = buildQb(3);
+    const service = buildService(qb);
+    const logSpy = jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation(() => undefined);
+
+    await service.purgeExpiredEmailCodeChallenges();
+
+    expect(logSpy).toHaveBeenCalledWith(
+      'Purged 3 expired sign-in code challenge(s)',
+    );
+  });
+
+  it('does not throw when the delete fails', async () => {
+    const qb = buildQb(0);
+    qb.execute.mockRejectedValue(new Error('connection reset'));
+    const service = buildService(qb);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+    await expect(
+      service.purgeExpiredEmailCodeChallenges(),
+    ).resolves.toBeUndefined();
   });
 });

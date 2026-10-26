@@ -1,6 +1,7 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
 import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-log';
+import { isLandingVisitBeacon } from '../landing/landing-visit-request-log';
 import { isStudioListeningRequest } from '../studio/studio-request-log';
 import { MetricsService } from './metrics.service';
 
@@ -27,7 +28,8 @@ export class HttpMetricsMiddleware implements NestMiddleware {
     const requestUrl = request.originalUrl ?? request.url;
     if (
       isStudioListeningRequest(requestUrl, request.method) ||
-      isCreatorDraftRequest(requestUrl)
+      isCreatorDraftRequest(requestUrl) ||
+      isLandingVisitBeacon(requestUrl, request.method)
     ) {
       next();
       return;

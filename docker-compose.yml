@@ -1,11 +1,24 @@
-# Local stack: the API plus its Postgres. For development/demo — inject real
-# secrets and enable TLS for anything internet-facing.
+# Local development stack. `docker compose up` is the whole setup: it starts
+# Postgres, MinIO and the `api` service, which installs dependencies, creates
+# the `queerpulse` and `queerpulse_test` databases, migrates both, seeds the
+# fixtures when needed, creates the MinIO bucket and then serves the API with
+# hot reload on http://localhost:3000. Nothing has to be installed on the host
+# besides Docker, and no .env is needed: missing values are filled in memory at
+# start (`scripts/dev-setup.mjs --container`).
 #
-# It runs the PRODUCTION image (`target: runtime`) with `NODE_ENV=development`,
-# which is deliberate: see the note on that variable below. Flipping it to
-# `production` means also supplying API_URL, all five AWS_* bucket variables
-# (env validation refuses to boot without them) and serving over https, or the
-# container will crash-loop straight after a green migration step.
+# Requires Docker Compose 2.24 or newer, for the optional `env_file` entry on
+# `api` (`required: false`).
+#
+# Host ports move with QP_POSTGRES_PORT, QP_MINIO_PORT, QP_MINIO_CONSOLE_PORT,
+# QP_API_PORT and QP_API_DEBUG_PORT. Compose reads `${...}` values from the
+# shell and from the .env file next to this one, which is this app's own .env,
+# so the QP_* overrides can live there.
+#
+# The production image is still here as `app`, behind the `prod-image` profile,
+# so a plain `up` never builds it:
+#   docker compose --profile prod-image up app
+# For development and demo only: inject real secrets and enable TLS for
+# anything internet-facing.
 services:
   postgres:
     image: postgres:16
@@ -15,16 +28,129 @@ services:
       POSTGRES_PASSWORD: queerpulse
       POSTGRES_DB: queerpulse
     ports:
-      - '5432:5432'
+      # QP_POSTGRES_PORT moves the host side for engineers who already run
+      # Postgres.app on 5432; DATABASE_URL in .env then uses that port.
+      - '${QP_POSTGRES_PORT:-5432}:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Runs once on an EMPTY volume only, to add `queerpulse_test` beside
+      # POSTGRES_DB. An existing volume gets it from the `api` start instead.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U queerpulse']
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # Local stand-in for the Railway Bucket, for local development only. MinIO
+  # speaks the same S3 API, so uploads, presigned URLs and `storage:cors` all
+  # work against it. The `api` service below creates the `queerpulse-dev`
+  # bucket on start; for an API run on the host, `pnpm dev:setup` starts MinIO,
+  # creates the bucket and points the AWS_* variables at it as the MinIO block
+  # in .env.example shows. Browse uploads in the console at http://localhost:9001,
+  # signed in with the root user below. Browser CORS is server-wide in MinIO
+  # (all origins by default), so `storage:cors` is not needed here.
+  # MinIO serves path-style URLs, so that block also sets
+  # AWS_S3_FORCE_PATH_STYLE=true, which env validation refuses in production.
+  # Override the host ports with QP_MINIO_PORT / QP_MINIO_CONSOLE_PORT.
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: queerpulse
+      MINIO_ROOT_PASSWORD: queerpulse-dev-secret
+    ports:
+      - '${QP_MINIO_PORT:-9000}:9000'
+      - '${QP_MINIO_CONSOLE_PORT:-9001}:9001'
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      # The image ships the `mc` client and no curl.
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # The API for local development, built from the Dockerfile's `dev` stage. The
+  # repo is bind-mounted, so a saved file reloads the server through
+  # `pnpm start:dev`. node_modules lives in its own named volume, which keeps
+  # the Linux build of native modules apart from a host install on macOS; the
+  # pnpm store has one too, so recreating the container reinstalls from cache.
+  #
+  # On start, `scripts/dev-setup.mjs --container` installs dependencies, fills
+  # .env on a fresh clone and otherwise leaves an existing .env untouched,
+  # filling any missing value in memory for that run, creates the
+  # `queerpulse` and `queerpulse_test` databases, migrates both, seeds the
+  # fixtures when needed, creates the MinIO bucket and then execs
+  # `pnpm start:dev`. Every step is idempotent, so a restart is cheap.
+  #
+  # Breakpoints: set QP_API_DEBUG=true in .env, run `docker compose up -d api`,
+  # then attach a debugger to localhost:${QP_API_DEBUG_PORT:-9229}.
+  api:
+    build:
+      context: .
+      target: dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: ['node', 'scripts/dev-setup.mjs', '--container']
+    volumes:
+      - .:/app
+      - api-node-modules:/app/node_modules
+      - pnpm-store:/pnpm/store
+    ports:
+      - '${QP_API_PORT:-3000}:3000'
+      - '${QP_API_DEBUG_PORT:-9229}:9229'
+    # The engineer's own .env, when there is one, for secrets such as the
+    # Google OAuth keys. `required: false` needs Compose 2.24 or newer; older
+    # versions reject the long `env_file` syntax.
+    env_file:
+      - path: .env
+        required: false
+    # These win over .env. That file is written for an API on the host
+    # (localhost:5432, localhost:9000), and inside the Docker network Postgres
+    # and MinIO answer at their service names instead.
+    environment:
+      DATABASE_URL: postgres://queerpulse:queerpulse@postgres:5432/queerpulse
+      # The bundled Postgres speaks plaintext.
+      DATABASE_SSL: 'false'
+      # Server-side bucket calls go to MinIO over the Docker network.
+      AWS_ENDPOINT_URL: http://minio:9000
+      # The browser cannot resolve `minio`, so the presigned upload and
+      # download URLs it receives are signed for the host port instead.
+      AWS_PUBLIC_ENDPOINT_URL: http://localhost:${QP_MINIO_PORT:-9000}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_S3_BUCKET_NAME: queerpulse-dev
+      AWS_ACCESS_KEY_ID: queerpulse
+      AWS_SECRET_ACCESS_KEY: queerpulse-dev-secret
+      AWS_S3_FORCE_PATH_STYLE: 'true'
+      # Where a browser reaches this API for `GET /files/*`.
+      API_URL: http://localhost:${QP_API_PORT:-3000}
+      PORT: '3000'
+      NODE_ENV: development
+      # Sign in with an email code that the API writes to its own log.
+      # Set EMAIL_CODE_DEV_LOG=false in .env or the shell to turn it off.
+      EMAIL_CODE_DEV_LOG: ${EMAIL_CODE_DEV_LOG:-true}
+      # Tells scripts/dev-setup.mjs it runs inside this container.
+      QP_IN_CONTAINER: '1'
+
+  # The PRODUCTION image (`target: runtime`), for checking a release build
+  # locally. Behind the `prod-image` profile, so `docker compose up` leaves it
+  # alone; run it with:
+  #   docker compose --profile prod-image up app
+  # It listens on QP_PROD_IMAGE_PORT (3001) so it can run beside `api`.
+  #
+  # It runs with `NODE_ENV=development`, which is deliberate: see the note on
+  # that variable below. Flipping it to `production` means also supplying
+  # API_URL, all five AWS_* bucket variables (env validation refuses to boot
+  # without them) and serving over https, or the container will crash-loop
+  # straight after a green migration step.
   app:
+    profiles: ['prod-image']
     build:
       context: .
       target: runtime
@@ -49,7 +175,7 @@ services:
       PORT: '3000'
       # Where a browser reaches this API for `GET /files/*` — image URLs are
       # built from it.
-      API_URL: http://localhost:3000
+      API_URL: http://localhost:${QP_PROD_IMAGE_PORT:-3001}
       DATABASE_URL: postgres://queerpulse:queerpulse@postgres:5432/queerpulse
       # The bundled Postgres speaks plaintext, so disable TLS explicitly here.
       # For a managed/prod database, remove this and provide DATABASE_SSL_CA.
@@ -63,10 +189,11 @@ services:
       JWT_REFRESH_TTL: 30d
       GOOGLE_CLIENT_ID: your-google-client-id
       GOOGLE_CLIENT_SECRET: your-google-client-secret
-      GOOGLE_CALLBACK_URL: http://localhost:3000/auth/google/callback
+      GOOGLE_CALLBACK_URL: http://localhost:${QP_PROD_IMAGE_PORT:-3001}/auth/google/callback
       FRONTEND_URL: http://localhost:5173
     ports:
-      - '3000:3000'
+      # 3001 on the host, so it never clashes with `api` on 3000.
+      - '${QP_PROD_IMAGE_PORT:-3001}:3000'
     # Deploy order: preflight, run migrations, apply the bucket CORS policy,
     # then start the server — the order README "Deployment" documents.
     # `migration:preflight` drops a leftover INVALID index from an interrupted
@@ -78,3 +205,8 @@ services:
 
 volumes:
   pgdata:
+  miniodata:
+  # The `api` container's Linux node_modules and the pnpm store it installs
+  # from. `docker compose down -v` drops them with the data volumes.
+  api-node-modules:
+  pnpm-store:

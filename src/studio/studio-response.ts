@@ -61,6 +61,10 @@ export type StudioArtistPersona = Pick<
   'id' | 'handle' | 'displayName' | 'kind' | 'avatarUrl'
 >;
 
+/** The extra persona columns the artist page header reads. */
+export type StudioArtistHeaderPersona = StudioArtistPersona &
+  Pick<Subprofile, 'coverUrl' | 'skinData'>;
+
 export interface StudioArtistRef {
   id: string;
   handle: string;
@@ -272,7 +276,14 @@ export interface StudioTrackResponse extends StudioTrackSummary {
 }
 
 export interface StudioArtistResponse {
-  artist: StudioFormatArtistRef & { bio: string | null; city: string | null };
+  artist: StudioFormatArtistRef & {
+    bio: string | null;
+    city: string | null;
+    /** The persona cover photo, null when absent. */
+    coverUrl: string | null;
+    /** `skinData.studioHero`, null when the owner never chose a layout. */
+    studioHero: 'full-bleed' | 'avatar' | null;
+  };
   releases: StudioReleaseCard[];
   ownerReleases: StudioOwnerReleaseCard[] | null;
   /** Studio v2: every follower of the persona, already public on its page. */
@@ -444,6 +455,22 @@ export function toStudioFormatArtistRef(
 ): StudioFormatArtistRef {
   const artist = toStudioArtistRef(persona);
   return { ...artist, format: STUDIO_FORMAT_BY_KIND[artist.kind] };
+}
+
+/** The artist page header fields beyond the format ref: the persona cover
+ *  photo (through `toImageUrl`) and the stored hero layout. Any stored value
+ *  other than the two layouts reads as null. */
+export function toStudioArtistHeroFields(
+  persona: Pick<StudioArtistHeaderPersona, 'coverUrl' | 'skinData'>,
+): { coverUrl: string | null; studioHero: 'full-bleed' | 'avatar' | null } {
+  const storedHero: unknown = persona.skinData?.studioHero;
+  return {
+    coverUrl: toImageUrl(persona.coverUrl),
+    studioHero:
+      storedHero === 'full-bleed' || storedHero === 'avatar'
+        ? storedHero
+        : null,
+  };
 }
 
 export function toStudioTrackSummary(track: StudioTrack): StudioTrackSummary {

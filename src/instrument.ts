@@ -21,9 +21,13 @@ import {
   isCreatorDraftRequest,
 } from './creator-drafts/creator-draft-request-log';
 // Also import-free, for the same reason.
+import { dropLandingVisitRequest } from './landing/landing-visit-request-log';
+// Also import-free, for the same reason.
 import { dropCommunityGivingRequestBody } from './communities/community-giving-request-log';
 // Also import-free, for the same reason.
 import { dropQuizshowRequestBody } from './quizshow/quizshow-request-log';
+// Also import-free, for the same reason.
+import { dropEmailCodeRequestBody } from './auth/email-code/email-code-request-log';
 
 /**
  * Sentry initialization, isolated in its own module so it runs BEFORE anything
@@ -89,6 +93,8 @@ export function scrubSensitiveQueryParameters(
   // Pulse Live bodies hold join codes and quiz text, and its socket frames
   // never reach Sentry.
   dropQuizshowRequestBody(request);
+  // Sign-in code bodies hold an email address and a code.
+  dropEmailCodeRequestBody(request);
   // The Referer header can name the same listening page the URL would.
   dropStudioListeningReferer(request);
   dropCreatorDraftReferer(request);
@@ -102,7 +108,9 @@ export function scrubSensitiveQueryParameters(
   if (
     request &&
     !dropStudioListeningUrl(request) &&
-    !dropCreatorDraftUrl(request)
+    !dropCreatorDraftUrl(request) &&
+    // The landing visit beacon is an anonymous counter: no URL, body, headers or cookies.
+    !dropLandingVisitRequest(request)
   ) {
     if (typeof request.url === 'string') {
       request.url = redactSensitiveQueryParameters(request.url);

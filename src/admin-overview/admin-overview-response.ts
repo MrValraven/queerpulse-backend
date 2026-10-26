@@ -44,9 +44,13 @@ export interface AdminOverviewDTO {
   memberGrowth: {
     points: {
       at: string;
+      /** Profiles whose `joinedAt` falls inside this weekly bucket. */
       joined: number;
+      /** Members as of the end of this bucket: every profile that joined
+       *  before the window opened plus the cumulative `joined` up to and
+       *  including this bucket. Same `joinedAt` population as `joined`. */
+      total: number;
       churned: number | null;
-      spike: boolean;
     }[];
   };
   responseTime: {

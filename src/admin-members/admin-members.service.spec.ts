@@ -8,6 +8,7 @@ import {
   CommunityMember,
   RosterRole,
 } from '../communities/entities/community-member.entity';
+import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
   Report,
@@ -141,6 +142,9 @@ describe('AdminMembersService', () => {
   let reports: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let modAuditLogs: { find: jest.Mock };
   let staffRoles: { find: jest.Mock };
+  // `getMember` counts the member's still-usable invites
+  // (`pendingInviteCount`).
+  let invites: { count: jest.Mock };
   let vouchService: { getVouchCounts: jest.Mock; getVouchCount: jest.Mock };
   // The last-admin guard counts admins through `UsersService.countAdmins`,
   // inside the demotion's own transaction. Two by default, so an ordinary
@@ -200,6 +204,7 @@ describe('AdminMembersService', () => {
     };
     modAuditLogs = { find: jest.fn().mockResolvedValue([]) };
     staffRoles = { find: jest.fn().mockResolvedValue([]) };
+    invites = { count: jest.fn().mockResolvedValue(0) };
     vouchService = {
       getVouchCounts: jest.fn().mockResolvedValue(new Map()),
       getVouchCount: jest.fn().mockResolvedValue(0),
@@ -269,6 +274,7 @@ describe('AdminMembersService', () => {
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: getRepositoryToken(ModAuditLog), useValue: modAuditLogs },
         { provide: getRepositoryToken(UserStaffRole), useValue: staffRoles },
+        { provide: getRepositoryToken(Invite), useValue: invites },
         { provide: VouchService, useValue: vouchService },
         { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: dataSource },
@@ -527,6 +533,38 @@ describe('AdminMembersService', () => {
       expect(membershipQueryBuilder.andWhere).toHaveBeenCalledWith(
         'community.parent_id IS NULL',
       );
+    });
+
+    it('defaults invite access to on with no pending invites', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+
+      const result = await service.getMember('ines-martins');
+
+      expect(result.hasInviteAccess).toBe(true);
+      expect(result.pendingInviteCount).toBe(0);
+    });
+
+    it('passes paused invite access and the pending invite count through', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      users.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Member,
+        isSystem: false,
+        email: null,
+        hasInviteAccess: false,
+      });
+      invites.count.mockResolvedValue(3);
+
+      const result = await service.getMember('ines-martins');
+
+      expect(result.hasInviteAccess).toBe(false);
+      expect(result.pendingInviteCount).toBe(3);
+      expect(invites.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          inviterId: 'user-ines',
+          status: InviteStatus.Pending,
+        }) as unknown,
+      });
     });
   });
 
@@ -1074,6 +1112,106 @@ describe('AdminMembersService', () => {
       await expect(
         service.updateRole('user-admin', 'ines-martins', UserRole.Member),
       ).resolves.toMatchObject({ role: UserRole.Member });
+    });
+  });
+
+  describe('updateInviteAccess', () => {
+    it('pauses invites and writes an audit row', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        hasInviteAccess: true,
+      });
+
+      const result = await service.updateInviteAccess(
+        'ines-martins',
+        false,
+        'user-admin',
+      );
+
+      expect(transactionUsers.update).toHaveBeenCalledWith(
+        { id: 'user-ines' },
+        { hasInviteAccess: false },
+      );
+      expect(transactionAuditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'invite_access_changed',
+          note: 'Invites paused',
+          actorId: 'user-admin',
+          targetUserId: 'user-ines',
+          targetName: 'Inês Martins',
+          reportId: null,
+          reasonCode: null,
+          duration: null,
+        }),
+      );
+      expect(result).toEqual({
+        userId: 'user-ines',
+        slug: 'ines-martins',
+        hasInviteAccess: false,
+      });
+    });
+
+    it('turns invites back on and says so in the audit note', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        hasInviteAccess: false,
+      });
+
+      await service.updateInviteAccess('ines-martins', true, 'user-admin');
+
+      expect(transactionUsers.update).toHaveBeenCalledWith(
+        { id: 'user-ines' },
+        { hasInviteAccess: true },
+      );
+      expect(transactionAuditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'invite_access_changed',
+          note: 'Invites turned back on',
+        }),
+      );
+    });
+
+    it('writes nothing for a no-op and still returns the state', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        hasInviteAccess: false,
+      });
+
+      const result = await service.updateInviteAccess(
+        'ines-martins',
+        false,
+        'user-admin',
+      );
+
+      expect(transactionUsers.update).not.toHaveBeenCalled();
+      expect(transactionAuditLogs.save).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        userId: 'user-ines',
+        slug: 'ines-martins',
+        hasInviteAccess: false,
+      });
+    });
+
+    it('404s on an unknown member', async () => {
+      profiles.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateInviteAccess('nobody', false, 'user-admin'),
+      ).rejects.toThrow(NotFoundException);
+      expect(transactionUsers.update).not.toHaveBeenCalled();
+    });
+
+    it('404s when the profile has no user row', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateInviteAccess('ines-martins', false, 'user-admin'),
+      ).rejects.toThrow(NotFoundException);
+      expect(transactionAuditLogs.save).not.toHaveBeenCalled();
     });
   });
 });

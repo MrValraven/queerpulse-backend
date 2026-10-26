@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThanOrEqual, Repository } from 'typeorm';
+import { LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
 import { AdminCommunitiesService } from '../admin-communities/admin-communities.service';
 import { reasonCodeToCategoryIndex } from '../admin-overview/admin-overview-response';
 import { toCsvRow } from '../common/csv';
@@ -60,27 +60,42 @@ export class AdminReportsService {
   ): Promise<AdminReportsGrowthDTO> {
     const now = new Date();
     const windowStart = new Date(now.getTime() - weeks * WEEK_MS);
-    const profilesInWindow = await this.profiles.find({
-      select: ['joinedAt'],
-      where: { joinedAt: MoreThanOrEqual(windowStart) },
-    });
+    const [profilesInWindow, membersBeforeWindowCount] = await Promise.all([
+      this.profiles.find({
+        select: ['joinedAt'],
+        where: { joinedAt: MoreThanOrEqual(windowStart) },
+      }),
+      // The growth line's starting point, counted over the same `joinedAt`
+      // population as `profilesInWindow` so the running total only ever moves
+      // by the joins the chart shows. Inclusive because `weekBucketIndex`
+      // drops a join landing exactly on the window start from every bucket.
+      this.profiles.count({
+        where: { joinedAt: LessThanOrEqual(windowStart) },
+      }),
+    ]);
     return {
       range: weeks,
-      points: this.buildGrowthPoints(now, weeks, profilesInWindow),
+      points: this.buildGrowthPoints(
+        now,
+        weeks,
+        profilesInWindow,
+        membersBeforeWindowCount,
+      ),
     };
   }
 
-  /** Same weekly join-cohort series as `getGrowth`, as a CSV attachment. */
+  /** Same weekly joins and running total as `getGrowth`, as a CSV
+   *  attachment. */
   async getGrowthCsv(
     weeks: ReportWeekRange = DEFAULT_REPORT_WEEK_RANGE,
   ): Promise<string> {
     const { points } = await this.getGrowth(weeks);
     const table = [
-      ['week_start', 'joined', 'spike'],
+      ['week_start', 'joined', 'total'],
       ...points.map((point) => [
         point.at,
         String(point.joined),
-        String(point.spike),
+        String(point.total),
       ]),
     ];
     return table.map(toCsvRow).join('\n');
@@ -141,6 +156,7 @@ export class AdminReportsService {
     now: Date,
     weeks: number,
     profilesInWindow: Pick<Profile, 'joinedAt'>[],
+    membersBeforeWindowCount: number,
   ): AdminReportsGrowthDTO['points'] {
     const buckets = buildEmptyWeeklyBuckets<number>(now, weeks, () => 0);
     for (const profile of profilesInWindow) {
@@ -151,26 +167,19 @@ export class AdminReportsService {
       bucket.value += 1;
     }
 
-    let spikeBucketIndex = 0;
-    for (let bucketIndex = 1; bucketIndex < buckets.length; bucketIndex += 1) {
-      const candidateBucket = buckets[bucketIndex];
-      const currentSpikeBucket = buckets[spikeBucketIndex];
-      if (
-        candidateBucket !== undefined &&
-        currentSpikeBucket !== undefined &&
-        candidateBucket.value > currentSpikeBucket.value
-      ) {
-        spikeBucketIndex = bucketIndex;
-      }
-    }
-    const hasAnyGrowth = buckets.some((bucket) => bucket.value > 0);
-
-    return buckets.map((bucket, index) => ({
-      at: new Date(bucket.weekStartMs).toISOString(),
-      joined: bucket.value,
-      churned: null,
-      spike: hasAnyGrowth && index === spikeBucketIndex,
-    }));
+    // Running total as of the END of each bucket: the pre-window baseline plus
+    // every join up to and including that week, matching
+    // `AdminOverviewService`'s member-growth line.
+    let runningMemberTotal = membersBeforeWindowCount;
+    return buckets.map((bucket) => {
+      runningMemberTotal += bucket.value;
+      return {
+        at: new Date(bucket.weekStartMs).toISOString(),
+        joined: bucket.value,
+        total: runningMemberTotal,
+        churned: null,
+      };
+    });
   }
 
   private buildReportsByTypeWeeks(

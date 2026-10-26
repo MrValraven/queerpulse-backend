@@ -1,8 +1,9 @@
 import 'dotenv/config';
+import { join } from 'node:path';
 import { DataSource, EntityManager } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { OpenToEntry } from '../profiles/open-to';
 import { Activity, ActivityKind } from '../profiles/entities/activity.entity';
 import { BoardPost, BoardKind } from '../profiles/entities/board-post.entity';
@@ -107,8 +108,6 @@ import {
   CHANGEMAKER_SETTINGS_ID,
   ChangemakerDirectorySettings,
 } from '../changemakers/entities/changemaker-directory-settings.entity';
-import { HousingCoop } from '../housing/entities/housing-coop.entity';
-import { CoopJoinRequest } from '../housing/entities/coop-join-request.entity';
 import { OrgTier, OrgTierCtaType } from '../org-tiers/entities/org-tier.entity';
 import { GovernanceFinanceReport } from '../governance/entities/governance-finance-report.entity';
 import {
@@ -117,13 +116,8 @@ import {
 } from '../governance/governance-finance.seed';
 import { GovernanceOverview } from '../governance/entities/governance-overview.entity';
 import { governanceOverviewSeed } from '../governance/governance-overview.seed';
-import { RoadmapItem } from '../roadmap/entities/roadmap-item.entity';
-import { RoadmapIdea } from '../roadmap/entities/roadmap-idea.entity';
-import { RoadmapTeamMember } from '../roadmap/entities/roadmap-team-member.entity';
-import { RoadmapAuditLog } from '../roadmap/entities/roadmap-audit-log.entity';
-import { RoadmapItemDependency } from '../roadmap/entities/roadmap-item-dependency.entity';
-import { RoadmapSettings } from '../roadmap/entities/roadmap-settings.entity';
 import { seedRoadmapAdminContent } from '../roadmap/roadmap.seed';
+import { allocateUniqueSlug } from '../common/slug.util';
 
 // Representative members for local frontend integration. Replace/extend with the
 // prototype's mock members (frontend src/features/members/data/members.ts) as
@@ -149,6 +143,9 @@ const MEMBERS: Array<{
   verified?: boolean;
   joinedAt?: string;
   privateNetwork?: boolean;
+  // Platform account tier. Optional so every fixture stays an ordinary member
+  // (the `users.role` column default); only the dev admin below sets it.
+  role?: UserRole;
 }> = [
   {
     googleId: 'seed-tomas',
@@ -672,6 +669,26 @@ const MEMBERS: Array<{
     verified: false,
     joinedAt: '2025-06-01T09:00:00.000Z',
   },
+  // Local onboarding: the one platform Admin, so a new engineer can sign in
+  // with an email code (EMAIL_CODE_DEV_LOG=true logs it on the backend) and
+  // reach the admin screens. Every other fixture stays a plain member.
+  {
+    googleId: 'seed-dev-admin',
+    email: 'admin@example.com',
+    status: UserStatus.Active,
+    slug: 'dev-admin',
+    firstName: 'Dev',
+    lastName: 'Admin',
+    pronouns: 'they/them',
+    tagline: 'Local development admin',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: [],
+    openTo: [],
+    verified: true,
+    joinedAt: '2025-01-01T09:00:00.000Z',
+    role: UserRole.Admin,
+  },
 ];
 
 // Representative communities for local frontend integration, owned by the
@@ -690,8 +707,9 @@ interface CommunitySeedPost {
   replies: Array<{ authorSlug: string; text: string }>;
 }
 
+// No `ref` here: a seeded community takes the next one from
+// `communities_ref_seq`, like an app-created community (see `nextCommunityRef`).
 interface CommunitySeedDefinition {
-  ref: string;
   slug: string;
   name: string;
   purpose: string;
@@ -710,7 +728,6 @@ interface CommunitySeedDefinition {
 
 const COMMUNITIES: CommunitySeedDefinition[] = [
   {
-    ref: 'QP-C-0001',
     slug: 'queer-artists-lisbon',
     name: 'Queer Artists Lisbon',
     purpose:
@@ -765,7 +782,6 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     ],
   },
   {
-    ref: 'QP-C-0002',
     slug: 'sober-queers-porto',
     name: 'Sober Queers Porto',
     purpose:
@@ -809,7 +825,6 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     },
   },
   {
-    ref: 'QP-C-0003',
     slug: 'queer-professionals-network',
     name: 'Queer Professionals Network',
     purpose:
@@ -848,7 +863,6 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     ],
   },
   {
-    ref: 'QP-C-0004',
     slug: 'queer-sports-braga',
     name: 'Queer Sports Braga',
     purpose:
@@ -896,6 +910,25 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
 ];
 
 /**
+ * The next community ref from `communities_ref_seq`, formatted exactly as
+ * `CommunitiesService.createWithUniqueRef` formats it (`QP-C-0007`). Seeded
+ * communities used to carry hardcoded refs `QP-C-0001`..`QP-C-0004`, which
+ * collided on `UQ_communities_ref` with any community already created through
+ * the app on the same database, since the app hands out those same numbers
+ * from this sequence. Drawing from the one allocator makes a collision
+ * impossible. Gaps are harmless: a ref is an opaque handle.
+ */
+async function nextCommunityRef(manager: EntityManager): Promise<string> {
+  const [refRow] = await manager.query<{ refNumber: string }[]>(
+    `SELECT nextval('communities_ref_seq') AS "refNumber"`,
+  );
+  if (!refRow) {
+    throw new Error('communities_ref_seq returned no row');
+  }
+  return `QP-C-${refRow.refNumber.padStart(4, '0')}`;
+}
+
+/**
  * Idempotently seeds communities owned by the already-seeded active members.
  * `memberIdBySlug` maps a member's profile slug to their userId — callers
  * resolve it via the Profile repository before invoking this.
@@ -941,7 +974,7 @@ async function seedCommunities(
         features: c.features,
         rules: c.rules,
         ownerId: userId(c.ownerSlug),
-        ref: c.ref,
+        ref: await nextCommunityRef(manager),
       }),
     );
 
@@ -3200,8 +3233,9 @@ async function backfillVolunteeringPartnerLinks(
 // the live directory reads recognisably. All are `live` (publicly visible);
 // three are flagged `isPartneredWithQueerpulse` with venue capacity so the
 // host page renders real partner venues instead of the old fabricated card.
+// No `ref` here: a seeded listing takes the next one from `listings_ref_seq`,
+// like an app-created listing (see `nextListingRef`).
 interface ListingSeedDefinition {
-  ref: string;
   slug: string;
   ownerSlug: string;
   name: string;
@@ -3243,7 +3277,6 @@ interface ListingSeedDefinition {
 
 const LISTINGS: ListingSeedDefinition[] = [
   {
-    ref: 'QPL-2026-1001',
     slug: 'atelier-pulso',
     ownerSlug: 'tomas-mendes',
     name: 'Atelier Pulso',
@@ -3292,7 +3325,6 @@ const LISTINGS: ListingSeedDefinition[] = [
     hostNote: 'member-run',
   },
   {
-    ref: 'QPL-2026-1002',
     slug: 'queer-supper-club',
     ownerSlug: 'tomas-mendes',
     name: 'Queer Supper Club',
@@ -3337,7 +3369,6 @@ const LISTINGS: ListingSeedDefinition[] = [
     hostNote: 'ticketed',
   },
   {
-    ref: 'QPL-2026-1003',
     slug: 'galeria-lume',
     ownerSlug: 'ana-rocha',
     name: 'Galeria Lume',
@@ -3377,7 +3408,6 @@ const LISTINGS: ListingSeedDefinition[] = [
     hostNote: 'events only',
   },
   {
-    ref: 'QPL-2026-1004',
     slug: 'livraria-bertha',
     ownerSlug: 'noa-silva',
     name: 'Livraria Bertha',
@@ -3421,7 +3451,6 @@ const LISTINGS: ListingSeedDefinition[] = [
     },
   },
   {
-    ref: 'QPL-2026-1005',
     slug: 'a-farinha',
     ownerSlug: 'ana-rocha',
     name: 'A Farinha',
@@ -3461,7 +3490,6 @@ const LISTINGS: ListingSeedDefinition[] = [
     },
   },
   {
-    ref: 'QPL-2026-1006',
     slug: 'bairro-alto-studio',
     ownerSlug: 'noa-silva',
     name: 'Bairro Alto Studio',
@@ -3495,7 +3523,6 @@ const LISTINGS: ListingSeedDefinition[] = [
     },
   },
   {
-    ref: 'QPL-2026-1007',
     slug: 'navalha',
     ownerSlug: 'tomas-mendes',
     name: 'Navalha',
@@ -3543,7 +3570,6 @@ const LISTINGS: ListingSeedDefinition[] = [
     },
   },
   {
-    ref: 'QPL-2026-1008',
     slug: 'movimento',
     ownerSlug: 'ana-rocha',
     name: 'Movimento',
@@ -3789,6 +3815,24 @@ const LISTING_EVENTS: Record<string, ListingEventSeed[]> = {
   ],
 };
 
+/**
+ * The next listing ref from `listings_ref_seq`, formatted exactly as
+ * `ListingsService.nextRef` formats it (`QPL-<year>-0007`). Seeded listings
+ * used to carry hardcoded refs `QPL-2026-1001`..`QPL-2026-1008`, which the app
+ * reaches from the same sequence once a database has a thousand listings, and
+ * then the seed fails on `UQ_listings_ref`.
+ */
+async function nextListingRef(manager: EntityManager): Promise<string> {
+  const year = new Date().getFullYear();
+  const [sequenceRow] = await manager.query<{ seq: string }[]>(
+    "SELECT nextval('listings_ref_seq') AS seq",
+  );
+  if (!sequenceRow) {
+    throw new Error('listings_ref_seq returned no row');
+  }
+  return `QPL-${year}-${sequenceRow.seq.padStart(4, '0')}`;
+}
+
 async function seedListings(
   manager: EntityManager,
   memberIdBySlug: Map<string, string>,
@@ -3815,7 +3859,7 @@ async function seedListings(
 
     const saved = await listings.save(
       listings.create({
-        ref: listing.ref,
+        ref: await nextListingRef(manager),
         slug: listing.slug,
         ownerId: userId(listing.ownerSlug),
         status: ListingStatus.Live,
@@ -3891,7 +3935,13 @@ async function seedListings(
         events.create({
           hostId,
           listingId: saved.id,
-          slug: listingEvent.slug,
+          // The fixture slug is only the preferred one: an event created in
+          // the app can already hold it (event slugs come from the title), so
+          // take a free one the way `EventsService` does, with a random
+          // suffix on a clash.
+          slug: await allocateUniqueSlug(listingEvent.slug, (candidate) =>
+            events.exists({ where: { slug: candidate } }),
+          ),
           title: listingEvent.title,
           description: listingEvent.description,
           startAt,
@@ -4286,49 +4336,9 @@ async function seed(): Promise<void> {
   const dataSource = new DataSource({
     type: 'postgres',
     url: process.env.DATABASE_URL,
-    entities: [
-      User,
-      Profile,
-      Skill,
-      BoardPost,
-      Shaping,
-      Activity,
-      Group,
-      GroupMembership,
-      Vouch,
-      Report,
-      ModAuditLog,
-      Community,
-      CommunityMember,
-      CommunityPost,
-      CommunityPostReaction,
-      CommunityPostReply,
-      CommunityJoinRequest,
-      Company,
-      CompanyTeamMember,
-      CompanyReview,
-      Job,
-      JobApplication,
-      VolunteerOpportunity,
-      VolunteerOpportunityTeam,
-      VolunteerSignup,
-      Partner,
-      Listing,
-      ListingReview,
-      Event,
-      Changemaker,
-      ChangemakerDirectorySettings,
-      HousingCoop,
-      CoopJoinRequest,
-      GovernanceFinanceReport,
-      GovernanceOverview,
-      RoadmapItem,
-      RoadmapIdea,
-      RoadmapTeamMember,
-      RoadmapAuditLog,
-      RoadmapItemDependency,
-      RoadmapSettings,
-    ],
+    // Same glob as src/data-source.ts. A hand-kept list here drifted from the
+    // entities the seed touches (OrgTier was missing) and from their relations.
+    entities: [join(__dirname, '..', '**', '*.entity.{ts,js}')],
     namingStrategy: new SnakeNamingStrategy(),
     synchronize: false,
   });
@@ -4364,6 +4374,7 @@ async function seed(): Promise<void> {
             googleId: m.googleId,
             email: m.email,
             status: m.status,
+            role: m.role ?? UserRole.Member,
             activatedAt: m.status === UserStatus.Active ? new Date() : null,
           }),
         );

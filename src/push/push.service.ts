@@ -133,6 +133,23 @@ function isRetryablePushStatus(statusCode: number | undefined): boolean {
 }
 
 /**
+ * The log line for a subscription pruned after a push service answer. A
+ * 404/410 means the device went away (expired); a 401/403 means the push
+ * service rejected our VAPID key for it, so the subscription was made under a
+ * key this server no longer holds. The two read differently so the fallout of a
+ * key rotation can be counted in the logs without any new storage.
+ */
+export function pruneLogLine(
+  subscriptionId: string,
+  statusCode: number,
+): string {
+  const isKeyRejected = statusCode === 401 || statusCode === 403;
+  return isKeyRejected
+    ? `Pruned push subscription ${subscriptionId}: VAPID key rejected (push service answered ${statusCode})`
+    : `Pruned push subscription ${subscriptionId}: expired (push service answered ${statusCode})`;
+}
+
+/**
  * How long to wait before retrying a failed push, or `null` when it must not be
  * retried: the failure carries no retryable status (a timeout, a network error,
  * a 404/410/401/403), or the wait plus a meaningful attempt no longer fits in
@@ -552,9 +569,7 @@ export class PushService implements OnModuleInit {
           );
         } else if (statusCode === 404 || statusCode === 410) {
           await this.subscriptions.delete(row.id);
-          this.logger.log(
-            `Pruned push subscription ${row.id}: push service answered ${statusCode}`,
-          );
+          this.logger.log(pruneLogLine(row.id, statusCode));
         } else if (statusCode === 401 || statusCode === 403) {
           // The push service rejected our VAPID credentials for this endpoint:
           // the subscription was created under an application server key this
@@ -562,9 +577,9 @@ export class PushService implements OnModuleInit {
           // succeed. Pruned like a 404/410 instead of failing on every push
           // forever; the client re-subscribes under the current key on boot.
           await this.subscriptions.delete(row.id);
-          this.logger.log(
-            `Pruned push subscription ${row.id}: push service answered ${statusCode}`,
-          );
+          // Logged as a warning so that after a VAPID key leak this is the line that shows
+          // how many devices still hold the old key.
+          this.logger.warn(pruneLogLine(row.id, statusCode));
         } else {
           this.logger.warn(
             `Web Push send failed for ${row.id}${hasRetried ? ' after one retry' : ''}: ${statusCode ?? String(error)}`,

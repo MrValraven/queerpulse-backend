@@ -27,6 +27,10 @@ coverage
 docs
 bruno
 *.log
+# Local database dumps (.local/db-dumps/): large, and real member data.
+.local
+# The Postgres init scripts reach the postgres service through a bind mount.
+docker
 
 # Tests (not needed in the production image)
 test

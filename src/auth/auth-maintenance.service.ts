@@ -4,6 +4,8 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { EmailSignInChallenge } from './email-code/email-sign-in-challenge.entity';
+import { EMAIL_CODE_RETENTION_AFTER_EXPIRY_MS } from './email-code/email-code.constants';
 
 @Injectable()
 export class AuthMaintenanceService {
@@ -13,6 +15,8 @@ export class AuthMaintenanceService {
     @InjectRepository(RefreshToken)
     private readonly refreshTokens: Repository<RefreshToken>,
     private readonly config: ConfigService,
+    @InjectRepository(EmailSignInChallenge)
+    private readonly emailChallenges: Repository<EmailSignInChallenge>,
   ) {}
 
   /**
@@ -62,6 +66,34 @@ export class AuthMaintenanceService {
     } catch (err) {
       this.logger.error(
         `Refresh-token purge failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Hourly purge of sign-in code challenges that expired more than the
+   * retention window ago. The window keeps every row the 24-hour per-address
+   * caps in `EmailCodeService` still count. Only the count is logged.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async purgeExpiredEmailCodeChallenges(): Promise<void> {
+    try {
+      const cutoff = new Date(
+        Date.now() - EMAIL_CODE_RETENTION_AFTER_EXPIRY_MS,
+      );
+      const result = await this.emailChallenges
+        .createQueryBuilder()
+        .delete()
+        .from(EmailSignInChallenge)
+        .where('expires_at < :cutoff', { cutoff })
+        .execute();
+      const removed = result.affected ?? 0;
+      if (removed > 0) {
+        this.logger.log(`Purged ${removed} expired sign-in code challenge(s)`);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Sign-in code challenge purge failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     }
   }

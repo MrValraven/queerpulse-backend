@@ -67,6 +67,33 @@ export interface AdminInvitesPageDTO {
   pageSize: number;
 }
 
+// Why an invite was left alone by `POST /admin/invites/bulk`. `not_found` means
+// no invite carries that id; the other four name the invite's RESOLVED status
+// (`resolveInviteStatus`, with 'used' spelled `accepted` and 'valid' spelled
+// `still_valid`), so the reason matches what the admin list shows for the row.
+export type AdminInviteSkipReason =
+  'not_found' | 'accepted' | 'revoked' | 'expired' | 'still_valid';
+
+export interface AdminInviteBulkSkipDTO {
+  id: string;
+  // `null` when the reason is `not_found`, since there is no row to read it from.
+  code: string | null;
+  reason: AdminInviteSkipReason;
+}
+
+// Result of `POST /admin/invites/bulk`. `updated` holds the invites now in
+// their new state, in the order the ids were sent, each in the same shape the
+// single revoke and refresh routes return.
+export interface AdminInvitesBulkResultDTO {
+  updated: AdminInviteDTO[];
+  skipped: AdminInviteBulkSkipDTO[];
+}
+
+// Result of `POST /admin/invites/refresh-expired`.
+export interface AdminInvitesRefreshExpiredResultDTO {
+  refreshedCount: number;
+}
+
 // One entry in the "filter by sender" list: every member who has minted at
 // least one invite, with how many they sent. Powers the admin invite filter's
 // dropdown so it can offer every inviter platform-wide, not only those on the
@@ -83,6 +110,36 @@ export interface AdminInviteInviterDTO {
   // the member detail view) so the admin invite-oversight page can show and
   // edit it inline, right next to who's actually sending invites.
   inviteMonthlyQuota: number | null;
+}
+
+// One member row in the admin "Invite quotas" list: their invite usage and the
+// monthly limit enforcement actually applies to them.
+export interface AdminInviteQuotaMemberDTO {
+  slug: string;
+  name: string;
+  avatarUrl: string | null;
+  // Invites created since the start of the current UTC calendar month, the
+  // same window `InvitesService` counts against the limit.
+  sentThisMonth: number;
+  sentTotal: number;
+  // The staff-set override (`User.inviteMonthlyQuota`), `null` when none.
+  inviteMonthlyQuota: number | null;
+  // `User.hasInviteAccess`. While false, `InvitesService` refuses every new
+  // invite from this member (the admin "Invites paused" lever).
+  hasInviteAccess: boolean;
+  // The effective limit from `resolveMonthlyInviteLimit`: the override when
+  // set, otherwise the base plus the level and ambassador bonuses.
+  monthlyLimit: number;
+}
+
+// Result of `GET /admin/invites/quotas`.
+export interface AdminInviteQuotaListDTO {
+  // The configured base (`app.inviteMonthlyQuota`, from INVITE_MONTHLY_QUOTA).
+  defaultMonthlyQuota: number;
+  items: AdminInviteQuotaMemberDTO[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 export function toAdminInviteDTO(

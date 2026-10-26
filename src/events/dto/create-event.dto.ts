@@ -18,6 +18,7 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
@@ -202,6 +203,20 @@ export class CreateEventDto {
   // How it is paid for. `free` makes the service store `cost` as null.
   // Same absent/null/value three-way as `cost` on update.
   @IsOptional() @IsIn(COST_KIND_VALUES) costKind?: CostKind | null;
+  // How a guest pays the host: a link and the host's own instructions, both
+  // DISPLAY ONLY like `cost`. The platform takes no money, so nothing about
+  // either may promise a charge, a ticket or a refund. Same absent/null/value
+  // three-way as `cost` on update; a blank string is stored as null, and a
+  // `free` gathering stores both as null. The link must be https.
+  @IsOptional()
+  @ValidateIf(
+    (dto: CreateEventDto) =>
+      typeof dto.paymentUrl !== 'string' || dto.paymentUrl.trim() !== '',
+  )
+  @IsUrl({ protocols: ['https'], require_protocol: true })
+  @MaxLength(500)
+  paymentUrl?: string | null;
+  @IsOptional() @IsString() @MaxLength(500) paymentInstructions?: string | null;
   // ── Care (create-gathering v2), vocabularies in `../gathering-extras.ts` ──
   // An unknown key is a 400 and so is a duplicate, which makes the
   // three-theme cap count distinct themes. On update both arrays REPLACE

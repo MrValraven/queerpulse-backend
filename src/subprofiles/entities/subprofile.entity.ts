@@ -338,6 +338,10 @@ export interface SkinData {
    *  background at its bottom edge instead of ending on a hard seam. Rendered
    *  by the frontend (`.pp[data-cover-bleed]`); the backend only stores it. */
   coverBleed?: boolean;
+  /** Studio artist page layout when the persona has a cover: the photo fills
+   *  the hero ('full-bleed') or sits behind the avatar ('avatar'). Absent
+   *  resolves on the frontend. Validated by `assertValidStudioHero`. */
+  studioHero?: 'full-bleed' | 'avatar';
   booker?: {
     fee: string;
     rider: string;

@@ -38,6 +38,7 @@ import { EventLineupEntry } from '../events/entities/event-lineup-entry.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { EventSeries } from '../events/entities/event-series.entity';
+import { HiddenEventCommunity } from '../events/entities/hidden-event-community.entity';
 import { MemberEventReminderPreferences } from '../events/entities/member-event-reminder-preferences.entity';
 import { FeedSourceMute } from '../feed/entities/feed-source-mute.entity';
 import { ForumPollOption } from '../forum/entities/forum-poll-option.entity';
@@ -1150,6 +1151,35 @@ export class EventPreferencesExportContributor implements DataExportContribution
       createdAt: preferences.createdAt.toISOString(),
       updatedAt: preferences.updatedAt.toISOString(),
     };
+  }
+}
+
+/**
+ * `events` -> `hiddenEventCommunities`: the communities the member keeps off
+ * their upcoming events browse, oldest first, each community by id. The list
+ * is private to the member, so it leaves in their archive alone.
+ */
+@Injectable()
+export class HiddenEventCommunitiesExportContributor implements DataExportContribution {
+  readonly category = 'events';
+  readonly archiveKey = 'hiddenEventCommunities';
+
+  constructor(
+    @InjectRepository(HiddenEventCommunity)
+    private readonly hiddenEventCommunities: Repository<HiddenEventCommunity>,
+  ) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const hiddenRows = await this.hiddenEventCommunities.find({
+      where: { userId },
+      order: { createdAt: 'ASC' },
+    });
+    return hiddenRows.map((hiddenRow) => ({
+      type: 'hiddenEventCommunity' as const,
+      id: hiddenRow.id,
+      communityId: hiddenRow.communityId,
+      createdAt: hiddenRow.createdAt.toISOString(),
+    }));
   }
 }
 
@@ -2942,6 +2972,7 @@ export const MORE_EXPORT_CONTRIBUTORS = [
   CommunityRequestsExportContributor,
   FeedPreferencesExportContributor,
   EventPreferencesExportContributor,
+  HiddenEventCommunitiesExportContributor,
   EventParticipationExportContributor,
   ConnectionNotesExportContributor,
   SuggestionDismissalsExportContributor,

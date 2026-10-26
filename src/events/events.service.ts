@@ -40,7 +40,10 @@ import {
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
-import { CommunityMembershipService } from '../communities/community-membership.service';
+import {
+  CommunityMembershipService,
+  type CommunityTierRef,
+} from '../communities/community-membership.service';
 import { isCommunityStaffRole } from '../communities/community-staff-access';
 import { RosterRole } from '../communities/entities/community-member.entity';
 import { AccessTier } from '../communities/entities/community.entity';
@@ -89,6 +92,7 @@ import {
   EventDetailGuestCommunity,
   EventOrganizerView,
   EventSummary,
+  EventSummaryCommunityRef,
   toAttendeeView,
   toEventAnnouncementView,
   toEventSummary,
@@ -121,6 +125,10 @@ import {
   isPrivateCommunityWithheld,
   toCommunityHostingFields,
 } from './event-community-hosting';
+import {
+  hiddenCommunityIdsFor,
+  keepUnlessEveryHostHiddenSql,
+} from './hidden-event-communities.sql';
 import {
   ADMITTING_INVITE_STATUSES,
   EventInvite,
@@ -247,6 +255,10 @@ export interface CreateEventInput {
   // `costKind: 'free'` stores `cost` as null. Arrays replace wholesale on
   // update and `null` clears them; `rsvpQuestions` merges per key.
   costKind?: CostKind | null;
+  // How a guest pays the host. Display only, like `cost`: trimmed, blank
+  // stored as null, and both stored as null when `costKind` is `free`.
+  paymentUrl?: string | null;
+  paymentInstructions?: string | null;
   themes?: GatheringTheme[] | null;
   contentNotes?: ContentNote[] | null;
   houseRules?: string | null;
@@ -274,6 +286,33 @@ export interface CreateEventInput {
 export type UpdateEventInput = Partial<Omit<CreateEventInput, 'recurrence'>>;
 export type EventListFilter =
   'upcoming' | 'going' | 'hosting' | 'waitlisted' | 'past' | 'saved';
+
+/** `EventsService.list`'s options. See the method's doc for which branch
+ *  honours which; `includeHidden` is read by the 'upcoming' branch only. */
+export interface EventListOptions {
+  hostSlug?: string;
+  excludeSlug?: string;
+  from?: string;
+  to?: string;
+  hood?: string;
+  family?: GatheringFamily;
+  type?: string;
+  q?: string;
+  cost?: EventCostFilter;
+  /** Lists events from the communities the viewer hid too. */
+  includeHidden?: boolean;
+}
+
+/**
+ * Which lead communities a page of events may name to its viewer, read once
+ * per page by `EventsService.resolveLeadCommunities`. `refById` holds every
+ * lead the page names; `withheldEventIds` the events whose lead is withheld
+ * from this viewer (`isPrivateCommunityWithheld`).
+ */
+interface LeadCommunityVisibility {
+  refById: ReadonlyMap<string, CommunityTierRef>;
+  withheldEventIds: ReadonlySet<string>;
+}
 
 const PAGE_SIZE = 20;
 
@@ -553,6 +592,16 @@ export class EventsService {
         cost:
           dto.costKind === 'free' ? null : EventsService.blankToNull(dto.cost),
         costKind: dto.costKind ?? null,
+        // Nothing to pay for a free gathering either, so the payment link and
+        // instructions go the same way as the amount.
+        paymentUrl:
+          dto.costKind === 'free'
+            ? null
+            : EventsService.blankToNull(dto.paymentUrl),
+        paymentInstructions:
+          dto.costKind === 'free'
+            ? null
+            : EventsService.blankToNull(dto.paymentInstructions),
         // Care (create-gathering v2), written onto every occurrence of a
         // series like the rest of the content. Each row gets its own arrays.
         themes: EventsService.distinctKeys(dto.themes),
@@ -1043,6 +1092,16 @@ export class EventsService {
         ? { cost: EventsService.blankToNull(dto.cost) }
         : {}),
       ...(dto.costKind !== undefined ? { costKind: dto.costKind ?? null } : {}),
+      ...(dto.paymentUrl !== undefined
+        ? { paymentUrl: EventsService.blankToNull(dto.paymentUrl) }
+        : {}),
+      ...(dto.paymentInstructions !== undefined
+        ? {
+            paymentInstructions: EventsService.blankToNull(
+              dto.paymentInstructions,
+            ),
+          }
+        : {}),
       // Care (create-gathering v2). Both arrays REPLACE wholesale: the client
       // holds the whole selection, so a patch naming two themes means exactly
       // those two, and `null` clears. The strings follow the LOC-04 rule above.
@@ -1131,9 +1190,12 @@ export class EventsService {
     // only `costKind: 'free'` to one that has an amount, both end with `cost`
     // null. It runs on every patch, the same rule `create()` applies, so a row
     // that is free and still carries an old amount sheds it on its next save
-    // whatever that save changed.
+    // whatever that save changed. The payment link and instructions follow
+    // the same rule, since a free gathering has nothing to pay.
     if (event.costKind === 'free') {
       event.cost = null;
+      event.paymentUrl = null;
+      event.paymentInstructions = null;
     }
 
     // Pushing the start later makes an already-sent reminder premature — re-arm
@@ -1753,22 +1815,17 @@ export class EventsService {
    * gathering that already started on the first page. The rest
    * are browse-only and ignored by `going`/`hosting`/`waitlisted`/`saved`,
    * which are already scoped by the viewer's own relationship to the event.
+   *
+   * The 'upcoming' branch also leaves out the events whose every hosting
+   * community the viewer hid (`excludeHiddenCommunities`), unless
+   * `options.includeHidden` is set. No other branch reads the hidden list:
+   * a member's own RSVPs, hosting and saved events stay whole.
    */
   async list(
     userId: string,
     filter: EventListFilter,
     page: number,
-    options?: {
-      hostSlug?: string;
-      excludeSlug?: string;
-      from?: string;
-      to?: string;
-      hood?: string;
-      family?: GatheringFamily;
-      type?: string;
-      q?: string;
-      cost?: EventCostFilter;
-    },
+    options?: EventListOptions,
   ): Promise<EventSummary[]> {
     const now = new Date();
     const skip = (page - 1) * PAGE_SIZE;
@@ -1917,6 +1974,9 @@ export class EventsService {
         });
       }
       this.applyDiscoveryFilters(upcomingQb, options ?? {});
+      if (!options?.includeHidden) {
+        await this.excludeHiddenCommunities(upcomingQb, userId);
+      }
       events = await upcomingQb
         // Sorting on the start alone puts a gathering that is ALREADY UNDER
         // WAY at the top of its window, above everything starting later, since
@@ -1934,6 +1994,25 @@ export class EventsService {
     }
 
     return this.summarize(events, userId, knownCohostedIds);
+  }
+
+  /**
+   * Drops the events whose every hosting community this viewer hid
+   * (`keepUnlessEveryHostHiddenSql`). One read of the viewer's hidden ids per
+   * request, and no predicate at all when they hid nothing.
+   */
+  private async excludeHiddenCommunities(
+    queryBuilder: SelectQueryBuilder<Event>,
+    viewerId: string,
+  ): Promise<void> {
+    const hiddenCommunityIds = await hiddenCommunityIdsFor(
+      this.events.manager,
+      viewerId,
+    );
+    if (!hiddenCommunityIds.length) return;
+    queryBuilder.andWhere(keepUnlessEveryHostHiddenSql(), {
+      hiddenCommunityIds,
+    });
   }
 
   /**
@@ -2648,8 +2727,25 @@ export class EventsService {
     // already fallen behind: it hardcoded both to `null`/`false`, so a member
     // reading their own community's pulse could not see they were already
     // going to one of its gatherings.
-    const summaries = await this.summarize(events, viewerId);
-    return this.withCommunityHosting(events, summaries, communityId, viewerId);
+    // The leads are read once and shared: `summarize` names them on the
+    // cards, `withCommunityHosting` names a guest row's lead. The listed
+    // community is the page the viewer is reading, so its own rows are never
+    // withheld from them.
+    const leadVisibility = await this.resolveLeadCommunities(events, viewerId, {
+      viewableCommunityId: communityId,
+    });
+    const summaries = await this.summarize(
+      events,
+      viewerId,
+      undefined,
+      leadVisibility,
+    );
+    return this.withCommunityHosting(
+      events,
+      summaries,
+      communityId,
+      leadVisibility,
+    );
   }
 
   async isOrganizer(eventId: string, userId: string): Promise<boolean> {
@@ -2767,11 +2863,16 @@ export class EventsService {
    * `knownCohostedIds`: every event the viewer co-hosts, when the caller has
    * already loaded the viewer's full co-host roster (the 'hosting' list). It
    * skips the batched co-host lookup below. Omitted, the lookup runs.
+   *
+   * `leadVisibility`: the page's lead communities, when the caller already
+   * resolved them (the community lane shares one read with
+   * `withCommunityHosting`). Omitted, `resolveLeadCommunities` runs here.
    */
   private async summarize(
     events: Event[],
     userId: string,
     knownCohostedIds?: ReadonlySet<string>,
+    leadVisibility?: LeadCommunityVisibility,
   ): Promise<EventSummary[]> {
     if (!events.length) return [];
     const eventIds = events.map((e) => e.id);
@@ -2842,12 +2943,30 @@ export class EventsService {
     const cohostedIds =
       knownCohostedIds ?? (await this.cohostedEventIdsAmong(events, userId));
 
+    // ...and ONE batched read of the page's lead communities, plus a roster
+    // and a co-host read only when a private lead is involved. Never a
+    // per-event query.
+    const leads =
+      leadVisibility ??
+      (await this.resolveLeadCommunities(events, userId, {
+        knownCohostedIds,
+      }));
+
+    // ...and ONE batched read of which events on the page hold an accepted
+    // guest community (`EventSummary.isCoHosted`).
+    const eventIdsWithAcceptedGuests =
+      await this.eventIdsWithAcceptedGuestsAmong(eventIds);
+
     // A host who hid the going count hid it from every list too: the card
     // carries null tallies for anyone who is not an organiser. The host and
     // co-hosts keep the real numbers, matching what the detail shows them.
     // See `withholdHiddenAttendeeCounts`.
-    return events.map((e) =>
-      withholdHiddenAttendeeCounts(
+    //
+    // A withheld lead goes from the card entirely, `communityId` included,
+    // the way the detail withholds it (see `EventSummary.hostingCommunity`).
+    return events.map((e) => {
+      const isLeadWithheld = leads.withheldEventIds.has(e.id);
+      const summary = withholdHiddenAttendeeCounts(
         e,
         toEventSummary(
           e,
@@ -2859,10 +2978,127 @@ export class EventsService {
           e.seriesId ? seriesById.get(e.seriesId) : undefined,
           seatsByEvent.get(e.id) ?? 0,
           EventsService.runByListingOf(e, runByListingsById),
+          isLeadWithheld
+            ? null
+            : EventsService.summaryCommunityRefOf(e, leads.refById),
+          eventIdsWithAcceptedGuests.has(e.id),
         ),
         (e.hostId !== null && e.hostId === userId) || cohostedIds.has(e.id),
-      ),
+      );
+      return isLeadWithheld ? { ...summary, communityId: null } : summary;
+    });
+  }
+
+  /** `summarize`'s co-hosting read: which of `eventIds` hold at least one
+   *  ACCEPTED guest community. One query over the page's ids, selecting the
+   *  event id alone (a gathering holds at most `MAX_GUEST_COMMUNITIES`
+   *  guests, so the rows stay few), and none for an empty page. */
+  private async eventIdsWithAcceptedGuestsAmong(
+    eventIds: string[],
+  ): Promise<ReadonlySet<string>> {
+    if (!eventIds.length) return new Set<string>();
+    const acceptedGuestRows = await this.eventCommunities.find({
+      where: { eventId: In(eventIds), status: EventCommunityStatus.Accepted },
+      select: { eventId: true },
+    });
+    return new Set(acceptedGuestRows.map((row) => row.eventId));
+  }
+
+  /** The card's `hostingCommunity` for a lead the viewer may see: null when
+   *  the event has no lead or the lead could not be resolved. */
+  private static summaryCommunityRefOf(
+    event: Event,
+    refById: ReadonlyMap<string, CommunityTierRef>,
+  ): EventSummaryCommunityRef | null {
+    const leadRef = event.communityId
+      ? refById.get(event.communityId)
+      : undefined;
+    return leadRef
+      ? { id: leadRef.id, slug: leadRef.slug, name: leadRef.name }
+      : null;
+  }
+
+  /**
+   * The lead communities a page of events names, and which of them this
+   * viewer must not see: the private-naming rule `isHostingCommunityWithheld`
+   * applies on the detail, batched for a whole page. One community read for
+   * every lead on the page; one roster read only when a private lead is
+   * involved; one co-host read only for private leads the viewer neither
+   * hosts nor is on the roster of (skipped when the caller already holds the
+   * viewer's co-host roster as `knownCohostedIds`).
+   *
+   * `viewableCommunityId`: a community the caller already knows the viewer
+   * may see (the community lane's own community), whose rows are never
+   * withheld and never cost a roster read.
+   */
+  private async resolveLeadCommunities(
+    events: Event[],
+    viewerId: string,
+    options: {
+      viewableCommunityId?: string;
+      knownCohostedIds?: ReadonlySet<string>;
+    } = {},
+  ): Promise<LeadCommunityVisibility> {
+    const ledEvents = events.filter(
+      (event): event is Event & { communityId: string } =>
+        event.communityId !== null,
     );
+    if (!ledEvents.length) {
+      return { refById: new Map(), withheldEventIds: new Set() };
+    }
+    const refById = await this.membership.tierRefsByIds(
+      ledEvents.map((event) => event.communityId),
+    );
+    const isPrivateLeadInQuestion = (communityId: string): boolean =>
+      communityId !== options.viewableCommunityId &&
+      refById.get(communityId)?.accessTier === AccessTier.Private;
+    const privateLeadRefs = [...refById.values()].filter((leadRef) =>
+      isPrivateLeadInQuestion(leadRef.id),
+    );
+    const viewerLeadRoles = privateLeadRefs.length
+      ? await this.membership.effectiveRolesFor(privateLeadRefs, viewerId)
+      : new Map<string, RosterRole>();
+    const eventsNeedingCohostCheck = ledEvents.filter(
+      (event) =>
+        event.hostId !== viewerId &&
+        isPrivateLeadInQuestion(event.communityId) &&
+        !viewerLeadRoles.has(event.communityId),
+    );
+    const cohostedEventIds =
+      options.knownCohostedIds ??
+      (eventsNeedingCohostCheck.length
+        ? new Set(
+            (
+              await this.cohosts.find({
+                where: {
+                  userId: viewerId,
+                  eventId: In(
+                    eventsNeedingCohostCheck.map((event) => event.id),
+                  ),
+                },
+                select: { eventId: true },
+              })
+            ).map((row) => row.eventId),
+          )
+        : new Set<string>());
+    const withheldEventIds = new Set(
+      ledEvents
+        .filter((event) => {
+          const leadRef = refById.get(event.communityId);
+          return (
+            leadRef !== undefined &&
+            isPrivateLeadInQuestion(event.communityId) &&
+            isPrivateCommunityWithheld({
+              accessTier: leadRef.accessTier,
+              isOrganizer:
+                event.hostId === viewerId || cohostedEventIds.has(event.id),
+              isOnRoster: viewerLeadRoles.has(leadRef.id),
+            })
+          );
+        })
+        .map((event) => event.id),
+    );
+    return { refById, withheldEventIds };
   }
 
   /** `summarize`'s co-host lookup: which of `events` the viewer co-hosts,
@@ -2926,67 +3162,27 @@ export class EventsService {
    * `hostedAs` and `leadCommunity` for a community's own upcoming lane
    * (2026-10-08). A led row is `lead`. A guest row names its lead through
    * the private-naming rule `isHostingCommunityWithheld` applies on the
-   * detail; a withheld lead also takes the summary's `communityId` with it.
-   * One community read for the page's leads, plus one roster read and one
-   * co-host read only when a private lead is involved.
+   * detail, read once for the page by `resolveLeadCommunities` and shared
+   * with `summarize`, which already took a withheld lead's `communityId` off
+   * the summary. Reads nothing of its own.
    */
-  private async withCommunityHosting(
+  private withCommunityHosting(
     events: Event[],
     summaries: EventSummary[],
     listedCommunityId: string,
-    viewerId: string,
-  ): Promise<CommunityUpcomingEventSummary[]> {
-    const guestEvents = events.filter(
-      (event): event is Event & { communityId: string } =>
-        event.communityId !== null && event.communityId !== listedCommunityId,
-    );
-    const leadRefs = await this.membership.tierRefsByIds(
-      guestEvents.map((event) => event.communityId),
-    );
-    const privateLeadRefs = [...leadRefs.values()].filter(
-      (leadRef) => leadRef.accessTier === AccessTier.Private,
-    );
-    const viewerLeadRoles = privateLeadRefs.length
-      ? await this.membership.effectiveRolesFor(privateLeadRefs, viewerId)
-      : new Map<string, RosterRole>();
-    const eventsNeedingCohostCheck = guestEvents.filter(
-      (event) =>
-        event.hostId !== viewerId &&
-        leadRefs.get(event.communityId)?.accessTier === AccessTier.Private &&
-        !viewerLeadRoles.has(event.communityId),
-    );
-    const cohostedEventIds = eventsNeedingCohostCheck.length
-      ? new Set(
-          (
-            await this.cohosts.find({
-              where: {
-                userId: viewerId,
-                eventId: In(eventsNeedingCohostCheck.map((event) => event.id)),
-              },
-              select: { eventId: true },
-            })
-          ).map((row) => row.eventId),
-        )
-      : new Set<string>();
+    leadVisibility: LeadCommunityVisibility,
+  ): CommunityUpcomingEventSummary[] {
     const eventsBySlug = new Map(events.map((event) => [event.slug, event]));
     return summaries.map((summary) => {
       const event = eventsBySlug.get(summary.slug);
       const leadCommunityId = event?.communityId ?? null;
       const leadRef = leadCommunityId
-        ? leadRefs.get(leadCommunityId)
+        ? leadVisibility.refById.get(leadCommunityId)
         : undefined;
       const isLeadWithheld =
-        event !== undefined &&
-        leadRef !== undefined &&
-        isPrivateCommunityWithheld({
-          accessTier: leadRef.accessTier,
-          isOrganizer:
-            event.hostId === viewerId || cohostedEventIds.has(event.id),
-          isOnRoster: viewerLeadRoles.has(leadRef.id),
-        });
+        event !== undefined && leadVisibility.withheldEventIds.has(event.id);
       return {
         ...summary,
-        ...(isLeadWithheld ? { communityId: null } : {}),
         ...toCommunityHostingFields(
           leadCommunityId,
           listedCommunityId,
@@ -3002,18 +3198,27 @@ export class EventsService {
    * follows (`isHostingCommunityWithheld`): dropped for a viewer who is
    * neither on its roster nor an organiser. Two reads beyond the row read
    * when the gathering has guests, none when it has none.
+   *
+   * `hasAcceptedGuest` answers `EventSummary.isCoHosted` from the same row
+   * read: true for any accepted guest, a withheld private one included,
+   * matching what the list cards carry.
    */
   private async visibleGuestCommunities(
     event: Event,
     viewerId: string,
     isOrganizer: boolean,
-  ): Promise<EventDetailGuestCommunity[]> {
+  ): Promise<{
+    guestCommunities: EventDetailGuestCommunity[];
+    hasAcceptedGuest: boolean;
+  }> {
     const acceptedRows = await this.eventCommunities.find({
       where: { eventId: event.id, status: EventCommunityStatus.Accepted },
       order: { createdAt: 'ASC' },
       select: { id: true, communityId: true },
     });
-    if (!acceptedRows.length) return [];
+    if (!acceptedRows.length) {
+      return { guestCommunities: [], hasAcceptedGuest: false };
+    }
     const guestRefs = await this.membership.tierRefsByIds(
       acceptedRows.map((row) => row.communityId),
     );
@@ -3021,7 +3226,7 @@ export class EventsService {
       [...guestRefs.values()],
       viewerId,
     );
-    return acceptedRows.flatMap((row) => {
+    const guestCommunities = acceptedRows.flatMap((row) => {
       const guestRef = guestRefs.get(row.communityId);
       if (!guestRef) return [];
       const viewerRole = viewerRoles.get(guestRef.id) ?? null;
@@ -3046,6 +3251,7 @@ export class EventsService {
         },
       ];
     });
+    return { guestCommunities, hasAcceptedGuest: true };
   }
 
   private async eventSeriesByIds(
@@ -3155,11 +3361,8 @@ export class EventsService {
     const hostingCommunity = isHostingCommunityWithheld
       ? null
       : hostingCommunityRef;
-    const guestCommunities = await this.visibleGuestCommunities(
-      event,
-      viewerId,
-      isOrganizer,
-    );
+    const { guestCommunities, hasAcceptedGuest } =
+      await this.visibleGuestCommunities(event, viewerId, isOrganizer);
 
     // The host's "Show attendee count" toggle governs the detail exactly as
     // it governs every list row: a viewer who is not an organiser gets null
@@ -3187,6 +3390,15 @@ export class EventsService {
         series ?? undefined,
         seatCounts.seatsTaken,
         EventsService.runByListingOf(event, runByListingsById),
+        // The detail's own lead lookup, under the same withholding rule.
+        hostingCommunity && event.communityId
+          ? {
+              id: event.communityId,
+              slug: hostingCommunity.slug,
+              name: hostingCommunity.name,
+            }
+          : null,
+        hasAcceptedGuest,
       ),
       isOrganizer,
     );
@@ -3226,6 +3438,12 @@ export class EventsService {
       // Organiser-facing edit age (PRD-191). Harmless to every other reader,
       // and the manage dashboard is the only surface that renders it.
       updatedAt: event.updatedAt,
+      // How to pay the host goes to every reader of the detail, since a guest
+      // needs it before RSVPing. A free gathering carries neither, even for a
+      // row saved before the free rule nulled them.
+      paymentUrl: event.costKind === 'free' ? null : (event.paymentUrl ?? null),
+      paymentInstructions:
+        event.costKind === 'free' ? null : (event.paymentInstructions ?? null),
       address: seesExactLocation ? event.address : null,
       arrivalNotes: seesExactLocation ? event.arrivalNotes : null,
       locationPrecision:

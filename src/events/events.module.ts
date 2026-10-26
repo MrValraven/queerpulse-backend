@@ -57,6 +57,9 @@ import { EventReminderPreferencesService } from './event-reminder-preferences.se
 import { EventAttendanceRetentionService } from './event-attendance-retention.service';
 import { EventRemindersService } from './event-reminders.service';
 import { EventsService } from './events.service';
+import { HiddenEventCommunity } from './entities/hidden-event-community.entity';
+import { HiddenEventCommunitiesController } from './hidden-event-communities.controller';
+import { HiddenEventCommunitiesService } from './hidden-event-communities.service';
 import { MemberEventInvitesService } from './member-event-invites.service';
 import { RsvpService } from './rsvp.service';
 
@@ -94,6 +97,9 @@ import { RsvpService } from './rsvp.service';
       // Read-only: `EventAudienceGateService.audienceAmong` answers the
       // `community` tier for a whole candidate set with one roster read.
       CommunityMember,
+      // A member's hidden event communities (2026-10-26), owned by
+      // `HiddenEventCommunitiesService`.
+      HiddenEventCommunity,
     ]),
     UsersModule,
     NotificationsModule,
@@ -150,6 +156,7 @@ import { RsvpService } from './rsvp.service';
     EventLineupInvitesController,
     EventPhotosController,
     EventReminderPreferencesController,
+    HiddenEventCommunitiesController,
   ],
   providers: [
     EventsService,
@@ -175,6 +182,9 @@ import { RsvpService } from './rsvp.service';
     EventPhotosService,
     EventAnnouncementsService,
     EventBansService,
+    // `GET/POST/DELETE /me/hidden-event-communities`: the member's own list.
+    // The browse filter reads the table directly in `EventsService`.
+    HiddenEventCommunitiesService,
     EventCheckInService,
     // Verifies a scanned membership-card QR at an event door (LOC-03).
     // Provided here, not imported, for the cycle reason spelled out on the

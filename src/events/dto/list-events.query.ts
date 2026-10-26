@@ -1,5 +1,6 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
@@ -114,4 +115,16 @@ export class ListEventsQuery {
   @IsOptional()
   @IsIn(EVENT_COST_FILTERS)
   cost?: EventCostFilter;
+
+  /** `true` lists events from the communities the viewer hid too
+   *  (`hidden_event_communities`). The mention picker sends it, since a
+   *  member naming an event in a post may name any event they can see, and
+   *  the create wizard's date-clash notes send it so a host sees every clash.
+   *  Honoured on the `upcoming` branch only: every other branch is scoped by
+   *  the viewer's own relationship to the event and never reads the hidden
+   *  list. Any value other than `true` leaves the filter on. */
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  includeHidden?: boolean;
 }

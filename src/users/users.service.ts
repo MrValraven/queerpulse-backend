@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { EntityManager, In, Repository } from 'typeorm';
+import { EntityManager, In, IsNull, Not, Repository } from 'typeorm';
 import {
   liftExpiredRestriction as liftExpiredRestrictionRow,
   RestrictionAware,
@@ -11,6 +11,7 @@ import { User, UserRole, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { handleWriteError } from '../handles/handles.service';
 import { CURRENT_GUIDELINES_VERSION } from '../consent/policy-versions';
+import { PRIVATE_PARAMETERS_COMMENT } from '../database/private-parameters-logger';
 import {
   PolicyAcceptance,
   PolicyAcceptanceSource,
@@ -106,6 +107,22 @@ export interface CreateGoogleUserInput {
   avatarUrl?: string | null;
 }
 
+/** An account opened by an email sign-in code: no Google identity, no avatar. */
+export interface CreateEmailUserInput {
+  email: string;
+  firstName: string;
+  lastName: string;
+}
+
+/** The sign-up stamps every new account accepts beyond its identity fields. */
+type NewUserExtras = {
+  status?: UserStatus;
+  invitedBy?: string | null;
+  ageAttestedAt?: Date | null;
+  termsVersion?: string | null;
+  isSystem?: boolean;
+};
+
 @Injectable()
 export class UsersService {
   /** Backing store for `countActiveMembers`'s TTL cache. */
@@ -146,14 +163,61 @@ export class UsersService {
    *
    * Selects only the id: the caller never needs the row, and `email` stays
    * `select: false` everywhere it is not explicitly needed.
+   *
+   * Matches case-insensitively on `lower(email)`, the expression the
+   * `UQ_users_email_lower` unique index covers, so `Sam@Example.com` on file
+   * and `sam@example.com` typed at sign-in name the same account. The
+   * `private-parameters` comment keeps the address out of the slow and failed
+   * query logs.
    */
   async findIdByEmail(email: string): Promise<string | null> {
     const found = await this.usersRepo
       .createQueryBuilder('user')
       .select('user.id')
-      .where('user.email = :email', { email })
+      .where('lower(user.email) = lower(:email)', { email })
+      .comment(PRIVATE_PARAMETERS_COMMENT)
       .getOne();
     return found?.id ?? null;
+  }
+
+  // Email-code sign-in lookup. Like `findByGoogleId`, `addSelect('user.email')`
+  // re-includes the `select: false` email column because the caller mints an
+  // access token carrying the email claim. The default columns (`isSystem`,
+  // `status`, `role`) load as usual so the caller can refuse a system account
+  // or a removed member before issuing a session. The match is case-insensitive
+  // on the same `lower(email)` expression as `findIdByEmail`, with the same
+  // `private-parameters` comment.
+  findByEmailForSignIn(email: string): Promise<User | null> {
+    return this.usersRepo
+      .createQueryBuilder('user')
+      .addSelect('user.email')
+      .where('lower(user.email) = lower(:email)', { email })
+      .comment(PRIVATE_PARAMETERS_COMMENT)
+      .getOne();
+  }
+
+  /** Whether this account has a Google identity linked (`google_id IS NOT NULL`). */
+  hasGoogleIdentity(userId: string): Promise<boolean> {
+    return this.usersRepo.exists({
+      where: { id: userId, googleId: Not(IsNull()) },
+    });
+  }
+
+  /**
+   * Links a Google identity to an account that holds none yet. The `IS NULL`
+   * condition sits in the UPDATE itself, so a concurrent link or an account
+   * already tied to another Google subject is left untouched. Returns `true`
+   * only when this call wrote the id.
+   */
+  async attachGoogleIdIfUnset(
+    userId: string,
+    googleId: string,
+  ): Promise<boolean> {
+    const result = await this.usersRepo.update(
+      { id: userId, googleId: IsNull() },
+      { googleId },
+    );
+    return (result.affected ?? 0) > 0;
   }
 
   findById(id: string): Promise<User | null> {
@@ -430,17 +494,40 @@ export class UsersService {
 
   async createGoogleUser(
     manager: EntityManager,
-    input: CreateGoogleUserInput & {
-      status?: UserStatus;
-      invitedBy?: string | null;
-      ageAttestedAt?: Date | null;
-      termsVersion?: string | null;
-      isSystem?: boolean;
-    },
+    input: CreateGoogleUserInput & NewUserExtras,
+  ): Promise<User> {
+    return this.createUserWithProfile(manager, input.googleId, input);
+  }
+
+  /**
+   * Opens an account for a person who signed in with an email code. The row
+   * holds no Google identity (`google_id` stays NULL until a later Google
+   * sign-in links one through `attachGoogleIdIfUnset`) and no avatar, and the
+   * handle is built from the name they typed exactly the way `createGoogleUser`
+   * builds it from a Google display name. Email accounts are never system
+   * accounts, so `isSystem` is pinned to false.
+   */
+  async createEmailUser(
+    manager: EntityManager,
+    input: CreateEmailUserInput & Omit<NewUserExtras, 'isSystem'>,
+  ): Promise<User> {
+    return this.createUserWithProfile(manager, null, {
+      ...input,
+      avatarUrl: null,
+      isSystem: false,
+    });
+  }
+
+  // The shared body of both sign-up paths: the `users` row, then its profile
+  // and global handle. `googleId` is null for an email-code account.
+  private async createUserWithProfile(
+    manager: EntityManager,
+    googleId: string | null,
+    input: Omit<CreateGoogleUserInput, 'googleId'> & NewUserExtras,
   ): Promise<User> {
     const status = input.status ?? UserStatus.Active;
     const user = manager.create(User, {
-      googleId: input.googleId,
+      googleId,
       email: input.email,
       status,
       activatedAt: status === UserStatus.Active ? new Date() : null,
@@ -489,7 +576,7 @@ export class UsersService {
     userId: string,
     base: string,
     slug: string,
-    input: CreateGoogleUserInput,
+    input: Omit<CreateGoogleUserInput, 'googleId'>,
     isSystemOwnedSignup: boolean,
   ): Promise<void> {
     for (let attempt = 1; ; attempt++) {

@@ -178,6 +178,56 @@ describe('AdminOverviewService', () => {
       }
     });
 
+    it('reports member growth as a running total: the pre-window baseline plus cumulative weekly joins', async () => {
+      // Only the pre-window baseline count filters `joinedAt` with
+      // LessThanOrEqual; every other profile count keeps the 0 default.
+      profiles.count.mockImplementation((options: Record<string, unknown>) => {
+        const where = options?.where as
+          { joinedAt?: { type?: string } } | undefined;
+        return Promise.resolve(
+          where?.joinedAt?.type === 'lessThanOrEqual' ? 500 : 0,
+        );
+      });
+      // Only the member-growth query filters `find` by `joinedAt`; the feed's
+      // recent-profiles query and the name lookup get no rows.
+      const growthWindowJoins = [
+        { joinedAt: daysAgo(60) },
+        { joinedAt: daysAgo(10) },
+        { joinedAt: daysAgo(2) },
+        { joinedAt: daysAgo(1) },
+      ];
+      profiles.find.mockImplementation((options: Record<string, unknown>) => {
+        const where = options?.where as { joinedAt?: unknown } | undefined;
+        return Promise.resolve(where?.joinedAt ? growthWindowJoins : []);
+      });
+
+      const result = await service.getOverview();
+
+      const points = result.memberGrowth.points;
+      expect(points).toHaveLength(10);
+      expect(points.map((point) => point.joined)).toEqual([
+        0, 1, 0, 0, 0, 0, 0, 0, 1, 2,
+      ]);
+      expect(points.map((point) => point.total)).toEqual([
+        500, 501, 501, 501, 501, 501, 501, 501, 502, 504,
+      ]);
+      expect(points[points.length - 1]?.total).toBe(
+        500 + growthWindowJoins.length,
+      );
+      for (const point of points) {
+        expect(point).not.toHaveProperty('spike');
+      }
+    });
+
+    it('starts the member-growth total at zero on a platform with no members yet', async () => {
+      const result = await service.getOverview();
+
+      for (const point of result.memberGrowth.points) {
+        expect(point.joined).toBe(0);
+        expect(point.total).toBe(0);
+      }
+    });
+
     it('always returns exactly eight reports-by-type week buckets, zero-filled with no data', async () => {
       const result = await service.getOverview();
 

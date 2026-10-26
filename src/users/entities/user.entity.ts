@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   OneToOne,
@@ -60,11 +61,19 @@ export class User {
   // back in. A reader that legitimately needs them says so explicitly, either
   // with `addSelect('user.email')` on a QueryBuilder or `select: { email: true }`
   // in find options (both re-include a `select: false` column). Grep for those
-  // to enumerate every place that reads real PII. `googleId` currently has NO
-  // value-reader in app code (only WHERE clauses, which are unaffected).
-  @Column({ type: 'varchar', unique: true, select: false })
-  googleId!: string;
+  // to enumerate every place that reads real PII. `googleId` has two value
+  // readers in app code: `BanEvasionService` (through `hashOauthSubject`) and
+  // `AdminIdentityService.applyRelink`. WHERE clauses are unaffected.
+  //
+  // `google_id` is NULL for an account created with an email code. Google
+  // sign-in attaches it later (`AuthService.validateOrCreateGoogleUser`). Every
+  // reader of the value must handle NULL.
+  @Column({ type: 'varchar', unique: true, nullable: true, select: false })
+  googleId!: string | null;
 
+  // A functional unique index `UQ_users_email_lower` on `lower(email)` backs
+  // case-insensitive lookups and lives only in the migration.
+  @Index('UQ_users_email_lower', { synchronize: false })
   @Column({ type: 'varchar', unique: true, select: false })
   email!: string;
 
@@ -214,6 +223,17 @@ export class User {
   // the database to grant a member a higher (or lower) allowance.
   @Column({ type: 'integer', nullable: true })
   inviteMonthlyQuota!: number | null;
+
+  /**
+   * Whether this member may invite new people to the platform. Defaults to
+   * true; admins pause it per member through
+   * `PATCH /admin/members/:id/invite-access` without restricting anything else
+   * on the account. Enforced in `InvitesService` on create and resend
+   * (`INVITE_ACCESS_DISABLED` 403). Approval and genesis mints skip the check,
+   * since those are admin-side. See `AddUserInviteAccess1837410000000`.
+   */
+  @Column({ type: 'boolean', default: true })
+  hasInviteAccess!: boolean;
 
   /**
    * Marks a non-human platform account (currently only the permanent

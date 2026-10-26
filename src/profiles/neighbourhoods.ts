@@ -9,9 +9,10 @@ import { foldSearchText } from '../search/search-text';
  * the wire (see `useMemberDirectoryQuery`). Keep the two in step: a name a
  * member can pick that is missing here is a member no filter can find.
  *
- * It carries two vocabularies on purpose. The 24 official freguesias
- * (parishes) are the taxonomy housing and the map already use; the nine
- * informal bairros before them are what people actually say. Members write
+ * It carries two vocabularies on purpose. The official freguesias (parishes)
+ * of Lisbon, Oeiras, Cascais, the south bank of the Tejo and Setúbal are the taxonomy
+ * housing and the map already use; the nine informal Lisbon bairros before
+ * them are what people actually say. Members write
  * "Príncipe Real", never "Santo António".
  *
  * `profiles.location` is free text ("Anjos, Lisboa", "Lisbon"), not a closed
@@ -32,7 +33,7 @@ export const NEIGHBOURHOODS = [
   'Mouraria',
   'Príncipe Real',
   'Santos',
-  // ── The 24 official freguesias ──
+  // ── The 24 official Lisbon freguesias ──
   'Ajuda',
   'Alcântara',
   'Alvalade',
@@ -57,6 +58,50 @@ export const NEIGHBOURHOODS = [
   'Santo António',
   'São Domingos de Benfica',
   'São Vicente',
+  // ── Oeiras, Cascais and the south bank of the Tejo (Almada, Seixal,
+  //    Barreiro, Moita, Montijo, Alcochete), spelled as OSM names them ──
+  'Costa de Caparica',
+  'Charneca de Caparica e Sobreda',
+  'Almada, Cova da Piedade, Pragal e Cacilhas',
+  'Laranjeiro e Feijó',
+  'Caparica e Trafaria',
+  'Alcabideche',
+  'São Domingos de Rana',
+  'Cascais e Estoril',
+  'Carcavelos e Parede',
+  'Barcarena',
+  'Porto Salvo',
+  'Algés, Linda-a-Velha e Cruz Quebrada-Dafundo',
+  'Carnaxide e Queijas',
+  'Oeiras e São Julião da Barra, Paço de Arcos e Caxias',
+  'Alcochete',
+  'Samouco',
+  'São Francisco',
+  'Canha',
+  'Sarilhos Grandes',
+  'Montijo e Afonsoeiro',
+  'Atalaia e Alto Estanqueiro-Jardia',
+  'Pegões',
+  'Santo António da Charneca',
+  'Barreiro e Lavradio',
+  'Palhais e Coina',
+  'Alto do Seixalinho, Santo André e Verderena',
+  'Alhos Vedros',
+  'Moita',
+  'Gaio-Rosário e Sarilhos Pequenos',
+  'Baixa da Banheira e Vale da Amoreira',
+  'Amora',
+  'Corroios',
+  'Fernão Ferro',
+  'Aldeia de Paio Pires',
+  'Arrentela',
+  'Seixal',
+  // ── Setúbal ──
+  'Gâmbia-Pontes-Alto da Guerra',
+  'Sado',
+  'Setúbal (São Sebastião)',
+  'Setúbal (São Julião, Nossa Senhora da Anunciada e Santa Maria da Graça)',
+  'Azeitão (São Lourenço e São Simão)',
 ] as const;
 
 const NEIGHBOURHOOD_SET: ReadonlySet<string> = new Set(NEIGHBOURHOODS);

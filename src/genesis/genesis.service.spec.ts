@@ -7,11 +7,29 @@ import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { InvitesService } from '../membership/invites.service';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
-import { HOUSE_GOOGLE_ID } from './genesis.constants';
+import { GenesisErrorCode, HOUSE_GOOGLE_ID } from './genesis.constants';
 import { GenesisService } from './genesis.service';
 
 const GENESIS_EMAIL = 'akatiago@gmail.com';
 const HOUSE_ACCOUNT = { id: 'house-1', googleId: HOUSE_GOOGLE_ID } as User;
+
+/** Asserts a 403 whose body carries the machine-readable reason code. */
+async function expectForbiddenWithCode(
+  pendingCall: Promise<unknown>,
+  code: GenesisErrorCode,
+  message: string,
+): Promise<void> {
+  const caughtError: unknown = await pendingCall.then(
+    () => undefined,
+    (rejection: unknown) => rejection,
+  );
+  expect(caughtError).toBeInstanceOf(ForbiddenException);
+  expect((caughtError as ForbiddenException).getResponse()).toEqual({
+    statusCode: 403,
+    code,
+    message,
+  });
+}
 
 describe('GenesisService', () => {
   let service: GenesisService;
@@ -83,6 +101,36 @@ describe('GenesisService', () => {
     }).compile();
 
     service = module.get(GenesisService);
+  });
+
+  describe('getStatus', () => {
+    it('is closed when GENESIS_EMAIL is unset, without throwing', async () => {
+      configuredEmail = null;
+      await expect(service.getStatus()).resolves.toEqual({ open: false });
+      expect(dataSource.query).not.toHaveBeenCalled();
+      expect(users.count).not.toHaveBeenCalled();
+    });
+
+    it('is closed once genesis has been consumed', async () => {
+      dataSource.query.mockResolvedValue([{ id: 1 }]);
+      await expect(service.getStatus()).resolves.toEqual({ open: false });
+    });
+
+    it('is closed once any admin exists, and never writes the marker', async () => {
+      users.count.mockResolvedValue(1);
+      await expect(service.getStatus()).resolves.toEqual({ open: false });
+      expect(users.count).toHaveBeenCalledWith({
+        where: { role: UserRole.Admin },
+      });
+      expect(dataSource.manager.query).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('is open when GENESIS_EMAIL is set and neither the marker nor an admin exists', async () => {
+      await expect(service.getStatus()).resolves.toEqual({ open: true });
+      expect(dataSource.manager.query).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
   });
 
   describe('mintGenesisInvite', () => {
@@ -221,9 +269,11 @@ describe('GenesisService', () => {
     });
 
     it('rejects a caller whose email is not the genesis email', async () => {
-      await expect(
+      await expectForbiddenWithCode(
         service.claimAdmin('user-1', 'someone-else@example.com'),
-      ).rejects.toThrow(ForbiddenException);
+        'genesis_not_founder_account',
+        'Not the genesis account',
+      );
       expect(users.update).not.toHaveBeenCalled();
     });
 
@@ -239,8 +289,10 @@ describe('GenesisService', () => {
 
     it('rejects once any admin already exists, and marks genesis consumed', async () => {
       users.count.mockResolvedValue(1);
-      await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
-        ForbiddenException,
+      await expectForbiddenWithCode(
+        service.claimAdmin('user-1', GENESIS_EMAIL),
+        'genesis_closed',
+        'Genesis is closed',
       );
       expect(txManager.update).not.toHaveBeenCalled();
       // A pre-existing admin permanently closes genesis, so a later admin
@@ -250,8 +302,10 @@ describe('GenesisService', () => {
 
     it('rejects once genesis has already been consumed', async () => {
       dataSource.query.mockResolvedValue([{ id: 1 }]);
-      await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
-        ForbiddenException,
+      await expectForbiddenWithCode(
+        service.claimAdmin('user-1', GENESIS_EMAIL),
+        'genesis_closed',
+        'Genesis is closed',
       );
       expect(txManager.update).not.toHaveBeenCalled();
     });
@@ -271,8 +325,10 @@ describe('GenesisService', () => {
       // The conditional insert returned nothing: another claim consumed the
       // marker first.
       txManager.query.mockResolvedValue([]);
-      await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
-        ForbiddenException,
+      await expectForbiddenWithCode(
+        service.claimAdmin('user-1', GENESIS_EMAIL),
+        'genesis_closed',
+        'Genesis is closed',
       );
       expect(txManager.update).not.toHaveBeenCalled();
     });

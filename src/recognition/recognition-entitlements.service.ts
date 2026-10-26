@@ -10,6 +10,25 @@ import {
 import { computeLevel } from './recognition-response';
 
 /**
+ * The one rule for the claimed invite-quota perk bonus, shared by the single
+ * and batched lookups below so the two cannot drift: the highest bonus among
+ * the quota perks the member has claimed AND whose unlock level they still
+ * hold. 0 when no claimed perk qualifies.
+ */
+export function inviteQuotaBonusFromClaims(
+  level: number,
+  claimedPerkKeys: ReadonlySet<string>,
+): number {
+  let bonus = 0;
+  for (const perk of INVITE_QUOTA_PERKS) {
+    if (!claimedPerkKeys.has(perk.key)) continue;
+    if (level < perk.unlockLevel) continue;
+    bonus = Math.max(bonus, inviteQuotaBonusForLevel(perk.unlockLevel));
+  }
+  return bonus;
+}
+
+/**
  * What a member's recognition actually ENTITLES them to, for the services
  * outside this module that enforce it (SUS-04).
  *
@@ -60,12 +79,53 @@ export class RecognitionEntitlementsService {
       }),
     ]);
     const claimedKeys = new Set(claims.map((claim) => claim.perkKey));
-    let bonus = 0;
-    for (const perk of INVITE_QUOTA_PERKS) {
-      if (!claimedKeys.has(perk.key)) continue;
-      if (level < perk.unlockLevel) continue;
-      bonus = Math.max(bonus, inviteQuotaBonusForLevel(perk.unlockLevel));
+    return inviteQuotaBonusFromClaims(level, claimedKeys);
+  }
+
+  /**
+   * `getInviteQuotaBonus` for many members at once: one stats read and one
+   * claims read for the whole set, then the same `inviteQuotaBonusFromClaims`
+   * rule per member. Every requested id is in the map, at 0 when nothing
+   * qualifies. Backs the admin invite quotas list.
+   */
+  async getInviteQuotaBonusForUserIds(
+    userIds: string[],
+  ): Promise<Map<string, number>> {
+    const bonusByUserId = new Map<string, number>();
+    const uniqueUserIds = [...new Set(userIds)];
+    if (!uniqueUserIds.length) return bonusByUserId;
+    const quotaPerkKeys = INVITE_QUOTA_PERKS.map((perk) => perk.key);
+    if (quotaPerkKeys.length === 0) {
+      for (const userId of uniqueUserIds) bonusByUserId.set(userId, 0);
+      return bonusByUserId;
     }
-    return bonus;
+    const [stats, claims] = await Promise.all([
+      this.stats.find({
+        where: { userId: In(uniqueUserIds) },
+        select: ['userId', 'xp'],
+      }),
+      this.perkClaims.find({
+        where: { userId: In(uniqueUserIds), perkKey: In(quotaPerkKeys) },
+        select: ['id', 'userId', 'perkKey'],
+      }),
+    ]);
+    const xpByUserId = new Map(stats.map((stat) => [stat.userId, stat.xp]));
+    const claimedKeysByUserId = new Map<string, Set<string>>();
+    for (const claim of claims) {
+      const claimedKeys = claimedKeysByUserId.get(claim.userId) ?? new Set();
+      claimedKeys.add(claim.perkKey);
+      claimedKeysByUserId.set(claim.userId, claimedKeys);
+    }
+    for (const userId of uniqueUserIds) {
+      const level = computeLevel(xpByUserId.get(userId) ?? 0).level;
+      bonusByUserId.set(
+        userId,
+        inviteQuotaBonusFromClaims(
+          level,
+          claimedKeysByUserId.get(userId) ?? new Set(),
+        ),
+      );
+    }
+    return bonusByUserId;
   }
 }

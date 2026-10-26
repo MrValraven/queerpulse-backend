@@ -67,6 +67,7 @@ import {
   isListenerPlayableTrack,
   isWithheldTrack,
   toListenerTrackSummaries,
+  toStudioArtistHeroFields,
   toStudioFormatArtistRef,
   toStudioOwnerReleaseCard,
   toStudioReleaseCard,
@@ -640,6 +641,8 @@ export class StudioCatalogService {
         kind: true,
         avatarUrl: true,
         bio: true,
+        coverUrl: true,
+        skinData: true,
       },
     });
     if (!persona) {
@@ -733,6 +736,7 @@ export class StudioCatalogService {
         ...toStudioFormatArtistRef(persona),
         bio: persona.bio,
         city: null,
+        ...toStudioArtistHeroFields(persona),
       },
       releases: publishedReleases.map((release) =>
         toStudioReleaseCard(release, persona, listenerStats(statsOf(release))),

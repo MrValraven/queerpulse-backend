@@ -5,7 +5,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { AccountReauthToken } from '../account/entities/account-reauth-token.entity';
 import {
@@ -25,7 +25,11 @@ import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { RefreshToken } from './entities/refresh-token.entity';
-import { IdentityRelinkCandidate } from './entities/identity-relink-candidate.entity';
+import {
+  IdentityRelinkCandidate,
+  IdentityRelinkCandidateStatus,
+} from './entities/identity-relink-candidate.entity';
+import { EmailCodeRefusedError } from './email-code/email-code-refusal';
 import { SECURITY_NEW_SIGN_IN } from './security.events';
 
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -49,6 +53,9 @@ interface UsersMock {
   findByGoogleId: jest.Mock;
   createGoogleUser: jest.Mock;
   findIdByEmail: jest.Mock;
+  findByEmailForSignIn: jest.Mock;
+  attachGoogleIdIfUnset: jest.Mock;
+  createEmailUser: jest.Mock;
 }
 
 function buildMocks() {
@@ -97,6 +104,13 @@ function buildMocks() {
     // Nobody holds it by default, so signup is unaffected unless a test says
     // so; a test that returns an id gets the PRD-06 relink-candidate path.
     findIdByEmail: jest.fn().mockResolvedValue(null),
+    // Email-code sign-in reads the account that holds the address. Nobody
+    // holds it by default, so the email path lands on the new-account gates.
+    findByEmailForSignIn: jest.fn().mockResolvedValue(null),
+    // Google sign-in attaching its subject to an email-only account. Reports
+    // "already holds a Google identity" by default, the PRD-06 branch.
+    attachGoogleIdIfUnset: jest.fn().mockResolvedValue(false),
+    createEmailUser: jest.fn(),
   };
   // The transaction manager exposes getRepository so the atomic rotation can
   // run its conditional claim + insert through the same (mock) repo, plus a
@@ -161,6 +175,9 @@ function buildMocks() {
   // existed" by default (no identifier), which is the branch that only bumps
   // the attempt counter.
   const relinkCandidates = {
+    // Email-code sign-in asks whether an undecided or dismissed candidate
+    // stands against the account. None by default.
+    exists: jest.fn().mockResolvedValue(false),
     find: jest.fn().mockResolvedValue([]),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     createQueryBuilder: jest.fn(() => ({
@@ -1072,6 +1089,272 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
         }),
       ).rejects.toMatchObject({ reason: 'registration_disabled' });
     });
+  });
+});
+
+describe('AuthService.validateOrCreateGoogleUser (email-only account)', () => {
+  let service: AuthService;
+  let mocks: ReturnType<typeof buildMocks>;
+
+  const profile = {
+    googleId: 'g-new',
+    email: 'sam@example.com',
+    firstName: 'Sam',
+    lastName: 'Rivera',
+    avatarUrl: null,
+  };
+
+  beforeEach(async () => {
+    mocks = buildMocks();
+    service = await buildService(mocks);
+  });
+
+  it('attaches the Google identity to an email-only account holding the address and signs it in', async () => {
+    const emailOnlyMember = { id: 'u9', status: UserStatus.Active } as User;
+    mocks.users.findByGoogleId
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(emailOnlyMember);
+    mocks.users.findIdByEmail.mockResolvedValue('u9');
+    mocks.users.attachGoogleIdIfUnset.mockResolvedValue(true);
+
+    await expect(service.validateOrCreateGoogleUser(profile)).resolves.toBe(
+      emailOnlyMember,
+    );
+
+    expect(mocks.users.attachGoogleIdIfUnset).toHaveBeenCalledWith(
+      'u9',
+      'g-new',
+    );
+    // The account was keyed to no Google subject, so nothing knocked on a
+    // door held by someone else: no relink candidate is recorded.
+    expect(mocks.relinkCandidates.createQueryBuilder).not.toHaveBeenCalled();
+    expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('keeps email_in_use and records a candidate when the account has a different Google identity', async () => {
+    mocks.users.findByGoogleId.mockResolvedValue(null);
+    mocks.users.findIdByEmail.mockResolvedValue('u9');
+    mocks.users.attachGoogleIdIfUnset.mockResolvedValue(false);
+
+    const outcome = service.validateOrCreateGoogleUser(profile);
+
+    await expect(outcome).rejects.toBeInstanceOf(SignupRejectedError);
+    await expect(outcome).rejects.toMatchObject({ reason: 'email_in_use' });
+    expect(mocks.relinkCandidates.createQueryBuilder).toHaveBeenCalled();
+    expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('answers email_in_use when the attach loses a unique race', async () => {
+    mocks.users.findByGoogleId.mockResolvedValue(null);
+    mocks.users.findIdByEmail.mockResolvedValue('u9');
+    mocks.users.attachGoogleIdIfUnset.mockRejectedValue(
+      Object.assign(new Error('duplicate key value'), { code: '23505' }),
+    );
+
+    await expect(
+      service.validateOrCreateGoogleUser(profile),
+    ).rejects.toMatchObject({ reason: 'email_in_use' });
+    expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthService.signInWithVerifiedEmail', () => {
+  let service: AuthService;
+  let mocks: ReturnType<typeof buildMocks>;
+
+  /** Everything an invited stranger brings to an email-code signup. */
+  const invitedSignup = {
+    inviteCode: 'CODE',
+    ageAttested: true,
+    termsVersion: '2026-09',
+    firstName: 'Sam',
+  };
+
+  beforeEach(async () => {
+    mocks = buildMocks();
+    service = await buildService(mocks);
+  });
+
+  it('signs a returning member in through the reactivation path', async () => {
+    mocks.users.findByEmailForSignIn.mockResolvedValue({
+      id: 'u1',
+      status: UserStatus.Deactivated,
+      isSystem: false,
+    });
+    mocks.deactivations.findOne.mockResolvedValue({
+      id: 'deact-1',
+      userId: 'u1',
+      reactivatedAt: null,
+      previousStatus: UserStatus.Active,
+    });
+
+    const user = await service.signInWithVerifiedEmail('a@b.c', {});
+
+    expect(user.status).toBe(UserStatus.Active);
+    expect(mocks.managerUpdate).toHaveBeenCalledWith(
+      User,
+      expect.objectContaining({ status: UserStatus.Deactivated }),
+      { status: UserStatus.Active },
+    );
+    expect(mocks.users.createEmailUser).not.toHaveBeenCalled();
+  });
+
+  it('refuses a system account with code_incorrect and attemptsLeft 4', async () => {
+    mocks.users.findByEmailForSignIn.mockResolvedValue({
+      id: 'house',
+      status: UserStatus.Active,
+      isSystem: true,
+    });
+
+    const refusal: unknown = await service
+      .signInWithVerifiedEmail('house@example.com', {})
+      .catch((error: unknown) => error);
+
+    expect(refusal).toBeInstanceOf(EmailCodeRefusedError);
+    expect((refusal as EmailCodeRefusedError).getResponse()).toMatchObject({
+      reason: 'code_incorrect',
+      attemptsLeft: 4,
+    });
+    expect(mocks.relinkCandidates.exists).not.toHaveBeenCalled();
+  });
+
+  it('refuses account_recovery_review while a pending or dismissed relink candidate exists', async () => {
+    mocks.users.findByEmailForSignIn.mockResolvedValue({
+      id: 'u1',
+      status: UserStatus.Active,
+      isSystem: false,
+    });
+    mocks.relinkCandidates.exists.mockResolvedValue(true);
+
+    const refusal: unknown = await service
+      .signInWithVerifiedEmail('a@b.c', {})
+      .catch((error: unknown) => error);
+
+    expect(refusal).toBeInstanceOf(EmailCodeRefusedError);
+    expect(refusal).toMatchObject({ reason: 'account_recovery_review' });
+    expect(mocks.relinkCandidates.exists).toHaveBeenCalledWith({
+      where: {
+        userId: 'u1',
+        status: In([
+          IdentityRelinkCandidateStatus.Pending,
+          IdentityRelinkCandidateStatus.Dismissed,
+        ]),
+      },
+    });
+  });
+
+  it('rejects invite_required for a stranger without an invite', async () => {
+    // Blank name too: the invite gate answers first.
+    await expect(
+      service.signInWithVerifiedEmail('sam@example.com', {
+        ageAttested: true,
+        firstName: '',
+      }),
+    ).rejects.toMatchObject({ reason: 'invite_required' });
+    expect(mocks.users.createEmailUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects registration_disabled while registration is off', async () => {
+    mocks.platformSettings.get.mockResolvedValue({
+      registrationEnabled: false,
+    });
+
+    await expect(
+      service.signInWithVerifiedEmail('sam@example.com', {
+        ...invitedSignup,
+        firstName: '',
+      }),
+    ).rejects.toMatchObject({ reason: 'registration_disabled' });
+    expect(mocks.users.createEmailUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects name_required after the invite, suppression and age gates when firstName is blank', async () => {
+    const outcome = service.signInWithVerifiedEmail('sam@example.com', {
+      ...invitedSignup,
+      firstName: '   ',
+    });
+
+    await expect(outcome).rejects.toBeInstanceOf(SignupRejectedError);
+    await expect(outcome).rejects.toMatchObject({ reason: 'name_required' });
+    // The suppression gate ran ahead of the name check.
+    expect(mocks.suppressions.findOne).toHaveBeenCalled();
+    expect(mocks.users.createEmailUser).not.toHaveBeenCalled();
+    expect(mocks.invites.validateInviteForSignup).not.toHaveBeenCalled();
+    expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('creates an invited email-only account with the typed name', async () => {
+    mocks.invites.validateInviteForSignup.mockResolvedValue({
+      inviteId: 'inv-1',
+      inviterId: 'inviter-1',
+      personal: true,
+      vouch: 'you belong here',
+    });
+    mocks.users.createEmailUser.mockResolvedValue({
+      id: 'new-user',
+      status: UserStatus.Active,
+    });
+
+    const user = await service.signInWithVerifiedEmail(
+      'sam@example.com',
+      invitedSignup,
+    );
+
+    expect(user).toEqual(expect.objectContaining({ id: 'new-user' }));
+    expect(mocks.invites.validateInviteForSignup).toHaveBeenCalledWith(
+      expect.anything(),
+      'CODE',
+      'sam@example.com',
+    );
+    expect(mocks.users.createEmailUser).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        email: 'sam@example.com',
+        firstName: 'Sam',
+        lastName: '',
+        status: 'active',
+        invitedBy: 'inviter-1',
+        ageAttestedAt: expect.any(Date) as unknown,
+        termsVersion: '2026-09',
+      },
+    );
+    expect(mocks.invites.claimInvite).toHaveBeenCalledWith(
+      expect.anything(),
+      'inv-1',
+      'new-user',
+    );
+    expect(mocks.events.emit).toHaveBeenCalledWith(
+      'user.promoted',
+      expect.objectContaining({ userId: 'new-user' }),
+    );
+    expect(mocks.users.createGoogleUser).not.toHaveBeenCalled();
+  });
+
+  it('trims firstName and lastName and caps both at 100 characters', async () => {
+    mocks.invites.validateInviteForSignup.mockResolvedValue({
+      inviteId: 'inv-1',
+      inviterId: 'inviter-1',
+      personal: false,
+      vouch: null,
+    });
+    mocks.users.createEmailUser.mockResolvedValue({
+      id: 'new-user',
+      status: UserStatus.Active,
+    });
+
+    await service.signInWithVerifiedEmail('sam@example.com', {
+      ...invitedSignup,
+      firstName: `  ${'f'.repeat(120)}  `,
+      lastName: `  ${'l'.repeat(120)} `,
+    });
+
+    expect(mocks.users.createEmailUser).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        firstName: 'f'.repeat(100),
+        lastName: 'l'.repeat(100),
+      }),
+    );
   });
 });
 

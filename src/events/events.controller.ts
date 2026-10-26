@@ -100,7 +100,8 @@ export class EventsController {
       'they narrow `filter=upcoming` (and `from`/`to`/`q` also narrow ' +
       '`filter=past`). `filter=hosting` honours `to` alone, as an upper ' +
       'bound on the start, so a host can ask for the events they have ' +
-      'already started.',
+      'already started. `filter=upcoming` leaves out events whose every ' +
+      'hosting community the caller hid; `includeHidden=true` lists them too.',
   })
   @ApiOkResponse({ description: 'Event summaries for the requested filter.' })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListEventsQuery) {
@@ -118,6 +119,7 @@ export class EventsController {
         type: query.type,
         q: query.q,
         cost: query.cost,
+        includeHidden: query.includeHidden,
       },
     );
   }

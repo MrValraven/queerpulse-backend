@@ -104,6 +104,8 @@ export interface StoredObject {
 export class StorageService {
   private readonly logger = new Logger(StorageService.name);
   private client: S3Client | null = null;
+  // Signs browser-facing URLs only; see `presigningClient`.
+  private publicPresigningClient: S3Client | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -205,7 +207,7 @@ export class StorageService {
       ContentType: contentType,
       ...(contentLength !== undefined ? { ContentLength: contentLength } : {}),
     });
-    const uploadUrl = await getSignedUrl(this.storageClient(), command, {
+    const uploadUrl = await getSignedUrl(this.presigningClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,
     });
     return { uploadUrl, key, expiresIn: PRESIGN_EXPIRY_SECONDS };
@@ -249,7 +251,7 @@ export class StorageService {
         ? attachmentContentDispositionForStorageKey(key)
         : contentDispositionForStorageKey(key),
     });
-    return getSignedUrl(this.storageClient(), command, {
+    return getSignedUrl(this.presigningClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,
     });
   }
@@ -314,7 +316,7 @@ export class StorageService {
       ResponseContentDisposition: 'inline',
       ResponseCacheControl: `private, max-age=${expirySeconds}`,
     });
-    const url = await getSignedUrl(this.storageClient(), command, {
+    const url = await getSignedUrl(this.presigningClient(), command, {
       expiresIn: expirySeconds,
     });
     return { url, expiresAt };
@@ -976,19 +978,50 @@ export class StorageService {
 
   private storageClient(): S3Client {
     if (!this.client) {
-      this.client = new S3Client({
-        endpoint: this.requireConfig('storage.endpoint'),
-        region: this.requireConfig('storage.region'),
-        // Railway Buckets use virtual-hosted-style URLs (bucket as subdomain).
-        // Path-style requests are rejected.
-        forcePathStyle: false,
-        credentials: {
-          accessKeyId: this.requireConfig('storage.accessKey'),
-          secretAccessKey: this.requireConfig('storage.secretKey'),
-        },
-      });
+      this.client = this.buildS3Client(this.requireConfig('storage.endpoint'));
     }
     return this.client;
+  }
+
+  /**
+   * The client that signs every URL handed to a BROWSER: the presigned PUT,
+   * the presigned GET `FilesController` redirects to, and the Studio audio
+   * stream. Server-side calls never use it; they go through `storageClient`.
+   *
+   * Local development only: in the `api` container the server reaches MinIO
+   * at `http://minio:9000`, which a browser cannot resolve, so
+   * AWS_PUBLIC_ENDPOINT_URL (`http://localhost:9000`) names the endpoint the
+   * browser uses and the URL is signed for that host. Presigning is offline
+   * signing, so this client never opens a connection. Unset, it is the same
+   * client as `storageClient`, which is how production runs (env validation
+   * refuses the variable when NODE_ENV=production).
+   */
+  private presigningClient(): S3Client {
+    const publicEndpoint = this.config.get<string>('storage.publicEndpoint');
+    if (!publicEndpoint) {
+      return this.storageClient();
+    }
+    if (!this.publicPresigningClient) {
+      this.publicPresigningClient = this.buildS3Client(publicEndpoint);
+    }
+    return this.publicPresigningClient;
+  }
+
+  private buildS3Client(endpoint: string): S3Client {
+    return new S3Client({
+      endpoint,
+      region: this.requireConfig('storage.region'),
+      // Railway Buckets use virtual-hosted-style URLs (bucket as subdomain)
+      // and reject path-style requests, so this stays false there. The local
+      // MinIO bucket sets AWS_S3_FORCE_PATH_STYLE=true, which env validation
+      // refuses when NODE_ENV=production.
+      forcePathStyle:
+        this.config.get<boolean>('storage.isForcePathStyle') === true,
+      credentials: {
+        accessKeyId: this.requireConfig('storage.accessKey'),
+        secretAccessKey: this.requireConfig('storage.secretKey'),
+      },
+    });
   }
 
   private requireConfig(key: string): string {

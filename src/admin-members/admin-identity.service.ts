@@ -229,6 +229,15 @@ export class AdminIdentityService {
       }
 
       const previousGoogleId = target.googleId;
+      // An account created with an email code carries no Google identity, so
+      // there is nothing to re-point. Unreachable in practice: Google sign-in
+      // attaches itself to an email-only account directly, so no candidate is
+      // ever recorded against one.
+      if (previousGoogleId === null) {
+        throw new ConflictException(
+          'This member signs in with an email code and has no Google identity to replace.',
+        );
+      }
       let didRelink: boolean;
       try {
         didRelink = await this.auth.applyGoogleIdRelink(

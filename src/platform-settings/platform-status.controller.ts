@@ -1,4 +1,5 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   CurrentUser,
   CurrentUserData,
@@ -63,6 +64,13 @@ export interface PlatformStatusView {
    * `announcementVersion`) for the signed-out case.
    */
   announcementDismissed: boolean;
+  /**
+   * Whether the 6-digit email-code sign-in is switched on (`email.enabled` in
+   * `config/email.config.ts`). While it is `false` every `/auth/email-code`
+   * route answers 503 `email_code_unavailable`, and the frontend hides the
+   * email-code options on sign-in, invite join and step-up.
+   */
+  emailCodeSignIn: boolean;
 }
 
 /**
@@ -86,6 +94,7 @@ export class PlatformStatusController {
   constructor(
     private readonly settings: PlatformSettingsService,
     private readonly announcementDismissals: AnnouncementDismissalService,
+    private readonly config: ConfigService,
   ) {}
 
   @Get()
@@ -128,6 +137,7 @@ export class PlatformStatusController {
         ? settings.announcementVersion
         : null,
       announcementDismissed,
+      emailCodeSignIn: this.config.get<boolean>('email.enabled') === true,
     };
   }
 }

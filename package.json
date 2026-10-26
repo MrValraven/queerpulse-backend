@@ -36,7 +36,10 @@
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
     "recognition:rebase": "ts-node -r tsconfig-paths/register src/recognition/recognition-xp-rebase-cli.ts",
     "go-together:tune": "ts-node -r tsconfig-paths/register src/go-together/go-together-tune-weights-cli.ts",
-    "seed:safe-spaces": "ts-node -r tsconfig-paths/register src/database/seed-safe-spaces.ts"
+    "seed:safe-spaces": "ts-node -r tsconfig-paths/register src/database/seed-safe-spaces.ts",
+    "dev:setup": "node scripts/dev-setup.mjs",
+    "dev:doctor": "node scripts/dev-doctor.mjs",
+    "dev:import-db": "node scripts/dev-import-db.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1079.0",
@@ -76,6 +79,7 @@
     "pino-http": "^10.0.0",
     "prom-client": "^15.1.3",
     "reflect-metadata": "^0.2.2",
+    "resend": "6.32.1",
     "rxjs": "^7.8.1",
     "sanitize-html": "^2.17.0",
     "socket.io": "^4.8.3",

@@ -33,7 +33,12 @@ export type SignupRejectedReason =
   | 'email_in_use'
   // An admin has switched registration off (`platform_settings`). Existing
   // members are unaffected — this is only reachable on the new-account path.
-  | 'registration_disabled';
+  | 'registration_disabled'
+  // Email-code signups only. A Google profile always carries a name, while an
+  // email-only account takes the name the person typed, so a blank first name
+  // stops the account here. The invite landing collects the name before the
+  // code is sent, so this is a backstop for a request that skipped it.
+  | 'name_required';
 
 /**
  * Thrown when a brand-new Google sign-in is not allowed to create an account.

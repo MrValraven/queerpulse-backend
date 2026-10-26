@@ -1,6 +1,7 @@
 import { AdvancedConsoleLogger, type LogLevel, type LogMessage } from 'typeorm';
 import {
   PRIVATE_PARAMETER_TABLES,
+  PRIVATE_PARAMETERS_COMMENT,
   PrivateParametersLogger,
   touchesPrivateParameterTable,
 } from './private-parameters-logger';
@@ -109,7 +110,20 @@ describe('touchesPrivateParameterTable', () => {
     ).toBe(true);
   });
 
-  it('names the draft and quiz show tables', () => {
+  it('matches any table when the query carries the private-parameters comment', () => {
+    expect(
+      touchesPrivateParameterTable(
+        '/* private-parameters */ SELECT "user"."id" FROM "users" "user" WHERE lower("user"."email") = lower($1)',
+      ),
+    ).toBe(true);
+    expect(
+      touchesPrivateParameterTable(
+        'SELECT "user"."id" FROM "users" "user" WHERE lower("user"."email") = lower($1)',
+      ),
+    ).toBe(false);
+  });
+
+  it('names the draft, quiz show and sign-in code challenge tables', () => {
     expect([...PRIVATE_PARAMETER_TABLES]).toEqual([
       'creator_drafts',
       'listing_drafts',
@@ -122,6 +136,7 @@ describe('touchesPrivateParameterTable', () => {
       'quizshow_rounds',
       'quizshow_questions',
       'quizshow_sessions',
+      'email_sign_in_challenges',
     ]);
   });
 });
@@ -171,6 +186,26 @@ describe('PrivateParametersLogger', () => {
     ]);
     expect(JSON.stringify(logger.written[0]?.messages)).toContain('member-1');
     expect(JSON.stringify(logger.written[1]?.messages)).toContain('event-1');
+  });
+
+  it('drops the parameters of a failed or slow query tagged with the private-parameters comment', () => {
+    const logger = new CapturingLogger(['error', 'warn']);
+    const taggedSql = `/* ${PRIVATE_PARAMETERS_COMMENT} */ SELECT "jr"."id" FROM "join_requests" "jr" WHERE lower("jr"."email") = $1`;
+    logger.logQueryError('boom', taggedSql, ['sam@example.com']);
+    logger.logQuerySlow(900, taggedSql, ['sam@example.com']);
+    expect(sqlMessage(logger)?.message).toContain('/* private-parameters */');
+    expect(sqlMessage(logger)?.parameters).toBeUndefined();
+    expect(JSON.stringify(logger.written)).not.toContain('sam@example.com');
+  });
+
+  it('keeps the parameters of the same query without the comment', () => {
+    const logger = new CapturingLogger(['error', 'warn']);
+    logger.logQueryError(
+      'boom',
+      'SELECT "jr"."id" FROM "join_requests" "jr" WHERE "jr"."id" = $1',
+      ['request-1'],
+    );
+    expect(sqlMessage(logger)?.parameters).toEqual(['request-1']);
   });
 
   it('still honours the logging levels it was given', () => {

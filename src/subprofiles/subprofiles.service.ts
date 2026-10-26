@@ -119,6 +119,7 @@ import {
   MAX_ITEMS_PER_SECTION,
   MAX_SUBPROFILES,
   type PublishUnmetCode,
+  assertValidStudioHero,
   slugifyDisplayName,
   validatePublish,
   validateSocialLinks,
@@ -1127,6 +1128,7 @@ export class SubprofilesService {
     // checked for any kind before any write, answering 400
     // TATTOO_SKIN_INVALID with the failing `path`.
     assertValidTattooSkinData(rest.skinData);
+    assertValidStudioHero(rest.skinData);
 
     // A slug is the persona's address — it can never be blank. Trim it and
     // reject an empty one up front rather than writing "" into the per-owner

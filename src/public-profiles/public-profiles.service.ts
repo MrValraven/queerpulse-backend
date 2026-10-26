@@ -6,6 +6,7 @@ import { HandlesService } from '../handles/handles.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { Activity } from '../profiles/entities/activity.entity';
 import { ActivityVisibilityService } from '../profiles/activity-visibility.service';
+import { dedupeActivity } from '../profiles/activity-describe';
 import { SocialLink } from '../profiles/entities/social-link.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -150,7 +151,9 @@ export class PublicProfilesService {
       this.activities.find({
         where: { userId: profile.userId },
         order: { occurredAt: 'DESC' },
-        take: PublicProfilesService.ACTIVITY_LIMIT,
+        // Read past the window so rows dropped by the visibility re-check or
+        // collapsed by `dedupeActivity` below still leave the page full.
+        take: PublicProfilesService.ACTIVITY_LIMIT * 2,
       }),
     ]);
 
@@ -161,10 +164,11 @@ export class PublicProfilesService {
     // row stops being served to every audience. `null`
     // viewer: this endpoint has no session, so PRD-414's RSVP-visibility gate
     // treats the caller as a stranger to every attendee.
-    const visibleActivity = await this.activityVisibility.filterVisible(
-      activity,
-      null,
-    );
+    // Repeat rows about one subject (a persona re-published, an event
+    // re-RSVP'd) then collapse to the newest, the same as the member profile.
+    const visibleActivity = dedupeActivity(
+      await this.activityVisibility.filterVisible(activity, null),
+    ).slice(0, PublicProfilesService.ACTIVITY_LIMIT);
 
     return toPublicProfile(profile, socials, work, visibleActivity);
   }

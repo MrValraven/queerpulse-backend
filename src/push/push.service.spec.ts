@@ -259,6 +259,32 @@ describe('deliverToSubscription failure handling', () => {
     },
   );
 
+  it.each([
+    [401, 'VAPID key rejected'],
+    [403, 'VAPID key rejected'],
+    [404, 'expired'],
+    [410, 'expired'],
+  ])('words the prune log for a %i as "%s"', async (statusCode, wording) => {
+    const repo = oneRow();
+    const service = new PushService(repo as never, config);
+    service.onModuleInit();
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    sendNotification.mockRejectedValue({ statusCode });
+
+    await service.sendToUser('user-1', payload);
+
+    const lines = [...log.mock.calls, ...warn.mock.calls].map((call) =>
+      String(call[0]),
+    );
+    expect(lines.some((line) => line.includes(wording))).toBe(true);
+    const otherWording =
+      wording === 'expired' ? 'VAPID key rejected' : 'expired';
+    expect(lines.some((line) => line.includes(otherWording))).toBe(false);
+    log.mockRestore();
+    warn.mockRestore();
+  });
+
   it('retries once after a 503 and records the delivery when it lands', async () => {
     const repo = oneRow();
     const service = new PushService(repo as never, config);
@@ -412,9 +438,12 @@ describe('handleMessageRead (PRD-335)', () => {
     // Looked up by the READER's own userId only; see the handler's own doc
     // for why "every device except the reading one" cannot be computed from
     // `MessageReadEvent` alone (no device/session/endpoint id on the event).
-    const findCall = repo.find.mock.calls[0][0] as {
-      where: { userId: { value: string[] } };
-    };
+    const findCalls = repo.find.mock.calls as [
+      { where: { userId: { value: string[] } } },
+    ][];
+    const [[findCall]] = findCalls as [
+      [{ where: { userId: { value: string[] } } }],
+    ];
     expect(findCall.where.userId.value).toEqual(['user-1']);
 
     // Every one of the reader's subscriptions receives it.

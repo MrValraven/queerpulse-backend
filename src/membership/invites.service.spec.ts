@@ -401,6 +401,26 @@ describe('InvitesService.getQuota', () => {
     expect(quota.memberCount).toBe(312);
   });
 
+  it('reports invite access on for a member with no admin pause', async () => {
+    users.findById.mockResolvedValue({ inviteMonthlyQuota: null });
+    const quota = await service.getQuota('inviter');
+    expect(quota.hasInviteAccess).toBe(true);
+    expect(quota.remaining).toBe(5);
+  });
+
+  it('zeroes remaining while invite access is paused, keeping the real limit and used', async () => {
+    users.findById.mockResolvedValue({
+      inviteMonthlyQuota: null,
+      hasInviteAccess: false,
+    });
+    invitesRepo.count.mockResolvedValue(1);
+    const quota = await service.getQuota('inviter');
+    expect(quota.hasInviteAccess).toBe(false);
+    expect(quota.remaining).toBe(0);
+    expect(quota.limit).toBe(5);
+    expect(quota.used).toBe(1);
+  });
+
   it('resetsAt is the 1st of next month (UTC), rolling the year over in Dec', async () => {
     const quota = await service.getQuota('inviter');
     // resetsAt is always the 1st at 00:00 UTC of some month...
@@ -610,6 +630,38 @@ describe('InvitesService.createInvite', () => {
     });
   });
 
+  it('refuses with the typed INVITE_ACCESS_DISABLED code while invite access is paused', async () => {
+    userRepo.findOne.mockResolvedValue({
+      inviteMonthlyQuota: null,
+      hasInviteAccess: false,
+    });
+
+    await expect(service.createInvite('inviter')).rejects.toMatchObject({
+      response: {
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'INVITE_ACCESS_DISABLED',
+      },
+    });
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('reports paused invite access ahead of an exhausted quota', async () => {
+    await build(1);
+    userRepo.findOne.mockResolvedValue({
+      inviteMonthlyQuota: null,
+      hasInviteAccess: false,
+    });
+    manager.count.mockResolvedValue(1); // over quota as well
+
+    await expect(service.createInvite('inviter')).rejects.toMatchObject({
+      response: { statusCode: 403, code: 'INVITE_ACCESS_DISABLED' },
+    });
+    // The access check runs before the month's invites are even counted.
+    expect(manager.count).not.toHaveBeenCalled();
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
   it('locks the inviter row and uses its per-user quota override', async () => {
     await build(1); // global default is 1
     userRepo.findOne.mockResolvedValue({ inviteMonthlyQuota: 3 });
@@ -697,6 +749,32 @@ describe('InvitesService.createInvite', () => {
       ).resolves.toEqual(expect.objectContaining({ id: 'inv-new' }));
       // The quota path was never entered at all.
       expect(callerManager.count).not.toHaveBeenCalled();
+    });
+
+    it('still mints when the approver has invite access paused', async () => {
+      // Approval mints are admin-side and skip the quota path, which is where
+      // the access check lives.
+      userRepo.findOne.mockResolvedValue({
+        inviteMonthlyQuota: null,
+        hasInviteAccess: false,
+      });
+      const callerManager = {
+        getRepository: jest.fn(() => userRepo),
+        count: jest.fn().mockResolvedValue(0),
+        create: jest.fn((_entity: unknown, value: Partial<Invite>) => value),
+        save: jest.fn((value: Partial<Invite>) =>
+          Promise.resolve({ id: 'inv-new', ...value }),
+        ),
+      };
+
+      await expect(
+        service.createInviteForApproval(
+          callerManager as never,
+          'admin-1',
+          'applicant@x.com',
+        ),
+      ).resolves.toEqual(expect.objectContaining({ id: 'inv-new' }));
+      expect(callerManager.save).toHaveBeenCalled();
     });
 
     // PRD-02. An approval invite has nobody to hand it over: the platform
@@ -958,6 +1036,95 @@ describe('InvitesService.listMyInvites', () => {
         expect(repo.count).toHaveBeenCalledWith({ where: findWhere() });
       }
     });
+  });
+});
+
+describe('InvitesService.resendInvite', () => {
+  let service: InvitesService;
+  let repo: { findOne: jest.Mock; update: jest.Mock };
+  let users: { findById: jest.Mock };
+
+  const buildInvite = (overrides: Partial<Invite> = {}): Invite => ({
+    id: 'invite-1',
+    inviterId: 'inviter',
+    code: 'QP-AAAA-BBBB',
+    email: null,
+    note: null,
+    vouch: null,
+    privateNote: null,
+    personal: true,
+    status: InviteStatus.Expired,
+    acceptedBy: null,
+    usedAt: null,
+    expiresAt: new Date(Date.now() - 60_000),
+    createdAt: new Date('2026-10-01T00:00:00.000Z'),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    repo = {
+      findOne: jest.fn(),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    users = {
+      findById: jest.fn().mockResolvedValue({ hasInviteAccess: true }),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InvitesService,
+        { provide: getRepositoryToken(Invite), useValue: repo },
+        { provide: UsersService, useValue: users },
+        { provide: DataSource, useValue: {} },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        {
+          provide: RecognitionEntitlementsService,
+          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
+        {
+          provide: AmbassadorStatusService,
+          useValue: { getInviteBonus: jest.fn().mockResolvedValue(0) },
+        },
+        { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
+      ],
+    }).compile();
+    service = module.get(InvitesService);
+  });
+
+  it('refuses with INVITE_ACCESS_DISABLED before looking up the code while invite access is paused', async () => {
+    users.findById.mockResolvedValue({ hasInviteAccess: false });
+
+    await expect(
+      service.resendInvite('inviter', 'QP-AAAA-BBBB'),
+    ).rejects.toMatchObject({
+      response: {
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'INVITE_ACCESS_DISABLED',
+      },
+    });
+    expect(users.findById).toHaveBeenCalledWith('inviter');
+    expect(repo.findOne).not.toHaveBeenCalled();
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('refreshes an expired invite as before while invite access is on', async () => {
+    repo.findOne.mockResolvedValueOnce(buildInvite()).mockResolvedValueOnce(
+      buildInvite({
+        status: InviteStatus.Pending,
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
+    );
+
+    const view = await service.resendInvite('inviter', 'QP-AAAA-BBBB');
+
+    expect(repo.findOne).toHaveBeenNthCalledWith(1, {
+      where: { code: 'QP-AAAA-BBBB', inviterId: 'inviter' },
+    });
+    expect(repo.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'invite-1' }),
+      expect.objectContaining({ status: InviteStatus.Pending }),
+    );
+    expect(view.status).toBe('valid');
   });
 });
 

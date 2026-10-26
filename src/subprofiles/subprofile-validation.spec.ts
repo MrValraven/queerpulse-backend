@@ -5,7 +5,9 @@ import {
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
+import { BadRequestException } from '@nestjs/common';
 import {
+  assertValidStudioHero,
   BLOCKED_TERMS,
   MIN_BIO,
   validatePublish,
@@ -60,5 +62,33 @@ describe('validatePublish tagline screen (ENG-453)', () => {
   it('does not flag a persona with a clean name, bio, handle and tagline', () => {
     const sp = completeUnlinked({ tagline: 'a very normal tagline' });
     expect(validatePublish(sp, [])).toEqual([]);
+  });
+});
+
+describe('assertValidStudioHero', () => {
+  it('accepts full-bleed, avatar, an absent key and no skin data', () => {
+    expect(() =>
+      assertValidStudioHero({ studioHero: 'full-bleed' }),
+    ).not.toThrow();
+    expect(() => assertValidStudioHero({ studioHero: 'avatar' })).not.toThrow();
+    expect(() => assertValidStudioHero({})).not.toThrow();
+    expect(() => assertValidStudioHero(null)).not.toThrow();
+    expect(() => assertValidStudioHero(undefined)).not.toThrow();
+  });
+
+  it('rejects any other value with a message naming the key and the allowed values', () => {
+    for (const invalidValue of ['wide', '', 3, true, {}]) {
+      let caught: unknown;
+      try {
+        assertValidStudioHero({ studioHero: invalidValue });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(BadRequestException);
+      const message = (caught as BadRequestException).message;
+      expect(message).toContain('skinData.studioHero');
+      expect(message).toContain("'full-bleed'");
+      expect(message).toContain("'avatar'");
+    }
   });
 });

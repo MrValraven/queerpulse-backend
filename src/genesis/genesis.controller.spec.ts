@@ -5,7 +5,11 @@ import { GenesisService } from './genesis.service';
 
 describe('GenesisController', () => {
   let controller: GenesisController;
-  let service: { mintGenesisInvite: jest.Mock; claimAdmin: jest.Mock };
+  let service: {
+    getStatus: jest.Mock;
+    mintGenesisInvite: jest.Mock;
+    claimAdmin: jest.Mock;
+  };
 
   const founder: CurrentUserData = {
     userId: 'user-1',
@@ -16,6 +20,7 @@ describe('GenesisController', () => {
 
   beforeEach(async () => {
     service = {
+      getStatus: jest.fn().mockResolvedValue({ open: true }),
       mintGenesisInvite: jest.fn().mockResolvedValue({ code: 'ABCD2345' }),
       claimAdmin: jest.fn().mockResolvedValue(undefined),
     };
@@ -26,6 +31,16 @@ describe('GenesisController', () => {
     }).compile();
 
     controller = module.get(GenesisController);
+  });
+
+  it('returns the genesis status from the service', async () => {
+    await expect(controller.status()).resolves.toEqual({ open: true });
+    expect(service.getStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes a closed status through unchanged', async () => {
+    service.getStatus.mockResolvedValue({ open: false });
+    await expect(controller.status()).resolves.toEqual({ open: false });
   });
 
   it('returns the minted code', async () => {

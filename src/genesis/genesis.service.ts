@@ -1,8 +1,4 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Not, Repository } from 'typeorm';
@@ -15,6 +11,7 @@ import {
   HOUSE_FIRST_NAME,
   HOUSE_GOOGLE_ID,
   HOUSE_LAST_NAME,
+  genesisError,
 } from './genesis.constants';
 
 /**
@@ -96,6 +93,29 @@ export class GenesisService {
        ON CONFLICT ("id") DO NOTHING RETURNING "id"`,
     );
     return Array.isArray(inserted) && inserted.length > 0;
+  }
+
+  private countAdmins(): Promise<number> {
+    return this.users.count({ where: { role: UserRole.Admin } });
+  }
+
+  /**
+   * Whether the frontend should still offer genesis. Closed when the kill
+   * switch is off, the consumed marker exists, or any admin exists. Read-only:
+   * it never writes the marker, even when it finds a pre-existing admin, and it
+   * answers `{ open: false }` for an unset `GENESIS_EMAIL` so the page can hide
+   * the flow without treating a 404 as an error.
+   */
+  async getStatus(): Promise<{ open: boolean }> {
+    const genesisEmail = this.config.get<string | null>('app.genesisEmail');
+    if (!genesisEmail) {
+      return { open: false };
+    }
+    if (await this.isGenesisConsumed()) {
+      return { open: false };
+    }
+    const adminCount = await this.countAdmins();
+    return { open: adminCount === 0 };
   }
 
   async mintGenesisInvite(): Promise<{ code: string }> {
@@ -193,7 +213,7 @@ export class GenesisService {
     const genesisEmail = this.requireGenesisEmail();
 
     if (email.toLowerCase() !== genesisEmail) {
-      throw new ForbiddenException('Not the genesis account');
+      throw genesisError('genesis_not_founder_account');
     }
 
     // One-way consumed marker: the first successful claim closes this
@@ -201,19 +221,17 @@ export class GenesisService {
     // genesis mailbox from re-promoting itself if every admin is later removed
     // while `GENESIS_EMAIL` is still set (finding L5).
     if (await this.isGenesisConsumed()) {
-      throw new ForbiddenException('Genesis is closed');
+      throw genesisError('genesis_closed');
     }
 
     // A pre-existing admin (a manually seeded one, say) means bootstrap already
     // happened by another route: close genesis for good rather than merely
     // rejecting this one call, so the mailbox can't slip through later if that
     // admin is removed.
-    const adminCount = await this.users.count({
-      where: { role: UserRole.Admin },
-    });
+    const adminCount = await this.countAdmins();
     if (adminCount > 0) {
       await this.markGenesisConsumed(this.dataSource.manager);
-      throw new ForbiddenException('Genesis is closed');
+      throw genesisError('genesis_closed');
     }
 
     await this.dataSource.transaction(async (manager) => {
@@ -221,7 +239,7 @@ export class GenesisService {
       // already inserted it) means we must not promote.
       const won = await this.markGenesisConsumed(manager);
       if (!won) {
-        throw new ForbiddenException('Genesis is closed');
+        throw genesisError('genesis_closed');
       }
       await manager.update(User, { id: userId }, { role: UserRole.Admin });
     });

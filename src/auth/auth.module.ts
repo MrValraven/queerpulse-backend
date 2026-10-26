@@ -32,6 +32,15 @@ import {
   SocketTicketService,
   socketTicketService,
 } from './socket-ticket.service';
+import { EmailCodeController } from './email-code/email-code.controller';
+import { EmailCodeMailer } from './email-code/email-code.mailer';
+import { EmailCodeService } from './email-code/email-code.service';
+import {
+  EmailCodeRequestAddressThrottlerGuard,
+  EmailCodeRequestIpThrottlerGuard,
+  EmailCodeVerifyIpThrottlerGuard,
+} from './email-code/email-code-throttler.guards';
+import { EmailSignInChallenge } from './email-code/email-sign-in-challenge.entity';
 
 @Module({
   imports: [
@@ -107,6 +116,8 @@ import {
       // the sign-in. `AdminMembersModule` registers its own copy for the admin
       // console that decides those rows.
       IdentityRelinkCandidate,
+      // Write-side, owned here: `EmailCodeService` issues and spends these sign-in code rows.
+      EmailSignInChallenge,
     ]),
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -121,12 +132,14 @@ import {
       }),
     }),
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, EmailCodeController],
   providers: [
     AuthService,
     AuthMaintenanceService,
     GoogleStrategy,
     JwtStrategy,
+    EmailCodeService,
+    EmailCodeMailer,
     // Registered for the same reason `StorageModule` registers
     // `UserPresignThrottlerGuard`: the guard resolves under DI either way,
     // because `ThrottlerModule` is `@Global()`, so listing it here is about
@@ -137,6 +150,11 @@ import {
     // Same reason as `RefreshSessionThrottlerGuard` immediately above:
     // throttles `POST /auth/socket-ticket` per signed-in member.
     SocketTicketThrottlerGuard,
+    // Same reason again: the per-IP and per-IP+address limits on the
+    // `/auth/email-code` routes (`EmailCodeController`).
+    EmailCodeRequestIpThrottlerGuard,
+    EmailCodeRequestAddressThrottlerGuard,
+    EmailCodeVerifyIpThrottlerGuard,
     // A `useValue` provider, deliberately, rather than the usual
     // `useClass`/bare-class shorthand: this MUST resolve to the same
     // process-wide `socketTicketService` singleton `ChatGateway`

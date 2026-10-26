@@ -415,6 +415,26 @@ export class Event {
   @Column({ type: 'varchar', length: 20, nullable: true })
   costKind!: CostKind | null;
 
+  /**
+   * Where a guest can pay the host: an https link the host pasted (Revolut,
+   * PayPal, Ko-fi and the like), or null when they gave none.
+   *
+   * DISPLAY ONLY, for the reason `cost` above is. The platform takes no
+   * money and this link is the host's own: nothing here checks that a guest
+   * paid, and no copy may present it as a charge, a refund or a ticket. A
+   * `free` gathering stores it as null (enforced in `EventsService`).
+   */
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  paymentUrl!: string | null;
+
+  /**
+   * The host's own words on how to pay ("MB WAY to 912 345 678 with your
+   * name, or cash at the door"), or null when they wrote none. Display only
+   * and nulled for a `free` gathering, exactly like `paymentUrl`.
+   */
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  paymentInstructions!: string | null;
+
   // ── Care (create-gathering v2) ───────────────────────────────────────────
   // Every vocabulary here is declared once in `../gathering-extras.ts`.
 

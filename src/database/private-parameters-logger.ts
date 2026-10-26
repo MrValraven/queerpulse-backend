@@ -6,8 +6,8 @@ import { AdvancedConsoleLogger, type QueryRunner } from 'typeorm';
  * drafts/entities/draft.entity.ts) carry the whole draft payload, and the quiz
  * show tables carry
  * players' answers, votes and team names, and the quiz, round, question and
- * session tables carry game titles and question text. A failed or slow query
- * on any of
+ * session tables carry game titles and question text, and sign-in code
+ * challenges carry email addresses. A failed or slow query on any of
  * them logs its SQL text, its error and its timing as usual, with the
  * parameters left out.
  */
@@ -23,6 +23,7 @@ export const PRIVATE_PARAMETER_TABLES = [
   'quizshow_rounds',
   'quizshow_questions',
   'quizshow_sessions',
+  'email_sign_in_challenges',
 ] as const;
 
 /**
@@ -38,9 +39,27 @@ const PRIVATE_PARAMETER_TABLE_PATTERN = new RegExp(
   'i',
 );
 
+/**
+ * The SQL comment a query carries to opt into the same treatment from any
+ * table. A query builder adds it with `.comment('private-parameters')`, which
+ * TypeORM renders as `/* private-parameters *\/` at the head of the SQL; a raw
+ * `query()` call writes the comment into its SQL text itself. The users and
+ * join requests lookups by email address use it, since those tables also bind
+ * plenty of values that are fine to log.
+ */
+export const PRIVATE_PARAMETERS_COMMENT = 'private-parameters';
+
+const PRIVATE_PARAMETERS_MARKER = `/* ${PRIVATE_PARAMETERS_COMMENT} */`;
+
+/**
+ * True when a query names a table in `PRIVATE_PARAMETER_TABLES` or carries the
+ * `/* private-parameters *\/` marker comment.
+ */
 export function touchesPrivateParameterTable(query: string): boolean {
   return (
-    typeof query === 'string' && PRIVATE_PARAMETER_TABLE_PATTERN.test(query)
+    typeof query === 'string' &&
+    (PRIVATE_PARAMETER_TABLE_PATTERN.test(query) ||
+      query.includes(PRIVATE_PARAMETERS_MARKER))
   );
 }
 
@@ -54,8 +73,9 @@ function parametersFit(
 /**
  * TypeORM's default logger (the one `logging` picks when no `logger` is set),
  * with one change: the `-- PARAMETERS:` comment is dropped from a logged query
- * that touches a table in `PRIVATE_PARAMETER_TABLES`. Every other line, and
- * every query on any other table, logs exactly as before.
+ * that touches a table in `PRIVATE_PARAMETER_TABLES` or carries the
+ * `PRIVATE_PARAMETERS_COMMENT` marker. Every other line, and every other
+ * query, logs exactly as before.
  */
 export class PrivateParametersLogger extends AdvancedConsoleLogger {
   logQuery(

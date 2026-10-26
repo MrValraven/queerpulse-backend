@@ -16,13 +16,17 @@ export const DEFAULT_REPORT_WEEK_RANGE: ReportWeekRange = 8;
 
 export interface AdminReportsGrowthPoint {
   at: string;
+  /** Profiles whose `joinedAt` falls inside this weekly bucket. */
   joined: number;
+  /** Members as of the end of this bucket: every profile that joined at or
+   *  before the window start plus the cumulative `joined` up to and
+   *  including this bucket (mirrors `AdminOverviewDTO.memberGrowth.points[].total`). */
+  total: number;
   /** Always null — there is no churn/leave data anywhere on the platform yet
    *  (mirrors `AdminOverviewDTO.memberGrowth.points[].churned`). Kept in the
    *  shape so the frontend renders "not measured yet" rather than a
    *  fabricated number. */
   churned: null;
-  spike: boolean;
 }
 
 export interface AdminReportsGrowthDTO {

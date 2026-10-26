@@ -158,6 +158,12 @@ export interface AdminMemberDetailDTO {
    * hold nothing here" mean different things to an operator.
    */
   signInEmailMasked: string | null;
+  /** `User.hasInviteAccess`: false while an admin has paused this member's
+   *  invites (`PATCH /admin/members/:id/invite-access`). */
+  hasInviteAccess: boolean;
+  /** Invites this member sent that are still Pending and unexpired, so the
+   *  drawer can say how many open links a pause leaves standing. */
+  pendingInviteCount: number;
 }
 
 export function toAdminMemberCard(input: {
@@ -267,6 +273,8 @@ export function toAdminMemberDetail(input: {
    *  mapper is the boundary the full value must not cross: callers pass what
    *  they read, and what reaches the wire is `signInEmailMasked`. */
   signInEmail: string | null;
+  hasInviteAccess: boolean;
+  pendingInviteCount: number;
 }): AdminMemberDetailDTO {
   const { profile } = input;
   return {
@@ -304,6 +312,8 @@ export function toAdminMemberDetail(input: {
     signInEmailMasked: input.signInEmail
       ? maskEmailAddress(input.signInEmail)
       : null,
+    hasInviteAccess: input.hasInviteAccess,
+    pendingInviteCount: input.pendingInviteCount,
   };
 }
 
@@ -330,6 +340,16 @@ export function toAdminMemberRole(input: {
     role: input.role,
     isSystem: input.isSystem,
   };
+}
+
+/* ── Invite access (PATCH /admin/members/:id/invite-access) ──────────────── */
+
+/** Returned after an invite-access change (or a no-op), so the admin UI can
+ *  patch the drawer in place. */
+export interface AdminMemberInviteAccessDTO {
+  userId: string;
+  slug: string;
+  hasInviteAccess: boolean;
 }
 
 /**

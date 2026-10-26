@@ -33,6 +33,16 @@ import {
   ActivitySubjectKind,
 } from './entities/activity.entity';
 import { ActivityService } from './activity.service';
+// Titles are built from the same prefixes `describeActivity` parses, so the
+// structured action/subject on the profile response can never drift from
+// what is written here.
+import {
+  COMMUNITY_POST_TITLE_PREFIX,
+  JOIN_TITLE_PREFIX,
+  PERSONA_TITLE_PREFIX,
+  RSVP_TITLE_PREFIX,
+  THREAD_TITLE_PREFIX,
+} from './activity-describe';
 import {
   communityPath,
   communityPostPath,
@@ -119,7 +129,7 @@ export class ActivityListener {
     await this.activity.record({
       userId: event.rsvperId,
       kind: ActivityKind.Event,
-      title: `RSVP'd to ${event.eventTitle}`,
+      title: `${RSVP_TITLE_PREFIX}${event.eventTitle}`,
       sub: null,
       toLink: gatheringPath(event.eventSlug),
       subjectKind: ActivitySubjectKind.Event,
@@ -132,7 +142,7 @@ export class ActivityListener {
     await this.activity.record({
       userId: event.authorId,
       kind: ActivityKind.Post,
-      title: `Started a thread: ${event.title}`,
+      title: `${THREAD_TITLE_PREFIX}${event.title}`,
       sub: 'In the forum',
       toLink: threadPath(event.threadSlug),
       // The thread is re-checked on every read: it can be withdrawn, sit
@@ -170,7 +180,7 @@ export class ActivityListener {
     await this.activity.record({
       userId: event.authorId,
       kind: ActivityKind.Post,
-      title: `Posted in ${event.communityName}`,
+      title: `${COMMUNITY_POST_TITLE_PREFIX}${event.communityName}`,
       sub: event.excerpt || null,
       toLink: communityPostPath(event.communitySlug, event.postId),
       // The COMMUNITY is the subject to re-check: the post's readability is
@@ -206,7 +216,7 @@ export class ActivityListener {
     await this.activity.record({
       userId: event.userId,
       kind: ActivityKind.Community,
-      title: `Joined ${community.name}`,
+      title: `${JOIN_TITLE_PREFIX}${community.name}`,
       sub: null,
       toLink: communityPath(community.slug),
       subjectKind: ActivitySubjectKind.Community,
@@ -263,7 +273,7 @@ export class ActivityListener {
     await this.activity.record({
       userId: persona.userId,
       kind: ActivityKind.Persona,
-      title: `Published a persona: ${persona.displayName}`,
+      title: `${PERSONA_TITLE_PREFIX}${persona.displayName}`,
       sub: null,
       toLink: link,
       subjectKind: ActivitySubjectKind.Persona,

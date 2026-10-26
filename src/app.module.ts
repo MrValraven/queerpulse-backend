@@ -10,6 +10,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import appConfig from './config/app.config';
 import authConfig from './config/auth.config';
 import databaseConfig from './config/database.config';
+import emailConfig from './config/email.config';
 import loggingConfig from './config/logging.config';
 import muxConfig from './config/mux.config';
 import pushConfig from './config/push.config';
@@ -49,6 +50,7 @@ import {
   isCreatorDraftRequest,
   redactCreatorDraftPath,
 } from './creator-drafts/creator-draft-request-log';
+import { isLandingVisitBeacon } from './landing/landing-visit-request-log';
 import { CommunitiesModule } from './communities/communities.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
@@ -171,6 +173,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
         muxConfig,
         pushConfig,
         retentionConfig,
+        emailConfig,
       ],
       validate,
     }),
@@ -185,7 +188,9 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
           autoLogging: {
             ignore: (req: IncomingMessage) =>
               isStudioListeningRequest(req.url, req.method) ||
-              isCreatorDraftRequest(req.url),
+              isCreatorDraftRequest(req.url) ||
+              // The landing visit beacon is an anonymous counter.
+              isLandingVisitBeacon(req.url, req.method),
           },
           // Correlate every request with an id (honour an inbound one behind a proxy).
           genReqId: (req: IncomingMessage, res: ServerResponse) => {

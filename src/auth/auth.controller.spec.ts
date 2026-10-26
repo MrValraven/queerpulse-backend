@@ -91,6 +91,7 @@ function build(configNodeEnv = 'test', domain?: string) {
   const usersService = {
     findByIdWithProfile: jest.fn(),
     findByGoogleId: jest.fn(),
+    hasGoogleIdentity: jest.fn().mockResolvedValue(false),
   };
   const config = makeConfig(configNodeEnv, domain);
   const mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
@@ -724,6 +725,8 @@ describe('AuthController.me', () => {
       },
       // Mocked `staffRolesFor` — no staff-role grants for this fixture.
       staffRoles: [],
+      // Mocked `hasGoogleIdentity` defaults to false.
+      hasGoogle: false,
       // Mocked `earlyAccessFeaturesFor`, no early-access grants either.
       earlyAccessFeatures: [],
       // The re-acceptance signal (ID-14): what the member has on file paired
@@ -739,6 +742,28 @@ describe('AuthController.me', () => {
       suspendedUntil: null,
       suspension: null,
     });
+  });
+
+  it("me reports hasGoogle from the account's Google identity", async () => {
+    for (const hasGoogle of [true, false]) {
+      const { controller, usersService } = build();
+      usersService.findByIdWithProfile.mockResolvedValue({
+        id: 'u1',
+        status: 'active',
+        role: 'member',
+        profile: null,
+      });
+      usersService.hasGoogleIdentity.mockResolvedValue(hasGoogle);
+      const out = await controller.me({
+        userId: 'u1',
+        email: 'a@b.c',
+        status: 'active',
+        role: 'member',
+      });
+      expect(out.hasGoogle).toBe(hasGoogle);
+      expect(usersService.hasGoogleIdentity).toHaveBeenCalledTimes(1);
+      expect(usersService.hasGoogleIdentity).toHaveBeenCalledWith('u1');
+    }
   });
 
   it('resolves an uploaded avatar STORAGE KEY into a fetchable /files URL', async () => {

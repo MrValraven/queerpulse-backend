@@ -222,3 +222,29 @@ describe('scrubSensitiveQueryParameters Pulse Live body', () => {
     expect(event.request?.data).toBe(JOIN_BODY);
   });
 });
+
+describe('scrubSensitiveQueryParameters email code bodies', () => {
+  const CODE_BODY = { challengeId: 'c1', code: '123456' };
+
+  it('drops the body of a sign-in code request', () => {
+    const verifyUrl = 'https://api.queerpulse.com/auth/email-code/verify';
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      request: { url: verifyUrl, method: 'POST', data: CODE_BODY },
+    });
+    expect(event.request?.data).toBeUndefined();
+    expect(event.request?.url).toBe(verifyUrl);
+  });
+
+  it('keeps the body of other routes', () => {
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      request: {
+        url: 'https://api.queerpulse.com/v1/events',
+        method: 'POST',
+        data: CODE_BODY,
+      },
+    });
+    expect(event.request?.data).toEqual(CODE_BODY);
+  });
+});

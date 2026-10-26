@@ -7,6 +7,7 @@ import {
   Subprofile,
   SubprofileLinkVisibility,
 } from './entities/subprofile.entity';
+import { BadRequestException } from '@nestjs/common';
 import { SubprofileItem } from './entities/subprofile-item.entity';
 import { HANDLE_RE, RESERVED_HANDLES } from '../common/handles';
 import { BLOCKED_TERMS, textHasBlockedTerm } from '../common/blocked-terms';
@@ -203,6 +204,27 @@ export function slugifyDisplayName(displayName: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
   return slug || 'subprofile';
+}
+
+/** The Studio artist page layouts an owner can store in
+ *  `skinData.studioHero`. Absent resolves on the frontend. */
+export const STUDIO_HERO_LAYOUTS = ['full-bleed', 'avatar'] as const;
+
+/** Rejects a `skinData.studioHero` that is not one of the allowed layouts.
+ *  Absent or null is valid. */
+export function assertValidStudioHero(
+  skinData: { studioHero?: unknown } | null | undefined,
+): void {
+  const studioHero = skinData?.studioHero;
+  if (studioHero === undefined || studioHero === null) return;
+  if (
+    typeof studioHero !== 'string' ||
+    !(STUDIO_HERO_LAYOUTS as readonly string[]).includes(studioHero)
+  ) {
+    throw new BadRequestException(
+      `skinData.studioHero must be 'full-bleed' or 'avatar', received ${JSON.stringify(studioHero)}`,
+    );
+  }
 }
 
 // --- Identity & presence constants (design plan Task A2; must stay identical

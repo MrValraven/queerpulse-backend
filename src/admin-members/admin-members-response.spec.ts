@@ -143,6 +143,8 @@ describe('toAdminMemberDetail', () => {
       nodes: [],
     },
     staffRoles: [] as string[],
+    hasInviteAccess: true,
+    pendingInviteCount: 0,
   });
 
   it('maps nested contributions and moderation timeline timestamps to ISO strings', () => {
@@ -194,11 +196,25 @@ describe('toAdminMemberDetail', () => {
       },
       staffRoles: [],
       signInEmail: 'devon.rae@example.com',
+      hasInviteAccess: true,
+      pendingInviteCount: 0,
     });
 
     expect(detail.contributions[0]!.at).toBe('2025-03-05T00:00:00.000Z');
     expect(detail.moderationTimeline[0]!.at).toBe('2025-03-06T00:00:00.000Z');
     expect(detail.name).toBe('Devon Rae');
+  });
+
+  it('passes invite access and the pending invite count through', () => {
+    const detail = toAdminMemberDetail({
+      ...detailInput(),
+      signInEmail: null,
+      hasInviteAccess: false,
+      pendingInviteCount: 3,
+    });
+
+    expect(detail.hasInviteAccess).toBe(false);
+    expect(detail.pendingInviteCount).toBe(3);
   });
 
   // The mapper is the boundary the raw address must not cross: the console gets
