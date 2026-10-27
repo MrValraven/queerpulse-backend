@@ -4,20 +4,24 @@ import { QuizshowQuestionRecord } from './entities/quizshow-question.entity';
 import { QuizshowQuizRecord } from './entities/quizshow-quiz.entity';
 import { QuizshowRoundRecord } from './entities/quizshow-round.entity';
 import { quizshowCodeOf, quizshowError } from './quizshow-errors';
+import { toQuizShape } from './quizshow-quiz-mapping';
 import { QuizshowQuizService } from './quizshow-quiz.service';
-import { QUIZSHOW_STARTER_PACKS } from './quizshow-starter-packs';
 import type { QuizshowQuizInputDto } from './dto/quizshow-quiz-input.dto';
 import type { QuizshowImportDto } from './dto/quizshow-import.dto';
 import type {
   QuizshowQuestionInput,
+  QuizshowQuiz,
+  QuizshowQuizShape,
   QuizshowRoundInput,
-  QuizshowStarterPackQuiz,
 } from './quizshow.contract';
 
 const USER_ID = 'user-1';
 const OTHER_USER_ID = 'user-2';
 const GAME_ID = '00000000-0000-4000-8000-0000000000b1';
 const OTHER_GAME_ID = '00000000-0000-4000-8000-0000000000b2';
+const TEMPLATE_ID = '00000000-0000-4000-8000-0000000000c1';
+const TEMPLATE_QUIZ_ID = '00000000-0000-4000-8000-0000000000c2';
+const OTHER_TEMPLATE_ID = '00000000-0000-4000-8000-0000000000c3';
 const EVENT_ID = 'event-1';
 const SLUG = 'drag-bingo';
 const STORED_UPDATED_AT = new Date('2026-10-19T10:00:00.000Z');
@@ -79,7 +83,7 @@ function quizInput(
 
 function gameShape(
   rounds: QuizshowRoundInput[] = [round()],
-): QuizshowStarterPackQuiz {
+): QuizshowQuizShape {
   return {
     title: 'Game night',
     languages: 'both',
@@ -210,6 +214,7 @@ function build(options: { isAdultsEvent?: boolean } = {}) {
     organisedEvent: [] as object[],
     importSources: [] as object[],
     gameSources: [] as object[],
+    publishedTemplate: [] as object[],
   };
   const dataSource = {
     manager,
@@ -218,6 +223,9 @@ function build(options: { isAdultsEvent?: boolean } = {}) {
     ),
     query: jest.fn((sql: string, parameters: unknown[]) => {
       queries.push({ sql, parameters });
+      if (sql.includes('"quizshow_templates"')) {
+        return Promise.resolve(queryResults.publishedTemplate);
+      }
       if (sql.includes('"open_session"')) {
         return Promise.resolve(queryResults.state);
       }
@@ -259,7 +267,8 @@ function seedStoredQuiz(
     title: 'Stored',
     languages: 'both',
     screenLanguage: 'en',
-    starterPackKey: 'eurovision',
+    templateId: null,
+    sourceTemplateId: null,
     createdByUserId: USER_ID,
     updatedByUserId: USER_ID,
     createdAt: STORED_UPDATED_AT,
@@ -310,7 +319,8 @@ function seedStoredGame(
     title: 'Stored game',
     languages: 'both',
     screenLanguage: 'en',
-    starterPackKey: 'pride_history',
+    templateId: null,
+    sourceTemplateId: OTHER_TEMPLATE_ID,
     createdByUserId: game.ownerUserId,
     updatedByUserId: game.ownerUserId,
     createdAt: STORED_UPDATED_AT,
@@ -340,6 +350,57 @@ function seedStoredGame(
     timeLimitSeconds: null,
     points: 1000,
   });
+}
+
+/** A staff template's quiz: one round with one question, owned by the template alone. */
+function seedTemplateQuiz(
+  store: FakeStore,
+  contentLabel: QuizshowRoundInput['contentLabel'] = 'none',
+): void {
+  const roundId = 'template-round';
+  store.quizzes.push({
+    id: TEMPLATE_QUIZ_ID,
+    eventId: null,
+    ownerUserId: null,
+    isAdultsOnly: false,
+    title: 'Template quiz',
+    languages: 'both',
+    screenLanguage: 'en',
+    templateId: TEMPLATE_ID,
+    sourceTemplateId: null,
+    createdByUserId: OTHER_USER_ID,
+    updatedByUserId: OTHER_USER_ID,
+    createdAt: STORED_UPDATED_AT,
+    updatedAt: STORED_UPDATED_AT,
+  });
+  store.rounds.push({
+    id: roundId,
+    quizId: TEMPLATE_QUIZ_ID,
+    position: 0,
+    kind: 'quiz',
+    titleEn: 'Template round',
+    titlePt: 'Ronda do modelo',
+    contentLabel,
+    settings: round().settings,
+  });
+  store.questions.push({
+    id: 'template-question',
+    roundId,
+    position: 0,
+    type: 'multiple_choice',
+    promptEn: 'Which year?',
+    promptPt: 'Que ano?',
+    mediaRef: null,
+    options: multipleChoiceQuestion().options,
+    answer: { correctIndex: 1 },
+    acceptedAnswers: [],
+    timeLimitSeconds: 30,
+    points: 500,
+  });
+}
+
+function roundsOf(quiz: QuizshowQuiz | null | undefined): unknown {
+  return quiz ? toQuizShape(quiz).rounds : null;
 }
 
 function codeOfThrow(action: () => void): unknown {
@@ -459,7 +520,8 @@ describe('QuizshowQuizService', () => {
         title: 'Winner',
         languages: 'both',
         screenLanguage: 'en',
-        starterPackKey: null,
+        templateId: null,
+        sourceTemplateId: null,
         createdByUserId: null,
         updatedByUserId: null,
         createdAt: winner,
@@ -545,23 +607,33 @@ describe('QuizshowQuizService', () => {
     ).resolves.toBeDefined();
   });
 
-  it("imports a pack with its key and an event's quiz with its key", async () => {
-    const { service, store } = build();
-    const pack = QUIZSHOW_STARTER_PACKS[0];
-    if (!pack) throw new Error('The catalog holds no pack');
+  it("imports a published template with its id as source and copies an event quiz's source", async () => {
+    const { service, store, queryResults, queries } = build();
+    seedTemplateQuiz(store);
+    queryResults.publishedTemplate = [{ quiz_id: TEMPLATE_QUIZ_ID }];
 
-    const packResponse = await service.importQuiz(SLUG, USER_ID, {
-      from: 'pack',
-      packKey: pack.key,
+    const response = await service.importQuiz(SLUG, USER_ID, {
+      from: 'template',
+      templateId: TEMPLATE_ID,
     });
 
-    expect(packResponse.quiz?.starterPackKey).toBe(pack.key);
-    expect(store.quizzes[0]?.starterPackKey).toBe(pack.key);
+    expect(response.quiz?.sourceTemplateId).toBe(TEMPLATE_ID);
+    const eventQuiz = store.quizzes.find((quiz) => quiz.eventId === EVENT_ID);
+    expect(eventQuiz?.sourceTemplateId).toBe(TEMPLATE_ID);
+    expect(eventQuiz?.templateId).toBeUndefined();
+    expect(response.quiz?.title).toBe('Template quiz');
+    const templateQuiz = await service.loadQuizById(TEMPLATE_QUIZ_ID);
+    expect(templateQuiz?.rounds).toHaveLength(1);
+    expect(roundsOf(response.quiz)).toEqual(roundsOf(templateQuiz));
+    const templateQuery = queries.find((entry) =>
+      entry.sql.includes('"quizshow_templates"'),
+    );
+    expect(templateQuery?.parameters).toEqual([TEMPLATE_ID]);
 
     const second = build();
     seedStoredQuiz(second.store, {
       eventId: 'source-event',
-      starterPackKey: 'drag_herstory',
+      sourceTemplateId: OTHER_TEMPLATE_ID,
     });
     second.queryResults.organisedEvent = [{ event_id: 'source-event' }];
     const eventResponse = await second.service.importQuiz(SLUG, USER_ID, {
@@ -569,8 +641,78 @@ describe('QuizshowQuizService', () => {
       eventSlug: 'last-bingo',
     });
 
-    expect(eventResponse.quiz?.starterPackKey).toBe('drag_herstory');
+    expect(eventResponse.quiz?.sourceTemplateId).toBe(OTHER_TEMPLATE_ID);
     expect(eventResponse.quiz?.rounds).toHaveLength(1);
+  });
+
+  it('refuses a draft or unknown template with template not found and copies nothing', async () => {
+    const { service, store, queryResults, queries, manager } = build();
+    seedTemplateQuiz(store);
+    queryResults.publishedTemplate = [];
+    const quizzesBefore = structuredClone(store.quizzes);
+    const roundsBefore = structuredClone(store.rounds);
+
+    const error = await codeOfRejection(
+      service.importQuiz(SLUG, USER_ID, {
+        from: 'template',
+        templateId: TEMPLATE_ID,
+      }),
+    );
+
+    expect(quizshowCodeOf(error)).toBe('quizshow_template_not_found');
+    const templateQuery = queries.find((entry) =>
+      entry.sql.includes('"quizshow_templates"'),
+    );
+    expect(templateQuery?.sql).toContain(
+      '"template"."published_at" IS NOT NULL',
+    );
+    expect(templateQuery?.parameters).toEqual([TEMPLATE_ID]);
+    expect(store.quizzes).toEqual(quizzesBefore);
+    expect(store.rounds).toEqual(roundsBefore);
+    expect(manager.insert).not.toHaveBeenCalled();
+    expect(manager.update).not.toHaveBeenCalled();
+
+    const missingId = await codeOfRejection(
+      service.importQuiz(SLUG, USER_ID, {
+        from: 'template',
+      } as unknown as QuizshowImportDto),
+    );
+    expect(quizshowCodeOf(missingId)).toBe('quizshow_template_not_found');
+    expect(store.quizzes).toEqual(quizzesBefore);
+  });
+
+  it('refuses an adults round from a template into a non-18+ event with the event code', async () => {
+    const { service, store, queryResults } = build({ isAdultsEvent: false });
+    seedTemplateQuiz(store, 'adults');
+    queryResults.publishedTemplate = [{ quiz_id: TEMPLATE_QUIZ_ID }];
+
+    const error = await codeOfRejection(
+      service.importQuiz(SLUG, USER_ID, {
+        from: 'template',
+        templateId: TEMPLATE_ID,
+      }),
+    );
+
+    expect(quizshowCodeOf(error)).toBe(
+      'quizshow_adults_round_needs_adults_event',
+    );
+    expect(store.quizzes.some((quiz) => quiz.eventId === EVENT_ID)).toBe(false);
+  });
+
+  it('keeps the stored source on an event save', async () => {
+    const { service, store } = build();
+    seedStoredQuiz(store, { sourceTemplateId: TEMPLATE_ID });
+
+    const response = await service.replaceQuiz(
+      SLUG,
+      USER_ID,
+      quizInput({ expectedUpdatedAt: STORED_UPDATED_AT.toISOString() }),
+    );
+
+    expect(store.quizzes).toHaveLength(1);
+    expect(store.quizzes[0]?.sourceTemplateId).toBe(TEMPLATE_ID);
+    expect(store.quizzes[0]?.title).toBe('Bingo night');
+    expect(response.quiz?.sourceTemplateId).toBe(TEMPLATE_ID);
   });
 
   it('refuses an import from the same event and from an event the caller does not organise', async () => {
@@ -592,14 +734,6 @@ describe('QuizshowQuizService', () => {
       }),
     );
     expect(quizshowCodeOf(foreign)).toBe('quizshow_import_source_not_found');
-
-    const unknownPack = await codeOfRejection(
-      service.importQuiz(SLUG, USER_ID, {
-        from: 'pack',
-        packKey: 'not_a_pack',
-      } as unknown as QuizshowImportDto),
-    );
-    expect(quizshowCodeOf(unknownPack)).toBe('quizshow_pack_not_found');
   });
 
   it('lists import sources with the series flag, newest first', async () => {
@@ -648,19 +782,6 @@ describe('QuizshowQuizService', () => {
     expect(sourcesQuery?.parameters).toEqual([SLUG, USER_ID, 'series-1', 50]);
   });
 
-  it('lists the packs with no questions', () => {
-    const { service } = build();
-
-    const { items } = service.listPacks();
-
-    expect(items).toHaveLength(QUIZSHOW_STARTER_PACKS.length);
-    for (const card of items) {
-      expect(card).not.toHaveProperty('quiz');
-      expect(JSON.stringify(card)).not.toContain('"questions"');
-      expect(card.questionCount).toBeGreaterThan(0);
-    }
-  });
-
   it('imports a game the caller owns into an event', async () => {
     const { service, store, access } = build();
     seedStoredGame(store, { id: GAME_ID, ownerUserId: USER_ID });
@@ -673,7 +794,7 @@ describe('QuizshowQuizService', () => {
     expect(access.loadOwnedGame).toHaveBeenCalledWith(GAME_ID, USER_ID);
     const eventQuiz = store.quizzes.find((quiz) => quiz.eventId === EVENT_ID);
     expect(eventQuiz?.title).toBe('Stored game');
-    expect(eventQuiz?.starterPackKey).toBe('pride_history');
+    expect(eventQuiz?.sourceTemplateId).toBe(OTHER_TEMPLATE_ID);
     expect(eventQuiz?.ownerUserId).toBeUndefined();
     expect(response.quiz?.title).toBe('Stored game');
     expect(response.quiz?.rounds).toHaveLength(1);
@@ -836,7 +957,7 @@ describe('QuizshowQuizService', () => {
       target: { kind: 'game', gameId: GAME_ID, isAdultsOnly: true },
       userId: USER_ID,
       shape: gameShape([round({ contentLabel: 'adults' })]),
-      starterPackKey: null,
+      sourceTemplateId: null,
       expectedUpdatedAt: STORED_UPDATED_AT.toISOString(),
     });
 
@@ -890,6 +1011,69 @@ describe('QuizshowQuizService', () => {
     ).toBeNull();
   });
 
+  it('writes a template target by template id and allows an adults round', async () => {
+    const { service, store, manager } = build({ isAdultsEvent: false });
+    const shapeWithAdultsRound = gameShape([round({ contentLabel: 'adults' })]);
+
+    expect(
+      codeOfThrow(() =>
+        service.assertShapeAllowed(
+          { kind: 'template', templateId: TEMPLATE_ID },
+          shapeWithAdultsRound,
+        ),
+      ),
+    ).toBeNull();
+    const tooFewOptions = multipleChoiceQuestion({
+      options: [{ id: 'a', text: { en: 'One', pt: 'Um' } }],
+    });
+    expect(
+      codeOfThrow(() =>
+        service.assertShapeAllowed(
+          { kind: 'template', templateId: TEMPLATE_ID },
+          gameShape([round({}, [tooFewOptions])]),
+        ),
+      ),
+    ).toBe('quizshow_quiz_invalid');
+
+    const quizId = await service.writeQuiz({
+      target: { kind: 'template', templateId: TEMPLATE_ID },
+      userId: USER_ID,
+      shape: shapeWithAdultsRound,
+      sourceTemplateId: null,
+      expectedUpdatedAt: undefined,
+    });
+
+    expect(quizId).toBe('quiz-new');
+    expect(manager.findOne).toHaveBeenCalledWith(QuizshowQuizRecord, {
+      where: { templateId: TEMPLATE_ID },
+      lock: { mode: 'for_no_key_update' },
+    });
+    const insertedQuiz = store.quizzes.find((quiz) => quiz.id === quizId);
+    expect(insertedQuiz).toMatchObject({
+      templateId: TEMPLATE_ID,
+      eventId: null,
+      sourceTemplateId: null,
+      title: 'Game night',
+      createdByUserId: USER_ID,
+    });
+    expect(insertedQuiz).not.toHaveProperty('isAdultsOnly');
+    expect(insertedQuiz).not.toHaveProperty('ownerUserId');
+    expect(store.rounds.map((stored) => stored.contentLabel)).toEqual([
+      'adults',
+    ]);
+  });
+
+  it('answers game not found for a template quiz on the game builder', async () => {
+    const { service, store } = build();
+    seedTemplateQuiz(store);
+
+    const error = await codeOfRejection(
+      service.buildGameResponse(TEMPLATE_QUIZ_ID),
+    );
+
+    expect(quizshowCodeOf(error)).toBe('quizshow_game_not_found');
+  });
+
   it('creates a new game row with its owner inside the given transaction and returns its id', async () => {
     const { service, store, manager, dataSource } = build();
     const passedInsert = jest.fn((entity: unknown, rows: object | object[]) =>
@@ -902,7 +1086,7 @@ describe('QuizshowQuizService', () => {
         target: { kind: 'new_game', ownerUserId: USER_ID, isAdultsOnly: true },
         userId: USER_ID,
         shape: gameShape([round({ contentLabel: 'adults' })]),
-        starterPackKey: null,
+        sourceTemplateId: null,
         expectedUpdatedAt: undefined,
       },
       passedManager as unknown as EntityManager,
@@ -936,7 +1120,7 @@ describe('QuizshowQuizService', () => {
         target: { kind: 'game', gameId: GAME_ID, isAdultsOnly: false },
         userId: USER_ID,
         shape: gameShape(),
-        starterPackKey: null,
+        sourceTemplateId: null,
         expectedUpdatedAt: undefined,
       }),
     );

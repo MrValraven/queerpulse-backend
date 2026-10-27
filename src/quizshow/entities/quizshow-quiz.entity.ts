@@ -11,6 +11,7 @@ import {
 } from 'typeorm';
 import { Event } from '../../events/entities/event.entity';
 import { User } from '../../users/entities/user.entity';
+import { QuizshowTemplateRecord } from './quizshow-template.entity';
 import {
   QUIZSHOW_LANGUAGE_MODES,
   QUIZSHOW_LANGUAGES,
@@ -19,20 +20,25 @@ import {
 } from '../quizshow.contract';
 
 /**
- * The quiz of an event, or a game owned by a member, for Pulse Live: exactly
- * one of `eventId` and `ownerUserId` is set. An event has one quiz.
- * Retention: the quiz lives until its event goes (FK cascade), or until its
- * owner's account goes (FK cascade). Author columns are set null when an
+ * The quiz of an event, a game owned by a member, or a staff template, for
+ * Pulse Live: exactly one of `eventId`, `ownerUserId` and `templateId` is set.
+ * An event has one quiz and a template has one quiz.
+ * Retention: the quiz lives until its event goes (FK cascade), until its
+ * owner's account goes (FK cascade), or until its template is deleted (FK
+ * cascade). `sourceTemplateId` records the template a copy came from and is
+ * set null when that template is deleted. Author columns are set null when an
  * account goes. `updatedAt` is a plain column the
  * service sets, so the new value is returned as `updatedAt` before commit.
  */
 @Entity('quizshow_quizzes')
 @Unique('UQ_quizshow_quizzes_event_id', ['eventId'])
+@Unique('UQ_quizshow_quizzes_template_id', ['templateId'])
 @Check(
   'CHK_quizshow_quizzes_scope',
-  'num_nonnulls("event_id", "owner_user_id") = 1',
+  'num_nonnulls("event_id", "owner_user_id", "template_id") = 1',
 )
 @Index('IDX_quizshow_quizzes_owner_user_id', ['ownerUserId'])
+@Index('IDX_quizshow_quizzes_source_template_id', ['sourceTemplateId'])
 export class QuizshowQuizRecord {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -77,8 +83,31 @@ export class QuizshowQuizRecord {
   })
   screenLanguage!: QuizshowLanguage;
 
-  @Column({ type: 'varchar', length: 40, nullable: true })
-  starterPackKey!: string | null;
+  @Column({ type: 'uuid', nullable: true })
+  templateId!: string | null;
+
+  @ManyToOne(() => QuizshowTemplateRecord, {
+    onDelete: 'CASCADE',
+    nullable: true,
+  })
+  @JoinColumn({
+    name: 'template_id',
+    foreignKeyConstraintName: 'FK_quizshow_quizzes_template',
+  })
+  template?: QuizshowTemplateRecord | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  sourceTemplateId!: string | null;
+
+  @ManyToOne(() => QuizshowTemplateRecord, {
+    onDelete: 'SET NULL',
+    nullable: true,
+  })
+  @JoinColumn({
+    name: 'source_template_id',
+    foreignKeyConstraintName: 'FK_quizshow_quizzes_source_template',
+  })
+  sourceTemplate?: QuizshowTemplateRecord | null;
 
   @Column({ type: 'uuid', nullable: true })
   createdByUserId!: string | null;

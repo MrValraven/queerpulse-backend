@@ -5,14 +5,15 @@
  * Sentry 9's `httpIntegration` attaches the incoming request body to every
  * captured event as `request.data`. A 500 during a join, an import or a
  * session call would ship that body to a third-party service. The body is
- * dropped for every Pulse Live route; the URL names only the event slug and
- * stays.
+ * dropped for every Pulse Live route, staff template routes included, since
+ * staff template bodies carry question text and staff notes. The URL names
+ * only the event slug or a template id and stays.
  *
  * This module imports nothing: `instrument.ts` reads it before `Sentry.init`.
  */
 
 const QUIZSHOW_PATH_PATTERN =
-  /^(?:\/v\d+)?\/(?:events\/[^/]+\/quizshow|quizshow)(?:\/[^?#]*)?\/?$/i;
+  /^(?:\/v\d+)?\/(?:events\/[^/]+\/quizshow|quizshow|admin\/quizshow\/templates)(?:\/[^?#]*)?\/?$/i;
 
 /**
  * Answers whether a request URL (absolute, or a path with an optional query

@@ -26,8 +26,7 @@ import {
   type QuizshowGameSummary,
   type QuizshowImportSource,
   type QuizshowLiveSessionRef,
-  type QuizshowStarterPackKey,
-  type QuizshowStarterPackQuiz,
+  type QuizshowQuizShape,
 } from './quizshow.contract';
 
 /** Moderation audit action codes for staff takedowns of a reported game. */
@@ -147,8 +146,8 @@ interface GameListRow {
 }
 
 interface NewGamePlan {
-  shape: QuizshowStarterPackQuiz;
-  starterPackKey: QuizshowStarterPackKey | null;
+  shape: QuizshowQuizShape;
+  sourceTemplateId: string | null;
   isAdultsOnly: boolean;
 }
 
@@ -221,18 +220,18 @@ export class QuizshowGamesService {
     if (input.source === null) {
       return this.insertNewGame(userId, {
         shape: { title, languages: 'both', screenLanguage: 'en', rounds: [] },
-        starterPackKey: null,
+        sourceTemplateId: null,
         isAdultsOnly: false,
       });
     }
-    const { shape, starterPackKey } = await this.quizzes.resolveImportShape(
+    const { shape, sourceTemplateId } = await this.quizzes.resolveImportShape(
       input.source,
       userId,
       { eventSlug: null, gameId: null },
     );
     return this.insertNewGame(userId, {
       shape: { ...shape, title },
-      starterPackKey,
+      sourceTemplateId,
       isAdultsOnly: hasAdultsRound(shape),
     });
   }
@@ -250,7 +249,7 @@ export class QuizshowGamesService {
   ): Promise<QuizshowGameResponse> {
     await this.access.loadOwnedGame(gameId, userId);
     // Sound because IsQuizshowAnswerForType fixes each answer's shape and structuralProblems rejects the rest.
-    const inputShape = input as unknown as QuizshowStarterPackQuiz;
+    const inputShape = input as unknown as QuizshowQuizShape;
     const target: QuizshowQuizTarget = {
       kind: 'game',
       gameId,
@@ -274,7 +273,7 @@ export class QuizshowGamesService {
       target,
       userId,
       shape: inputShape,
-      starterPackKey: storedQuiz?.starterPackKey ?? null,
+      sourceTemplateId: storedQuiz?.sourceTemplateId ?? null,
       expectedUpdatedAt: input.expectedUpdatedAt,
     });
     return this.quizzes.buildGameResponse(gameId);
@@ -300,24 +299,24 @@ export class QuizshowGamesService {
     if (!sourceQuiz) throw quizshowError('quizshow_game_not_found');
     return this.insertNewGame(userId, {
       shape: { ...toQuizShape(sourceQuiz), title: sourceGame.title },
-      starterPackKey: sourceQuiz.starterPackKey,
+      sourceTemplateId: sourceQuiz.sourceTemplateId,
       isAdultsOnly: sourceGame.isAdultsOnly,
     });
   }
 
-  /** Replaces the rounds, languages and pack key from the source; the game keeps its own title and switch. */
+  /** Replaces the rounds, languages and source template from the source; the game keeps its own title and switch. */
   async importIntoGame(
     gameId: string,
     userId: string,
     input: QuizshowImportDto,
   ): Promise<QuizshowGameResponse> {
     const game = await this.access.loadOwnedGame(gameId, userId);
-    const { shape, starterPackKey } = await this.quizzes.resolveImportShape(
+    const { shape, sourceTemplateId } = await this.quizzes.resolveImportShape(
       input,
       userId,
       { eventSlug: null, gameId },
     );
-    const gameShape: QuizshowStarterPackQuiz = { ...shape, title: game.title };
+    const gameShape: QuizshowQuizShape = { ...shape, title: game.title };
     const target: QuizshowQuizTarget = {
       kind: 'game',
       gameId,
@@ -328,7 +327,7 @@ export class QuizshowGamesService {
       target,
       userId,
       shape: gameShape,
-      starterPackKey,
+      sourceTemplateId,
       expectedUpdatedAt: undefined,
     });
     return this.quizzes.buildGameResponse(gameId);
@@ -453,7 +452,7 @@ export class QuizshowGamesService {
             target,
             userId,
             shape,
-            starterPackKey: plan.starterPackKey,
+            sourceTemplateId: plan.sourceTemplateId,
             expectedUpdatedAt: undefined,
           },
           manager,

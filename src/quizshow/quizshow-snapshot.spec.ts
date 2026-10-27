@@ -154,7 +154,7 @@ function buildQuiz(): QuizshowQuiz {
     title: 'Quiz night',
     languages: 'both',
     screenLanguage: 'en',
-    starterPackKey: null,
+    sourceTemplateId: null,
     updatedAt: '2026-10-19T10:00:00.000Z',
     rounds: [
       round(

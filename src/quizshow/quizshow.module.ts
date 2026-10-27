@@ -21,8 +21,10 @@ import { QuizshowResultRecord } from './entities/quizshow-result.entity';
 import { QuizshowRoundRecord } from './entities/quizshow-round.entity';
 import { QuizshowSessionRecord } from './entities/quizshow-session.entity';
 import { QuizshowTeamRecord } from './entities/quizshow-team.entity';
+import { QuizshowTemplateRecord } from './entities/quizshow-template.entity';
 import { QuizshowVoteRecord } from './entities/quizshow-vote.entity';
 import { AdminQuizshowController } from './admin-quizshow.controller';
+import { AdminQuizshowTemplatesController } from './admin-quizshow-templates.controller';
 import { QuizshowAccessService } from './quizshow-access.service';
 import { QuizshowEventController } from './quizshow-event.controller';
 import { QuizshowEventLifecycleListener } from './quizshow-event-lifecycle.listener';
@@ -34,13 +36,15 @@ import { QuizshowQuizService } from './quizshow-quiz.service';
 import { QuizshowRetentionService } from './quizshow-retention.service';
 import { QuizshowRuntimeService } from './quizshow-runtime.service';
 import { QuizshowSessionsService } from './quizshow-sessions.service';
+import { QuizshowTemplatesService } from './quizshow-templates.service';
 import { QuizshowController } from './quizshow.controller';
 import { QuizshowGateway } from './quizshow.gateway';
 import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
 
 /**
  * Pulse Live (`quizshow`): live quiz and party games on events, and games
- * without an event that a member owns. Join is open to every active member
+ * without an event that a member owns, and the staff templates hosts import
+ * from. Join is open to every active member
  * before launch; hosting stays behind the feature gate.
  *
  * Module edges: `QuizshowModule` imports `EventsModule`; `EventsModule` and
@@ -64,6 +68,7 @@ import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
       QuizshowResultRecord,
       // The lobby rate limit's ledger; it outlives the games it counts.
       QuizshowLobbyOpenRecord,
+      QuizshowTemplateRecord,
       Event,
       EventBan,
       User,
@@ -101,12 +106,14 @@ import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
     QuizshowEventController,
     QuizshowGamesController,
     AdminQuizshowController,
+    AdminQuizshowTemplatesController,
     QuizshowController,
   ],
   providers: [
     QuizshowAccessService,
     QuizshowQuizService,
     QuizshowGamesService,
+    QuizshowTemplatesService,
     QuizshowSessionsService,
     QuizshowGuestPushService,
     QuizshowPersistenceService,

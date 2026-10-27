@@ -11,8 +11,8 @@ import {
   type QuizshowRoundKind,
 } from './quizshow.contract';
 
-/** An input, a stored quiz and a starter pack all fit this shape. */
-export type QuizshowQuizShape = {
+/** An input, a stored quiz, a template and a seed all fit this shape. */
+export type QuizshowValidatableQuiz = {
   title: string;
   languages: QuizshowLanguageMode;
   rounds: ReadonlyArray<
@@ -34,7 +34,7 @@ export function isPartyRoundKind(kind: QuizshowRoundKind): boolean {
 }
 
 export function hasAdultsRound(
-  quiz: Pick<QuizshowQuizShape, 'rounds'>,
+  quiz: Pick<QuizshowValidatableQuiz, 'rounds'>,
 ): boolean {
   return quiz.rounds.some((round) => round.contentLabel === 'adults');
 }
@@ -177,7 +177,7 @@ function questionStructuralProblems(
 }
 
 export function structuralProblems(
-  quiz: QuizshowQuizShape,
+  quiz: QuizshowValidatableQuiz,
 ): QuizshowQuizProblem[] {
   const problems: QuizshowQuizProblem[] = [];
   if (quiz.rounds.length > QUIZSHOW_LIMITS.roundsMax) {
@@ -265,7 +265,7 @@ function questionCompletenessProblems(
 }
 
 export function completenessProblems(
-  quiz: QuizshowQuizShape,
+  quiz: QuizshowValidatableQuiz,
 ): QuizshowQuizProblem[] {
   const problems: QuizshowQuizProblem[] = [];
   if (quiz.rounds.length === 0) {

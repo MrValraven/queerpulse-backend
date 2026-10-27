@@ -4,7 +4,7 @@ import {
   isPartyRoundKind,
   structuralProblems,
   usedLanguages,
-  type QuizshowQuizShape,
+  type QuizshowValidatableQuiz,
 } from './quizshow-quiz-validation';
 import type {
   QuizshowOption,
@@ -14,7 +14,7 @@ import type {
   QuizshowText,
 } from './quizshow.contract';
 
-type ShapeRound = QuizshowQuizShape['rounds'][number];
+type ShapeRound = QuizshowValidatableQuiz['rounds'][number];
 
 const filledText = (label: string): QuizshowText => ({
   en: `${label} en`,
@@ -95,8 +95,8 @@ function roundOf(
 
 function quizOf(
   rounds: ShapeRound[],
-  overrides: Partial<QuizshowQuizShape> = {},
-): QuizshowQuizShape {
+  overrides: Partial<QuizshowValidatableQuiz> = {},
+): QuizshowValidatableQuiz {
   return { title: 'Quiz', languages: 'both', rounds, ...overrides };
 }
 

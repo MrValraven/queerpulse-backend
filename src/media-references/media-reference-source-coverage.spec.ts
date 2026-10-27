@@ -660,6 +660,109 @@ describe('Pulse Live question images', () => {
     expect(String(firstCall?.[0])).toContain('LEFT JOIN "events"');
   });
 
+  describe('in a staff template', () => {
+    const TEMPLATE_ID = 'a7e3b1c0-5eed-4000-8000-000000000001';
+    const templateRow = {
+      quiz_id: 'quiz-template-1',
+      quiz_title: 'Pride and queer history quiz',
+      quiz_event_id: null,
+      quiz_owner_user_id: null,
+      quiz_template_id: TEMPLATE_ID,
+      event_title: null,
+      event_slug: null,
+      template_card_title_en: 'Pride and queer history',
+      template_card_title_pt: 'Orgulho e história queer',
+    };
+
+    it('links a template question image to the template with its EN card title', async () => {
+      const imageKey = 'work-image/u1/template.jpg';
+      const { dataSource } = dataSourceReturning([
+        { media_ref: imageKey, ...templateRow },
+      ]);
+
+      const resolved = await questionSource!.resolve(
+        dataSource,
+        new Set([imageKey]),
+        [imageKey, `/files/${imageKey}`],
+      );
+
+      expect(resolved).toEqual([
+        [
+          imageKey,
+          {
+            type: 'quizshow-template-question',
+            entityId: TEMPLATE_ID,
+            label: 'Pride and queer history',
+            slug: '',
+          },
+        ],
+      ]);
+    });
+
+    it('checks the template before the game branch', async () => {
+      const otherMemberId = '4a2b3c5d-6e7f-4a81-9b0c-1d2e3f4a5b6c';
+      const imageKey = `work/${otherMemberId}/9e4f5a6b-7c8d-4e9f-8a1b-2c3d4e5f6a7b.jpg`;
+      const { dataSource } = dataSourceReturning([
+        { media_ref: imageKey, ...templateRow },
+      ]);
+
+      const resolved = await questionSource!.resolve(
+        dataSource,
+        new Set([imageKey]),
+        [imageKey],
+      );
+
+      expect(resolved[0]?.[1]).toEqual({
+        type: 'quizshow-template-question',
+        entityId: TEMPLATE_ID,
+        label: 'Pride and queer history',
+        slug: '',
+      });
+    });
+
+    it('labels a template with a blank EN card title by its PT card title', async () => {
+      const imageKey = 'work-image/u1/template-pt.jpg';
+      const { dataSource } = dataSourceReturning([
+        {
+          media_ref: imageKey,
+          ...templateRow,
+          template_card_title_en: '  ',
+        },
+      ]);
+
+      const resolved = await questionSource!.resolve(
+        dataSource,
+        new Set([imageKey]),
+        [imageKey],
+      );
+
+      expect(resolved[0]?.[1].label).toBe('Orgulho e história queer');
+    });
+
+    it('joins templates with a left join', async () => {
+      const { dataSource, query } = dataSourceReturning([]);
+
+      await questionSource!.resolve(
+        dataSource,
+        new Set(['work-image/u1/a.jpg']),
+        ['work-image/u1/a.jpg'],
+      );
+
+      const [firstCall] = query.mock.calls as Array<[string, unknown[]]>;
+      const sql = String(firstCall?.[0]);
+      expect(sql).toContain(
+        'LEFT JOIN "quizshow_templates" "template" ON "template"."id" = "quiz"."template_id"',
+      );
+      expect(sql).toContain('"quiz"."template_id" AS "quiz_template_id"');
+      expect(sql).toContain(
+        '"template"."card_title_en" AS "template_card_title_en"',
+      );
+      expect(sql).toContain(
+        '"template"."card_title_pt" AS "template_card_title_pt"',
+      );
+    });
+  });
+
   it('runs no query for an empty candidate set', async () => {
     const { dataSource, query } = dataSourceReturning([]);
 

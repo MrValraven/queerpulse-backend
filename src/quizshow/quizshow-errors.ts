@@ -55,10 +55,6 @@ export const QUIZSHOW_ERRORS: Readonly<
     message:
       'This event keeps a quiz with rounds for adults, so it must stay 18+.',
   },
-  quizshow_pack_not_found: {
-    status: HttpStatus.NOT_FOUND,
-    message: 'This starter pack was not found.',
-  },
   quizshow_import_source_not_found: {
     status: HttpStatus.NOT_FOUND,
     message: 'The quiz to copy from was not found.',
@@ -134,6 +130,15 @@ export const QUIZSHOW_ERRORS: Readonly<
   quizshow_game_adults_rounds_need_switch: {
     status: HttpStatus.FORBIDDEN,
     message: 'A round for adults needs the game marked 18+.',
+  },
+  quizshow_template_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This quiz template was not found.',
+  },
+  quizshow_template_card_incomplete: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message:
+      'The template card needs a title and a description in every language the quiz uses.',
   },
   // socket
   quizshow_session_not_found: {

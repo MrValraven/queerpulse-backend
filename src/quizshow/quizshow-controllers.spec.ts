@@ -8,6 +8,7 @@ import {
   PATH_METADATA,
   ROUTE_ARGS_METADATA,
 } from '@nestjs/common/constants';
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
@@ -18,6 +19,7 @@ import { ROLES_KEY } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminQuizshowController } from './admin-quizshow.controller';
+import { AdminQuizshowTemplatesController } from './admin-quizshow-templates.controller';
 import {
   QuizshowCreateGameDto,
   QuizshowGameInputDto,
@@ -28,6 +30,7 @@ import { QuizshowJoinDto } from './dto/quizshow-join.dto';
 import { QuizshowOpenSessionDto } from './dto/quizshow-open-session.dto';
 import { QuizshowQuizInputDto } from './dto/quizshow-quiz-input.dto';
 import { QuizshowStaffActionDto } from './dto/quizshow-staff-action.dto';
+import { QuizshowTemplateInputDto } from './dto/quizshow-template.dto';
 import { QuizshowAccessService } from './quizshow-access.service';
 import { QuizshowEventController } from './quizshow-event.controller';
 import { QuizshowEventLifecycleListener } from './quizshow-event-lifecycle.listener';
@@ -39,9 +42,11 @@ import { QuizshowQuizService } from './quizshow-quiz.service';
 import { QuizshowRetentionService } from './quizshow-retention.service';
 import { QuizshowRuntimeService } from './quizshow-runtime.service';
 import { QuizshowSessionsService } from './quizshow-sessions.service';
+import { QuizshowTemplatesService } from './quizshow-templates.service';
 import { QuizshowController } from './quizshow.controller';
 import { QuizshowGateway } from './quizshow.gateway';
 import { QuizshowModule } from './quizshow.module';
+import { QuizshowTemplateRecord } from './entities/quizshow-template.entity';
 
 const THROTTLE_LIMIT_KEY = 'THROTTLER:LIMITdefault';
 const THROTTLE_TTL_KEY = 'THROTTLER:TTLdefault';
@@ -50,6 +55,17 @@ const USER: CurrentUserData = {
   restricted: false,
 } as CurrentUserData;
 const SLUG = 'drag-quiz-night';
+const TEMPLATE_ID = 'a7e3b1c0-5eed-4000-8000-000000000004';
+const TEMPLATE_HANDLER_NAMES = [
+  'listTemplates',
+  'createTemplate',
+  'duplicateTemplate',
+  'getTemplate',
+  'replaceTemplate',
+  'publishTemplate',
+  'unpublishTemplate',
+  'deleteTemplate',
+];
 
 const handlerOf = (
   controller: { prototype: unknown },
@@ -66,7 +82,7 @@ const guardsOf = (target: object): unknown[] =>
   (Reflect.getMetadata(GUARDS_METADATA, target) as unknown[] | undefined) ?? [];
 
 describe('Pulse Live controllers', () => {
-  it('leaves join untagged and keeps packs and every hosting route tagged', () => {
+  it('leaves join untagged and keeps template cards and every hosting route tagged', () => {
     const reflector = new Reflector();
     const featureOf = (
       controller: Type<unknown>,
@@ -78,7 +94,7 @@ describe('Pulse Live controllers', () => {
       ]);
 
     expect(featureOf(QuizshowController, 'join')).toBeUndefined();
-    expect(featureOf(QuizshowController, 'listPacks')).toBe('quizshow');
+    expect(featureOf(QuizshowController, 'listTemplates')).toBe('quizshow');
     for (const controller of [
       QuizshowGamesController,
       QuizshowEventController,
@@ -93,6 +109,11 @@ describe('Pulse Live controllers', () => {
     }
     for (const methodName of ['endSession', 'deleteGame']) {
       expect(featureOf(AdminQuizshowController, methodName)).toBeUndefined();
+    }
+    for (const methodName of TEMPLATE_HANDLER_NAMES) {
+      expect(featureOf(AdminQuizshowTemplatesController, methodName)).toBe(
+        'quizshow',
+      );
     }
   });
 
@@ -117,7 +138,7 @@ describe('Pulse Live controllers', () => {
       [QuizshowEventController, 'listImportSources'],
       [QuizshowEventController, 'getResults'],
       [QuizshowEventController, 'deleteResults'],
-      [QuizshowController, 'listPacks'],
+      [QuizshowController, 'listTemplates'],
     ];
     for (const [controller, methodName] of openRoutes) {
       expect(guardsOf(handlerOf(controller, methodName))).toEqual([]);
@@ -156,7 +177,13 @@ describe('Pulse Live controllers', () => {
       'results',
       204,
     ],
-    [QuizshowController, 'listPacks', RequestMethod.GET, 'packs', undefined],
+    [
+      QuizshowController,
+      'listTemplates',
+      RequestMethod.GET,
+      'templates',
+      undefined,
+    ],
     [QuizshowController, 'join', RequestMethod.POST, 'join', 200],
   ])(
     'serves %p.%s on the contract method, path and status',
@@ -184,7 +211,7 @@ describe('Pulse Live controllers', () => {
     expect(
       Reflect.getMetadata(
         THROTTLE_LIMIT_KEY,
-        handlerOf(QuizshowController, 'listPacks'),
+        handlerOf(QuizshowController, 'listTemplates'),
       ),
     ).toBeUndefined();
   });
@@ -204,7 +231,6 @@ describe('Pulse Live controllers', () => {
       replaceQuiz: jest.fn().mockResolvedValue({ quiz: null }),
       importQuiz: jest.fn().mockResolvedValue({ quiz: null }),
       listImportSources: jest.fn().mockResolvedValue({ items: [] }),
-      listPacks: jest.fn().mockReturnValue({ items: [] }),
     };
     const sessionsService = {
       openSession: jest.fn().mockResolvedValue({
@@ -216,20 +242,23 @@ describe('Pulse Live controllers', () => {
       deleteResults: jest.fn().mockResolvedValue(undefined),
       join: jest.fn().mockResolvedValue({ isRejoin: false }),
     };
+    const templatesService = {
+      listPublishedCards: jest.fn().mockResolvedValue({ items: [] }),
+    };
     const eventController = new QuizshowEventController(
       quizService as unknown as QuizshowQuizService,
       sessionsService as unknown as QuizshowSessionsService,
     );
     const quizshowController = new QuizshowController(
-      quizService as unknown as QuizshowQuizService,
+      templatesService as unknown as QuizshowTemplatesService,
       sessionsService as unknown as QuizshowSessionsService,
     );
     const quizBody = {
       title: 'Drag herstory',
     } as unknown as QuizshowQuizInputDto;
     const importBody = {
-      from: 'pack',
-      packKey: 'drag_herstory',
+      from: 'template',
+      templateId: TEMPLATE_ID,
     } as unknown as QuizshowImportDto;
     const openBody = {
       playMode: 'solo',
@@ -257,7 +286,9 @@ describe('Pulse Live controllers', () => {
     await expect(
       eventController.deleteResults(USER, SLUG),
     ).resolves.toBeUndefined();
-    expect(quizshowController.listPacks()).toEqual({ items: [] });
+    await expect(quizshowController.listTemplates()).resolves.toEqual({
+      items: [],
+    });
     await expect(quizshowController.join(USER, joinBody)).resolves.toEqual({
       isRejoin: false,
     });
@@ -287,7 +318,7 @@ describe('Pulse Live controllers', () => {
       SLUG,
       USER.userId,
     );
-    expect(quizService.listPacks).toHaveBeenCalledWith();
+    expect(templatesService.listPublishedCards).toHaveBeenCalledWith();
     expect(sessionsService.join).toHaveBeenCalledWith(USER, joinBody);
   });
 
@@ -472,8 +503,8 @@ describe('Pulse Live controllers', () => {
       isAdultsOnly: false,
     } as unknown as QuizshowGameInputDto;
     const importBody = {
-      from: 'pack',
-      packKey: 'drag_herstory',
+      from: 'template',
+      templateId: TEMPLATE_ID,
     } as unknown as QuizshowImportDto;
     const openBody = {
       playMode: 'solo',
@@ -587,6 +618,146 @@ describe('Pulse Live controllers', () => {
     ).toBe(false);
   });
 
+  it('mounts the staff template routes at admin/quizshow/templates for staff with Pulse Live access', () => {
+    expect(
+      Reflect.getMetadata(PATH_METADATA, AdminQuizshowTemplatesController),
+    ).toBe('admin/quizshow/templates');
+    expect(
+      Reflect.getMetadata(FEATURE_KEY, AdminQuizshowTemplatesController),
+    ).toBe('quizshow');
+    expect(
+      Reflect.getMetadata(ROLES_KEY, AdminQuizshowTemplatesController),
+    ).toEqual([UserRole.Moderator, UserRole.Admin]);
+    expect(guardsOf(AdminQuizshowTemplatesController)).toEqual([
+      ActiveMemberGuard,
+      RolesGuard,
+    ]);
+  });
+
+  it.each([
+    ['listTemplates', RequestMethod.GET, '/', undefined],
+    ['createTemplate', RequestMethod.POST, '/', undefined],
+    [
+      'duplicateTemplate',
+      RequestMethod.POST,
+      ':templateId/duplicate',
+      undefined,
+    ],
+    ['getTemplate', RequestMethod.GET, ':templateId', undefined],
+    ['replaceTemplate', RequestMethod.PUT, ':templateId', undefined],
+    ['publishTemplate', RequestMethod.POST, ':templateId/publish', 200],
+    ['unpublishTemplate', RequestMethod.POST, ':templateId/unpublish', 200],
+    ['deleteTemplate', RequestMethod.DELETE, ':templateId', 204],
+  ])(
+    'serves AdminQuizshowTemplatesController.%s on the contract method, path and status',
+    (methodName, method, path, httpCode) => {
+      const handler = handlerOf(AdminQuizshowTemplatesController, methodName);
+      expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(method);
+      expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(path);
+      expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(httpCode);
+    },
+  );
+
+  it('passes the caller, the template id and the body to the templates service', async () => {
+    const templatesService = {
+      listTemplateRows: jest.fn().mockResolvedValue({ items: [] }),
+      createTemplate: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
+      duplicateTemplate: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
+      getTemplate: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
+      replaceTemplate: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
+      publishTemplate: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
+      unpublishTemplate: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
+      deleteTemplate: jest.fn().mockResolvedValue(undefined),
+    };
+    const templatesController = new AdminQuizshowTemplatesController(
+      templatesService as unknown as QuizshowTemplatesService,
+    );
+    const inputBody = {
+      card: {
+        title: { en: 'Drag herstory', pt: 'Herstory drag' },
+        description: { en: 'A quiz', pt: 'Um quiz' },
+      },
+      staffNotes: '',
+    } as unknown as QuizshowTemplateInputDto;
+
+    await expect(templatesController.listTemplates()).resolves.toEqual({
+      items: [],
+    });
+    await templatesController.createTemplate(USER);
+    await templatesController.duplicateTemplate(USER, TEMPLATE_ID);
+    await templatesController.getTemplate(TEMPLATE_ID);
+    await templatesController.replaceTemplate(USER, TEMPLATE_ID, inputBody);
+    await templatesController.publishTemplate(USER, TEMPLATE_ID);
+    await templatesController.unpublishTemplate(USER, TEMPLATE_ID);
+    await expect(
+      templatesController.deleteTemplate(USER, TEMPLATE_ID),
+    ).resolves.toBeUndefined();
+
+    expect(templatesService.listTemplateRows).toHaveBeenCalledWith();
+    expect(templatesService.createTemplate).toHaveBeenCalledWith(USER.userId);
+    expect(templatesService.duplicateTemplate).toHaveBeenCalledWith(
+      TEMPLATE_ID,
+      USER.userId,
+    );
+    expect(templatesService.getTemplate).toHaveBeenCalledWith(TEMPLATE_ID);
+    expect(templatesService.replaceTemplate).toHaveBeenCalledWith(
+      TEMPLATE_ID,
+      USER.userId,
+      inputBody,
+    );
+    expect(templatesService.publishTemplate).toHaveBeenCalledWith(
+      TEMPLATE_ID,
+      USER.userId,
+    );
+    expect(templatesService.unpublishTemplate).toHaveBeenCalledWith(
+      TEMPLATE_ID,
+      USER.userId,
+    );
+    expect(templatesService.deleteTemplate).toHaveBeenCalledWith(
+      TEMPLATE_ID,
+      USER.userId,
+    );
+  });
+
+  it("lets staff re-save each other's template images", () => {
+    expect(
+      allowsSharedUploads(
+        'AdminQuizshowTemplatesController',
+        'replaceTemplate',
+      ),
+    ).toBe(true);
+    expect(
+      allowsSharedUploads(
+        'AdminQuizshowTemplatesController',
+        'publishTemplate',
+      ),
+    ).toBe(false);
+  });
+
+  it('registers the templates service, the template entity and the staff templates controller in the module', () => {
+    const importedModules = Reflect.getMetadata(
+      MODULE_METADATA.IMPORTS,
+      QuizshowModule,
+    ) as { module?: unknown; providers?: unknown[] }[];
+    expect(importedModules.length).toBeGreaterThan(0);
+    expect(
+      Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, QuizshowModule),
+    ).toContain(AdminQuizshowTemplatesController);
+    expect(
+      Reflect.getMetadata(MODULE_METADATA.PROVIDERS, QuizshowModule),
+    ).toContain(QuizshowTemplatesService);
+    const typeOrmFeature = importedModules.find(
+      (importedModule) =>
+        Array.isArray(importedModule.providers) &&
+        importedModule.providers.some(
+          (provider) =>
+            (provider as { provide?: unknown }).provide ===
+            getRepositoryToken(QuizshowTemplateRecord),
+        ),
+    );
+    expect(typeOrmFeature).toBeDefined();
+  });
+
   it('registers the games service and both new controllers in the module', () => {
     expect(
       Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, QuizshowModule),
@@ -594,6 +765,7 @@ describe('Pulse Live controllers', () => {
       QuizshowEventController,
       QuizshowGamesController,
       AdminQuizshowController,
+      AdminQuizshowTemplatesController,
       QuizshowController,
     ]);
     expect(
@@ -602,6 +774,7 @@ describe('Pulse Live controllers', () => {
       QuizshowAccessService,
       QuizshowQuizService,
       QuizshowGamesService,
+      QuizshowTemplatesService,
       QuizshowSessionsService,
       QuizshowGuestPushService,
       QuizshowPersistenceService,

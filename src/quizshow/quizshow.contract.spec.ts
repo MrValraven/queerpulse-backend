@@ -1,12 +1,14 @@
 import {
+  QUIZSHOW_ERROR_CODES,
   QUIZSHOW_GAMES_PER_MEMBER_MAX,
   QUIZSHOW_JOIN_CODE_ALPHABET,
   QUIZSHOW_JOIN_CODE_PATTERN,
   QUIZSHOW_LIMITS,
   QUIZSHOW_LOBBY_OPENS_PER_HOUR_MAX,
   QUIZSHOW_OPEN_SESSION_STATUSES,
-  QUIZSHOW_STARTER_PACK_KEYS,
   QUIZSHOW_TEAM_COLOR_KEYS,
+  QUIZSHOW_TEMPLATE_CARD_FIELDS,
+  QUIZSHOW_TEMPLATE_STATUSES,
   QUIZSHOW_TIMED_PHASES,
 } from './quizshow.contract';
 
@@ -27,15 +29,8 @@ describe('Pulse Live contract vocabulary', () => {
     expect(QUIZSHOW_JOIN_CODE_ALPHABET).toHaveLength(31);
   });
 
-  it('names eight team colour keys, five starter packs and four timed phases', () => {
+  it('names eight team colour keys and four timed phases', () => {
     expect(QUIZSHOW_TEAM_COLOR_KEYS).toHaveLength(8);
-    expect(QUIZSHOW_STARTER_PACK_KEYS).toEqual([
-      'pride_history',
-      'portuguese_queer_culture',
-      'eurovision',
-      'drag_herstory',
-      'lisbon_queer_icons',
-    ]);
     expect(QUIZSHOW_TIMED_PHASES).toEqual(['read', 'open', 'write', 'vote']);
     expect(QUIZSHOW_OPEN_SESSION_STATUSES).toEqual([
       'lobby',
@@ -97,6 +92,23 @@ describe('Pulse Live contract vocabulary', () => {
     expect(QUIZSHOW_LIMITS.pointsValues).toEqual([500, 1000, 2000]);
     expect(QUIZSHOW_LIMITS.optionIdPattern.test('a1b2')).toBe(true);
     expect(QUIZSHOW_LIMITS.optionIdPattern.test('A1')).toBe(false);
+  });
+
+  it('lists the template statuses, card fields and template limits', () => {
+    expect(QUIZSHOW_TEMPLATE_STATUSES).toEqual(['draft', 'published']);
+    expect(QUIZSHOW_TEMPLATE_CARD_FIELDS).toEqual([
+      'title.en',
+      'title.pt',
+      'description.en',
+      'description.pt',
+    ]);
+    expect(QUIZSHOW_LIMITS.templateCardTitleMax).toBe(120);
+    expect(QUIZSHOW_LIMITS.templateCardDescriptionMax).toBe(300);
+    expect(QUIZSHOW_LIMITS.templateStaffNotesMax).toBe(20000);
+  });
+
+  it('carries no starter pack code', () => {
+    expect(QUIZSHOW_ERROR_CODES).not.toContain('quizshow_pack_not_found');
   });
 
   it('caps games at 50 per member and lobby opens at 10 an hour', () => {

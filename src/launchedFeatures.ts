@@ -116,10 +116,9 @@ export const launchedFeatures = {
   studio: { launched: true },
   // Pulse Live: live quiz and party games on events (`/events/:slug/quizshow*`,
   // `/quizshow/*` and the `/quizshow` socket namespace, whose gateway checks
-  // access itself). Hidden from everyone else until the user flips it, after
-  // the starter packs are fact-checked
-  // (`QUIZSHOW_STARTER_PACKS_ARE_FACT_CHECKED`). Until then, testers holding an
-  // early-access grant use it; admins set grants from the member drawer.
+  // access itself). Hidden from everyone else until the user flips it. Until
+  // then, testers holding an early-access grant use it; admins set grants from
+  // the member drawer.
   quizshow: { launched: false, earlyAccess: true },
 } satisfies Record<string, FeatureConfig>;
 

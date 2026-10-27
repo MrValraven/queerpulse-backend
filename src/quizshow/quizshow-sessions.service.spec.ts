@@ -18,7 +18,6 @@ import {
   normaliseJoinCode,
   QuizshowSessionsService,
 } from './quizshow-sessions.service';
-import { QUIZSHOW_STARTER_PACKS } from './quizshow-starter-packs';
 import type { QuizshowJoinHost } from './quizshow.contract';
 import type { QuizshowOpenGameSessionDto } from './dto/quizshow-game.dto';
 import type { QuizshowJoinDto } from './dto/quizshow-join.dto';
@@ -92,11 +91,45 @@ interface FakeState {
 }
 
 function completeQuiz(): unknown {
-  const pack = QUIZSHOW_STARTER_PACKS[0];
-  if (!pack) throw new Error('A starter pack is needed');
   return structuredClone({
-    ...pack.quiz,
+    title: 'Pride and queer history',
+    languages: 'both',
+    screenLanguage: 'en',
     updatedAt: '2026-10-19T10:00:00.000Z',
+    rounds: [
+      {
+        kind: 'quiz',
+        title: { en: 'Where it started', pt: 'Onde tudo começou' },
+        contentLabel: 'none',
+        settings: {
+          timeLimitSeconds: 20,
+          isSpeedBonusOn: true,
+          isJokerAllowed: true,
+          writeSeconds: 60,
+          voteSeconds: 30,
+        },
+        questions: [
+          {
+            type: 'multiple_choice',
+            prompt: {
+              en: 'Which year was the first Pride march?',
+              pt: 'Em que ano foi a primeira marcha do orgulho?',
+            },
+            options: [
+              { id: 'a', text: { en: '1959', pt: '1959' } },
+              { id: 'b', text: { en: '1970', pt: '1970' } },
+              { id: 'c', text: { en: '1985', pt: '1985' } },
+              { id: 'd', text: { en: '1999', pt: '1999' } },
+            ],
+            answer: { correctIndex: 1 },
+            acceptedAnswers: [],
+            mediaRef: null,
+            timeLimitSeconds: null,
+            points: 1000,
+          },
+        ],
+      },
+    ],
   });
 }
 

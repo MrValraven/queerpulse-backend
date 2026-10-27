@@ -5,11 +5,14 @@ import { AddQuizshowReportSubject1836000000000 } from '../migrations/18360000000
 import { AddQuizshow1836000100000 } from '../migrations/1836000100000-AddQuizshow';
 import { AddQuizshowGameReportSubject1837000000000 } from '../migrations/1837000000000-AddQuizshowGameReportSubject';
 import { AddQuizshowGames1837000100000 } from '../migrations/1837000100000-AddQuizshowGames';
+import { AddQuizshowTemplates1837900000000 } from '../migrations/1837900000000-AddQuizshowTemplates';
+import { QUIZSHOW_TEMPLATE_SEEDS_1837900000000 } from '../migrations/data/quizshow-templates-1837900000000.seed';
 
 /**
  * Pulse Live migrations on real Postgres, in ledger order: the two
  * `1836000*` migrations as they ran in production, then the two `1837000*`
- * forward migrations that add games without an event. Skipped unless
+ * forward migrations that add games without an event, then the
+ * `1837900000000` templates migration with its five seeded drafts. Skipped unless
  * `QUIZSHOW_MIGRATIONS_DATABASE_URL` names a database whose name ends in
  * `_test` (it drops and rebuilds the schema). Run it with, for example:
  *
@@ -546,6 +549,509 @@ describeWithDatabase('Pulse Live migrations on real Postgres', () => {
         { player_id: playerId, hidden_by_user_id: null },
       ]);
       expect(await countOf('quizshow_players')).toBe(1);
+    });
+  });
+
+  describe('the templates migration', () => {
+    const templatesMigration = new AddQuizshowTemplates1837900000000();
+    const SEED_TEMPLATE_IDS = QUIZSHOW_TEMPLATE_SEEDS_1837900000000.map(
+      (seed) => seed.id,
+    );
+    const STAFF_USER = 'd8000000-0000-4000-8000-000000000003';
+    const STAFF_TEMPLATE_ID = 'd8800000-0000-4000-8000-000000000001';
+    const STAFF_QUIZ_ID = 'd8200000-0000-4000-8000-000000000003';
+    const HOST_QUIZ_ID = 'd8200000-0000-4000-8000-000000000004';
+
+    const seedTemplateIdOf = (packKey: string): string => {
+      const seed = QUIZSHOW_TEMPLATE_SEEDS_1837900000000.find(
+        (candidate) => candidate.packKey === packKey,
+      );
+      if (!seed) {
+        throw new Error(`Expected a seed for ${packKey}`);
+      }
+      return seed.id;
+    };
+
+    const insertStaffTemplate = async (
+      templateId: string,
+      quizId: string,
+    ): Promise<void> => {
+      await dataSource.query(
+        `INSERT INTO "quizshow_templates" ("id", "card_title_en", "card_title_pt", "card_description_en", "card_description_pt")
+         VALUES ($1, 'Staff quiz', 'Quiz da equipa', '', '')`,
+        [templateId],
+      );
+      await dataSource.query(
+        `INSERT INTO "quizshow_quizzes" ("id", "template_id", "title", "languages", "screen_language", "updated_at")
+         VALUES ($1, $2, 'Staff quiz', 'both', 'en', now())`,
+        [quizId, templateId],
+      );
+    };
+
+    const countOfTemplateQuizzes = async (): Promise<number> => {
+      const rows: { count: number }[] = await dataSource.query(
+        `SELECT COUNT(*)::int AS "count" FROM "quizshow_quizzes" WHERE "template_id" IS NOT NULL`,
+      );
+      return rows[0]?.count ?? 0;
+    };
+
+    const columnNamesOf = async (tableName: string): Promise<string[]> => {
+      const rows: { column_name: string }[] = await dataSource.query(
+        `SELECT "column_name" FROM "information_schema"."columns"
+          WHERE "table_name" = $1
+          ORDER BY "column_name"`,
+        [tableName],
+      );
+      return rows.map((row) => row.column_name);
+    };
+
+    beforeAll(async () => {
+      await dataSource.query(
+        `INSERT INTO "quizshow_quizzes" ("id", "event_id", "title", "languages", "screen_language", "starter_pack_key", "updated_at")
+         VALUES ($1, $2, 'Eurovision night', 'both', 'en', 'eurovision', now())`,
+        [QUIZ_ID, EVENT_ID],
+      );
+      await dataSource.query(
+        `INSERT INTO "quizshow_quizzes" ("id", "owner_user_id", "title", "languages", "screen_language", "starter_pack_key", "updated_at")
+         VALUES ($1, $2, 'Game night', 'both', 'en', 'retired_pack', now())`,
+        [OTHER_QUIZ_ID, PLAYER_USER],
+      );
+      await templatesMigration.up(queryRunner);
+    });
+
+    afterAll(async () => {
+      await dataSource.query(`DELETE FROM "quizshow_quizzes"`);
+      await dataSource.query(
+        `INSERT INTO "users" ("id") VALUES ($1), ($2) ON CONFLICT DO NOTHING`,
+        [ORGANISER_USER, PLAYER_USER],
+      );
+      await dataSource.query(
+        `INSERT INTO "events" ("id") VALUES ($1), ($2) ON CONFLICT DO NOTHING`,
+        [EVENT_ID, OTHER_EVENT_ID],
+      );
+    });
+
+    it('seeds the five packs as drafts with every round, question and note', async () => {
+      const templates: { id: string; is_draft: boolean }[] =
+        await dataSource.query(
+          `SELECT "id", "published_at" IS NULL AS "is_draft" FROM "quizshow_templates" ORDER BY "id"`,
+        );
+      expect(templates).toEqual(
+        [...SEED_TEMPLATE_IDS]
+          .sort()
+          .map((templateId) => ({ id: templateId, is_draft: true })),
+      );
+
+      const quizzes: { template_id: string }[] = await dataSource.query(
+        `SELECT "template_id" FROM "quizshow_quizzes" WHERE "template_id" IS NOT NULL ORDER BY "template_id"`,
+      );
+      expect(quizzes.map((quiz) => quiz.template_id)).toEqual(
+        [...SEED_TEMPLATE_IDS].sort(),
+      );
+
+      const contentCounts: { round_count: number; question_count: number }[] =
+        await dataSource.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM "quizshow_rounds" AS "round"
+                JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+               WHERE "quiz"."template_id" IS NOT NULL) AS "round_count",
+             (SELECT COUNT(*)::int FROM "quizshow_questions" AS "question"
+                JOIN "quizshow_rounds" AS "round" ON "round"."id" = "question"."round_id"
+                JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+               WHERE "quiz"."template_id" IS NOT NULL) AS "question_count"`,
+        );
+      expect(contentCounts).toEqual([{ round_count: 16, question_count: 83 }]);
+
+      const noteLines: { count: number }[] = await dataSource.query(
+        `SELECT SUM(cardinality(string_to_array("staff_notes", chr(10))))::int AS "count" FROM "quizshow_templates"`,
+      );
+      expect(noteLines).toEqual([{ count: 83 }]);
+
+      const lisbonQuizzes: { screen_language: string }[] =
+        await dataSource.query(
+          `SELECT "screen_language" FROM "quizshow_quizzes" WHERE "template_id" = $1`,
+          [seedTemplateIdOf('lisbon_queer_icons')],
+        );
+      expect(lisbonQuizzes).toEqual([{ screen_language: 'pt' }]);
+
+      const firstPrideQuestions: { is_match: boolean }[] =
+        await dataSource.query(
+          `SELECT "question"."answer" = '{"correctIndex": 1}'::jsonb AS "is_match"
+             FROM "quizshow_questions" AS "question"
+             JOIN "quizshow_rounds" AS "round" ON "round"."id" = "question"."round_id"
+             JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+            WHERE "quiz"."template_id" = $1 AND "round"."position" = 0 AND "question"."position" = 0`,
+          [seedTemplateIdOf('pride_history')],
+        );
+      expect(firstPrideQuestions).toEqual([{ is_match: true }]);
+    });
+
+    it('rebuilds every seeded template from the database exactly as the frozen seed holds it', async () => {
+      const templateRows: {
+        id: string;
+        card_title_en: string;
+        card_title_pt: string;
+        card_description_en: string;
+        card_description_pt: string;
+        staff_notes: string;
+      }[] = await dataSource.query(
+        `SELECT "id", "card_title_en", "card_title_pt", "card_description_en", "card_description_pt", "staff_notes"
+           FROM "quizshow_templates"
+          WHERE "id" = ANY($1::uuid[])`,
+        [SEED_TEMPLATE_IDS],
+      );
+      const quizRows: {
+        id: string;
+        template_id: string;
+        title: string;
+        languages: string;
+        screen_language: string;
+      }[] = await dataSource.query(
+        `SELECT "id", "template_id", "title", "languages", "screen_language"
+           FROM "quizshow_quizzes"
+          WHERE "template_id" = ANY($1::uuid[])`,
+        [SEED_TEMPLATE_IDS],
+      );
+      const roundRows: {
+        id: string;
+        quiz_id: string;
+        position: number;
+        kind: string;
+        title_en: string;
+        title_pt: string;
+        content_label: string;
+        settings: Record<string, number | boolean>;
+      }[] = await dataSource.query(
+        `SELECT "round"."id", "round"."quiz_id", "round"."position", "round"."kind",
+                "round"."title_en", "round"."title_pt", "round"."content_label", "round"."settings"
+           FROM "quizshow_rounds" AS "round"
+           JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+          WHERE "quiz"."template_id" = ANY($1::uuid[])
+          ORDER BY "round"."quiz_id", "round"."position"`,
+        [SEED_TEMPLATE_IDS],
+      );
+      const questionRows: {
+        round_id: string;
+        position: number;
+        type: string;
+        prompt_en: string;
+        prompt_pt: string;
+        media_ref: string | null;
+        options: unknown[];
+        answer: Record<string, unknown> | null;
+        accepted_answers: string[];
+        time_limit_seconds: number | null;
+        points: number;
+      }[] = await dataSource.query(
+        `SELECT "question"."round_id", "question"."position", "question"."type",
+                "question"."prompt_en", "question"."prompt_pt", "question"."media_ref",
+                "question"."options", "question"."answer", "question"."accepted_answers",
+                "question"."time_limit_seconds", "question"."points"
+           FROM "quizshow_questions" AS "question"
+           JOIN "quizshow_rounds" AS "round" ON "round"."id" = "question"."round_id"
+           JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+          WHERE "quiz"."template_id" = ANY($1::uuid[])
+          ORDER BY "question"."round_id", "question"."position"`,
+        [SEED_TEMPLATE_IDS],
+      );
+
+      const questionsOfRound = (roundId: string) => {
+        const rowsOfRound = questionRows.filter(
+          (questionRow) => questionRow.round_id === roundId,
+        );
+        expect(rowsOfRound.map((questionRow) => questionRow.position)).toEqual([
+          ...rowsOfRound.keys(),
+        ]);
+        return rowsOfRound.map((questionRow) => ({
+          type: questionRow.type,
+          prompt: { en: questionRow.prompt_en, pt: questionRow.prompt_pt },
+          options: questionRow.options,
+          answer: questionRow.answer,
+          acceptedAnswers: questionRow.accepted_answers,
+          mediaRef: questionRow.media_ref,
+          timeLimitSeconds: questionRow.time_limit_seconds,
+          points: questionRow.points,
+        }));
+      };
+
+      const roundsOfQuiz = (quizId: string) => {
+        const rowsOfQuiz = roundRows.filter(
+          (roundRow) => roundRow.quiz_id === quizId,
+        );
+        expect(rowsOfQuiz.map((roundRow) => roundRow.position)).toEqual([
+          ...rowsOfQuiz.keys(),
+        ]);
+        return rowsOfQuiz.map((roundRow) => ({
+          kind: roundRow.kind,
+          title: { en: roundRow.title_en, pt: roundRow.title_pt },
+          contentLabel: roundRow.content_label,
+          settings: roundRow.settings,
+          questions: questionsOfRound(roundRow.id),
+        }));
+      };
+
+      const rebuiltTemplateOf = (templateId: string) => {
+        const templateRow = templateRows.find(
+          (candidate) => candidate.id === templateId,
+        );
+        const quizRowsOfTemplate = quizRows.filter(
+          (quizRow) => quizRow.template_id === templateId,
+        );
+        expect(quizRowsOfTemplate).toHaveLength(1);
+        const quizRow = quizRowsOfTemplate[0];
+        if (!templateRow || !quizRow) {
+          throw new Error(`Expected template ${templateId} with its quiz`);
+        }
+        return {
+          id: templateRow.id,
+          cardTitle: {
+            en: templateRow.card_title_en,
+            pt: templateRow.card_title_pt,
+          },
+          cardDescription: {
+            en: templateRow.card_description_en,
+            pt: templateRow.card_description_pt,
+          },
+          staffNotes: templateRow.staff_notes,
+          quiz: {
+            title: quizRow.title,
+            languages: quizRow.languages,
+            screenLanguage: quizRow.screen_language,
+            rounds: roundsOfQuiz(quizRow.id),
+          },
+        };
+      };
+
+      expect(templateRows).toHaveLength(
+        QUIZSHOW_TEMPLATE_SEEDS_1837900000000.length,
+      );
+      expect(
+        QUIZSHOW_TEMPLATE_SEEDS_1837900000000.map((seed) =>
+          rebuiltTemplateOf(seed.id),
+        ),
+      ).toStrictEqual(
+        QUIZSHOW_TEMPLATE_SEEDS_1837900000000.map((seed) => ({
+          id: seed.id,
+          cardTitle: seed.cardTitle,
+          cardDescription: seed.cardDescription,
+          staffNotes: seed.staffNotes,
+          quiz: seed.quiz,
+        })),
+      );
+
+      const answerNullCounts: {
+        sql_null_count: number;
+        json_null_count: number;
+      }[] = await dataSource.query(
+        `SELECT COUNT(*) FILTER (WHERE "question"."answer" IS NULL)::int AS "sql_null_count",
+                COUNT(*) FILTER (WHERE jsonb_typeof("question"."answer") = 'null')::int AS "json_null_count"
+           FROM "quizshow_questions" AS "question"
+           JOIN "quizshow_rounds" AS "round" ON "round"."id" = "question"."round_id"
+           JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+          WHERE "quiz"."template_id" = ANY($1::uuid[])`,
+        [SEED_TEMPLATE_IDS],
+      );
+      expect(answerNullCounts).toEqual([
+        { sql_null_count: 3, json_null_count: 0 },
+      ]);
+    });
+
+    it('backfills the source template from the retired pack key and drops the key', async () => {
+      const sources: { id: string; source_template_id: string | null }[] =
+        await dataSource.query(
+          `SELECT "id", "source_template_id" FROM "quizshow_quizzes" WHERE "id" IN ($1, $2) ORDER BY "id"`,
+          [QUIZ_ID, OTHER_QUIZ_ID],
+        );
+      expect(sources).toEqual([
+        { id: QUIZ_ID, source_template_id: seedTemplateIdOf('eurovision') },
+        { id: OTHER_QUIZ_ID, source_template_id: null },
+      ]);
+      expect(await columnNamesOf('quizshow_quizzes')).not.toContain(
+        'starter_pack_key',
+      );
+    });
+
+    it('refuses a quiz with a template and an event, and a quiz with no scope', async () => {
+      const templateAndEvent = await failureOf(
+        dataSource.query(
+          `INSERT INTO "quizshow_quizzes" ("event_id", "template_id", "title", "languages", "screen_language", "updated_at")
+           VALUES ($1, $2, 'Both', 'both', 'en', now())`,
+          [OTHER_EVENT_ID, seedTemplateIdOf('pride_history')],
+        ),
+      );
+      expect(templateAndEvent.code).toBe('23514');
+      expect(templateAndEvent.constraint).toBe('CHK_quizshow_quizzes_scope');
+      const noScope = await failureOf(
+        dataSource.query(
+          `INSERT INTO "quizshow_quizzes" ("title", "languages", "screen_language", "updated_at")
+           VALUES ('Neither', 'both', 'en', now())`,
+        ),
+      );
+      expect(noScope.code).toBe('23514');
+      expect(noScope.constraint).toBe('CHK_quizshow_quizzes_scope');
+    });
+
+    it('refuses a second quiz for one template', async () => {
+      const refusal = await failureOf(
+        dataSource.query(
+          `INSERT INTO "quizshow_quizzes" ("template_id", "title", "languages", "screen_language", "updated_at")
+           VALUES ($1, 'Second', 'both', 'en', now())`,
+          [seedTemplateIdOf('pride_history')],
+        ),
+      );
+      expect(refusal.code).toBe('23505');
+      expect(refusal.constraint).toBe('UQ_quizshow_quizzes_template_id');
+    });
+
+    it('keeps templates and nulls their authors when the staff account is deleted', async () => {
+      const prideTemplateId = seedTemplateIdOf('pride_history');
+      await dataSource.query(`INSERT INTO "users" ("id") VALUES ($1)`, [
+        STAFF_USER,
+      ]);
+      await dataSource.query(
+        `UPDATE "quizshow_quizzes" SET "created_by_user_id" = $1, "updated_by_user_id" = $1 WHERE "template_id" = $2`,
+        [STAFF_USER, prideTemplateId],
+      );
+      await dataSource.query(
+        `UPDATE "quizshow_templates" SET "published_by_user_id" = $1 WHERE "id" = $2`,
+        [STAFF_USER, prideTemplateId],
+      );
+
+      await dataSource.query(`DELETE FROM "users" WHERE "id" = $1`, [
+        STAFF_USER,
+      ]);
+
+      const templates: { published_by_user_id: string | null }[] =
+        await dataSource.query(
+          `SELECT "published_by_user_id" FROM "quizshow_templates" WHERE "id" = $1`,
+          [prideTemplateId],
+        );
+      expect(templates).toEqual([{ published_by_user_id: null }]);
+      const quizzes: {
+        created_by_user_id: string | null;
+        updated_by_user_id: string | null;
+      }[] = await dataSource.query(
+        `SELECT "created_by_user_id", "updated_by_user_id" FROM "quizshow_quizzes" WHERE "template_id" = $1`,
+        [prideTemplateId],
+      );
+      expect(quizzes).toEqual([
+        { created_by_user_id: null, updated_by_user_id: null },
+      ]);
+    });
+
+    it('keeps templates when an event or a game owner goes', async () => {
+      await dataSource.query(`DELETE FROM "events" WHERE "id" = $1`, [
+        EVENT_ID,
+      ]);
+      await dataSource.query(`DELETE FROM "users" WHERE "id" = $1`, [
+        PLAYER_USER,
+      ]);
+
+      expect(await countOf('quizshow_templates')).toBe(5);
+      expect(await countOfTemplateQuizzes()).toBe(5);
+    });
+
+    it('deletes a template with its quiz, rounds and questions and keeps the host copy with no source', async () => {
+      await insertStaffTemplate(STAFF_TEMPLATE_ID, STAFF_QUIZ_ID);
+      const roundId = 'd8600000-0000-4000-8000-000000000001';
+      await dataSource.query(
+        `INSERT INTO "quizshow_rounds" ("id", "quiz_id", "position", "kind", "title_en", "title_pt", "content_label", "settings")
+         VALUES ($1, $2, 0, 'quiz', 'Round', 'Ronda', 'none', '{}')`,
+        [roundId, STAFF_QUIZ_ID],
+      );
+      await dataSource.query(
+        `INSERT INTO "quizshow_questions" ("round_id", "position", "type", "prompt_en", "prompt_pt")
+         VALUES ($1, 0, 'true_false', 'Is it?', 'E?')`,
+        [roundId],
+      );
+      await dataSource.query(
+        `INSERT INTO "quizshow_quizzes" ("id", "event_id", "source_template_id", "title", "languages", "screen_language", "updated_at")
+         VALUES ($1, $2, $3, 'Host copy', 'both', 'en', now())`,
+        [HOST_QUIZ_ID, OTHER_EVENT_ID, STAFF_TEMPLATE_ID],
+      );
+
+      await dataSource.query(
+        `DELETE FROM "quizshow_templates" WHERE "id" = $1`,
+        [STAFF_TEMPLATE_ID],
+      );
+
+      const staffQuizzes: { count: number }[] = await dataSource.query(
+        `SELECT COUNT(*)::int AS "count" FROM "quizshow_quizzes" WHERE "id" = $1`,
+        [STAFF_QUIZ_ID],
+      );
+      expect(staffQuizzes).toEqual([{ count: 0 }]);
+      const staffRounds: { count: number }[] = await dataSource.query(
+        `SELECT COUNT(*)::int AS "count" FROM "quizshow_rounds" WHERE "id" = $1`,
+        [roundId],
+      );
+      expect(staffRounds).toEqual([{ count: 0 }]);
+      const staffQuestions: { count: number }[] = await dataSource.query(
+        `SELECT COUNT(*)::int AS "count" FROM "quizshow_questions" WHERE "round_id" = $1`,
+        [roundId],
+      );
+      expect(staffQuestions).toEqual([{ count: 0 }]);
+      const hostQuizzes: { source_template_id: string | null }[] =
+        await dataSource.query(
+          `SELECT "source_template_id" FROM "quizshow_quizzes" WHERE "id" = $1`,
+          [HOST_QUIZ_ID],
+        );
+      expect(hostQuizzes).toEqual([{ source_template_id: null }]);
+    });
+
+    it('refuses down while a staff-made template remains, then removes exactly the five seeds and restores the pack key', async () => {
+      // The earlier event delete took the backfilled event quiz, so this test
+      // brings back an event quiz copied from the eurovision seed.
+      await dataSource.query(
+        `INSERT INTO "events" ("id") VALUES ($1) ON CONFLICT DO NOTHING`,
+        [EVENT_ID],
+      );
+      await dataSource.query(
+        `INSERT INTO "quizshow_quizzes" ("id", "event_id", "source_template_id", "title", "languages", "screen_language", "updated_at")
+         VALUES ($1, $2, $3, 'Eurovision night', 'both', 'en', now())`,
+        [QUIZ_ID, EVENT_ID, seedTemplateIdOf('eurovision')],
+      );
+      await insertStaffTemplate(STAFF_TEMPLATE_ID, STAFF_QUIZ_ID);
+
+      await queryRunner.startTransaction();
+      let refusal: { code?: string } | undefined;
+      try {
+        await templatesMigration.down(queryRunner);
+      } catch (error) {
+        refusal = error as { code?: string };
+      }
+      await queryRunner.rollbackTransaction();
+      expect(refusal?.code).toBe('23514');
+      expect(await countOf('quizshow_templates')).toBe(6);
+
+      await dataSource.query(
+        `DELETE FROM "quizshow_templates" WHERE "id" = $1`,
+        [STAFF_TEMPLATE_ID],
+      );
+      await templatesMigration.down(queryRunner);
+
+      const templateTables: { count: number }[] = await dataSource.query(
+        `SELECT COUNT(*)::int AS "count" FROM "information_schema"."tables" WHERE "table_name" = 'quizshow_templates'`,
+      );
+      expect(templateTables).toEqual([{ count: 0 }]);
+      const quizColumns = await columnNamesOf('quizshow_quizzes');
+      expect(quizColumns).toContain('starter_pack_key');
+      expect(quizColumns).not.toContain('source_template_id');
+      expect(quizColumns).not.toContain('template_id');
+      const packKeys: { starter_pack_key: string | null }[] =
+        await dataSource.query(
+          `SELECT "starter_pack_key" FROM "quizshow_quizzes" WHERE "id" = $1`,
+          [QUIZ_ID],
+        );
+      expect(packKeys).toEqual([{ starter_pack_key: 'eurovision' }]);
+
+      const noScope = await failureOf(
+        dataSource.query(
+          `INSERT INTO "quizshow_quizzes" ("title", "languages", "screen_language", "updated_at")
+           VALUES ('Neither', 'both', 'en', now())`,
+        ),
+      );
+      expect(noScope.code).toBe('23514');
+      expect(noScope.constraint).toBe('CHK_quizshow_quizzes_scope');
     });
   });
 

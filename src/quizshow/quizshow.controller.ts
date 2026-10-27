@@ -28,17 +28,17 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { QuizshowJoinDto } from './dto/quizshow-join.dto';
-import { QuizshowQuizService } from './quizshow-quiz.service';
 import { QuizshowSessionsService } from './quizshow-sessions.service';
+import { QuizshowTemplatesService } from './quizshow-templates.service';
 import type {
   QuizshowJoinResponse,
-  QuizshowStarterPackCard,
+  QuizshowTemplateCard,
 } from './quizshow.contract';
 
 /**
- * Pulse Live routes outside one event: the starter pack cards, and the join
- * code lookup. Join is open to every active member, so it carries no feature
- * tag; the pack cards serve hosting and stay tagged. Join checks the code and
+ * Pulse Live routes outside one event: the published template cards, and the
+ * join code lookup. Join is open to every active member, so it carries no
+ * feature tag; the template cards serve hosting and stay tagged. Join checks the code and
  * the caller's eligibility only; the player row is made by `lobby:join` on the
  * socket.
  */
@@ -49,18 +49,19 @@ import type {
 @UseGuards(ActiveMemberGuard)
 export class QuizshowController {
   constructor(
-    private readonly quizService: QuizshowQuizService,
+    private readonly templatesService: QuizshowTemplatesService,
     private readonly sessionsService: QuizshowSessionsService,
   ) {}
 
-  @Get('packs')
+  @Get('templates')
   @Feature('quizshow')
   @ApiOperation({
-    summary: 'The starter pack cards, without questions or answers.',
+    summary:
+      'The published template cards, without questions, answers or staff notes.',
   })
-  @ApiOkResponse({ description: '`{ items: QuizshowStarterPackCard[] }`.' })
-  listPacks(): { items: QuizshowStarterPackCard[] } {
-    return this.quizService.listPacks();
+  @ApiOkResponse({ description: '`{ items: QuizshowTemplateCard[] }`.' })
+  listTemplates(): Promise<{ items: QuizshowTemplateCard[] }> {
+    return this.templatesService.listPublishedCards();
   }
 
   @Post('join')

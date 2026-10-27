@@ -3,13 +3,12 @@ import { toImageUrl } from '../common/image-url';
 import type { QuizshowQuestionRecord } from './entities/quizshow-question.entity';
 import type { QuizshowQuizRecord } from './entities/quizshow-quiz.entity';
 import type { QuizshowRoundRecord } from './entities/quizshow-round.entity';
-import type { QuizshowQuizShape } from './quizshow-quiz-validation';
+import type { QuizshowValidatableQuiz } from './quizshow-quiz-validation';
 import type {
   QuizshowQuestion,
   QuizshowQuiz,
+  QuizshowQuizShape,
   QuizshowRound,
-  QuizshowStarterPackKey,
-  QuizshowStarterPackQuiz,
 } from './quizshow.contract';
 
 function toQuizshowQuestion(record: QuizshowQuestionRecord): QuizshowQuestion {
@@ -52,14 +51,14 @@ export function toQuizshowQuiz(
     title: quiz.title,
     languages: quiz.languages,
     screenLanguage: quiz.screenLanguage,
-    starterPackKey: quiz.starterPackKey as QuizshowStarterPackKey | null,
+    sourceTemplateId: quiz.sourceTemplateId,
     updatedAt: quiz.updatedAt.toISOString(),
     rounds: mappedRounds,
   };
 }
 
-/** The wire quiz without ids, urls and the stamp: the shape an input or a pack has. */
-export function toQuizShape(quiz: QuizshowQuiz): QuizshowStarterPackQuiz {
+/** The wire quiz without ids, urls and the stamp: the shape an input or an import copies. */
+export function toQuizShape(quiz: QuizshowQuiz): QuizshowQuizShape {
   return {
     title: quiz.title,
     languages: quiz.languages,
@@ -79,7 +78,7 @@ export function toQuizShape(quiz: QuizshowQuiz): QuizshowStarterPackQuiz {
 /** New rows with fresh uuids, so each question names its round before insert. */
 export function buildRoundRows(
   quizId: string,
-  rounds: QuizshowQuizShape['rounds'],
+  rounds: QuizshowValidatableQuiz['rounds'],
 ): {
   rounds: Partial<QuizshowRoundRecord>[];
   questions: Partial<QuizshowQuestionRecord>[];

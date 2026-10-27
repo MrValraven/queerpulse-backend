@@ -110,6 +110,14 @@ describe('touchesPrivateParameterTable', () => {
     ).toBe(true);
   });
 
+  it('leaves out the parameters of queries on the templates table', () => {
+    expect(
+      touchesPrivateParameterTable(
+        'UPDATE "quizshow_templates" SET "staff_notes" = $1',
+      ),
+    ).toBe(true);
+  });
+
   it('matches any table when the query carries the private-parameters comment', () => {
     expect(
       touchesPrivateParameterTable(
@@ -137,6 +145,7 @@ describe('touchesPrivateParameterTable', () => {
       'quizshow_questions',
       'quizshow_sessions',
       'email_sign_in_challenges',
+      'quizshow_templates',
     ]);
   });
 });

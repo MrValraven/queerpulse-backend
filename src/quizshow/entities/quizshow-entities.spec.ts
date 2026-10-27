@@ -8,6 +8,7 @@ import { QuizshowResultRecord } from './quizshow-result.entity';
 import { QuizshowRoundRecord } from './quizshow-round.entity';
 import { QuizshowSessionRecord } from './quizshow-session.entity';
 import { QuizshowTeamRecord } from './quizshow-team.entity';
+import { QuizshowTemplateRecord } from './quizshow-template.entity';
 import { QuizshowVoteRecord } from './quizshow-vote.entity';
 
 const ENTITY_CLASSES = [
@@ -21,6 +22,7 @@ const ENTITY_CLASSES = [
   QuizshowVoteRecord,
   QuizshowResultRecord,
   QuizshowLobbyOpenRecord,
+  QuizshowTemplateRecord,
 ];
 
 const quizshowColumns = () =>
@@ -29,7 +31,7 @@ const quizshowColumns = () =>
   );
 
 describe('quizshow entities', () => {
-  it('maps ten tables', () => {
+  it('maps eleven tables', () => {
     const tableNames = getMetadataArgsStorage()
       .tables.filter((table) =>
         ENTITY_CLASSES.includes(
@@ -49,6 +51,7 @@ describe('quizshow entities', () => {
         'quizshow_rounds',
         'quizshow_sessions',
         'quizshow_teams',
+        'quizshow_templates',
         'quizshow_votes',
       ].sort(),
     );
@@ -109,7 +112,7 @@ describe('quizshow entities', () => {
     );
   });
 
-  it('lets a quiz belong to an event or an owner', () => {
+  it('lets a quiz belong to an event, an owner or a template', () => {
     const storage = getMetadataArgsStorage();
     const quizColumns = storage.columns.filter(
       (column) => column.target === QuizshowQuizRecord,
@@ -125,6 +128,37 @@ describe('quizshow entities', () => {
       .filter((check) => check.target === QuizshowQuizRecord)
       .map((check) => check.name);
     expect(checkNames).toContain('CHK_quizshow_quizzes_scope');
+    const scopeCheck = storage.checks.find(
+      (check) =>
+        check.target === QuizshowQuizRecord &&
+        check.name === 'CHK_quizshow_quizzes_scope',
+    );
+    expect(scopeCheck?.expression).toBe(
+      'num_nonnulls("event_id", "owner_user_id", "template_id") = 1',
+    );
+
+    expect(columnOf('templateId')?.options.nullable).toBe(true);
+    const templateRelation = storage.relations.find(
+      (relation) =>
+        relation.target === QuizshowQuizRecord &&
+        relation.propertyName === 'template',
+    );
+    expect(templateRelation?.options.onDelete).toBe('CASCADE');
+    expect(templateRelation?.options.nullable).toBe(true);
+    const templateJoin = storage.joinColumns.find(
+      (join) =>
+        join.target === QuizshowQuizRecord && join.propertyName === 'template',
+    );
+    expect(templateJoin?.name).toBe('template_id');
+    expect(templateJoin?.foreignKeyConstraintName).toBe(
+      'FK_quizshow_quizzes_template',
+    );
+    const templateUnique = storage.uniques.find(
+      (unique) =>
+        unique.target === QuizshowQuizRecord &&
+        unique.name === 'UQ_quizshow_quizzes_template_id',
+    );
+    expect(templateUnique?.columns).toEqual(['templateId']);
 
     const ownerRelation = storage.relations.find(
       (relation) =>
@@ -147,6 +181,79 @@ describe('quizshow entities', () => {
     );
     expect(ownerIndex?.target).toBe(QuizshowQuizRecord);
     expect(ownerIndex?.columns).toEqual(['ownerUserId']);
+  });
+
+  it('keeps the source template and lets it go null', () => {
+    const storage = getMetadataArgsStorage();
+    const sourceColumn = storage.columns.find(
+      (column) =>
+        column.target === QuizshowQuizRecord &&
+        column.propertyName === 'sourceTemplateId',
+    );
+    expect(sourceColumn?.options.nullable).toBe(true);
+    const sourceRelation = storage.relations.find(
+      (relation) =>
+        relation.target === QuizshowQuizRecord &&
+        relation.propertyName === 'sourceTemplate',
+    );
+    expect(sourceRelation?.options.onDelete).toBe('SET NULL');
+    expect(sourceRelation?.options.nullable).toBe(true);
+    const sourceJoin = storage.joinColumns.find(
+      (join) =>
+        join.target === QuizshowQuizRecord &&
+        join.propertyName === 'sourceTemplate',
+    );
+    expect(sourceJoin?.name).toBe('source_template_id');
+    expect(sourceJoin?.foreignKeyConstraintName).toBe(
+      'FK_quizshow_quizzes_source_template',
+    );
+    const sourceIndex = storage.indices.find(
+      (index) => index.name === 'IDX_quizshow_quizzes_source_template_id',
+    );
+    expect(sourceIndex?.target).toBe(QuizshowQuizRecord);
+    expect(sourceIndex?.columns).toEqual(['sourceTemplateId']);
+  });
+
+  it('drops the starter pack key', () => {
+    const starterPackColumn = getMetadataArgsStorage().columns.find(
+      (column) =>
+        column.target === QuizshowQuizRecord &&
+        column.propertyName === 'starterPackKey',
+    );
+    expect(starterPackColumn).toBeUndefined();
+  });
+
+  it('keeps a template publisher that goes null with the account', () => {
+    const storage = getMetadataArgsStorage();
+    const templateColumns = storage.columns.filter(
+      (column) => column.target === QuizshowTemplateRecord,
+    );
+    const columnOf = (propertyName: string) =>
+      templateColumns.find((column) => column.propertyName === propertyName);
+    expect(columnOf('publishedByUserId')?.options.nullable).toBe(true);
+    expect(columnOf('publishedAt')?.options.nullable).toBe(true);
+    const publisherRelation = storage.relations.find(
+      (relation) =>
+        relation.target === QuizshowTemplateRecord &&
+        relation.propertyName === 'publishedBy',
+    );
+    expect(publisherRelation?.options.onDelete).toBe('SET NULL');
+    expect(publisherRelation?.options.nullable).toBe(true);
+    const publisherJoin = storage.joinColumns.find(
+      (join) =>
+        join.target === QuizshowTemplateRecord &&
+        join.propertyName === 'publishedBy',
+    );
+    expect(publisherJoin?.name).toBe('published_by_user_id');
+    expect(publisherJoin?.foreignKeyConstraintName).toBe(
+      'FK_quizshow_templates_published_by',
+    );
+    expect(columnOf('staffNotes')?.options.length).toBe(20000);
+    expect(columnOf('staffNotes')?.options.default).toBe('');
+    expect(columnOf('cardTitleEn')?.options.length).toBe(120);
+    expect(columnOf('cardTitlePt')?.options.length).toBe(120);
+    expect(columnOf('cardDescriptionEn')?.options.length).toBe(300);
+    expect(columnOf('cardDescriptionPt')?.options.length).toBe(300);
   });
 
   it('declares the per-quiz open session index and the opener index', () => {

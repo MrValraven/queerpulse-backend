@@ -80,7 +80,8 @@ export class QuizshowGamesController {
   @Post()
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
-    summary: 'Create a game, blank or copied from a starter pack or a source.',
+    summary:
+      'Create a game, blank or copied from a published template or a source.',
   })
   @ApiCreatedResponse({ description: '`QuizshowGameResponse`.' })
   @ApiForbiddenResponse({
@@ -88,7 +89,7 @@ export class QuizshowGamesController {
   })
   @ApiNotFoundResponse({
     description:
-      '`quizshow_pack_not_found` or `quizshow_import_source_not_found`.',
+      '`quizshow_template_not_found` or `quizshow_import_source_not_found`.',
   })
   createGame(
     @CurrentUser() user: CurrentUserData,
@@ -169,12 +170,12 @@ export class QuizshowGamesController {
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary:
-      'Replace the rounds of a game with a starter pack, an event quiz or another game of the caller.',
+      'Replace the rounds of a game with a published template, an event quiz or another game of the caller.',
   })
   @ApiOkResponse({ description: '`QuizshowGameResponse`.' })
   @ApiNotFoundResponse({
     description:
-      '`quizshow_game_not_found`, `quizshow_pack_not_found` or `quizshow_import_source_not_found`.',
+      '`quizshow_game_not_found`, `quizshow_template_not_found` or `quizshow_import_source_not_found`.',
   })
   @ApiForbiddenResponse({
     description:

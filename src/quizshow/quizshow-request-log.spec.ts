@@ -9,12 +9,18 @@ describe('isQuizshowRequestUrl', () => {
     expect(isQuizshowRequestUrl('/v1/events/x/quizshow/import')).toBe(true);
     expect(isQuizshowRequestUrl('/events/x/quizshow/sessions')).toBe(true);
     expect(isQuizshowRequestUrl('/quizshow/join')).toBe(true);
-    expect(isQuizshowRequestUrl('/quizshow/packs?x=1')).toBe(true);
+    expect(isQuizshowRequestUrl('/quizshow/templates?x=1')).toBe(true);
   });
 
   it('treats the game routes as Pulse Live', () => {
     expect(isQuizshowRequestUrl('/v1/quizshow/games/abc/import')).toBe(true);
     expect(isQuizshowRequestUrl('/quizshow/games')).toBe(true);
+    expect(isQuizshowRequestUrl('/admin/quizshow/sessions/x/end')).toBe(false);
+  });
+
+  it('treats the staff template routes as Pulse Live', () => {
+    expect(isQuizshowRequestUrl('/v1/admin/quizshow/templates/abc')).toBe(true);
+    expect(isQuizshowRequestUrl('/admin/quizshow/templates')).toBe(true);
     expect(isQuizshowRequestUrl('/admin/quizshow/sessions/x/end')).toBe(false);
   });
 

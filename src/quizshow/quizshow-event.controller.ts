@@ -109,12 +109,12 @@ export class QuizshowEventController {
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary:
-      'Replace the event quiz with a starter pack or the quiz of another event the caller organises.',
+      'Replace the event quiz with a published template or the quiz of another event the caller organises.',
   })
   @ApiOkResponse({ description: '`QuizshowQuizResponse`.' })
   @ApiNotFoundResponse({
     description:
-      '`quizshow_event_not_found`, `quizshow_pack_not_found` or `quizshow_import_source_not_found`.',
+      '`quizshow_event_not_found`, `quizshow_template_not_found` or `quizshow_import_source_not_found`.',
   })
   @ApiForbiddenResponse({
     description:

@@ -926,8 +926,12 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
 //   A host may edit the quiz during a live game while the screen still shows
 //   the snapshot, so the image stays in use until the game ends. At most one
 //   session per quiz is open, so the jsonb walk reads a handful of rows.
+// A question image may also belong to a staff template (a quiz with a
+// `template_id`). It is labelled with the template's card title and counts as
+// in use while the template holds it.
 // The two halves are one UNION so a live game lists its owner once. The events
-// join is a LEFT JOIN because a game has no event.
+// and templates joins are LEFT JOINs because a game has no event and only a
+// template quiz has a template.
 const QUIZSHOW_QUESTION_MEDIA_SQL = `
   SELECT
     "referenced"."media_ref" AS "media_ref",
@@ -935,8 +939,11 @@ const QUIZSHOW_QUESTION_MEDIA_SQL = `
     "quiz"."title" AS "quiz_title",
     "quiz"."event_id" AS "quiz_event_id",
     "quiz"."owner_user_id" AS "quiz_owner_user_id",
+    "quiz"."template_id" AS "quiz_template_id",
     "event"."title" AS "event_title",
-    "event"."slug" AS "event_slug"
+    "event"."slug" AS "event_slug",
+    "template"."card_title_en" AS "template_card_title_en",
+    "template"."card_title_pt" AS "template_card_title_pt"
   FROM (
     SELECT
       "question"."media_ref"::text AS "media_ref",
@@ -957,6 +964,7 @@ const QUIZSHOW_QUESTION_MEDIA_SQL = `
   ) AS "referenced"
   INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "referenced"."quiz_id"
   LEFT JOIN "events" "event" ON "event"."id" = "quiz"."event_id"
+  LEFT JOIN "quizshow_templates" "template" ON "template"."id" = "quiz"."template_id"
 `;
 
 interface QuizshowQuestionMediaRow {
@@ -965,8 +973,11 @@ interface QuizshowQuestionMediaRow {
   quiz_title: string | null;
   quiz_event_id: string | null;
   quiz_owner_user_id: string | null;
+  quiz_template_id: string | null;
   event_title: string | null;
   event_slug: string | null;
+  template_card_title_en: string | null;
+  template_card_title_pt: string | null;
 }
 
 /** True when the key's uploader is the game owner; a key with no uploader segment reads as someone else's. */
@@ -980,6 +991,13 @@ function isUploadedByGameOwner(
     ownerUserId !== null &&
     uploaderUserId.toLowerCase() === ownerUserId.toLowerCase()
   );
+}
+
+/** The EN card title, or the PT card title when the EN one is blank. */
+function templateCardTitle(row: QuizshowQuestionMediaRow): string {
+  const englishTitle = row.template_card_title_en ?? '';
+  if (englishTitle.trim() !== '') return englishTitle;
+  return row.template_card_title_pt ?? '';
 }
 
 const QUIZSHOW_QUESTION_SOURCE: MediaReferenceSource = {
@@ -1000,7 +1018,12 @@ const QUIZSHOW_QUESTION_SOURCE: MediaReferenceSource = {
       const bareKey = toBareKey(String(row.media_ref));
       if (!candidateBareKeys.has(bareKey)) continue;
       const isEventQuiz = row.quiz_event_id !== null;
-      const entityId = isEventQuiz ? row.quiz_event_id! : row.quiz_id;
+      const isTemplateQuiz = !isEventQuiz && row.quiz_template_id != null;
+      const entityId = isEventQuiz
+        ? row.quiz_event_id!
+        : isTemplateQuiz
+          ? row.quiz_template_id!
+          : row.quiz_id;
       // A uuid holds no colon, so the first colon ends the owner id.
       const dedupeKey = `${entityId}:${bareKey}`;
       if (seenKeyAndOwner.has(dedupeKey)) continue;
@@ -1014,14 +1037,21 @@ const QUIZSHOW_QUESTION_SOURCE: MediaReferenceSource = {
               label: row.event_title ?? '',
               slug: row.event_slug ?? '',
             }
-          : {
-              type: 'quizshow-game-question',
-              entityId,
-              label: isUploadedByGameOwner(bareKey, row.quiz_owner_user_id)
-                ? (row.quiz_title ?? '')
-                : '',
-              slug: '',
-            },
+          : isTemplateQuiz
+            ? {
+                type: 'quizshow-template-question',
+                entityId,
+                label: templateCardTitle(row),
+                slug: '',
+              }
+            : {
+                type: 'quizshow-game-question',
+                entityId,
+                label: isUploadedByGameOwner(bareKey, row.quiz_owner_user_id)
+                  ? (row.quiz_title ?? '')
+                  : '',
+                slug: '',
+              },
       ]);
     }
     return pairs;

@@ -11,6 +11,10 @@ import { QuizshowOpenSessionDto } from './quizshow-open-session.dto';
 import { QuizshowQuizInputDto } from './quizshow-quiz-input.dto';
 import { QuizshowStaffActionDto } from './quizshow-staff-action.dto';
 import {
+  QuizshowTemplateInputDto,
+  QuizshowTemplateQuizInputDto,
+} from './quizshow-template.dto';
+import {
   QuizshowAnswerSubmitPayload,
   QuizshowLobbyJoinPayload,
   QuizshowPhaseCommandPayload,
@@ -76,6 +80,18 @@ function buildQuiz(overrides: PlainObject = {}): PlainObject {
     languages: 'both',
     screenLanguage: 'en',
     rounds: [buildRound()],
+    ...overrides,
+  };
+}
+
+function buildTemplateInput(overrides: PlainObject = {}): PlainObject {
+  return {
+    card: {
+      title: { en: 'Eurovision night', pt: 'Noite Eurovisão' },
+      description: { en: 'Sing along', pt: 'Canta junto' },
+    },
+    staffNotes: 'Host tips for the final round',
+    quiz: buildQuiz({ title: 'Eurovision night' }),
     ...overrides,
   };
 }
@@ -168,26 +184,38 @@ describe('quizshow request bodies', () => {
     expect(accepted.errorCount).toBe(0);
   });
 
-  it('requires a pack key for a pack import and refuses an event slug beside it', async () => {
-    const missingKey = await validateBody(QuizshowImportDto, { from: 'pack' });
-    expect(missingKey.errorCount).toBeGreaterThan(0);
-    const withSlug = await validateBody(QuizshowImportDto, {
+  it('accepts a template import and refuses a pack import, a template import without an id and a malformed templateId', async () => {
+    const valid = await validateBody(QuizshowImportDto, {
+      from: 'template',
+      templateId: sampleUuid,
+    });
+    expect(valid.errorCount).toBe(0);
+    const packImport = await validateBody(QuizshowImportDto, {
       from: 'pack',
       packKey: 'eurovision',
+    });
+    expect(packImport.errorCount).toBeGreaterThan(0);
+    const missingId = await validateBody(QuizshowImportDto, {
+      from: 'template',
+    });
+    expect(missingId.errorCount).toBeGreaterThan(0);
+    const malformed = await validateBody(QuizshowImportDto, {
+      from: 'template',
+      templateId: 'not-a-uuid',
+    });
+    expect(malformed.errorCount).toBeGreaterThan(0);
+    const withSlug = await validateBody(QuizshowImportDto, {
+      from: 'template',
+      templateId: sampleUuid,
       eventSlug: 'some-event',
     });
     expect(withSlug.errorCount).toBeGreaterThan(0);
-    const valid = await validateBody(QuizshowImportDto, {
-      from: 'pack',
-      packKey: 'eurovision',
-    });
-    expect(valid.errorCount).toBe(0);
-    const eventWithKey = await validateBody(QuizshowImportDto, {
+    const eventWithTemplateId = await validateBody(QuizshowImportDto, {
       from: 'event',
       eventSlug: 'some-event',
-      packKey: 'eurovision',
+      templateId: sampleUuid,
     });
-    expect(eventWithKey.errorCount).toBeGreaterThan(0);
+    expect(eventWithTemplateId.errorCount).toBeGreaterThan(0);
   });
 
   it('refuses a team size in solo play', async () => {
@@ -319,18 +347,18 @@ describe('quizshow request bodies', () => {
     expect(errorCount).toBeGreaterThan(0);
   });
 
-  it('accepts a game import and refuses one with a packKey or a malformed gameId', async () => {
+  it('accepts a game import and refuses one with a templateId or a malformed gameId', async () => {
     const valid = await validateBody(QuizshowImportDto, {
       from: 'game',
       gameId: sampleUuid,
     });
     expect(valid.errorCount).toBe(0);
-    const withPackKey = await validateBody(QuizshowImportDto, {
+    const withTemplateId = await validateBody(QuizshowImportDto, {
       from: 'game',
       gameId: sampleUuid,
-      packKey: 'eurovision',
+      templateId: sampleUuid,
     });
-    expect(withPackKey.errorCount).toBeGreaterThan(0);
+    expect(withTemplateId.errorCount).toBeGreaterThan(0);
     const malformed = await validateBody(QuizshowImportDto, {
       from: 'game',
       gameId: 'not-a-uuid',
@@ -396,17 +424,17 @@ describe('quizshow request bodies', () => {
     expect(atLimit.errorCount).toBe(0);
   });
 
-  it('accepts a null source and a pack source on create and refuses a source of an unknown kind', async () => {
+  it('accepts a null source and a template source on create and refuses a source of an unknown kind', async () => {
     const nullSource = await validateBody(QuizshowCreateGameDto, {
       title: 'Game',
       source: null,
     });
     expect(nullSource.errorCount).toBe(0);
-    const packSource = await validateBody(QuizshowCreateGameDto, {
+    const templateSource = await validateBody(QuizshowCreateGameDto, {
       title: 'Game',
-      source: { from: 'pack', packKey: 'eurovision' },
+      source: { from: 'template', templateId: sampleUuid },
     });
-    expect(packSource.errorCount).toBe(0);
+    expect(templateSource.errorCount).toBe(0);
     const unknownKind = await validateBody(QuizshowCreateGameDto, {
       title: 'Game',
       source: { from: 'magazine' },
@@ -416,6 +444,104 @@ describe('quizshow request bodies', () => {
       title: 'Game',
     });
     expect(missingSource.errorCount).toBeGreaterThan(0);
+  });
+
+  it('accepts a template source on create', async () => {
+    const { errorCount } = await validateBody(QuizshowCreateGameDto, {
+      title: 'Game',
+      source: { from: 'template', templateId: sampleUuid },
+    });
+    expect(errorCount).toBe(0);
+  });
+
+  it('trims the card fields and refuses a title over 120, a description over 300 and staff notes over 20000', async () => {
+    const trimmed = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        card: {
+          title: { en: '  Eurovision night  ', pt: '  Noite Eurovisão  ' },
+          description: { en: '  Sing along  ', pt: '  Canta junto  ' },
+        },
+      }),
+    );
+    expect(trimmed.errorCount).toBe(0);
+    expect(trimmed.instance.card.title.en).toBe('Eurovision night');
+    expect(trimmed.instance.card.title.pt).toBe('Noite Eurovisão');
+    expect(trimmed.instance.card.description.en).toBe('Sing along');
+    expect(trimmed.instance.card.description.pt).toBe('Canta junto');
+    const titleAtLimit = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        card: {
+          title: { en: 'x'.repeat(120), pt: 'y'.repeat(120) },
+          description: { en: 'x'.repeat(300), pt: 'y'.repeat(300) },
+        },
+        staffNotes: 'n'.repeat(20000),
+      }),
+    );
+    expect(titleAtLimit.errorCount).toBe(0);
+    const titleTooLong = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        card: {
+          title: { en: 'x'.repeat(121), pt: '' },
+          description: blankText,
+        },
+      }),
+    );
+    expect(titleTooLong.errorCount).toBeGreaterThan(0);
+    const descriptionTooLong = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        card: {
+          title: blankText,
+          description: { en: '', pt: 'y'.repeat(301) },
+        },
+      }),
+    );
+    expect(descriptionTooLong.errorCount).toBeGreaterThan(0);
+    const notesTooLong = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({ staffNotes: 'n'.repeat(20001) }),
+    );
+    expect(notesTooLong.errorCount).toBeGreaterThan(0);
+  });
+
+  it('refuses a blank template quiz title and a missing card, notes or quiz', async () => {
+    const valid = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput(),
+    );
+    expect(valid.errorCount).toBe(0);
+    const blankQuizTitle = await validateBody(
+      QuizshowTemplateQuizInputDto,
+      buildQuiz({ title: '   ' }),
+    );
+    expect(blankQuizTitle.errorCount).toBeGreaterThan(0);
+    const blankQuizTitleInBody = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({ quiz: buildQuiz({ title: '' }) }),
+    );
+    expect(blankQuizTitleInBody.errorCount).toBeGreaterThan(0);
+    for (const missingField of ['card', 'staffNotes', 'quiz']) {
+      const body = buildTemplateInput();
+      delete body[missingField];
+      const refused = await validateBody(QuizshowTemplateInputDto, body);
+      expect(refused.errorCount).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts an adults round in a template quiz', async () => {
+    const { errorCount } = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        quiz: buildQuiz({
+          title: 'After dark',
+          rounds: [buildRound({ contentLabel: 'adults' })],
+        }),
+      }),
+    );
+    expect(errorCount).toBe(0);
   });
 
   it('requires isAdultsOnly on a game PUT and refuses a blank title there', async () => {

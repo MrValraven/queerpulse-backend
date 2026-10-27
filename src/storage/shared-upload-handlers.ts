@@ -55,6 +55,8 @@ export const SHARED_UPLOAD_HANDLERS: ReadonlySet<string> = new Set([
   'QuizshowEventController.replaceQuiz',
   // Pulse Live game: a game imported from an event keeps question images a co-host uploaded; paired with the same service-side unchanged-value check.
   'QuizshowGamesController.replaceGame',
+  // Pulse Live templates: any staff member re-saves images another staff member uploaded. Paired with the service-side unchanged-value check in QuizshowTemplatesService.
+  'AdminQuizshowTemplatesController.replaceTemplate',
   // Group-chat photo: any owner/admin of the group edits the same conversation.
   'ConversationsController.update',
   // Business listing photos: claimed listings have more than one editor.

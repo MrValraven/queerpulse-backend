@@ -6,7 +6,8 @@ import { AdvancedConsoleLogger, type QueryRunner } from 'typeorm';
  * drafts/entities/draft.entity.ts) carry the whole draft payload, and the quiz
  * show tables carry
  * players' answers, votes and team names, and the quiz, round, question and
- * session tables carry game titles and question text, and sign-in code
+ * session tables carry game titles and question text, the template table
+ * carries template card text and staff notes, and sign-in code
  * challenges carry email addresses. A failed or slow query on any of
  * them logs its SQL text, its error and its timing as usual, with the
  * parameters left out.
@@ -24,6 +25,7 @@ export const PRIVATE_PARAMETER_TABLES = [
   'quizshow_questions',
   'quizshow_sessions',
   'email_sign_in_challenges',
+  'quizshow_templates',
 ] as const;
 
 /**

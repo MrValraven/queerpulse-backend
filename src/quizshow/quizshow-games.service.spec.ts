@@ -23,7 +23,7 @@ import type {
   QuizshowQuestionInput,
   QuizshowQuiz,
   QuizshowRoundInput,
-  QuizshowStarterPackQuiz,
+  QuizshowQuizShape,
 } from './quizshow.contract';
 
 const USER_ID = 'user-1';
@@ -33,6 +33,7 @@ const NEW_GAME_ID = '00000000-0000-4000-8000-0000000000b9';
 const SESSION_ID = '00000000-0000-4000-8000-0000000000c1';
 const STAFF_ID = '00000000-0000-4000-8000-0000000000d1';
 const REPORT_ID = '00000000-0000-4000-8000-0000000000e1';
+const TEMPLATE_ID = 'a7e3b1c0-5eed-4000-8000-000000000003';
 const STORED_UPDATED_AT = '2026-10-19T10:00:00.000Z';
 const FOREIGN_IMAGE =
   'event-covers/00000000-0000-4000-8000-0000000000aa/00000000-0000-4000-8000-000000000002.jpg';
@@ -79,7 +80,7 @@ function round(
 function sourceShape(
   rounds: QuizshowRoundInput[] = [round()],
   title = 'Source quiz',
-): QuizshowStarterPackQuiz {
+): QuizshowQuizShape {
   return { title, languages: 'pt', screenLanguage: 'pt', rounds };
 }
 
@@ -106,7 +107,7 @@ function storedQuiz(
     title: 'Friday quiz',
     languages: 'both',
     screenLanguage: 'en',
-    starterPackKey: 'eurovision',
+    sourceTemplateId: TEMPLATE_ID,
     updatedAt: STORED_UPDATED_AT,
     rounds: rounds.map((storedRound, roundIndex) => ({
       ...storedRound,
@@ -220,7 +221,7 @@ function build(
   });
   const resolveImportShape = jest
     .spyOn(quizzes, 'resolveImportShape')
-    .mockResolvedValue({ shape: sourceShape(), starterPackKey: null });
+    .mockResolvedValue({ shape: sourceShape(), sourceTemplateId: null });
   const loadQuizById = jest
     .spyOn(quizzes, 'loadQuizById')
     .mockResolvedValue(storedQuiz());
@@ -379,7 +380,7 @@ describe('QuizshowGamesService', () => {
           screenLanguage: 'en',
           rounds: [],
         },
-        starterPackKey: null,
+        sourceTemplateId: null,
         expectedUpdatedAt: undefined,
       },
       transactionManager,
@@ -387,7 +388,7 @@ describe('QuizshowGamesService', () => {
     expect(response.gameId).toBe(NEW_GAME_ID);
   });
 
-  it('creates from a source and turns the switch on when the source holds an adults round', async () => {
+  it('creates a game from a published template with the template as source and the switch on for an adults round', async () => {
     const { service, writeQuiz, resolveImportShape } = build();
     const adultsShape = sourceShape([
       round(),
@@ -395,9 +396,12 @@ describe('QuizshowGamesService', () => {
     ]);
     resolveImportShape.mockResolvedValueOnce({
       shape: adultsShape,
-      starterPackKey: 'eurovision',
+      sourceTemplateId: TEMPLATE_ID,
     });
-    const source = { from: 'pack', packKey: 'eurovision' } as QuizshowImportDto;
+    const source = {
+      from: 'template',
+      templateId: TEMPLATE_ID,
+    } as QuizshowImportDto;
 
     await service.createGame(USER_ID, createInput('Late night', source));
 
@@ -409,13 +413,13 @@ describe('QuizshowGamesService', () => {
       target: { kind: 'new_game', ownerUserId: USER_ID, isAdultsOnly: true },
       userId: USER_ID,
       shape: { ...adultsShape, title: 'Late night' },
-      starterPackKey: 'eurovision',
+      sourceTemplateId: TEMPLATE_ID,
       expectedUpdatedAt: undefined,
     });
 
     resolveImportShape.mockResolvedValueOnce({
       shape: sourceShape([round()]),
-      starterPackKey: null,
+      sourceTemplateId: null,
     });
     await service.createGame(USER_ID, createInput('Early night', source));
     expect(writeQuiz.mock.calls[1]?.[0].target).toEqual({
@@ -497,7 +501,7 @@ describe('QuizshowGamesService', () => {
           screenLanguage: 'en',
           rounds: adultsRounds,
         },
-        starterPackKey: 'eurovision',
+        sourceTemplateId: TEMPLATE_ID,
         expectedUpdatedAt: undefined,
       },
       transactionManager,
@@ -555,7 +559,7 @@ describe('QuizshowGamesService', () => {
     expect(writeQuiz).not.toHaveBeenCalled();
   });
 
-  it('saves a game with the stale check, the stored pack key and the switch from the input', async () => {
+  it('keeps the source template on a game save and a duplicate', async () => {
     const { service, writeQuiz, buildGameResponse } = build();
     const input = gameInput({
       isAdultsOnly: true,
@@ -568,23 +572,27 @@ describe('QuizshowGamesService', () => {
       target: { kind: 'game', gameId: GAME_ID, isAdultsOnly: true },
       userId: USER_ID,
       shape: input,
-      starterPackKey: 'eurovision',
+      sourceTemplateId: TEMPLATE_ID,
       expectedUpdatedAt: STORED_UPDATED_AT,
     });
     expect(buildGameResponse).toHaveBeenCalledWith(GAME_ID);
+
+    await service.duplicateGame(GAME_ID, USER_ID);
+
+    expect(writeQuiz.mock.calls[1]?.[0].sourceTemplateId).toBe(TEMPLATE_ID);
   });
 
-  it('refuses importing an adults round into a game whose switch is off', async () => {
+  it('refuses a template with an adults round into a game whose switch is off with the game code', async () => {
     const { service, writeQuiz, resolveImportShape } = build();
     resolveImportShape.mockResolvedValueOnce({
       shape: sourceShape([round({ contentLabel: 'adults' })]),
-      starterPackKey: null,
+      sourceTemplateId: TEMPLATE_ID,
     });
 
     const error = await caughtError(
       service.importIntoGame(GAME_ID, USER_ID, {
-        from: 'game',
-        gameId: NEW_GAME_ID,
+        from: 'template',
+        templateId: TEMPLATE_ID,
       }),
     );
 
@@ -594,7 +602,7 @@ describe('QuizshowGamesService', () => {
     expect(writeQuiz).not.toHaveBeenCalled();
   });
 
-  it("keeps the game's title when importing into it", async () => {
+  it('imports a template into a game and keeps the game title and switch', async () => {
     const { service, writeQuiz, resolveImportShape, buildGameResponse } = build(
       {
         games: [
@@ -609,15 +617,15 @@ describe('QuizshowGamesService', () => {
     );
     const importedShape = sourceShape(
       [round({ contentLabel: 'adults' })],
-      'Pack title',
+      'Template title',
     );
     resolveImportShape.mockResolvedValueOnce({
       shape: importedShape,
-      starterPackKey: 'drag_herstory',
+      sourceTemplateId: TEMPLATE_ID,
     });
     const input = {
-      from: 'pack',
-      packKey: 'drag_herstory',
+      from: 'template',
+      templateId: TEMPLATE_ID,
     } as QuizshowImportDto;
 
     await service.importIntoGame(GAME_ID, USER_ID, input);
@@ -635,7 +643,7 @@ describe('QuizshowGamesService', () => {
         screenLanguage: 'pt',
         rounds: importedShape.rounds,
       },
-      starterPackKey: 'drag_herstory',
+      sourceTemplateId: TEMPLATE_ID,
       expectedUpdatedAt: undefined,
     });
     expect(buildGameResponse).toHaveBeenCalledWith(GAME_ID);
@@ -676,8 +684,8 @@ describe('QuizshowGamesService', () => {
       () => service.duplicateGame(GAME_ID, OTHER_USER_ID),
       () =>
         service.importIntoGame(GAME_ID, OTHER_USER_ID, {
-          from: 'pack',
-          packKey: 'eurovision',
+          from: 'template',
+          templateId: TEMPLATE_ID,
         }),
       () => service.listImportSources(GAME_ID, OTHER_USER_ID),
     ];

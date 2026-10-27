@@ -39,7 +39,6 @@ const REST_ROWS: Array<[QuizshowErrorCode, number]> = [
   ['quizshow_quiz_invalid', 422],
   ['quizshow_adults_round_needs_adults_event', 422],
   ['quizshow_quiz_has_adults_rounds', 409],
-  ['quizshow_pack_not_found', 404],
   ['quizshow_import_source_not_found', 404],
   ['quizshow_import_same_event', 422],
   ['quizshow_quiz_not_found', 404],
@@ -59,6 +58,8 @@ const REST_ROWS: Array<[QuizshowErrorCode, number]> = [
   ['quizshow_game_limit_reached', 403],
   ['quizshow_lobby_rate_limited', 429],
   ['quizshow_game_adults_rounds_need_switch', 403],
+  ['quizshow_template_not_found', 404],
+  ['quizshow_template_card_incomplete', 422],
 ];
 
 describe('quizshow errors', () => {
@@ -133,6 +134,15 @@ describe('quizshow errors', () => {
   it('names the quiz to copy from when an import source is missing', () => {
     expect(QUIZSHOW_ERRORS.quizshow_import_source_not_found.message).toBe(
       'The quiz to copy from was not found.',
+    );
+  });
+
+  it('names the template and the card in the template refusals', () => {
+    expect(QUIZSHOW_ERRORS.quizshow_template_not_found.message).toBe(
+      'This quiz template was not found.',
+    );
+    expect(QUIZSHOW_ERRORS.quizshow_template_card_incomplete.message).toBe(
+      'The template card needs a title and a description in every language the quiz uses.',
     );
   });
 

@@ -27,45 +27,46 @@ import {
   completenessProblems,
   hasAdultsRound,
   structuralProblems,
-  type QuizshowQuizShape,
+  type QuizshowValidatableQuiz,
 } from './quizshow-quiz-validation';
-import {
-  QUIZSHOW_STARTER_PACKS,
-  starterPackByKey,
-  toStarterPackCard,
-} from './quizshow-starter-packs';
 import type {
   QuizshowGameResponse,
   QuizshowImportSource,
   QuizshowLiveSessionRef,
   QuizshowQuiz,
   QuizshowQuizResponse,
-  QuizshowStarterPackCard,
-  QuizshowStarterPackKey,
-  QuizshowStarterPackQuiz,
+  QuizshowQuizShape,
 } from './quizshow.contract';
 
 const QUIZ_EVENT_UNIQUE_CONSTRAINT = 'UQ_quizshow_quizzes_event_id';
 
-/** Where a quiz write lands: an event's quiz, a stored game, or a game created now. */
+/** Where a quiz write lands: an event's quiz, a stored game, a game created now, or a staff template's quiz. */
 export type QuizshowQuizTarget =
   | { kind: 'event'; event: Event }
   | { kind: 'game'; gameId: string; isAdultsOnly: boolean }
-  | { kind: 'new_game'; ownerUserId: string; isAdultsOnly: boolean };
+  | { kind: 'new_game'; ownerUserId: string; isAdultsOnly: boolean }
+  | { kind: 'template'; templateId: string };
 
 export interface QuizshowQuizWriteInput {
   target: QuizshowQuizTarget;
   userId: string;
-  shape: QuizshowStarterPackQuiz;
-  starterPackKey: QuizshowStarterPackKey | null;
+  shape: QuizshowQuizShape;
+  sourceTemplateId: string | null;
   /** undefined skips the stale check (imports and new games). */
   expectedUpdatedAt: string | null | undefined;
 }
 
 export interface QuizshowImportedShape {
-  shape: QuizshowStarterPackQuiz;
-  starterPackKey: QuizshowStarterPackKey | null;
+  shape: QuizshowQuizShape;
+  sourceTemplateId: string | null;
 }
+
+/** $1 template id: the template's quiz id while the template is published. */
+const PUBLISHED_TEMPLATE_QUIZ_SQL = `
+  SELECT "quiz"."id" AS "quiz_id" FROM "quizshow_templates" "template"
+  INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."template_id" = "template"."id"
+  WHERE "template"."id" = $1 AND "template"."published_at" IS NOT NULL
+`;
 
 /** $1 game quiz id: the open session with its player count, and whether kept results exist. */
 const GAME_RESPONSE_STATE_SQL = `
@@ -198,9 +199,9 @@ function toLiveSessionRef(
 
 /**
  * Quiz authoring for an event: read, save (a full replace guarded by
- * `expectedUpdatedAt`), and import from a starter pack, another event of the
- * same organiser or a game the caller owns. Every event route but the pack
- * list needs an organiser who is not playing an open session as a co-host.
+ * `expectedUpdatedAt`), and import from a published template, another event of
+ * the same organiser or a game the caller owns. Every event route needs an
+ * organiser who is not playing an open session as a co-host.
  * The games service reuses the write, the import resolution, the 18+ rule and
  * the response builder for games.
  */
@@ -223,7 +224,7 @@ export class QuizshowQuizService {
   ): Promise<QuizshowQuizResponse> {
     const event = await this.loadOrganisedEvent(slug, userId);
     // Sound because IsQuizshowAnswerForType fixes each answer's shape and structuralProblems rejects the rest.
-    const inputShape = input as unknown as QuizshowStarterPackQuiz;
+    const inputShape = input as unknown as QuizshowQuizShape;
     const target: QuizshowQuizTarget = { kind: 'event', event };
     this.assertShapeAllowed(target, inputShape);
     const storedQuiz = await this.loadQuiz(event.id);
@@ -243,7 +244,7 @@ export class QuizshowQuizService {
       target,
       userId,
       shape: inputShape,
-      starterPackKey: storedQuiz?.starterPackKey ?? null,
+      sourceTemplateId: storedQuiz?.sourceTemplateId ?? null,
       expectedUpdatedAt: input.expectedUpdatedAt,
     });
     return this.buildResponse(event);
@@ -255,7 +256,7 @@ export class QuizshowQuizService {
     input: QuizshowImportDto,
   ): Promise<QuizshowQuizResponse> {
     const event = await this.loadOrganisedEvent(slug, userId);
-    const { shape, starterPackKey } = await this.resolveImportShape(
+    const { shape, sourceTemplateId } = await this.resolveImportShape(
       input,
       userId,
       { eventSlug: slug, gameId: null },
@@ -266,7 +267,7 @@ export class QuizshowQuizService {
       target,
       userId,
       shape,
-      starterPackKey,
+      sourceTemplateId,
       expectedUpdatedAt: undefined,
     });
     return this.buildResponse(event);
@@ -308,7 +309,7 @@ export class QuizshowQuizService {
   }
 
   /**
-   * The quiz an import copies: a starter pack, an event the caller organises
+   * The quiz an import copies: a published template, an event the caller organises
    * (never the excluded event), or a game the caller owns (never the excluded
    * game). Another member's game reads as a missing source.
    */
@@ -317,11 +318,16 @@ export class QuizshowQuizService {
     userId: string,
     exclusion: { eventSlug: string | null; gameId: string | null },
   ): Promise<QuizshowImportedShape> {
-    if (input.from === 'pack') {
-      const pack =
-        input.packKey === undefined ? null : starterPackByKey(input.packKey);
-      if (!pack) throw quizshowError('quizshow_pack_not_found');
-      return { shape: pack.quiz, starterPackKey: pack.key };
+    if (input.from === 'template') {
+      const { templateId } = input;
+      if (templateId === undefined) {
+        throw quizshowError('quizshow_template_not_found');
+      }
+      const templateQuiz = await this.loadPublishedTemplateQuiz(templateId);
+      return {
+        shape: toQuizShape(templateQuiz),
+        sourceTemplateId: templateId,
+      };
     }
     if (input.from === 'event') {
       if (
@@ -336,7 +342,7 @@ export class QuizshowQuizService {
       );
       return {
         shape: toQuizShape(sourceQuiz),
-        starterPackKey: sourceQuiz.starterPackKey,
+        sourceTemplateId: sourceQuiz.sourceTemplateId,
       };
     }
     const sourceQuiz = await this.loadOwnedSourceQuiz(
@@ -346,7 +352,7 @@ export class QuizshowQuizService {
     );
     return {
       shape: toQuizShape(sourceQuiz),
-      starterPackKey: sourceQuiz.starterPackKey,
+      sourceTemplateId: sourceQuiz.sourceTemplateId,
     };
   }
 
@@ -371,10 +377,6 @@ export class QuizshowQuizService {
       liveSession: toLiveSessionRef(state),
       hasResults: state?.has_results === true,
     };
-  }
-
-  listPacks(): { items: QuizshowStarterPackCard[] } {
-    return { items: QUIZSHOW_STARTER_PACKS.map(toStarterPackCard) };
   }
 
   /** The stored quiz of an event with its rounds and questions, or null. */
@@ -452,6 +454,22 @@ export class QuizshowQuizService {
     return sourceQuiz;
   }
 
+  /** The quiz of a published template; a draft or unknown id reads as template not found. */
+  private async loadPublishedTemplateQuiz(
+    templateId: string,
+  ): Promise<QuizshowQuiz> {
+    const rows: { quiz_id: string }[] = await this.dataSource.query(
+      PUBLISHED_TEMPLATE_QUIZ_SQL,
+      [templateId],
+    );
+    const templateQuizId = rows[0]?.quiz_id;
+    const templateQuiz = templateQuizId
+      ? await this.loadQuizById(templateQuizId)
+      : null;
+    if (!templateQuiz) throw quizshowError('quizshow_template_not_found');
+    return templateQuiz;
+  }
+
   /** A game of the caller other than the excluded one; every miss reads as a missing source. */
   private async loadOwnedSourceQuiz(
     sourceGameId: string | undefined,
@@ -476,17 +494,19 @@ export class QuizshowQuizService {
   }
 
   /**
-   * Structural problems and the 18+ rule: an event needs its 18+ flag
-   * (the event code), a game needs its 18+ switch (the game code).
+   * Structural problems for every target, then the 18+ rule: an event needs
+   * its 18+ flag (the event code), a game needs its 18+ switch (the game
+   * code), and a template allows adults rounds.
    */
   assertShapeAllowed(
     target: QuizshowQuizTarget,
-    shape: QuizshowQuizShape,
+    shape: QuizshowValidatableQuiz,
   ): void {
     const problems = structuralProblems(shape);
     if (problems.length > 0) {
       throw quizshowErrorWithDetails('quizshow_quiz_invalid', { problems });
     }
+    if (target.kind === 'template') return;
     if (!hasAdultsRound(shape)) return;
     if (target.kind === 'event') {
       if (!this.access.isAdultsEvent(target.event)) {
@@ -535,6 +555,12 @@ export class QuizshowQuizService {
         lock: { mode: 'for_no_key_update' },
       });
     }
+    if (target.kind === 'template') {
+      return manager.findOne(QuizshowQuizRecord, {
+        where: { templateId: target.templateId },
+        lock: { mode: 'for_no_key_update' },
+      });
+    }
     const storedGame = await manager.findOne(QuizshowQuizRecord, {
       where: { id: target.gameId },
       lock: { mode: 'for_no_key_update' },
@@ -561,10 +587,12 @@ export class QuizshowQuizService {
       title: input.shape.title,
       languages: input.shape.languages,
       screenLanguage: input.shape.screenLanguage,
-      starterPackKey: input.starterPackKey,
+      sourceTemplateId: input.sourceTemplateId,
       updatedByUserId: input.userId,
       updatedAt: new Date(),
-      ...(target.kind === 'event' ? {} : { isAdultsOnly: target.isAdultsOnly }),
+      ...(target.kind === 'game' || target.kind === 'new_game'
+        ? { isAdultsOnly: target.isAdultsOnly }
+        : {}),
     };
     let quizId: string;
     if (stored) {
@@ -577,7 +605,9 @@ export class QuizshowQuizService {
           ? { eventId: target.event.id }
           : target.kind === 'new_game'
             ? { eventId: null, ownerUserId: target.ownerUserId }
-            : {};
+            : target.kind === 'template'
+              ? { eventId: null, templateId: target.templateId }
+              : {};
       const insertResult = await manager.insert(QuizshowQuizRecord, {
         ...quizColumns,
         ...scopeColumns,
