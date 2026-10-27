@@ -15,6 +15,7 @@ import { PushNotificationListener } from './push-notification.listener';
 import { PushPreviewPrivacyService } from './push-preview-privacy.service';
 import { PushService } from './push.service';
 import { PushSubscriptionRetentionService } from './push-subscription-retention.service';
+import { Notification } from '../notifications/entities/notification.entity';
 import { PushSubscription } from './entities/push-subscription.entity';
 
 @Module({
@@ -23,6 +24,7 @@ import { PushSubscription } from './entities/push-subscription.entity';
       PushSubscription,
       ConversationParticipant,
       Conversation,
+      Notification,
       // Read-only here, and read on the SEND path: `PushPreviewPrivacyService`
       // splits every batch by `hide_push_previews` before a payload is
       // encrypted. Registered as a repo rather than importing

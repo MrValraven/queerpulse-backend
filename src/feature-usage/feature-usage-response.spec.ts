@@ -1,8 +1,20 @@
-import { classifyFeatures, hasReachSignal } from './feature-usage-response';
+import {
+  classifyFeatures,
+  computeReachMedian,
+  hasReachSignal,
+} from './feature-usage-response';
+
+// Shared fixture fields. The daily series are empty here because
+// `classifyFeatures` reads only the `reach` total; the service spec covers
+// how the series are built and summed.
+const base = {
+  depthTotal: 0,
+  reachPrevious: 0,
+  reachDaily: [] as number[],
+  reachPreviousDaily: [] as number[],
+};
 
 describe('classifyFeatures', () => {
-  const base = { depthTotal: 0, reachPrevious: 0 };
-
   it('marks an unlaunched feature not-launched regardless of its numbers', () => {
     const [feature] = classifyFeatures([
       { ...base, featureKey: 'jobs', isLaunched: false, reach: 900, depth: 90 },
@@ -176,5 +188,49 @@ describe('classifyFeatures', () => {
     ];
 
     expect(hasReachSignal(rows)).toBe(false);
+  });
+});
+
+describe('computeReachMedian', () => {
+  it('takes the median over launched features only', () => {
+    const rows = [
+      { ...base, featureKey: 'jobs', isLaunched: false, reach: 9000, depth: 0 },
+      { ...base, featureKey: 'forum', isLaunched: true, reach: 400, depth: 1 },
+      {
+        ...base,
+        featureKey: 'feed',
+        isLaunched: true,
+        reach: 1240,
+        depth: null,
+      },
+      {
+        ...base,
+        featureKey: 'magazine',
+        isLaunched: true,
+        reach: 10,
+        depth: 2,
+      },
+    ];
+
+    expect(computeReachMedian(rows)).toBe(400);
+  });
+
+  it('averages the two middle values for an even count', () => {
+    const rows = [
+      { ...base, featureKey: 'forum', isLaunched: true, reach: 100, depth: 1 },
+      {
+        ...base,
+        featureKey: 'magazine',
+        isLaunched: true,
+        reach: 300,
+        depth: 2,
+      },
+    ];
+
+    expect(computeReachMedian(rows)).toBe(200);
+  });
+
+  it('reads zero when no feature is launched', () => {
+    expect(computeReachMedian([])).toBe(0);
   });
 });

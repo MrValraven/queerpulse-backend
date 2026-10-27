@@ -24,9 +24,13 @@ import { AdminStudioReleasesController } from './admin-studio-releases.controlle
 import { AdminStudioScenesController } from './admin-studio-scenes.controller';
 import { AdminStudioScenesService } from './admin-studio-scenes.service';
 import { AdminStudioTracksController } from './admin-studio-tracks.controller';
+import { StudioArtistMilestone } from './entities/studio-artist-milestone.entity';
 import { StudioCopyrightClaim } from './entities/studio-copyright-claim.entity';
 import { StudioAccessGrant } from './entities/studio-access-grant.entity';
 import { StudioCuratedPick } from './entities/studio-curated-pick.entity';
+import { StudioListen } from './entities/studio-listen.entity';
+import { StudioSupporter } from './entities/studio-supporter.entity';
+import { StudioTrackPlayDaily } from './entities/studio-track-play-daily.entity';
 import { StudioPersonaCredit } from './entities/studio-persona-credit.entity';
 import { StudioSceneEvent } from './entities/studio-scene-event.entity';
 import { StudioScene } from './entities/studio-scene.entity';
@@ -46,6 +50,10 @@ import { StudioAccessService } from './studio-access.service';
 import { StudioAdminTracksService } from './studio-admin-tracks.service';
 import { StudioAppearsOnService } from './studio-appears-on.service';
 import { StudioArtistAppearsOnController } from './studio-artist-appears-on.controller';
+import { StudioArtistMilestonesService } from './studio-artist-milestones.service';
+import { StudioArtistPlacementsService } from './studio-artist-placements.service';
+import { StudioArtistPlaysService } from './studio-artist-plays.service';
+import { StudioArtistSupporterController } from './studio-artist-supporter.controller';
 import { StudioAudioConfirmService } from './studio-audio-confirm.service';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioClaimsAdminService } from './studio-claims-admin.service';
@@ -61,7 +69,18 @@ import { StudioEpisodeAlertsListener } from './studio-episode-alerts.listener';
 import { StudioEpisodesController } from './studio-episodes.controller';
 import { StudioEpisodesService } from './studio-episodes.service';
 import { StudioLikedTracksService } from './studio-liked-tracks.service';
+import { StudioFollowerMilestonesListener } from './studio-follower-milestones.listener';
 import { StudioListeningController } from './studio-listening.controller';
+import { StudioListeningHistoryController } from './studio-listening-history.controller';
+import { StudioListeningHistoryService } from './studio-listening-history.service';
+import { StudioListeningPruneService } from './studio-listening-prune.service';
+import { StudioPlayGate } from './studio-play-gate';
+import { StudioPlayMilestonesService } from './studio-play-milestones.service';
+import { StudioPlaysController } from './studio-plays.controller';
+import { StudioPlaysService } from './studio-plays.service';
+import { StudioSupportersService } from './studio-supporters.service';
+import { StudioMilestonesController } from './studio-milestones.controller';
+import { StudioMilestoneSweepService } from './studio-milestone-sweep.service';
 import { StudioMeController } from './studio-me.controller';
 import { StudioModerationService } from './studio-moderation.service';
 import { StudioOwnershipService } from './studio-ownership.service';
@@ -140,7 +159,9 @@ import { StudioTracksService } from './studio-tracks.service';
  * routes, the staff track actions and the in-app safety notices, on the
  * existing imports (`ModerationModule` brings `ModAuditService` and
  * `StudioTakedownReportService`, `NotificationsModule` the notices,
- * `Profile` the claimant card).
+ * `Profile` the claimant card). Studio listening (the Part 2 contract) adds
+ * play counting, the member's history, supporters and the history prune on
+ * the existing imports.
  */
 @Module({
   imports: [
@@ -163,6 +184,10 @@ import { StudioTracksService } from './studio-tracks.service';
       StudioPersonaCredit,
       StudioReleaseDispute,
       StudioCopyrightClaim,
+      StudioArtistMilestone,
+      StudioTrackPlayDaily,
+      StudioListen,
+      StudioSupporter,
       Subprofile,
       SubprofileMember,
       SubprofileSocialLink,
@@ -198,6 +223,10 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioPlaylistListingsController,
     StudioProfilePlaylistsController,
     StudioStatsController,
+    StudioMilestonesController,
+    StudioPlaysController,
+    StudioListeningHistoryController,
+    StudioArtistSupporterController,
     StudioReleaseToolsController,
     StudioPreviewsController,
     StudioPressKitController,
@@ -267,6 +296,19 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioClaimsAdminService,
     StudioAdminTracksService,
     StudioSafetyNoticesService,
+    // Studio dashboard.
+    StudioArtistPlacementsService,
+    StudioArtistMilestonesService,
+    StudioFollowerMilestonesListener,
+    StudioMilestoneSweepService,
+    // Studio listening.
+    StudioPlayGate,
+    StudioPlaysService,
+    StudioPlayMilestonesService,
+    StudioListeningHistoryService,
+    StudioSupportersService,
+    StudioArtistPlaysService,
+    StudioListeningPruneService,
   ],
   // The Admin creator drafts preview (`CreatorDraftsModule`) reads a release
   // as its preview link shows it. That module imports this one; nothing here

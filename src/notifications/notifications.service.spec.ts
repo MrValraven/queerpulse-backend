@@ -569,6 +569,44 @@ describe('NotificationsService', () => {
     expect(profileRepo.find).not.toHaveBeenCalled();
   });
 
+  it('keeps pushed_at when a later event is absorbed into an unread bundle row', async () => {
+    const pushedAt = new Date('2026-10-26T09:00:00.000Z');
+    const setSpy = jest.fn().mockReturnThis();
+    const builder = {
+      update: jest.fn().mockReturnThis(),
+      set: setSpy,
+      whereInIds: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
+    };
+    (repo as unknown as { createQueryBuilder: jest.Mock }).createQueryBuilder =
+      jest.fn().mockReturnValue(builder);
+    const existing = {
+      id: 'n1',
+      userId: 'u1',
+      type: NotificationType.StudioReleasePublished,
+      payload: { subprofileId: 'persona-1', releaseId: 'release-1' },
+      read: false,
+      bundleKey: 'studio_release_published:persona-1',
+      otherActorCount: 0,
+      createdAt: new Date('2026-10-26T09:00:00.000Z'),
+      pushedAt,
+    };
+    repo.find.mockResolvedValue([existing]);
+
+    await service.createForRecipients(
+      ['u1'],
+      NotificationType.StudioReleasePublished,
+      { subprofileId: 'persona-1', releaseId: 'release-2' },
+    );
+
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    const written = setSpy.mock.calls[0]![0] as Record<string, unknown>;
+    expect(written).not.toHaveProperty('pushedAt');
+    expect(written).toHaveProperty('createdAt');
+    expect(existing.pushedAt).toBe(pushedAt);
+    expect(repo.save).not.toHaveBeenCalled();
+  });
+
   it('unreadCount counts unread notifications for the owner', async () => {
     repo.count.mockResolvedValue(4);
     await expect(service.unreadCount('u1')).resolves.toBe(4);

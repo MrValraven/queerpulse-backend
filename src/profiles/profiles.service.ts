@@ -1060,10 +1060,15 @@ export class ProfilesService {
     return out;
   }
 
-  private async canViewFull(
-    profile: Profile,
-    viewerUserId: string,
-  ): Promise<boolean> {
+  /**
+   * The limited-card rule: whether `viewerUserId` gets the full profile or
+   * only the limited card `getBySlug` answers with. The owner always passes,
+   * an open profile passes for everyone, a network profile for accepted
+   * connections, and a private one for nobody else. Public so a profile
+   * sub-resource that must not say more than the limited card does (the
+   * `GET /profiles/:slug/events` section) asks the same question.
+   */
+  async canViewFull(profile: Profile, viewerUserId: string): Promise<boolean> {
     if (profile.userId === viewerUserId) {
       return true; // owner
     }

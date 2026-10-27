@@ -39,6 +39,7 @@ import { ListStudioPlaylistsQuery } from './dto/list-studio-playlists.query';
 import { ReorderStudioPlaylistEntriesDto } from './dto/reorder-studio-playlist-entries.dto';
 import { UpdateStudioPlaylistDto } from './dto/update-studio-playlist.dto';
 import { StudioAccessGuard } from './studio-access.guard';
+import { ListLikedStatusQuery } from './dto/list-liked-status.query';
 import { StudioLikedTracksPage } from './studio-liked-tracks-response';
 import { StudioLikedTracksService } from './studio-liked-tracks.service';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
@@ -86,6 +87,19 @@ export class StudioPlaylistsController {
     @Query() query: ListStudioPlaylistsQuery,
   ): Promise<StudioLikedTracksPage> {
     return this.likedTracks.listLiked(user.userId, query.cursor);
+  }
+
+  // Which of the named tracks the caller has liked, whatever page of Liked
+  // songs holds them: a heart reads its state from here whatever the paging.
+  // Declared before `:id`, so the uuid pipe never sees `liked`.
+  @Get('liked/status')
+  @ApiOperation({ summary: 'Which of the named tracks you have liked.' })
+  @ApiOkResponse({ description: '`{ likedTrackIds: string[] }`.' })
+  likedStatus(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListLikedStatusQuery,
+  ): Promise<{ likedTrackIds: string[] }> {
+    return this.likedTracks.likedAmong(user.userId, query.ids);
   }
 
   @Post()

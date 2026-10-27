@@ -24,9 +24,10 @@ export interface AdminFinanceHistoryPoint {
 }
 
 /**
- * Provenance of each editable scalar, so the tab can badge which figures are
+ * Provenance of each headline scalar, so the tab can badge which figures are
  * trustworthy. `surplus` is always `computed` (it is derived from the two
- * totals, never stored or edited directly).
+ * totals, never stored or edited directly). `expenseTotal` turns `computed`
+ * once a save sums the switched-on spending rows into it.
  */
 export interface AdminFinanceSources {
   mrr: FinanceMetricSource;
@@ -39,9 +40,9 @@ export interface AdminFinanceSources {
 
 export interface AdminFinanceLatest {
   quarter: string;
-  /** The five editable headline figures are null when nobody has entered
-   *  them yet (a freshly opened quarter), so the editor can show an empty
-   *  field and an entered 0 is still an entry. */
+  /** The five headline figures are null until someone enters them (a
+   *  freshly opened quarter; `expenseTotal` until a spending row exists), so
+   *  the editor can show an empty field and an entered 0 is still an entry. */
   incomeTotal: number | null;
   expenseTotal: number | null;
   surplus: number;

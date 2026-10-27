@@ -14,7 +14,7 @@ import {
   StudioReleaseStatus,
 } from './entities/studio-release.entity';
 import { StudioScene, StudioSceneState } from './entities/studio-scene.entity';
-import { StudioTrack } from './entities/studio-track.entity';
+import { StudioSource, StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { stampShowEpisodes } from './studio-episode-rule';
@@ -83,6 +83,28 @@ export class StudioReleasesService {
       }),
     );
     return this.catalog.getRelease(userId, saved.id);
+  }
+
+  /** The credited sources of every track with audio, in one read, for the
+   *  publish checklist. Owner only (the write check also answers 404 to a
+   *  stranger). */
+  async trackSources(
+    userId: string,
+    releaseId: string,
+  ): Promise<{ tracks: { trackId: string; sources: StudioSource[] }[] }> {
+    await this.ownership.loadReleaseForWrite(userId, releaseId);
+    const releaseTracks = await this.dataSource
+      .getRepository(StudioTrack)
+      .find({
+        where: { releaseId },
+        order: { position: 'ASC' },
+        select: { id: true, audioKey: true, sources: true },
+      });
+    return {
+      tracks: releaseTracks
+        .filter((track) => track.audioKey)
+        .map((track) => ({ trackId: track.id, sources: track.sources ?? [] })),
+    };
   }
 
   async update(

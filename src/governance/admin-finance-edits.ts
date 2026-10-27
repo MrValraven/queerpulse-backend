@@ -87,6 +87,18 @@ function sumLineItems(items: FinanceLineItem[]): string {
   );
 }
 
+/**
+ * The ledger's total in euros: the amounts of every row still switched on
+ * (`enabled` missing reads as on), summed in cents so "0.1" and "0.2" make
+ * 0.3. Drives the computed `expenseTotal` on every Finances save.
+ */
+export function sumEnabledLineAmounts(lines: FinanceLine[]): number {
+  const totalCents = lines
+    .filter((line) => line.enabled !== false)
+    .reduce((cents, line) => cents + toCents(line.amount), 0);
+  return Math.round(totalCents) / 100;
+}
+
 /** A breakdown's audit value: "3 items · 120", or "0 items" when empty. */
 function summarizeLineItems(items: FinanceLineItem[]): string {
   if (items.length === 0) return '0 items';

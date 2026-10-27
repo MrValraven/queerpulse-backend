@@ -115,6 +115,15 @@ function build(opts: {
   const conversationsRepo = {
     findOne: jest.fn().mockResolvedValue(opts.conversationRow ?? null),
   };
+  // The once-per-artist-per-UTC-day claim: by default every recipient it is
+  // asked about is claimed (nobody has been pushed today).
+  const notificationRows = {
+    query: jest
+      .fn()
+      .mockImplementation((_sql: string, parameters: [string[]]) =>
+        Promise.resolve(parameters[0].map((user_id) => ({ user_id }))),
+      ),
+  };
   const listener = new PushNotificationListener(
     profilesRepo as never,
     push as never,
@@ -122,9 +131,11 @@ function build(opts: {
     notificationDelivery as never,
     pushMessageListener as never,
     conversationsRepo as never,
+    notificationRows as never,
   );
   return {
     listener,
+    notificationRows,
     push,
     notificationPreferences,
     notificationDelivery,
@@ -1234,6 +1245,94 @@ describe('PushNotificationListener', () => {
       expect(payload.icon).toBeUndefined();
       expect(profilesRepo.findOne).not.toHaveBeenCalled();
       expect(payload.timestamp).toBe(NOTIFICATION_CREATED_AT.getTime());
+    });
+
+    describe('once per artist per UTC day', () => {
+      const bundledRelease = () => ({
+        ...makeNotification(
+          NotificationType.StudioReleasePublished,
+          releasePayload,
+        ),
+        bundleKey: 'studio_release_published:persona-1',
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('sends the first push of the day and stamps pushed_at in the claim', async () => {
+        jest.useFakeTimers({ now: new Date('2026-10-26T15:30:00.000Z') });
+        const { listener, push, notificationRows } = build({});
+
+        await listener.handleNotificationBatchCreated(emit(bundledRelease()));
+
+        expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+        expect(notificationRows.query).toHaveBeenCalledTimes(1);
+        const [sql, parameters] = notificationRows.query.mock.calls[0] as [
+          string,
+          [string[], string, string, Date],
+        ];
+        expect(sql).toContain('SET "pushed_at" = now()');
+        expect(parameters[0]).toEqual(['recipient-1']);
+        expect(parameters[1]).toBe('studio_release_published');
+        expect(parameters[2]).toBe('studio_release_published:persona-1');
+        expect(parameters[3].toISOString()).toBe('2026-10-26T00:00:00.000Z');
+      });
+
+      it('sends no push for a second release the same UTC day', async () => {
+        jest.useFakeTimers({ now: new Date('2026-10-26T21:00:00.000Z') });
+        const { listener, push, notificationRows } = build({});
+        // The claim finds today's earlier stamp and returns nobody.
+        notificationRows.query.mockResolvedValueOnce([]);
+
+        await listener.handleNotificationBatchCreated(emit(bundledRelease()));
+
+        expect(notificationRows.query).toHaveBeenCalledTimes(1);
+        expect(push.sendToUsers).not.toHaveBeenCalled();
+      });
+
+      it('sends again on the next UTC day, claiming against the new day start', async () => {
+        const { listener, push, notificationRows } = build({});
+        jest.useFakeTimers({ now: new Date('2026-10-26T23:59:00.000Z') });
+        await listener.handleNotificationBatchCreated(emit(bundledRelease()));
+        jest.setSystemTime(new Date('2026-10-27T00:01:00.000Z'));
+        await listener.handleNotificationBatchCreated(emit(bundledRelease()));
+
+        expect(push.sendToUsers).toHaveBeenCalledTimes(2);
+        const dayStarts = notificationRows.query.mock.calls.map((call) =>
+          (call[1] as [string[], string, string, Date])[3].toISOString(),
+        );
+        expect(dayStarts).toEqual([
+          '2026-10-26T00:00:00.000Z',
+          '2026-10-27T00:00:00.000Z',
+        ]);
+      });
+
+      it('pushes only the recipients the claim returns', async () => {
+        const { listener, push, notificationRows } = build({});
+        notificationRows.query.mockResolvedValueOnce([{ user_id: 'b' }]);
+
+        await listener.handleNotificationBatchCreated(
+          emit(bundledRelease(), ['a', 'b']),
+        );
+
+        const [userIds] = push.sendToUsers.mock.calls[0] as [string[]];
+        expect(userIds).toEqual(['b']);
+      });
+
+      it('skips the claim when the payload names no persona', async () => {
+        const { listener, push, notificationRows } = build({});
+        await listener.handleNotificationBatchCreated(
+          emit(
+            makeNotification(NotificationType.StudioReleasePublished, {
+              subprofileName: 'Night Shift',
+              releaseTitle: 'Lisbon at four',
+            }),
+          ),
+        );
+        expect(notificationRows.query).not.toHaveBeenCalled();
+        expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+      });
     });
 
     it('sends nothing when Personas you follow is off', async () => {

@@ -23,6 +23,10 @@ import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { truncateCharacters } from '../common/text-characters';
 import {
+  studioShareOrigins,
+  textWithoutFirstStudioShareLink,
+} from '../studio/studio-share-link';
+import {
   DEFAULT_LIST_LIMIT,
   PAGE_SIZE,
   normalizePage,
@@ -141,6 +145,11 @@ export type UpdatePostInput = Partial<CreatePostInput> & {
  * without a community to pin *within* (see `CommunityPostsController`'s flat
  * routes doc comment). */
 export type UpdateFlatPostInput = Partial<CreatePostInput>;
+
+/** An excerpt reads without a raw Studio URL (Studio rich cards). */
+function withoutStudioLink(body: string): string {
+  return textWithoutFirstStudioShareLink(body, studioShareOrigins());
+}
 
 @Injectable()
 export class CommunityPostsService {
@@ -387,7 +396,7 @@ export class CommunityPostsService {
       source: 'community',
       communitySlug: slug,
       postId: saved.id,
-      excerpt: truncateCharacters(dto.body, 140),
+      excerpt: truncateCharacters(withoutStudioLink(dto.body), 140),
     });
     // Record the post as public profile activity — but only for PUBLIC
     // communities; the listener drops request/invite/private ones (the
@@ -400,7 +409,7 @@ export class CommunityPostsService {
       communityName: community.name,
       accessTier: community.accessTier,
       postId: saved.id,
-      excerpt: truncateCharacters(dto.body, 80),
+      excerpt: truncateCharacters(withoutStudioLink(dto.body), 80),
     } satisfies CommunityPostCreatedEvent);
     return this.buildPostDTO(saved, authorId, membership.role);
   }
@@ -1102,7 +1111,7 @@ export class CommunityPostsService {
       communitySlug: slug,
       postId: post.id,
       replyId: saved.id,
-      excerpt: truncateCharacters(text, 140),
+      excerpt: truncateCharacters(withoutStudioLink(text), 140),
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
     // Tell the post's author their post got a reply — unless the reply already
@@ -1241,7 +1250,7 @@ export class CommunityPostsService {
       source: 'community',
       postId: saved.id,
       communitySlug: dto.communitySlug,
-      excerpt: truncateCharacters(dto.body, 140),
+      excerpt: truncateCharacters(withoutStudioLink(dto.body), 140),
     });
     return { id: saved.id };
   }
@@ -1319,7 +1328,7 @@ export class CommunityPostsService {
       postId: post.id,
       replyId: saved.id,
       ...(community ? { communitySlug: community.slug } : {}),
-      excerpt: truncateCharacters(text, 140),
+      excerpt: truncateCharacters(withoutStudioLink(text), 140),
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
     // A `null` post.authorId (erased author) has no one to notify — see the
@@ -1932,7 +1941,7 @@ export class CommunityPostsService {
         communitySlug: community.slug,
         communityName: community.name,
         postId: post.id,
-        excerpt: truncateCharacters(post.body, 140),
+        excerpt: truncateCharacters(withoutStudioLink(post.body), 140),
       };
 
       for (

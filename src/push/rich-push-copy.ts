@@ -209,6 +209,16 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
     '{name} mencionou-te e partilhou uma playlist do Studio',
   'push:messages.group.mention.studio.playlistWithNote':
     '{name} mencionou-te e partilhou uma playlist do Studio: {note}',
+  'push:messages.studio.milestone': 'Partilhou um marco do Studio',
+  'push:messages.studio.milestoneWithNote':
+    'Partilhou um marco do Studio: {note}',
+  'push:messages.group.studio.milestone': '{name} partilhou um marco do Studio',
+  'push:messages.group.studio.milestoneWithNote':
+    '{name} partilhou um marco do Studio: {note}',
+  'push:messages.group.mention.studio.milestone':
+    '{name} mencionou-te e partilhou um marco do Studio',
+  'push:messages.group.mention.studio.milestoneWithNote':
+    '{name} mencionou-te e partilhou um marco do Studio: {note}',
   // Pulse Live
   'push:quizshow.starting.title': 'O Pulse Live está a começar',
   'push:quizshow.starting.body':

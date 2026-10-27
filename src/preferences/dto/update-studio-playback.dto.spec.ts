@@ -69,4 +69,20 @@ describe('UpdateStudioPlaybackDto', () => {
       'askBeforeWarnings',
     ]);
   });
+
+  it('accepts the history switch either way and refuses null', async () => {
+    expect(await failingFields({ isListeningHistoryOn: false })).toEqual([]);
+    expect(await failingFields({ isListeningHistoryOn: null })).toEqual([
+      'isListeningHistoryOn',
+    ]);
+  });
+
+  it('accepts hasSeenListeningNotice as true only', async () => {
+    expect(await failingFields({ hasSeenListeningNotice: true })).toEqual([]);
+    for (const value of [false, null, 'true']) {
+      expect(await failingFields({ hasSeenListeningNotice: value })).toEqual([
+        'hasSeenListeningNotice',
+      ]);
+    }
+  });
 });

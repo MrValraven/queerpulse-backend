@@ -12,9 +12,15 @@ import { StudioTrack } from './entities/studio-track.entity';
 import { isPodcastRelease } from './studio-episode-rule';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { publiclyListedPlaylistSql } from './studio-playlist-visibility';
+import { toReleaseHealth } from './studio-release-health';
 import {
   StudioArtistStats,
+  StudioFollowerGrowthWeek,
+  followerGrowthWeekStarts,
   orderReleasesForStats,
+  playWindowDays,
+  toFollowerGrowth,
+  toNextRelease,
   toStudioCount,
 } from './studio-stats';
 import {
@@ -44,13 +50,30 @@ interface ReminderCountRow {
   reminder_count: number | string;
 }
 
+interface FollowerGrowthRow {
+  week_start: string;
+  new_followers: number | string;
+}
+
+interface PlayCountRow {
+  track_id: string;
+  plays: number | string;
+  plays_28d: number | string;
+}
+
+interface LatestVersionRow {
+  release_id: string;
+  latest_created_at: Date | string;
+}
+
 /**
  * Studio v2 "Your numbers": current totals for a persona's owners and
- * co-owners. Everything comes from data that already exists; nothing here
- * reads or records a play. Six grouped queries per page, whatever the
- * catalogue size: releases, tracks, saves, track inclusions, release
- * inclusions and, for scheduled releases only, Notify me reminders (plus
- * the follower count).
+ * co-owners. Everything comes from data that already exists; plays come
+ * from the anonymous daily totals. Nine grouped queries at most per page,
+ * whatever the catalogue size: releases, tracks, saves, track inclusions,
+ * release inclusions, daily plays, weekly new followers, Notify me reminders
+ * for scheduled releases only, and version dates for published releases
+ * whose tracks changed only (plus the follower count).
  */
 @Injectable()
 export class StudioStatsService {
@@ -91,6 +114,10 @@ export class StudioStatsService {
     const followerCounts = await this.followers.loadFollowerCountsFor([
       persona.id,
     ]);
+    const followerGrowth = await this.followerGrowth(
+      persona.id,
+      followerGrowthWeekStarts(new Date()),
+    );
     const orderedReleases = orderReleasesForStats(
       await this.releases.find({
         where: { subprofileId },
@@ -108,18 +135,38 @@ export class StudioStatsService {
     const saves = await this.saveCounts(releaseIds, trackIds);
     const trackInclusions = await this.trackInclusionCounts(trackIds);
     const releaseInclusions = await this.releaseInclusionCounts(releaseIds);
+    const playCounts = await this.playCounts(
+      trackIds,
+      playWindowDays(new Date())[0] ?? '',
+    );
     const reminderCounts = await this.reminderCounts(
       orderedReleases
         .filter((release) => release.status === StudioReleaseStatus.Scheduled)
         .map((release) => release.id),
     );
+    const latestVersionDates = await this.latestVersionDates(
+      orderedReleases
+        .filter(
+          (release) =>
+            release.status === StudioReleaseStatus.Published &&
+            Boolean(release.tracksChangedAt),
+        )
+        .map((release) => release.id),
+    );
     return {
       subprofileId: persona.id,
       followerCount: followerCounts.get(persona.id) ?? 0,
+      followerGrowth,
+      nextRelease: toNextRelease(orderedReleases, reminderCounts),
       releases: orderedReleases.map((release) => {
         const tracksOfRelease = releaseTracks.filter(
           (track) => track.releaseId === release.id,
         );
+        // Studio artist kinds: a show has no per-episode numbers, and an
+        // episode never counts a play.
+        const rowTracks = isPodcastRelease(release) ? [] : tracksOfRelease;
+        const playsOf = (track: StudioTrack) =>
+          playCounts.get(track.id) ?? { plays: 0, plays28d: 0 };
         return {
           release: {
             ...toStudioReleaseCard(
@@ -137,19 +184,69 @@ export class StudioStatsService {
             release.status === StudioReleaseStatus.Scheduled
               ? toStudioCount(reminderCounts.get(release.id) ?? 0)
               : null,
-          // Studio artist kinds: a show has no per-episode numbers.
-          tracks: isPodcastRelease(release)
-            ? []
-            : tracksOfRelease.map((track) => ({
-                track: toStudioTrackSummary(track),
-                saves: toStudioCount(saves.byTrackId.get(track.id) ?? 0),
-                playlistInclusions: toStudioCount(
-                  trackInclusions.get(track.id) ?? 0,
-                ),
-              })),
+          // Withheld tracks are summed in; each sum is floored once.
+          plays: toStudioCount(
+            rowTracks.reduce((sum, track) => sum + playsOf(track).plays, 0),
+          ),
+          plays28d: toStudioCount(
+            rowTracks.reduce((sum, track) => sum + playsOf(track).plays28d, 0),
+          ),
+          tracks: rowTracks.map((track) => ({
+            track: toStudioTrackSummary(track),
+            saves: toStudioCount(saves.byTrackId.get(track.id) ?? 0),
+            playlistInclusions: toStudioCount(
+              trackInclusions.get(track.id) ?? 0,
+            ),
+            plays: toStudioCount(playsOf(track).plays),
+            plays28d: toStudioCount(playsOf(track).plays28d),
+          })),
+          health: toReleaseHealth(
+            release,
+            tracksOfRelease,
+            latestVersionDates.get(release.id) ?? null,
+          ),
         };
       }),
     };
+  }
+
+  /** Studio dashboard: new followers per UTC week from the first week
+   *  start on, one grouped read. Counts only. */
+  private async followerGrowth(
+    subprofileId: string,
+    weekStarts: string[],
+  ): Promise<StudioFollowerGrowthWeek[]> {
+    const rows: FollowerGrowthRow[] = await this.dataSource.query(
+      `SELECT to_char(date_trunc('week', "follower"."created_at" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "week_start",
+              COUNT(*)::int AS "new_followers"
+         FROM "subprofile_followers" "follower"
+        WHERE "follower"."subprofile_id" = $1
+          AND "follower"."created_at" >= $2::timestamptz
+        GROUP BY 1`,
+      [subprofileId, `${weekStarts[0]}T00:00:00.000Z`],
+    );
+    return toFollowerGrowth(weekStarts, rows);
+  }
+
+  /** Studio dashboard: the newest version note date per release, read for
+   *  published releases whose tracks changed. */
+  private async latestVersionDates(
+    releaseIds: string[],
+  ): Promise<Map<string, Date>> {
+    if (!releaseIds.length) {
+      return new Map();
+    }
+    const rows: LatestVersionRow[] = await this.dataSource.query(
+      `SELECT "version"."release_id" AS "release_id",
+              MAX("version"."created_at") AS "latest_created_at"
+         FROM "studio_release_versions" "version"
+        WHERE "version"."release_id" = ANY($1::uuid[])
+        GROUP BY "version"."release_id"`,
+      [releaseIds],
+    );
+    return new Map(
+      rows.map((row) => [row.release_id, new Date(row.latest_created_at)]),
+    );
   }
 
   private async saveCounts(
@@ -243,6 +340,32 @@ export class StudioStatsService {
     );
     return new Map(
       rows.map((row) => [row.release_id, Number(row.reminder_count)]),
+    );
+  }
+
+  /** Studio dashboard listening: all-time and window plays per track from
+   *  the anonymous daily totals, one grouped read. Counts only. */
+  private async playCounts(
+    trackIds: string[],
+    windowStartDay: string,
+  ): Promise<Map<string, { plays: number; plays28d: number }>> {
+    if (!trackIds.length) {
+      return new Map();
+    }
+    const rows: PlayCountRow[] = await this.dataSource.query(
+      `SELECT "daily"."track_id" AS "track_id",
+              SUM("daily"."plays")::bigint AS "plays",
+              COALESCE(SUM("daily"."plays") FILTER (WHERE "daily"."day" >= $2::date), 0)::bigint AS "plays_28d"
+         FROM "studio_track_play_daily" "daily"
+        WHERE "daily"."track_id" = ANY($1::uuid[])
+        GROUP BY "daily"."track_id"`,
+      [trackIds, windowStartDay],
+    );
+    return new Map(
+      rows.map((row) => [
+        row.track_id,
+        { plays: Number(row.plays), plays28d: Number(row.plays_28d) },
+      ]),
     );
   }
 }

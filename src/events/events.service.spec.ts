@@ -46,7 +46,14 @@ import {
   EventVisibility,
   GatheringFamily,
 } from './entities/event.entity';
+import type { EventSummary } from './event-response';
 import { EventsService } from './events.service';
+import { ENDED_SQL, UPCOMING_OR_UNDERWAY_SQL } from './event-schedule-sql';
+import {
+  MEMBER_PROFILE_PAST_LIMIT,
+  MEMBER_PROFILE_UPCOMING_LIMIT,
+  SERIES_FOLD_KEY_SQL,
+} from './member-profile-events';
 import { RsvpService } from './rsvp.service';
 
 describe('EventsService', () => {
@@ -4418,6 +4425,519 @@ describe('EventsService', () => {
         expect.stringContaining('"feature_early_access_grants"'),
         ['u1', 'quizshow'],
       );
+    });
+  });
+
+  // `GET /profiles/:slug/events`. One base query (the member's hosted and
+  // co-hosted events, published, moderation- and block-filtered, and
+  // audience-gated for a visitor) is cloned into the two inner series-fold
+  // queries (upcoming, then past), and each inner query feeds an outer one
+  // that orders and caps the folded ids. The stub records every clause each
+  // builder inherits and adds, so a test reads back exactly what each query
+  // asked Postgres for.
+  describe('listForMemberProfile', () => {
+    const MEMBER_ID = 'member-1';
+    const VISITOR_ID = 'visitor-1';
+
+    interface RecordedProfileQuery {
+      alias: string;
+      whereCalls: RecordedWhereCall[];
+      orderCalls: Array<[string, string]>;
+      takeCalls: number[];
+      selectCalls: Array<[string, string]>;
+      distinctOnCalls: string[][];
+      setParametersCalls: Array<Record<string, unknown>>;
+    }
+
+    // `events.createQueryBuilder` hands out the base first, then one outer
+    // builder per list (upcoming, then past). `rowsByOuter[0]` answers the
+    // upcoming outer query and `rowsByOuter[1]` the past one. An inner
+    // (cloned) builder's `getQuery` answers `INNER_QUERY_<n>`, numbered in
+    // clone order, and its `getParameters` merges every parameter its
+    // clauses bound.
+    const profileEventsQueryBuilders = (rowsByOuter: Event[][] = [[], []]) => {
+      const clones: RecordedProfileQuery[] = [];
+      const outers: RecordedProfileQuery[] = [];
+      const build = (
+        alias: string,
+        inheritedWhereCalls: RecordedWhereCall[],
+      ) => {
+        const recorded: RecordedProfileQuery = {
+          alias,
+          whereCalls: [...inheritedWhereCalls],
+          orderCalls: [],
+          takeCalls: [],
+          selectCalls: [],
+          distinctOnCalls: [],
+          setParametersCalls: [],
+        };
+        const queryBuilder: Record<string, jest.Mock> = {};
+        for (const method of ['where', 'andWhere']) {
+          queryBuilder[method] = jest.fn(
+            (clause: unknown, parameters: unknown) => {
+              if (typeof clause === 'string') {
+                recorded.whereCalls.push({
+                  clause,
+                  parameters:
+                    parameters && typeof parameters === 'object'
+                      ? (parameters as Record<string, unknown>)
+                      : {},
+                });
+              }
+              return queryBuilder;
+            },
+          );
+        }
+        for (const method of ['orderBy', 'addOrderBy']) {
+          queryBuilder[method] = jest.fn(
+            (column: string, direction: string) => {
+              recorded.orderCalls.push([column, direction]);
+              return queryBuilder;
+            },
+          );
+        }
+        queryBuilder.take = jest.fn((count: number) => {
+          recorded.takeCalls.push(count);
+          return queryBuilder;
+        });
+        queryBuilder.select = jest.fn(
+          (selection: string, aliasName: string) => {
+            recorded.selectCalls.push([selection, aliasName]);
+            return queryBuilder;
+          },
+        );
+        queryBuilder.distinctOn = jest.fn((expressions: string[]) => {
+          recorded.distinctOnCalls.push(expressions);
+          return queryBuilder;
+        });
+        queryBuilder.setParameters = jest.fn(
+          (parameters: Record<string, unknown>) => {
+            recorded.setParametersCalls.push(parameters);
+            return queryBuilder;
+          },
+        );
+        queryBuilder.clone = jest.fn(() => {
+          const child = build(recorded.alias, recorded.whereCalls);
+          clones.push(child.recorded);
+          return child.queryBuilder;
+        });
+        queryBuilder.getQuery = jest.fn(
+          () => `INNER_QUERY_${clones.indexOf(recorded)}`,
+        );
+        queryBuilder.getParameters = jest.fn(
+          () =>
+            Object.assign(
+              {},
+              ...recorded.whereCalls.map((call) => call.parameters),
+            ) as Record<string, unknown>,
+        );
+        queryBuilder.getMany = jest.fn(() =>
+          Promise.resolve(rowsByOuter[outers.indexOf(recorded)] ?? []),
+        );
+        return { queryBuilder, recorded };
+      };
+      const base = build('e', []);
+      let hasHandedOutBase = false;
+      const createQueryBuilder = jest.fn((alias: string) => {
+        if (!hasHandedOutBase) {
+          hasHandedOutBase = true;
+          base.recorded.alias = alias;
+          return base.queryBuilder;
+        }
+        const outer = build(alias, []);
+        outers.push(outer.recorded);
+        return outer.queryBuilder;
+      });
+      return {
+        createQueryBuilder,
+        queryBuilder: base.queryBuilder,
+        base: base.recorded,
+        clones,
+        outers,
+      };
+    };
+
+    const listedRow = (id: string, hostId: string | null): Event =>
+      ({ id, slug: `${id}-slug`, hostId }) as unknown as Event;
+
+    // `summarize` is covered by the list tests above. Here it only has to
+    // hand back one card per row, in order, so the split and the role
+    // mapping are what the assertions read.
+    const spyOnSummarize = () =>
+      jest
+        .spyOn(
+          service as unknown as {
+            summarize: (
+              rows: Event[],
+              viewerId: string,
+              knownCohostedIds?: ReadonlySet<string>,
+            ) => Promise<EventSummary[]>;
+          },
+          'summarize',
+        )
+        .mockImplementation((rows: Event[]) =>
+          Promise.resolve(
+            rows.map((row) => ({ slug: row.slug }) as unknown as EventSummary),
+          ),
+        );
+
+    const runFor = async (viewerId: string, rowsByOuter?: Event[][]) => {
+      const stub = profileEventsQueryBuilders(rowsByOuter);
+      events.createQueryBuilder.mockImplementation(stub.createQueryBuilder);
+      const response = await service.listForMemberProfile(MEMBER_ID, viewerId);
+      return { ...stub, response };
+    };
+
+    it('asks for hosted or co-hosted events in one predicate', async () => {
+      const { base } = await runFor(VISITOR_ID);
+
+      const memberClause = base.whereCalls[0]!;
+      const collapsedClause = memberClause.clause.replace(/\s+/g, ' ');
+      expect(collapsedClause).toMatch(/^e\.id IN \( SELECT /);
+      expect(collapsedClause).toContain(
+        'SELECT "member_hosted_event"."id" FROM "events" "member_hosted_event" WHERE "member_hosted_event"."host_id" = :memberId UNION SELECT',
+      );
+      expect(collapsedClause).toContain(
+        'SELECT "member_cohosted_event"."event_id" FROM "event_cohosts" "member_cohosted_event" WHERE "member_cohosted_event"."user_id" = :memberId',
+      );
+      expect(collapsedClause).not.toContain(' OR ');
+      expect(collapsedClause).not.toContain('EXISTS');
+      expect(memberClause.parameters).toEqual({ memberId: MEMBER_ID });
+    });
+
+    it('reads no co-host rows ahead of the query', async () => {
+      await runFor(VISITOR_ID);
+      await runFor(MEMBER_ID);
+
+      expect(cohosts.find).not.toHaveBeenCalled();
+    });
+
+    it('keeps published events only', async () => {
+      const { base } = await runFor(VISITOR_ID);
+
+      expect(base.whereCalls).toContainEqual({
+        clause: 'e.status = :status',
+        parameters: { status: EventStatus.Published },
+      });
+    });
+
+    it('drops events whose host and the viewer blocked each other', async () => {
+      const { queryBuilder } = await runFor(VISITOR_ID);
+
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledTimes(1);
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        VISITOR_ID,
+        '"e"."host_id"',
+      );
+    });
+
+    it('drops moderator takedowns', async () => {
+      const { base } = await runFor(VISITOR_ID);
+
+      const moderationCalls = base.whereCalls.filter((call) =>
+        call.clause.includes('"content_moderation"'),
+      );
+      expect(moderationCalls).toHaveLength(1);
+      expect(moderationCalls[0]!.parameters).toEqual({
+        eventSubjectType: 'event',
+      });
+    });
+
+    it('keeps events from communities the viewer hid', async () => {
+      events.manager.query.mockResolvedValue([{ community_id: 'c-1' }]);
+
+      const { base, clones, outers } = await runFor(VISITOR_ID);
+
+      expect(events.manager.query).not.toHaveBeenCalled();
+      for (const recorded of [base, ...clones, ...outers]) {
+        expect(
+          recorded.whereCalls.filter((call) =>
+            call.clause.includes('hiddenCommunityIds'),
+          ),
+        ).toHaveLength(0);
+      }
+    });
+
+    it("applies the visitor's audience gate exactly as the browse does", async () => {
+      const gateClause =
+        '(e.visibility IN (:...vis) OR (e.visibility = :networkVisibility AND e.host_id IN (:...viewerConnectionIds)))';
+      const gateParams = {
+        vis: [EventVisibility.Public, EventVisibility.Members],
+        networkVisibility: EventVisibility.Network,
+        viewerConnectionIds: ['connection-1'],
+      };
+      audienceGate.scopedVisibilityWhere.mockResolvedValue({
+        clause: gateClause,
+        params: gateParams,
+      });
+
+      const { base } = await runFor(VISITOR_ID);
+
+      expect(audienceGate.scopedVisibilityWhere).toHaveBeenCalledTimes(1);
+      expect(audienceGate.scopedVisibilityWhere).toHaveBeenCalledWith(
+        VISITOR_ID,
+      );
+      expect(base.whereCalls).toContainEqual({
+        clause: gateClause,
+        parameters: gateParams,
+      });
+      expect(
+        base.whereCalls.filter((call) =>
+          call.clause.includes(':...ownProfileVisibilities'),
+        ),
+      ).toHaveLength(0);
+    });
+
+    it.each([
+      ['an empty clause', { clause: '', params: {} }],
+      ['no answer at all', undefined],
+    ])(
+      'fails closed for a visitor when the gate returns %s',
+      async (_label, gateAnswer) => {
+        audienceGate.scopedVisibilityWhere.mockResolvedValue(gateAnswer);
+        const summarizeSpy = spyOnSummarize();
+
+        const { response } = await runFor(VISITOR_ID, [
+          [listedRow('hosted-upcoming', MEMBER_ID)],
+          [listedRow('hosted-past', MEMBER_ID)],
+        ]);
+
+        expect(response).toEqual({ upcoming: [], past: [] });
+        expect(events.createQueryBuilder).not.toHaveBeenCalled();
+        expect(summarizeSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    it('picks the owner branch from the ids alone, whatever the gate would say', async () => {
+      audienceGate.scopedVisibilityWhere.mockResolvedValue({
+        clause: '',
+        params: {},
+      });
+
+      const { base } = await runFor(MEMBER_ID);
+
+      expect(audienceGate.scopedVisibilityWhere).not.toHaveBeenCalled();
+      expect(
+        base.whereCalls.some((call) =>
+          call.clause.includes(':...ownProfileVisibilities'),
+        ),
+      ).toBe(true);
+    });
+
+    it('skips the gate on the owner profile and lists every tier a profile shows', async () => {
+      const { base } = await runFor(MEMBER_ID);
+
+      expect(audienceGate.scopedVisibilityWhere).not.toHaveBeenCalled();
+      const ownVisibilityCalls = base.whereCalls.filter((call) =>
+        call.clause.includes(':...ownProfileVisibilities'),
+      );
+      expect(ownVisibilityCalls).toEqual([
+        {
+          clause: 'e.visibility IN (:...ownProfileVisibilities)',
+          parameters: {
+            ownProfileVisibilities: [
+              EventVisibility.Public,
+              EventVisibility.Members,
+              EventVisibility.Network,
+              EventVisibility.Community,
+            ],
+          },
+        },
+      ]);
+      const listedVisibilities = ownVisibilityCalls[0]!.parameters
+        .ownProfileVisibilities as EventVisibility[];
+      expect(listedVisibilities).not.toContain(EventVisibility.InviteOnly);
+      expect(listedVisibilities).not.toContain(EventVisibility.ExtendedNetwork);
+    });
+
+    it('still drops blocks and takedowns on the owner profile', async () => {
+      const { queryBuilder, base } = await runFor(MEMBER_ID);
+
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        MEMBER_ID,
+        '"e"."host_id"',
+      );
+      expect(
+        base.whereCalls.some((call) =>
+          call.clause.includes('"content_moderation"'),
+        ),
+      ).toBe(true);
+    });
+
+    // Inner query n is clone n; outer query n is the createQueryBuilder
+    // call after the base. Upcoming builds first, then past.
+    const foldFor = (
+      stub: { clones: RecordedProfileQuery[]; outers: RecordedProfileQuery[] },
+      listIndex: number,
+    ) => ({ inner: stub.clones[listIndex]!, outer: stub.outers[listIndex]! });
+
+    it('folds upcoming events to the earliest date of each series', async () => {
+      const stub = await runFor(VISITOR_ID);
+
+      expect(stub.clones).toHaveLength(2);
+      const { inner } = foldFor(stub, 0);
+      expect(inner.selectCalls).toEqual([['e.id', 'id']]);
+      expect(inner.distinctOnCalls).toEqual([[SERIES_FOLD_KEY_SQL]]);
+      const scheduleCalls = inner.whereCalls.filter((call) =>
+        call.clause.includes(':now'),
+      );
+      expect(scheduleCalls).toHaveLength(1);
+      expect(scheduleCalls[0]!.clause).toBe(UPCOMING_OR_UNDERWAY_SQL);
+      expect(scheduleCalls[0]!.parameters.now).toBeInstanceOf(Date);
+      expect(inner.orderCalls).toEqual([
+        [SERIES_FOLD_KEY_SQL, 'ASC'],
+        ['e.start_at', 'ASC'],
+        ['e.id', 'ASC'],
+      ]);
+      expect(inner.takeCalls).toEqual([]);
+    });
+
+    it('folds past events to the latest date of each series', async () => {
+      const stub = await runFor(VISITOR_ID);
+
+      const { inner } = foldFor(stub, 1);
+      expect(inner.selectCalls).toEqual([['e.id', 'id']]);
+      expect(inner.distinctOnCalls).toEqual([[SERIES_FOLD_KEY_SQL]]);
+      const scheduleCalls = inner.whereCalls.filter((call) =>
+        call.clause.includes(':now'),
+      );
+      expect(scheduleCalls).toHaveLength(1);
+      expect(scheduleCalls[0]!.clause).toBe(ENDED_SQL);
+      expect(scheduleCalls[0]!.parameters.now).toBeInstanceOf(Date);
+      expect(inner.orderCalls).toEqual([
+        [SERIES_FOLD_KEY_SQL, 'ASC'],
+        ['e.start_at', 'DESC'],
+        ['e.id', 'DESC'],
+      ]);
+      expect(inner.takeCalls).toEqual([]);
+    });
+
+    it('orders the folded upcoming ids soonest first and takes 12', async () => {
+      const stub = await runFor(VISITOR_ID);
+
+      const { outer } = foldFor(stub, 0);
+      expect(outer.alias).toBe('listed_event');
+      expect(outer.whereCalls.map((call) => call.clause)).toEqual([
+        'listed_event.id IN (INNER_QUERY_0)',
+      ]);
+      expect(outer.orderCalls).toEqual([
+        ['listed_event.start_at', 'ASC'],
+        ['listed_event.id', 'ASC'],
+      ]);
+      expect(outer.takeCalls).toEqual([MEMBER_PROFILE_UPCOMING_LIMIT]);
+    });
+
+    it('orders the folded past ids latest first and takes 6', async () => {
+      const stub = await runFor(VISITOR_ID);
+
+      const { outer } = foldFor(stub, 1);
+      expect(outer.alias).toBe('listed_event');
+      expect(outer.whereCalls.map((call) => call.clause)).toEqual([
+        'listed_event.id IN (INNER_QUERY_1)',
+      ]);
+      expect(outer.orderCalls).toEqual([
+        ['listed_event.start_at', 'DESC'],
+        ['listed_event.id', 'DESC'],
+      ]);
+      expect(outer.takeCalls).toEqual([MEMBER_PROFILE_PAST_LIMIT]);
+    });
+
+    it('binds every inner parameter on the outer query', async () => {
+      const gateParams = {
+        vis: [EventVisibility.Public, EventVisibility.Members],
+      };
+      audienceGate.scopedVisibilityWhere.mockResolvedValue({
+        clause: 'e.visibility IN (:...vis)',
+        params: gateParams,
+      });
+
+      const stub = await runFor(VISITOR_ID);
+
+      for (const listIndex of [0, 1]) {
+        const { outer } = foldFor(stub, listIndex);
+        expect(outer.setParametersCalls).toHaveLength(1);
+        const boundParameters = outer.setParametersCalls[0]!;
+        expect(boundParameters).toEqual(
+          expect.objectContaining({
+            memberId: MEMBER_ID,
+            status: EventStatus.Published,
+            eventSubjectType: 'event',
+            vis: gateParams.vis,
+          }),
+        );
+        expect(boundParameters.now).toBeInstanceOf(Date);
+      }
+    });
+
+    it('carries every base clause into both inner queries', async () => {
+      const { base, clones } = await runFor(VISITOR_ID);
+
+      for (const recorded of clones) {
+        expect(recorded.whereCalls.slice(0, base.whereCalls.length)).toEqual(
+          base.whereCalls,
+        );
+      }
+    });
+
+    it('never joins attendance', async () => {
+      const { base, clones, outers } = await runFor(VISITOR_ID);
+
+      for (const recorded of [base, ...clones, ...outers]) {
+        expect(
+          recorded.whereCalls.filter(
+            (call) =>
+              call.clause.includes('event_rsvps') ||
+              call.clause.includes('r.user_id'),
+          ),
+        ).toHaveLength(0);
+      }
+      expect(base.whereCalls[0]!.clause).not.toContain('rsvp');
+    });
+
+    it('summarizes both lists in one call and maps each role', async () => {
+      const summarizeSpy = spyOnSummarize();
+      const hostedUpcoming = listedRow('hosted-upcoming', MEMBER_ID);
+      const cohostedUpcoming = listedRow('cohosted-upcoming', 'host-2');
+      const cohostedPast = listedRow('cohosted-past', 'host-3');
+
+      const { response } = await runFor(VISITOR_ID, [
+        [hostedUpcoming, cohostedUpcoming],
+        [cohostedPast],
+      ]);
+
+      expect(summarizeSpy).toHaveBeenCalledTimes(1);
+      expect(summarizeSpy).toHaveBeenCalledWith(
+        [hostedUpcoming, cohostedUpcoming, cohostedPast],
+        VISITOR_ID,
+      );
+      expect(response.upcoming).toEqual([
+        { slug: 'hosted-upcoming-slug', role: 'host' },
+        { slug: 'cohosted-upcoming-slug', role: 'cohost' },
+      ]);
+      expect(response.past).toEqual([
+        { slug: 'cohosted-past-slug', role: 'cohost' },
+      ]);
+    });
+
+    it('summarizes for the owner as the viewer on their own profile', async () => {
+      const summarizeSpy = spyOnSummarize();
+      const cohostedUpcoming = listedRow('cohosted-1', 'host-2');
+
+      const { response } = await runFor(MEMBER_ID, [[cohostedUpcoming], []]);
+
+      expect(summarizeSpy).toHaveBeenCalledTimes(1);
+      expect(summarizeSpy).toHaveBeenCalledWith([cohostedUpcoming], MEMBER_ID);
+      expect(response.upcoming).toEqual([
+        { slug: 'cohosted-1-slug', role: 'cohost' },
+      ]);
+    });
+
+    it('answers two empty lists when the member runs nothing', async () => {
+      const { response } = await runFor(VISITOR_ID);
+
+      expect(response).toEqual({ upcoming: [], past: [] });
     });
   });
 });

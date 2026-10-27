@@ -56,6 +56,11 @@ export function normalizeSceneBlurb(
 const LOCK_SCENES_SQL =
   'LOCK TABLE "studio_scenes" IN SHARE ROW EXCLUSIVE MODE';
 
+/** `$1` the scene. Locks the row for the rest of the transaction and reads
+ *  the cover it holds right now, so a cover edit is decided against the
+ *  stored value and never against a read taken before another edit. */
+const LOCK_SCENE_COVER_SQL = `SELECT "cover_key" FROM "studio_scenes" WHERE "id" = $1 FOR UPDATE`;
+
 const NEXT_ACTIVE_POSITION_SQL = `SELECT CAST(COALESCE(MAX("position"), 0) + 1 AS int) AS "position"
   FROM "studio_scenes" WHERE "status" = 'active'`;
 
@@ -126,7 +131,7 @@ const PINNED_EVENTS_SQL = `SELECT "event"."id" AS "event_id",
 /** `$1` the scene, `$2`/`$3` the cursor or nulls, `$4` the page size plus
  *  one. `created_at` holds microseconds and a JS `Date` cursor milliseconds,
  *  so both sides compare at millisecond precision. */
-const ADMIN_SCENE_RELEASES_SQL = `SELECT "release"."id" AS "id",
+export const ADMIN_SCENE_RELEASES_SQL = `SELECT "release"."id" AS "id",
        "release"."status"::text AS "status",
        date_trunc('milliseconds', "release"."created_at") AS "created_at_ms"
   FROM "studio_releases" "release"
@@ -183,27 +188,34 @@ export class AdminStudioScenesService {
     // refused (the cinema title pattern).
     assertNoForeignUploadIntroduced(staffUserId, body.coverKey, []);
     const coverKey = await this.toSceneScopedCover(body.coverKey);
-    const sceneId = await this.withSlugConflict(() =>
-      this.dataSource.transaction(async (manager) => {
-        await manager.query(LOCK_SCENES_SQL);
-        const slug = body.slug
-          ? await this.assertSlugFree(manager, body.slug, null)
-          : await this.firstFreeSlug(manager, sceneSlugBase(body.name));
-        const saved = await manager.save(
-          manager.create(StudioScene, {
-            slug,
-            name: body.name,
-            city: body.city,
-            blurb: normalizeSceneBlurb(body.blurb),
-            coverKey: coverKey ?? null,
-            status: StudioSceneState.Active,
-            position: await this.nextActivePosition(manager),
-            createdById: staffUserId,
-          }),
-        );
-        return saved.id;
-      }),
-    );
+    let sceneId: string;
+    try {
+      sceneId = await this.withSlugConflict(() =>
+        this.dataSource.transaction(async (manager) => {
+          await manager.query(LOCK_SCENES_SQL);
+          const slug = body.slug
+            ? await this.assertSlugFree(manager, body.slug, null)
+            : await this.firstFreeSlug(manager, sceneSlugBase(body.name));
+          const saved = await manager.save(
+            manager.create(StudioScene, {
+              slug,
+              name: body.name,
+              city: body.city,
+              blurb: normalizeSceneBlurb(body.blurb),
+              coverKey: coverKey ?? null,
+              status: StudioSceneState.Active,
+              position: await this.nextActivePosition(manager),
+              createdById: staffUserId,
+            }),
+          );
+          return saved.id;
+        }),
+      );
+    } catch (error) {
+      // The write rolled back, so the fresh copy is named by no row.
+      await this.discardUnusedCopy(body.coverKey, coverKey);
+      throw error;
+    }
     return this.loadSceneOrThrow(sceneId);
   }
 
@@ -219,27 +231,55 @@ export class AdminStudioScenesService {
       scene.coverKey,
     ]);
     const coverKey = await this.toSceneScopedCover(body.coverKey);
-    await this.withSlugConflict(() =>
-      this.dataSource.transaction(async (manager) => {
-        if (body.slug !== undefined && body.slug !== scene.slug) {
-          await this.assertSlugFree(manager, body.slug, scene.id);
-        }
-        const changes: Partial<StudioScene> = {};
-        if (body.name !== undefined) changes.name = body.name;
-        if (body.city !== undefined) changes.city = body.city;
-        if (body.slug !== undefined) changes.slug = body.slug;
-        if (body.blurb !== undefined) {
-          changes.blurb = normalizeSceneBlurb(body.blurb);
-        }
-        if (coverKey !== undefined) changes.coverKey = coverKey;
-        if (Object.keys(changes).length) {
-          await manager.update(StudioScene, { id: scene.id }, changes);
-        }
-      }),
-    );
-    if (coverKey !== undefined && coverKey !== scene.coverKey) {
-      await this.deleteReplacedCover(scene.coverKey);
+    let replacedCoverKey: string | null = null;
+    try {
+      await this.withSlugConflict(() =>
+        this.dataSource.transaction(async (manager) => {
+          // The row lock serializes cover edits. Everything below compares
+          // against the cover stored now, not the one read above.
+          const [lockedRow]: { cover_key: string | null }[] =
+            await manager.query(LOCK_SCENE_COVER_SQL, [scene.id]);
+          if (!lockedRow) {
+            throw new NotFoundException('Scene not found');
+          }
+          const storedCoverKey = lockedRow.cover_key;
+          // A re-sent stored copy is a claim about what the scene holds. If
+          // another edit replaced it first, saving it would point the scene
+          // at the copy that edit deleted.
+          if (
+            coverKey &&
+            isStudioSceneScopedKey(coverKey) &&
+            coverKey === body.coverKey &&
+            coverKey !== storedCoverKey
+          ) {
+            throw studioError('studio_scene_cover_changed');
+          }
+          if (body.slug !== undefined && body.slug !== scene.slug) {
+            await this.assertSlugFree(manager, body.slug, scene.id);
+          }
+          const changes: Partial<StudioScene> = {};
+          if (body.name !== undefined) changes.name = body.name;
+          if (body.city !== undefined) changes.city = body.city;
+          if (body.slug !== undefined) changes.slug = body.slug;
+          if (body.blurb !== undefined) {
+            changes.blurb = normalizeSceneBlurb(body.blurb);
+          }
+          if (coverKey !== undefined) changes.coverKey = coverKey;
+          if (Object.keys(changes).length) {
+            await manager.update(StudioScene, { id: scene.id }, changes);
+          }
+          if (coverKey !== undefined && coverKey !== storedCoverKey) {
+            replacedCoverKey = storedCoverKey;
+          }
+        }),
+      );
+    } catch (error) {
+      await this.discardUnusedCopy(body.coverKey, coverKey);
+      throw error;
     }
+    // The cover the write replaced is the one the locked row held, so a
+    // live cover is never the one deleted.
+    await this.deleteReplacedCover(replacedCoverKey);
     return this.loadSceneOrThrow(scene.id);
   }
 
@@ -420,6 +460,29 @@ export class AdminStudioScenesService {
         throw new BadRequestException('Cover upload not found');
       }
       throw error;
+    }
+  }
+
+  // A copy minted for a write that did not commit is named by no row. The
+  // files route never served it; this reclaims it now instead of leaving it
+  // to the orphan sweep. Best effort and logged.
+  private async discardUnusedCopy(
+    sentCoverKey: string | null | undefined,
+    storedCoverKey: string | null | undefined,
+  ): Promise<void> {
+    if (
+      !storedCoverKey ||
+      storedCoverKey === sentCoverKey ||
+      !isStudioSceneScopedKey(storedCoverKey)
+    ) {
+      return;
+    }
+    try {
+      await this.storage.deleteObjectByKey(storedCoverKey);
+    } catch (error) {
+      this.logger.error(
+        `Could not delete the cover copy of a failed scene write: ${String(error)}`,
+      );
     }
   }
 

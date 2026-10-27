@@ -158,7 +158,11 @@ const releaseCard = {
 } as StudioReleaseCard;
 
 describe('StudioPlaylistReadsService', () => {
-  let playlists: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
+  let playlists: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let entries: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let tracks: { createQueryBuilder: jest.Mock };
   let subprofiles: { find: jest.Mock; findOne: jest.Mock };
@@ -195,6 +199,7 @@ describe('StudioPlaylistReadsService', () => {
 
   beforeEach(() => {
     playlists = {
+      find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(playlistRow()),
       createQueryBuilder: jest.fn(() => queryBuilderMock()),
     };
@@ -730,6 +735,39 @@ describe('StudioPlaylistReadsService', () => {
           id: rows[23]!.id,
         }),
       });
+    });
+
+    it('builds the cards a public list builds for this viewer and keys them by playlist id', async () => {
+      const firstPlaylistId = 'e3000000-0000-4000-8000-0000000000a1';
+      const secondPlaylistId = 'e3000000-0000-4000-8000-0000000000a2';
+      playlists.find.mockResolvedValue([
+        playlistRow({ id: firstPlaylistId }),
+        playlistRow({ id: secondPlaylistId }),
+      ]);
+
+      const cards = await service.cardsForPlaylistIds(VIEWER_ID, [
+        firstPlaylistId,
+        secondPlaylistId,
+      ]);
+
+      expect(playlists.find).toHaveBeenCalledWith({
+        where: { id: In([firstPlaylistId, secondPlaylistId]) },
+      });
+      expect([...cards.keys()].sort()).toEqual(
+        [firstPlaylistId, secondPlaylistId].sort(),
+      );
+      expect(cards.get(firstPlaylistId)).toMatchObject({
+        id: firstPlaylistId,
+        isOwner: false,
+        visibility: null,
+      });
+    });
+
+    it('answers an empty map without a query for no ids', async () => {
+      expect(await service.cardsForPlaylistIds(VIEWER_ID, [])).toEqual(
+        new Map(),
+      );
+      expect(playlists.find).not.toHaveBeenCalled();
     });
 
     it('lists only publicly listed playlists credited to the persona, minus blocked owners', async () => {

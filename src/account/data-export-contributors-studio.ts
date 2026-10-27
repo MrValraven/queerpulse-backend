@@ -27,8 +27,9 @@ interface PlaylistEntryExportRow {
  * moved out of reach, keeps its date with a null title and artist.
  *
  * Raw SQL through the `DataSource`, so `AccountModule` needs no
- * `forFeature` registration for two tables it only reads. Nothing about
- * listening exists to export: Studio never records a play.
+ * `forFeature` registration for two tables it only reads. Listening history
+ * and supporter opt-ins export under `activityLog`
+ * (`StudioListeningExportContributor`).
  */
 @Injectable()
 export class StudioPlaylistsExportContributor implements DataExportContribution {
@@ -459,5 +460,77 @@ export class StudioPlaylistFoldersExportContributor implements DataExportContrib
           filedAt: filing.filed_at.toISOString(),
         })),
     }));
+  }
+}
+
+interface ListenExportRow {
+  track_title: string | null;
+  artist: string | null;
+  played_at: Date;
+}
+
+interface SupporterExportRow {
+  artist: string | null;
+  shown_as: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+/**
+ * `activityLog` -> `studioListening` (Studio listening): the member's own
+ * history and opt-ins. Every listen comes first, oldest first, with the
+ * track title while its release is published (a null title once the
+ * release left publication) and the artist persona; the supporter
+ * opt-ins follow, oldest first, each naming the artist and how the member
+ * shows themselves ("account" or the chosen persona's display name).
+ * Daily play totals carry no member and are not personal data.
+ */
+@Injectable()
+export class StudioListeningExportContributor implements DataExportContribution {
+  readonly category = 'activityLog';
+  readonly archiveKey = 'studioListening';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const listens: ListenExportRow[] = await this.dataSource.query(
+      `SELECT CASE WHEN "release"."status" = 'published' THEN "track"."title" END AS "track_title",
+              "persona"."display_name" AS "artist",
+              "listen"."played_at" AS "played_at"
+         FROM "studio_listens" "listen"
+         LEFT JOIN "studio_tracks" "track" ON "track"."id" = "listen"."track_id"
+         LEFT JOIN "studio_releases" "release" ON "release"."id" = "track"."release_id"
+         LEFT JOIN "subprofiles" "persona" ON "persona"."id" = "release"."subprofile_id"
+        WHERE "listen"."user_id" = $1
+        ORDER BY "listen"."played_at" ASC, "listen"."id" ASC`,
+      [userId],
+    );
+    const supporters: SupporterExportRow[] = await this.dataSource.query(
+      `SELECT "artist"."display_name" AS "artist",
+              "chosen"."display_name" AS "shown_as",
+              "supporter"."created_at" AS "created_at",
+              "supporter"."updated_at" AS "updated_at"
+         FROM "studio_supporters" "supporter"
+         LEFT JOIN "subprofiles" "artist" ON "artist"."id" = "supporter"."subprofile_id"
+         LEFT JOIN "subprofiles" "chosen" ON "chosen"."id" = "supporter"."shown_as_subprofile_id"
+        WHERE "supporter"."user_id" = $1
+        ORDER BY "supporter"."created_at" ASC, "supporter"."subprofile_id" ASC`,
+      [userId],
+    );
+    return [
+      ...listens.map((listen) => ({
+        type: 'listen',
+        trackTitle: listen.track_title,
+        artist: listen.artist,
+        playedAt: listen.played_at.toISOString(),
+      })),
+      ...supporters.map((supporter) => ({
+        type: 'supporter',
+        artist: supporter.artist,
+        shownAs: supporter.shown_as ?? 'account',
+        createdAt: supporter.created_at.toISOString(),
+        updatedAt: supporter.updated_at.toISOString(),
+      })),
+    ];
   }
 }

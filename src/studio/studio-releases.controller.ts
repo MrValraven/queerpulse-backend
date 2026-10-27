@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
@@ -36,6 +37,7 @@ import { UpdateStudioReleaseDto } from './dto/update-studio-release.dto';
 import { StudioAccessGuard } from './studio-access.guard';
 import { StudioDisputesService } from './studio-disputes.service';
 import { StudioReleasesService } from './studio-releases.service';
+import { StudioSource } from './entities/studio-track.entity';
 import { StudioReleaseResponse } from './studio-response';
 
 @Feature('studio')
@@ -63,6 +65,22 @@ export class StudioReleasesController {
     @Body() body: CreateStudioReleaseDto,
   ): Promise<StudioReleaseResponse> {
     return this.releases.create(user.userId, body);
+  }
+
+  @Get(':id/track-sources')
+  @ApiOperation({
+    summary:
+      'The sources of every track with audio, for the publish checklist.',
+  })
+  @ApiOkResponse({
+    description: '`{ tracks: [{ trackId, sources }] }`, in track order.',
+  })
+  @ApiNotFoundResponse({ description: 'Missing, or not yours.' })
+  trackSources(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) releaseId: string,
+  ): Promise<{ tracks: { trackId: string; sources: StudioSource[] }[] }> {
+    return this.releases.trackSources(user.userId, releaseId);
   }
 
   // Named `update` on purpose: `PERSONA_SCOPED_KEY_HANDLERS` lists

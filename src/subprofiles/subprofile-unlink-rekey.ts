@@ -4,6 +4,7 @@ import { ReportSubjectType } from '../reports/entities/report.entity';
 import { releasePlaylistCreditsOfPersona } from '../studio/studio-playlist-credit-release';
 import { forgetTeamLinksOfPersona } from '../listings/listing-team-unlink';
 import { forgetDiscoveryTiesOfPersona } from '../studio/studio-discovery-unlink';
+import { forgetListeningOfPersona } from '../studio/studio-listening-unlink';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 
 /**
@@ -62,7 +63,11 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * `publish_at` clears, and a release date the schedule filled clears with
  * it, as a takedown does), version note dates restart, the press kit forgets its chosen tracks (their ids changed), and
  * persona posts get fresh ids with restarted dates, their open reports
- * moving along. The post quota ledger goes too.
+ * moving along. The post quota ledger goes too. The milestones the persona reached are
+ * deleted as well.
+ *
+ * Studio listening: daily totals, listens and supporter opt-ins go before the releases and tracks get fresh ids
+ * (`forgetListeningOfPersona`).
  *
  * Meet the team: every team link the persona holds on a business listing is
  * deleted (`forgetTeamLinksOfPersona`).
@@ -116,6 +121,8 @@ export async function issueFreshPersonaId(
   // Studio discovery: credits and staff picks go before the releases and
   // tracks get fresh ids, so none follows them.
   await forgetDiscoveryTiesOfPersona(manager, freshSubprofileId);
+  // Studio listening: daily totals, listens and supporter opt-ins go before the releases and tracks get fresh ids.
+  await forgetListeningOfPersona(manager, freshSubprofileId);
   await manager.query(
     `UPDATE "subprofile_item_revisions"
         SET "subprofile_id" = $1
@@ -254,6 +261,11 @@ export async function issueFreshPersonaId(
     `UPDATE "studio_press_kits"
         SET "featured_track_ids" = '{}', "updated_at" = now()
       WHERE "subprofile_id" = $1`,
+    [freshSubprofileId],
+  );
+  // Studio dashboard: the milestones the named persona reached go, so no shared card id or reached date ties the pseudonymous persona to its named past. Its followers are already gone, and the hourly sweep finds no placement for it.
+  await manager.query(
+    `DELETE FROM "studio_artist_milestones" WHERE "subprofile_id" = $1`,
     [freshSubprofileId],
   );
   // Persona posts get fresh ids and restart their dates, as the items do,

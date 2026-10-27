@@ -1960,6 +1960,9 @@ export enum NotificationType {
 @Index('IDX_notifications_bundle', ['userId', 'bundleKey'], {
   where: '"bundle_key" IS NOT NULL AND "read" = false',
 })
+@Index('IDX_notifications_pushed_bundle', ['userId', 'bundleKey', 'pushedAt'], {
+  where: '"pushed_at" IS NOT NULL',
+})
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -2021,4 +2024,13 @@ export class Notification {
    */
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
+
+  /**
+   * When a push went out for this row's recipient, or `null` while none has.
+   * The Studio new-release push stamps it to hold its one-push-per-artist-per-
+   * UTC-day limit. Bundle absorption never writes it, so it survives a later
+   * release folding into the row. Server-side only: no response DTO carries it.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  pushedAt?: Date | null;
 }

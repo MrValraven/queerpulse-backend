@@ -7,7 +7,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { StorageService, StoredObject } from '../storage/storage.service';
@@ -118,6 +118,16 @@ const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = Object.fromEntries(
   ]),
 );
 
+/** `$1` a storage key. The scenes and the Studio releases that name it as
+ *  their cover, whatever their status: an archived scene or a draft release
+ *  shows the cover again on restore or publish. */
+const LIVE_COVER_HOLDERS_SQL = `SELECT 'studio-scene' AS "kind", "id", "name" AS "label"
+  FROM "studio_scenes" WHERE "cover_key" = $1
+ UNION ALL
+ SELECT 'studio-release' AS "kind", "id", "title" AS "label"
+  FROM "studio_releases" WHERE "cover_key" = $1
+ LIMIT 5`;
+
 @Injectable()
 export class AdminMediaService {
   private readonly logger = new Logger(AdminMediaService.name);
@@ -130,6 +140,7 @@ export class AdminMediaService {
     private readonly modAudit: ModAuditService,
     // T17: a persona-scoped key names no uploader; its registry row does.
     private readonly personaImageKeys: PersonaImageKeysService,
+    private readonly dataSource: DataSource,
   ) {}
 
   /** Resolve a kind name to its storage prefix (with trailing slash), or
@@ -391,11 +402,17 @@ export class AdminMediaService {
    * A forced delete also writes a `media_force_delete` row to the moderation
    * audit trail naming the acting admin, BEFORE the object is removed: if the
    * audit write fails, the irreversible delete does not happen. Private
-   * message keys 404 in `assertKnownKey`, forced or not; moderating a DM
+   * message keys 404 in `assertKnownKey`, forced or not; a key that is the
+   * cover of a live scene or Studio release 409s as `media_live_cover` unless
+   * forced, and the forced audit row then names those holders; moderating a DM
    * attachment goes through its report.
    */
   async delete(key: string, actorId: string, force = false): Promise<void> {
     this.assertKnownKey(key);
+    const liveCoverHolders = await this.liveCoverHolders(key);
+    if (liveCoverHolders.length > 0 && !force) {
+      throw this.liveCoverConflict(liveCoverHolders);
+    }
 
     const { references, degraded } = await this.references.resolve([key]);
     const referencingPlaces = references.get(key) ?? [];
@@ -412,7 +429,11 @@ export class AdminMediaService {
         actorId,
         'media_force_delete',
         undefined,
-        key,
+        liveCoverHolders.length > 0
+          ? `${key} (media_live_cover) live cover of ${liveCoverHolders
+              .map((holder) => `${holder.kind} ${holder.id} "${holder.label}"`)
+              .join(', ')}`
+          : key,
       );
       await this.storage.deleteObjectByKey(key);
       await this.personaImageKeys.forgetDeletedKeys([key]);
@@ -436,6 +457,34 @@ export class AdminMediaService {
     // T17: a persona-scoped key's registry row (and any crop on it) goes
     // with the object, so `GET /files/*` 404s it.
     await this.personaImageKeys.forgetDeletedKeys([key]);
+  }
+
+  /**
+   * The scenes and Studio releases that still name this key as their cover.
+   * An unforced delete of such a key is refused (`media_live_cover`, with the
+   * holders) because the page would show a broken image until someone uploads
+   * again. A forced delete goes through: staff may need to remove a live cover
+   * (a takedown), and the audit row records the holders it broke.
+   */
+  private async liveCoverHolders(
+    key: string,
+  ): Promise<{ kind: string; id: string; label: string }[]> {
+    return this.dataSource.query(LIVE_COVER_HOLDERS_SQL, [key]);
+  }
+
+  private liveCoverConflict(
+    holders: { kind: string; id: string; label: string }[],
+  ): ConflictException {
+    return new ConflictException({
+      code: 'media_live_cover',
+      message:
+        'This image is the cover of a live scene or release. Re-send with force=true to delete anyway.',
+      coverHolders: holders.map((holder) => ({
+        kind: holder.kind,
+        entityId: holder.id,
+        label: holder.label,
+      })),
+    });
   }
 
   /** The uploader of each key on this page: the key's own segment for a

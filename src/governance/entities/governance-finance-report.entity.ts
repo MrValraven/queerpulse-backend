@@ -20,9 +20,10 @@ export interface FinanceStat {
 /**
  * Where a finance figure came from, so the admin Finances tab can flag which
  * numbers are trustworthy and which are placeholders:
- *  - `seeded`   — inserted by the quarterly seed and never verified by a human.
- *  - `manual`   — an admin typed this value (see `metricsEditedBy`/`At`).
- *  - `computed` — derived from other figures, not directly editable (surplus).
+ *  - `seeded`: inserted by the quarterly seed and never verified by a human.
+ *  - `manual`: an admin typed this value (see `metricsEditedBy`/`At`).
+ *  - `computed`: derived from other figures and never typed: the surplus,
+ *    and the spending total summed from the switched-on spending rows.
  */
 export enum FinanceMetricSource {
   Seeded = 'seeded',
@@ -203,9 +204,10 @@ export class GovernanceFinanceReport {
   })
   solidarityRate!: number | null;
 
-  // Per-metric provenance for the five editable scalars above. One shared
+  // Per-metric provenance for the five headline scalars above. One shared
   // Postgres enum type backs all five columns (they share the same three
-  // states). `surplus` has no column: it is always derived from
+  // states). `expense_total_source` reads `computed` once a save has summed
+  // the spending rows into `expense_total`. `surplus` has no column: it is always derived from
   // `income_total - expense_total`, so its provenance is a constant `computed`
   // reported by the DTO, never stored. Default `seeded` so every existing
   // (seed-inserted) row is honestly labelled until an admin edits it.

@@ -165,8 +165,9 @@ export class FinanceReserveEditDto {
  * Partial update of the latest governance finance report's editable figures.
  * Every field is optional — the service writes and audits only the fields
  * actually present and actually changed, so saving the form untouched produces
- * no history. `surplus` is intentionally absent: it is always recomputed from
- * `incomeTotal - expenseTotal`, never set directly.
+ * no history. `expenseTotal` and `surplus` are intentionally absent: the
+ * service sums the switched-on spending ledger rows into `expenseTotal` on
+ * every save, and recomputes `surplus` as `incomeTotal - expenseTotal`.
  *
  * The global ValidationPipe runs with `whitelist` + `forbidNonWhitelisted`, so
  * an unknown field is a 400 rather than a silently ignored typo.
@@ -192,11 +193,6 @@ export class UpdateAdminFinancesDto {
   @IsNumber()
   @Min(0)
   incomeTotal?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  expenseTotal?: number;
 
   @IsOptional()
   @IsArray()

@@ -21,6 +21,7 @@ import {
   replacePartners,
   replaceReserve,
   replaceStats,
+  sumEnabledLineAmounts,
 } from './admin-finance-edits';
 import {
   AdminFinanceResponseDTO,
@@ -41,20 +42,22 @@ import {
   GovernanceFinanceReport,
 } from './entities/governance-finance-report.entity';
 
-/** The editable scalar metrics, each paired with its provenance column. Drives
- *  the update loop and keeps the value/source columns in lockstep. */
+/** The scalar metrics an admin types, each paired with its provenance column.
+ *  Drives the update loop and keeps the value/source columns in lockstep.
+ *  `expenseTotal` is absent: it is the sum of the switched-on spending rows,
+ *  recomputed on every save. */
 const SCALAR_FIELDS = [
   { key: 'mrr', sourceKey: 'mrrSource' },
   { key: 'sustainerCount', sourceKey: 'sustainerCountSource' },
   { key: 'solidarityRate', sourceKey: 'solidarityRateSource' },
   { key: 'incomeTotal', sourceKey: 'incomeTotalSource' },
-  { key: 'expenseTotal', sourceKey: 'expenseTotalSource' },
 ] as const;
 
 /**
  * PRD-447. The public endpoint only ever reads a report whose five headline
- * figures were all entered by people (the SQL twin of `isEnteredByPeople`).
- * A seeded or half-entered report stays on the admin tab.
+ * figures all came from people (the SQL twin of `isEnteredByPeople`): four
+ * typed in, plus `expenseTotal` summed from the spending rows people entered
+ * (`computed`). A seeded or half-entered report stays on the admin tab.
  */
 const ENTERED_BY_PEOPLE_WHERE = {
   mrrSource: Not(FinanceMetricSource.Seeded),
@@ -212,9 +215,17 @@ export class GovernanceFinanceService {
    * "figures entered on" date, so a save that only touches words (ledger
    * labels and notes, a row switched off, stat tiles, event notes, partners,
    * the reserve) is written and audited but leaves the date and the editor
-   * badge alone. `surplus` is never edited directly: whenever either total
-   * changes it is recomputed from `incomeTotal - expenseTotal` (its
-   * provenance stays the constant `computed`).
+   * badge alone.
+   *
+   * `expenseTotal` is never typed: on every save, once the spending ledger
+   * holds at least one row, it is set to the sum of the switched-on rows and
+   * marked `computed`. Running it on every save (with or without spending
+   * edits) heals a report whose total was typed by hand and drifted from its
+   * rows. An empty ledger leaves the total and its provenance as they were,
+   * so a freshly opened quarter never publishes €0 of spending. `surplus` is
+   * never edited directly either: whenever either total changes it is
+   * recomputed from `incomeTotal - expenseTotal` (its provenance stays the
+   * constant `computed`).
    */
   async updateAdminFinances(
     dto: UpdateAdminFinancesDto,
@@ -292,9 +303,41 @@ export class GovernanceFinanceService {
         report.reserve = take(replaceReserve(report.reserve, dto.reserve));
       }
 
+      // Spending total is the sum of the switched-on spending rows. A total
+      // still marked `manual` or `seeded` is relabelled `computed` even when
+      // the sum matches, so the provenance badge tells the truth.
+      let isExpenseTotalMoved = false;
+      if (report.expense.length > 0) {
+        const computedExpenseTotal = sumEnabledLineAmounts(report.expense);
+        const previousExpenseTotal = report.expenseTotal;
+        if (
+          computedExpenseTotal !== previousExpenseTotal ||
+          report.expenseTotalSource !== FinanceMetricSource.Computed
+        ) {
+          auditRows.push(
+            manager.create(GovernanceFinanceChange, {
+              actorId,
+              reportId: report.id,
+              field: 'expenseTotal',
+              oldValue:
+                previousExpenseTotal === null
+                  ? null
+                  : String(previousExpenseTotal),
+              newValue: String(computedExpenseTotal),
+              note: dto.note ?? null,
+            }),
+          );
+          report.expenseTotal = computedExpenseTotal;
+          report.expenseTotalSource = FinanceMetricSource.Computed;
+          isExpenseTotalMoved = true;
+          changed = true;
+          isFigureChanged = true;
+        }
+      }
+
       // Surplus is derived, never edited: keep the stored value consistent
       // whenever a total moved.
-      if (dto.incomeTotal !== undefined || dto.expenseTotal !== undefined) {
+      if (dto.incomeTotal !== undefined || isExpenseTotalMoved) {
         report.surplus = (report.incomeTotal ?? 0) - (report.expenseTotal ?? 0);
       }
 

@@ -758,6 +758,23 @@ export class StudioPlaylistReadsService {
     );
   }
 
+  // Cards for playlists the caller already chose by id. The Studio dashboard's
+  // placements read filters playlists itself (public listing, blocks against
+  // every persona member) and borrows the card builder here, so a placement
+  // card matches the card the public lists show this viewer. An empty id list
+  // answers an empty map with no query.
+  async cardsForPlaylistIds(
+    viewerId: string,
+    playlistIds: string[],
+  ): Promise<Map<string, StudioPlaylistCard>> {
+    if (!playlistIds.length) {
+      return new Map();
+    }
+    const rows = await this.playlists.find({ where: { id: In(playlistIds) } });
+    const cards = await this.toCards(viewerId, rows);
+    return new Map(cards.map((card) => [card.id, card]));
+  }
+
   private async pageOfCards(
     viewerId: string,
     queryBuilder: SelectQueryBuilder<StudioPlaylist>,

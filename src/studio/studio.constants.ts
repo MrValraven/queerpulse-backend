@@ -486,6 +486,7 @@ export type StudioErrorCode =
   | 'studio_curation_order_mismatch'
   | 'studio_scene_slug_taken'
   | 'studio_scene_order_mismatch'
+  | 'studio_scene_cover_changed'
   | 'studio_credit_already_requested'
   | 'studio_credit_limit'
   | 'studio_credit_not_pending'
@@ -502,6 +503,10 @@ export type StudioErrorCode =
   | 'studio_schedule_out_of_range'
   | 'studio_press_track_not_allowed'
   | 'studio_preview_not_found'
+  | 'studio_milestone_not_found'
+  | 'studio_supporter_artist_not_found'
+  | 'studio_supporter_own_persona'
+  | 'studio_supporter_identity_not_yours'
   | 'studio_chapters_out_of_range'
   | 'studio_episode_show_not_published'
   | 'studio_episode_already_published'
@@ -681,6 +686,11 @@ const STUDIO_ERRORS: Readonly<
     status: HttpStatus.CONFLICT,
     message: 'The new order must list every active scene once.',
   },
+  studio_scene_cover_changed: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'Another staff member changed this scene cover first. Reload the scene and choose the cover again.',
+  },
   studio_credit_already_requested: {
     status: HttpStatus.CONFLICT,
     message: 'This persona already has a credit in this role on this track.',
@@ -746,6 +756,23 @@ const STUDIO_ERRORS: Readonly<
   studio_preview_not_found: {
     status: HttpStatus.NOT_FOUND,
     message: 'This preview link is not available.',
+  },
+  studio_milestone_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This milestone is not available to you.',
+  },
+  studio_supporter_artist_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This artist is not available to support.',
+  },
+  studio_supporter_own_persona: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'You are a member of this artist, so you cannot be its supporter.',
+  },
+  studio_supporter_identity_not_yours: {
+    status: HttpStatus.FORBIDDEN,
+    message:
+      'You can show yourself only as your account or a persona you are a member of.',
   },
   studio_chapters_out_of_range: {
     status: HttpStatus.UNPROCESSABLE_ENTITY,

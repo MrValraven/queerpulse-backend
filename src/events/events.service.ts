@@ -129,6 +129,15 @@ import {
   hiddenCommunityIdsFor,
   keepUnlessEveryHostHiddenSql,
 } from './hidden-event-communities.sql';
+import { ENDED_SQL, UPCOMING_OR_UNDERWAY_SQL } from './event-schedule-sql';
+import {
+  HOSTED_OR_COHOSTED_BY_MEMBER_SQL,
+  MEMBER_PROFILE_PAST_LIMIT,
+  MEMBER_PROFILE_UPCOMING_LIMIT,
+  memberEventRole,
+  type ProfileEventsResponse,
+  SERIES_FOLD_KEY_SQL,
+} from './member-profile-events';
 import {
   ADMITTING_INVITE_STATUSES,
   EventInvite,
@@ -1902,10 +1911,7 @@ export class EventsService {
         //
         // The null-end arm matches `hasEnded`'s strict reading in
         // `event-timing.ts`.
-        .andWhere(
-          '(e.start_at < :now AND (e.end_at IS NULL OR e.end_at < :now))',
-          { now },
-        );
+        .andWhere(ENDED_SQL, { now });
       this.applyDiscoveryFilters(pastQb, {
         from: options?.from,
         to: options?.to,
@@ -1951,10 +1957,7 @@ export class EventsService {
         // close that door on BOTH arms at once, which is the reason to write
         // it this way rather than that way. The 'past' branch above carries
         // the exact logical inverse of this predicate.
-        .andWhere(
-          '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))',
-          { now },
-        )
+        .andWhere(UPCOMING_OR_UNDERWAY_SQL, { now })
         .andWhere(visibilityClause, visibilityParams);
       this.excludeModeratedEvents(upcomingQb);
       if (options?.hostSlug) {
@@ -2705,10 +2708,7 @@ export class EventsService {
       // keeps showing tonight's party while it is happening. See `list`'s
       // 'upcoming' branch for what this disjunct costs today and what it
       // keeps open.
-      .andWhere(
-        '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))',
-        { now },
-      );
+      .andWhere(UPCOMING_OR_UNDERWAY_SQL, { now });
     this.excludeModeratedEvents(qb);
     const candidates = await qb
       .orderBy('e.start_at', 'ASC')
@@ -2746,6 +2746,134 @@ export class EventsService {
       communityId,
       leadVisibility,
     );
+  }
+
+  /**
+   * `GET /profiles/:slug/events`: the events `memberUserId` hosts or
+   * co-hosts, as `viewerId` may see them. The caller has already passed the
+   * profile gate (`ProfilesService.findBySlugOrThrow`) and the limited-card
+   * rule (`canViewFull`); this method answers for the events alone.
+   *
+   * Published only, so drafts and cancelled dates stay off. Moderator
+   * takedowns are excluded, and so is any event whose host and the viewer
+   * have blocked each other either way (`BlockFilterService.excludeBlocked`
+   * on `e.host_id`; an erased host passes). Communities the viewer hid from
+   * browse are NOT applied here (product call, 2026-10-26): a profile is a
+   * look at one member, and hiding a community's events from Discover was
+   * never meant to edit what other people's profiles say about them.
+   *
+   * A VISITOR gets the browse predicate (`scopedVisibilityWhere`), applied
+   * exactly as `list`'s `hostSlug` lane applies it: public/members, network
+   * to the host's connections, community to that community's members, and
+   * invite_only and extended_network never. A gate answer with no clause
+   * fails closed to two empty lists. The OWNER skips the gate, which only
+   * checks the viewer's connections and so would drop their own network
+   * events, and reads every tier that shows to someone on a profile:
+   * public, members, network and community. invite_only and
+   * extended_network stay off for the owner too, so the section shows what a
+   * visitor could find there.
+   *
+   * SERIES. A recurring series lists once: its next date in `upcoming`, its
+   * latest in `past`. The fold runs in SQL: an inner `DISTINCT ON
+   * (SERIES_FOLD_KEY_SQL)` picks one id per series over the full predicate,
+   * and the outer query orders those ids and takes the `*_LIMIT`. However
+   * many dates a series has, it costs the section one row, so standalone
+   * events always keep their place.
+   *
+   * Attendance never counts: there is no RSVP arm, so an event the member is
+   * only going to never lists. The viewer's own fields on each card
+   * (`myRsvpStatus`, `isBookmarked`) are `summarize`'s, unchanged.
+   *
+   * The member's events come from `HOSTED_OR_COHOSTED_BY_MEMBER_SQL`, an
+   * `e.id IN` over a `UNION` of hosted ids (`IDX_events_host_id`) and
+   * co-hosted ids (`IDX_event_cohosts_user_id`), so each arm is an index
+   * scan and the rest of the predicate only reads the member's own events.
+   */
+  async listForMemberProfile(
+    memberUserId: string,
+    viewerId: string,
+  ): Promise<ProfileEventsResponse> {
+    const now = new Date();
+    const isOwnProfile = viewerId === memberUserId;
+    const visitorVisibility = isOwnProfile
+      ? null
+      : await this.audienceGate.scopedVisibilityWhere(viewerId);
+    if (!isOwnProfile && !visitorVisibility?.clause) {
+      return { upcoming: [], past: [] };
+    }
+
+    // Alias `e` is `scopedVisibilityWhere`'s alias contract.
+    const baseQb = this.events
+      .createQueryBuilder('e')
+      .where(HOSTED_OR_COHOSTED_BY_MEMBER_SQL, { memberId: memberUserId })
+      .andWhere('e.status = :status', { status: EventStatus.Published });
+    this.excludeModeratedEvents(baseQb);
+    this.blockFilter.excludeBlocked(baseQb, viewerId, '"e"."host_id"');
+    if (isOwnProfile) {
+      baseQb.andWhere('e.visibility IN (:...ownProfileVisibilities)', {
+        ownProfileVisibilities: [
+          EventVisibility.Public,
+          EventVisibility.Members,
+          EventVisibility.Network,
+          EventVisibility.Community,
+        ],
+      });
+    } else if (visitorVisibility) {
+      baseQb.andWhere(visitorVisibility.clause, visitorVisibility.params);
+    }
+
+    // One occurrence per series, `direction` deciding which: ASC keeps a
+    // series' earliest qualifying date, DESC its latest. The inner query is a
+    // clone of the base, so every clause and parameter above carries into it
+    // unchanged; `getParameters` hands those parameters (plus `:now`) to the
+    // outer query, which binds them when it runs. The outer alias differs
+    // from the inner `e` so neither reads as the other.
+    const listOnePerSeries = (
+      scheduleSql: string,
+      direction: 'ASC' | 'DESC',
+      limit: number,
+    ): Promise<Event[]> => {
+      const foldedIdsQb = baseQb
+        .clone()
+        .select('e.id', 'id')
+        .distinctOn([SERIES_FOLD_KEY_SQL])
+        .andWhere(scheduleSql, { now })
+        // Postgres requires the `DISTINCT ON` key to lead the ORDER BY; the
+        // two columns after it choose which row of each group survives.
+        .orderBy(SERIES_FOLD_KEY_SQL, 'ASC')
+        .addOrderBy('e.start_at', direction)
+        .addOrderBy('e.id', direction);
+      return this.events
+        .createQueryBuilder('listed_event')
+        .where(`listed_event.id IN (${foldedIdsQb.getQuery()})`)
+        .setParameters(foldedIdsQb.getParameters())
+        .orderBy('listed_event.start_at', direction)
+        .addOrderBy('listed_event.id', direction)
+        .take(limit)
+        .getMany();
+    };
+    const [upcomingEvents, pastEvents] = await Promise.all([
+      listOnePerSeries(
+        UPCOMING_OR_UNDERWAY_SQL,
+        'ASC',
+        MEMBER_PROFILE_UPCOMING_LIMIT,
+      ),
+      listOnePerSeries(ENDED_SQL, 'DESC', MEMBER_PROFILE_PAST_LIMIT),
+    ]);
+
+    // One `summarize` for both lists, so each batched lookup runs once, over
+    // the listed rows only. It keeps the input order, which is what lets the
+    // split below work.
+    const listedEvents = [...upcomingEvents, ...pastEvents];
+    const summaries = await this.summarize(listedEvents, viewerId);
+    const cards = summaries.map((summary, index) => ({
+      ...summary,
+      role: memberEventRole(listedEvents[index]!, memberUserId),
+    }));
+    return {
+      upcoming: cards.slice(0, upcomingEvents.length),
+      past: cards.slice(upcomingEvents.length),
+    };
   }
 
   async isOrganizer(eventId: string, userId: string): Promise<boolean> {

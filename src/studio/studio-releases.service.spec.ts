@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   HttpException,
+  NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, Repository } from 'typeorm';
@@ -74,7 +75,9 @@ describe('StudioReleasesService', () => {
   let ownership: {
     assertArtistPersona: jest.Mock;
     lockReleaseForWrite: jest.Mock;
+    loadReleaseForWrite: jest.Mock;
   };
+  let trackFind: jest.Mock;
   let catalog: { getRelease: jest.Mock };
   let personaImageKeys: {
     rehomeKeys: jest.Mock;
@@ -108,6 +111,12 @@ describe('StudioReleasesService', () => {
       assertArtistPersona: jest.fn(() =>
         Promise.resolve({ id: PERSONA_ID, kind: personaKind }),
       ),
+      loadReleaseForWrite: jest.fn(() =>
+        Promise.resolve({
+          release,
+          persona: { id: PERSONA_ID, kind: personaKind },
+        }),
+      ),
       lockReleaseForWrite: jest.fn(() =>
         Promise.resolve({
           release,
@@ -129,7 +138,9 @@ describe('StudioReleasesService', () => {
         Promise.resolve({ ...row, id: RELEASE_ID }),
       ),
     };
+    trackFind = jest.fn(() => Promise.resolve(tracks));
     const dataSource = {
+      getRepository: jest.fn(() => ({ find: trackFind })),
       transaction: jest.fn((work: (inner: EntityManager) => unknown) =>
         Promise.resolve(work(manager as unknown as EntityManager)),
       ),
@@ -697,6 +708,69 @@ describe('StudioReleasesService', () => {
         'studio_release_not_draft',
       );
       expect(studioAudioUploads.deleteObjectsAndForget).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('trackSources', () => {
+    it('lists the sources of the tracks that have audio, in track order', async () => {
+      tracks = [
+        {
+          id: 'track-1',
+          audioKey: AUDIO_KEY,
+          sources: [{ title: 'Rumour Has It', artist: 'Adele' }],
+        },
+        { id: 'track-2', audioKey: null, sources: [] },
+        { id: 'track-3', audioKey: AUDIO_KEY, sources: null },
+      ] as unknown as Partial<StudioTrack>[];
+
+      const result = await service.trackSources(USER_ID, RELEASE_ID);
+
+      expect(ownership.loadReleaseForWrite).toHaveBeenCalledWith(
+        USER_ID,
+        RELEASE_ID,
+      );
+      expect(trackFind).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { releaseId: RELEASE_ID },
+          order: { position: 'ASC' },
+        }),
+      );
+      expect(result).toEqual({
+        tracks: [
+          {
+            trackId: 'track-1',
+            sources: [{ title: 'Rumour Has It', artist: 'Adele' }],
+          },
+          { trackId: 'track-3', sources: [] },
+        ],
+      });
+    });
+
+    it('answers an empty list for a release with no audio yet', async () => {
+      tracks = [{ id: 'track-1', audioKey: null, sources: [] }];
+      expect(await service.trackSources(USER_ID, RELEASE_ID)).toEqual({
+        tracks: [],
+      });
+    });
+
+    it('answers 404 to a stranger and reads no tracks', async () => {
+      ownership.loadReleaseForWrite.mockRejectedValue(
+        new NotFoundException('Release not found'),
+      );
+      await expect(
+        service.trackSources(OTHER_USER_ID, RELEASE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(trackFind).not.toHaveBeenCalled();
+    });
+
+    it('answers 404 for an unknown release and reads no tracks', async () => {
+      ownership.loadReleaseForWrite.mockRejectedValue(
+        new NotFoundException('Release not found'),
+      );
+      await expect(
+        service.trackSources(USER_ID, 'a2000000-0000-4000-8000-0000000000ff'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(trackFind).not.toHaveBeenCalled();
     });
   });
 });

@@ -882,6 +882,8 @@ describe('Studio share copy (Studio rich cards)', () => {
   const STUDIO_TRACK_URL = `${STUDIO_ORIGIN}/studio/track?id=${STUDIO_ID}`;
   const STUDIO_RELEASE_URL = `${STUDIO_ORIGIN}/studio/album?id=${STUDIO_ID}`;
   const STUDIO_PLAYLIST_URL = `${STUDIO_ORIGIN}/studio/collection?id=${STUDIO_ID}`;
+  const STUDIO_MILESTONE_ID = '3b7e1d90-6c4a-4f28-8d5e-a9c0b1d2e3f4';
+  const STUDIO_MILESTONE_URL = `${STUDIO_ORIGIN}/studio/artist?id=${STUDIO_ID}&milestone=${STUDIO_MILESTONE_ID}`;
   const originalFrontendUrl = process.env.FRONTEND_URL;
 
   beforeEach(() => {
@@ -964,6 +966,39 @@ describe('Studio share copy (Studio rich cards)', () => {
     expect(payload.l10n).toEqual({
       bodyKey: 'push:messages.group.studio.playlist',
       params: { name: 'Alex Doe' },
+    });
+  });
+
+  it('pushes the milestone share line for a DM that is only a milestone link', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: STUDIO_MILESTONE_URL }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe('Shared a milestone from Studio');
+    expect(payload.l10n).toEqual({ bodyKey: 'push:messages.studio.milestone' });
+  });
+
+  it('names the sender and keeps the note for a milestone in a group', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: `we did it ${STUDIO_MILESTONE_URL}` }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe(
+      'Alex Doe shared a milestone from Studio: we did it',
+    );
+    expect(payload.l10n).toEqual({
+      bodyKey: 'push:messages.group.studio.milestoneWithNote',
+      params: { name: 'Alex Doe', note: 'we did it' },
     });
   });
 

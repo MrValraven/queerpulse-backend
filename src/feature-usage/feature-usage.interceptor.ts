@@ -11,6 +11,7 @@ import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-l
 import { FeatureKey } from '../launchedFeatures';
 import { isTrackedFeature } from './feature-depth';
 import { FeatureUsageTallyService } from './feature-usage-tally.service';
+import { isProfileEventsRequest } from './profile-events-request';
 
 /**
  * Counts one request against the feature its controller is tagged with.
@@ -30,6 +31,10 @@ import { FeatureUsageTallyService } from './feature-usage-tally.service';
  * "this is a staff surface" without reading anything from the request.
  *
  * The creator draft routes carry `@Feature` tags and count nothing.
+ *
+ * `GET /profiles/:slug/events` carries `@Feature('events')` and counts
+ * nothing either: it answers every profile view, so counting it would turn
+ * profile traffic into events reach (`isProfileEventsRequest`).
  *
  * Keys in `UNTRACKED_FEATURES` (`feature-depth.ts`) are never counted: Go
  * together allows no analytics of any of its actions.
@@ -59,17 +64,21 @@ export class FeatureUsageInterceptor implements NestInterceptor {
 
     const isStaffSurface = context.getClass().name.startsWith('Admin');
 
-    const draftRequest = context
+    const request = context
       .switchToHttp()
       .getRequest<{ originalUrl?: string; url?: string }>();
     const isCreatorDraftSurface = isCreatorDraftRequest(
-      draftRequest.originalUrl ?? draftRequest.url,
+      request.originalUrl ?? request.url,
+    );
+    const isProfileEventsSurface = isProfileEventsRequest(
+      request.originalUrl ?? request.url,
     );
 
     if (
       featureKey &&
       !isStaffSurface &&
       !isCreatorDraftSurface &&
+      !isProfileEventsSurface &&
       isTrackedFeature(featureKey)
     ) {
       this.tally.record(featureKey);

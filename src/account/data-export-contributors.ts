@@ -68,6 +68,7 @@ import {
 import { PersonaPostsExportContributor } from './data-export-contributors-persona-posts';
 import {
   StudioCopyrightClaimsExportContributor,
+  StudioListeningExportContributor,
   StudioPersonaCreditsExportContributor,
   StudioPlaylistAdditionsExportContributor,
   StudioPlaylistFoldersExportContributor,
@@ -1114,6 +1115,7 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   StudioPlaylistFoldersExportContributor,
   // Studio safety and moderation: the copyright claims the member filed.
   StudioCopyrightClaimsExportContributor,
+  StudioListeningExportContributor,
   // Creator drafts: the member's own event, listing edit and community wizard drafts.
   CreatorDraftsExportContributor,
   // Pulse Live: the sessions the member played, with their own answers and votes.

@@ -206,6 +206,10 @@ export class MemberPreferencesExportContributor implements DataExportContributio
       studioHideExplicit: preferences.studioHideExplicit,
       studioCrossfadeSeconds: preferences.studioCrossfadeSeconds,
       studioAskBeforeWarnings: preferences.studioAskBeforeWarnings,
+      isListeningHistoryOn: preferences.isListeningHistoryOn,
+      listeningNoticeSeenAt: preferences.listeningNoticeSeenAt
+        ? preferences.listeningNoticeSeenAt.toISOString()
+        : null,
       updatedAt: preferences.updatedAt.toISOString(),
     };
   }

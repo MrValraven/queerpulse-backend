@@ -263,7 +263,10 @@ export interface StudioTrackResponse extends StudioTrackSummary {
   /** Studio listening: the same for listeners and owners. */
   syncedLyrics: StudioSyncedLyricLine[] | null;
   chapters: StudioChapter[] | null;
-  release: StudioReleaseCard;
+  /** `status` rides on the track detail's card so the track page can tell
+   *  the owner a taken-down release cannot be liked. Only the track detail
+   *  sends it; listeners never read a non-published release. */
+  release: StudioReleaseCard & { status?: StudioReleaseStatus };
   /** Studio discovery: accepted credits to public personas only. */
   personaCredits: StudioPersonaCreditPublic[];
   /** Studio artist kinds: show notes, on podcast episodes only. */
@@ -282,7 +285,7 @@ export interface StudioArtistResponse {
     /** The persona cover photo, null when absent. */
     coverUrl: string | null;
     /** `skinData.studioHero`, null when the owner never chose a layout. */
-    studioHero: 'full-bleed' | 'avatar' | null;
+    studioHero: 'banner' | 'portrait' | 'both' | null;
   };
   releases: StudioReleaseCard[];
   ownerReleases: StudioOwnerReleaseCard[] | null;
@@ -458,19 +461,38 @@ export function toStudioFormatArtistRef(
 }
 
 /** The artist page header fields beyond the format ref: the persona cover
- *  photo (through `toImageUrl`) and the stored hero layout. Any stored value
- *  other than the two layouts reads as null. */
+ *  photo (through `toImageUrl`) and the stored hero layout. 'banner',
+ *  'portrait' and 'both' pass through; the legacy 'full-bleed' reads as
+ *  'banner' and the legacy 'avatar' reads as 'both'. Any other stored value
+ *  reads as null. */
 export function toStudioArtistHeroFields(
   persona: Pick<StudioArtistHeaderPersona, 'coverUrl' | 'skinData'>,
-): { coverUrl: string | null; studioHero: 'full-bleed' | 'avatar' | null } {
-  const storedHero: unknown = persona.skinData?.studioHero;
+): {
+  coverUrl: string | null;
+  studioHero: 'banner' | 'portrait' | 'both' | null;
+} {
   return {
     coverUrl: toImageUrl(persona.coverUrl),
-    studioHero:
-      storedHero === 'full-bleed' || storedHero === 'avatar'
-        ? storedHero
-        : null,
+    studioHero: toStudioHeroLayout(persona.skinData?.studioHero),
   };
+}
+
+/** Normalises a stored `skinData.studioHero` to a current layout. */
+function toStudioHeroLayout(
+  storedHero: unknown,
+): 'banner' | 'portrait' | 'both' | null {
+  switch (storedHero) {
+    case 'banner':
+    case 'portrait':
+    case 'both':
+      return storedHero;
+    case 'full-bleed':
+      return 'banner';
+    case 'avatar':
+      return 'both';
+    default:
+      return null;
+  }
 }
 
 export function toStudioTrackSummary(track: StudioTrack): StudioTrackSummary {
@@ -784,7 +806,7 @@ export function toStudioReleaseResponse(
  *  kinds). Show notes reach the wire on podcast episodes only. */
 export function toStudioTrackResponse(
   track: StudioTrack,
-  releaseCard: StudioReleaseCard,
+  releaseCard: StudioReleaseCard & { status?: StudioReleaseStatus },
   personaCredits: StudioPersonaCreditPublic[] = [],
   viewer: Pick<StudioReleaseViewer, 'isOwner'> = { isOwner: false },
   ownerClaims: readonly StudioOwnerClaim[] = [],

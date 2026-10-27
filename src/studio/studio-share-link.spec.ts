@@ -7,6 +7,7 @@ import {
   STUDIO_SHARE_MAX_LINE_INDEX,
   STUDIO_SHARE_MAX_START_SECONDS,
   studioShareOrigins,
+  textWithoutFirstStudioShareLink,
   textWithoutStudioShareLink,
 } from './studio-share-link';
 
@@ -533,5 +534,84 @@ describe('isOwnOriginStudioUrl decode depth', () => {
 
   it('stops after five decodes', () => {
     expect(isOwnOriginStudioUrl(studioPathEncoded(6), ORIGINS)).toBe(false);
+  });
+});
+
+describe('textWithoutFirstStudioShareLink', () => {
+  it('takes the first Studio link out of an excerpt source', () => {
+    expect(
+      textWithoutFirstStudioShareLink(`have a listen ${TRACK_URL}`, ORIGINS),
+    ).toBe('have a listen');
+  });
+
+  it('answers an empty string for a link-only post', () => {
+    expect(textWithoutFirstStudioShareLink(TRACK_URL, ORIGINS)).toBe('');
+  });
+
+  it('returns text with no Studio link unchanged', () => {
+    expect(textWithoutFirstStudioShareLink('see you at 7', ORIGINS)).toBe(
+      'see you at 7',
+    );
+  });
+});
+
+describe('parseStudioShareLink milestone links', () => {
+  const PERSONA_ID = OTHER_ID;
+  const MILESTONE_ID = '3b7e1d90-6c4a-4f28-8d5e-a9c0b1d2e3f4';
+  const ORIGIN = 'https://queerpulse.test';
+  const MILESTONE_LINK = {
+    kind: 'milestone',
+    id: MILESTONE_ID,
+    artistId: PERSONA_ID,
+    startAtSeconds: null,
+    path: `/studio/artist?id=${PERSONA_ID}&milestone=${MILESTONE_ID}`,
+  };
+
+  it('reads an artist link with a milestone as a milestone link', () => {
+    expect(
+      parseStudioShareLink(
+        `${ORIGIN}/studio/artist?id=${PERSONA_ID.toUpperCase()}&milestone=${MILESTONE_ID.toUpperCase()}`,
+        [ORIGIN],
+      ),
+    ).toEqual(MILESTONE_LINK);
+  });
+
+  it('reads the root-relative form and ignores t and line', () => {
+    expect(
+      parseStudioShareLink(
+        `/studio/artist?milestone=${MILESTONE_ID}&id=${PERSONA_ID}&t=30&line=2`,
+        [ORIGIN],
+      ),
+    ).toEqual(MILESTONE_LINK);
+  });
+
+  it.each([
+    ['a plain artist link', `/studio/artist?id=${PERSONA_ID}`],
+    [
+      'a milestone that is not a uuid',
+      `/studio/artist?id=${PERSONA_ID}&milestone=100-followers`,
+    ],
+    [
+      'an artist id that is not a uuid',
+      `/studio/artist?id=night-shift&milestone=${MILESTONE_ID}`,
+    ],
+  ])('answers null for %s', (_label, url) => {
+    expect(parseStudioShareLink(url, [ORIGIN])).toBeNull();
+  });
+
+  it('keeps a milestone parameter on a track link a track link', () => {
+    expect(
+      parseStudioShareLink(
+        `/studio/track?id=${PERSONA_ID}&milestone=${MILESTONE_ID}`,
+        [ORIGIN],
+      )?.kind,
+    ).toBe('track');
+  });
+
+  it('finds a milestone link in a note and takes it out', () => {
+    const text = `we did it ${ORIGIN}/studio/artist?id=${PERSONA_ID}&milestone=${MILESTONE_ID}`;
+    const match = findStudioShareLinkMatch(text, [ORIGIN]);
+    expect(match?.link).toEqual(MILESTONE_LINK);
+    expect(match && textWithoutStudioShareLink(text, match)).toBe('we did it');
   });
 });

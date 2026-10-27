@@ -33,6 +33,7 @@ import {
   DEFAULT_STUDIO_AUTOPLAY_NEXT,
   DEFAULT_STUDIO_CROSSFADE_SECONDS,
   DEFAULT_STUDIO_HIDE_EXPLICIT,
+  DEFAULT_STUDIO_LISTENING_HISTORY_ON,
   MemberPreferences,
 } from './entities/member-preferences.entity';
 import { DEFAULT_WHO_CAN_MESSAGE } from './who-can-message';
@@ -105,6 +106,8 @@ export class PreferencesService {
     row.studioHideExplicit = DEFAULT_STUDIO_HIDE_EXPLICIT;
     row.studioCrossfadeSeconds = DEFAULT_STUDIO_CROSSFADE_SECONDS;
     row.studioAskBeforeWarnings = DEFAULT_STUDIO_ASK_BEFORE_WARNINGS;
+    row.isListeningHistoryOn = DEFAULT_STUDIO_LISTENING_HISTORY_ON;
+    row.listeningNoticeSeenAt = null;
     return row;
   }
 
@@ -310,6 +313,15 @@ export class PreferencesService {
     }
     if (dto.askBeforeWarnings !== undefined) {
       row.studioAskBeforeWarnings = dto.askBeforeWarnings;
+    }
+    if (dto.isListeningHistoryOn !== undefined) {
+      row.isListeningHistoryOn = dto.isListeningHistoryOn;
+    }
+    if (
+      dto.hasSeenListeningNotice === true &&
+      (row.listeningNoticeSeenAt ?? null) === null
+    ) {
+      row.listeningNoticeSeenAt = new Date();
     }
     return toStudioPlaybackDTO(await this.preferences.save(row));
   }

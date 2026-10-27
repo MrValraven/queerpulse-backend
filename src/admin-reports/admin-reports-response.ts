@@ -10,7 +10,7 @@ import { AdminCommunityCardDTO } from '../admin-communities/admin-communities-re
 /** Allowed `weeks` presets for the growth / reports-by-type trend charts —
  *  an allowlist rather than an arbitrary bounded integer, so a caller can
  *  never force an unbounded or oddball scan window. */
-export const REPORT_WEEK_RANGES = [4, 8, 12, 26] as const;
+export const REPORT_WEEK_RANGES = [4, 8, 12, 26, 52] as const;
 export type ReportWeekRange = (typeof REPORT_WEEK_RANGES)[number];
 export const DEFAULT_REPORT_WEEK_RANGE: ReportWeekRange = 8;
 

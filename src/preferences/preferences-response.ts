@@ -156,7 +156,7 @@ export function toLanguagePreferenceDTO(
 
 /**
  * `GET|PUT /me/studio-playback` (Studio open demo pages): the Studio
- * player's four settings, named for what each one does.
+ * player's six settings, named for what each one does.
  */
 export interface StudioPlaybackDTO {
   autoplayNext: boolean;
@@ -164,6 +164,10 @@ export interface StudioPlaybackDTO {
   crossfadeSeconds: number;
   /** Studio safety and moderation: pause before a warned track. */
   askBeforeWarnings: boolean;
+  /** The listening history switch; pausing deletes nothing. */
+  isListeningHistoryOn: boolean;
+  /** When the first-play notice was seen (ISO), set once; null until then. */
+  listeningNoticeSeenAt: string | null;
 }
 
 export function toStudioPlaybackDTO(row: MemberPreferences): StudioPlaybackDTO {
@@ -172,5 +176,9 @@ export function toStudioPlaybackDTO(row: MemberPreferences): StudioPlaybackDTO {
     hideExplicit: row.studioHideExplicit,
     crossfadeSeconds: row.studioCrossfadeSeconds,
     askBeforeWarnings: row.studioAskBeforeWarnings,
+    isListeningHistoryOn: row.isListeningHistoryOn,
+    listeningNoticeSeenAt: row.listeningNoticeSeenAt
+      ? row.listeningNoticeSeenAt.toISOString()
+      : null,
   };
 }

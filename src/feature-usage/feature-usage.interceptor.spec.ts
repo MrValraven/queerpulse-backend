@@ -101,4 +101,18 @@ describe('FeatureUsageInterceptor', () => {
     );
     expect(tally.drain().size).toBe(0);
   });
+
+  it('records nothing for the Events section of a member profile', () => {
+    class ProfilesController {}
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue('events');
+
+    interceptor.intercept(
+      contextFor('http', ProfilesController, '/v1/profiles/sam/events'),
+      next,
+    );
+    expect(tally.drain().size).toBe(0);
+
+    interceptor.intercept(contextFor('http', class {}, '/v1/events'), next);
+    expect(tally.drain().get('events')).toBe(1);
+  });
 });

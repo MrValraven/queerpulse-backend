@@ -6,6 +6,7 @@ import {
   EventCommunityStatus,
 } from '../events/entities/event-community.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { UPCOMING_OR_UNDERWAY_SQL } from '../events/event-schedule-sql';
 import { toImageUrl } from '../common/image-url';
 import { truncateCharacters } from '../common/text-characters';
 import {
@@ -316,8 +317,7 @@ export class CommunityDigestService {
     // 'upcoming' branch): a gathering that is UNDERWAY is still ahead, so a
     // three-day festival that opened last night is still a reason to open the
     // app tonight.
-    const upcomingSchedule =
-      '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))';
+    const upcomingSchedule = UPCOMING_OR_UNDERWAY_SQL;
     const [ledRows, guestRows] = await Promise.all([
       this.events
         .createQueryBuilder('e')

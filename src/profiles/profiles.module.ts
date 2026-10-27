@@ -8,6 +8,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { Connection } from '../connections/entities/connection.entity';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { EventsModule } from '../events/events.module';
 import { HandlesModule } from '../handles/handles.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { SocialModule } from '../social/social.module';
@@ -87,6 +88,11 @@ import { ProfilesService } from './profiles.service';
     // `AmbassadorStatusService.findActive` backs the owner-only `ambassador`
     // field on the full profile response. A leaf module, so no cycle risk.
     AmbassadorStatusModule,
+    // `EventsService.listForMemberProfile` backs `GET /profiles/:slug/events`.
+    // Plain import: nothing `EventsModule` imports reaches back to this
+    // module, and `EventsModule` does not import it either, so no
+    // `forwardRef` is needed.
+    EventsModule,
   ],
   controllers: [
     ProfilesController,

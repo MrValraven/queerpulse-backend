@@ -1298,17 +1298,34 @@ describe('Studio artist hero fields', () => {
   it('returns the cover through toImageUrl and the stored layout', () => {
     const fields = toStudioArtistHeroFields({
       coverUrl: 'https://cdn.example/cover.jpg',
-      skinData: { studioHero: 'avatar' },
+      skinData: { studioHero: 'both' },
     });
     expect(fields.coverUrl).toBe(toImageUrl('https://cdn.example/cover.jpg'));
     expect(fields.coverUrl).not.toBeNull();
-    expect(fields.studioHero).toBe('avatar');
+    expect(fields.studioHero).toBe('both');
+    for (const layout of ['banner', 'portrait', 'both'] as const) {
+      expect(
+        toStudioArtistHeroFields({
+          coverUrl: 'https://cdn.example/cover.jpg',
+          skinData: { studioHero: layout },
+        }).studioHero,
+      ).toBe(layout);
+    }
+  });
+
+  it('reads the legacy full-bleed as banner and the legacy avatar as both', () => {
     expect(
       toStudioArtistHeroFields({
         coverUrl: 'https://cdn.example/cover.jpg',
         skinData: { studioHero: 'full-bleed' },
       }).studioHero,
-    ).toBe('full-bleed');
+    ).toBe('banner');
+    expect(
+      toStudioArtistHeroFields({
+        coverUrl: 'https://cdn.example/cover.jpg',
+        skinData: { studioHero: 'avatar' },
+      }).studioHero,
+    ).toBe('both');
   });
 
   it('returns null for both fields when the persona has neither', () => {

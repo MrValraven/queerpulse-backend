@@ -581,8 +581,77 @@ describe('PreferencesService', () => {
         hideExplicit: false,
         crossfadeSeconds: 0,
         askBeforeWarnings: true,
+        isListeningHistoryOn: true,
+        listeningNoticeSeenAt: null,
       });
       expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('reads history on and no notice for a member who never saved a setting', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      expect(await service.getStudioPlayback('u1')).toEqual(
+        expect.objectContaining({
+          isListeningHistoryOn: true,
+          listeningNoticeSeenAt: null,
+        }),
+      );
+    });
+
+    it('pauses history and keeps the other settings', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioAutoplayNext: false,
+          studioCrossfadeSeconds: 5,
+          isListeningHistoryOn: true,
+          listeningNoticeSeenAt: null,
+        }),
+      );
+
+      const result = await service.updateStudioPlayback('u1', {
+        isListeningHistoryOn: false,
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          autoplayNext: false,
+          crossfadeSeconds: 5,
+          isListeningHistoryOn: false,
+          listeningNoticeSeenAt: null,
+        }),
+      );
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isListeningHistoryOn: false,
+          studioCrossfadeSeconds: 5,
+        }),
+      );
+    });
+
+    it('stamps the notice once and keeps the first stamp', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-27T10:00:00.000Z'));
+      try {
+        const storedRow = row({
+          isListeningHistoryOn: true,
+          listeningNoticeSeenAt: null,
+        });
+        repo.findOne.mockResolvedValue(storedRow);
+
+        const first = await service.updateStudioPlayback('u1', {
+          hasSeenListeningNotice: true,
+        });
+        expect(first.listeningNoticeSeenAt).toBe('2026-10-27T10:00:00.000Z');
+
+        // The saved row now carries the stamp; a later call at 11:00 answers
+        // the 10:00 stamp.
+        jest.setSystemTime(new Date('2026-10-27T11:00:00.000Z'));
+        const second = await service.updateStudioPlayback('u1', {
+          hasSeenListeningNotice: true,
+        });
+        expect(second.listeningNoticeSeenAt).toBe('2026-10-27T10:00:00.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('reads the stored settings', async () => {
@@ -591,6 +660,8 @@ describe('PreferencesService', () => {
           studioAutoplayNext: false,
           studioHideExplicit: true,
           studioCrossfadeSeconds: 6,
+          isListeningHistoryOn: true,
+          listeningNoticeSeenAt: null,
         }),
       );
 
@@ -598,6 +669,8 @@ describe('PreferencesService', () => {
         autoplayNext: false,
         hideExplicit: true,
         crossfadeSeconds: 6,
+        isListeningHistoryOn: true,
+        listeningNoticeSeenAt: null,
       });
     });
 
@@ -607,6 +680,8 @@ describe('PreferencesService', () => {
           studioAutoplayNext: false,
           studioHideExplicit: true,
           studioCrossfadeSeconds: 4,
+          isListeningHistoryOn: true,
+          listeningNoticeSeenAt: null,
         }),
       );
 
@@ -618,6 +693,8 @@ describe('PreferencesService', () => {
         autoplayNext: false,
         hideExplicit: true,
         crossfadeSeconds: 8,
+        isListeningHistoryOn: true,
+        listeningNoticeSeenAt: null,
       });
       expect(repo.save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -653,6 +730,8 @@ describe('PreferencesService', () => {
           studioAutoplayNext: true,
           studioHideExplicit: false,
           studioCrossfadeSeconds: 3,
+          isListeningHistoryOn: true,
+          listeningNoticeSeenAt: null,
         }),
       );
 
@@ -660,6 +739,8 @@ describe('PreferencesService', () => {
         autoplayNext: true,
         hideExplicit: false,
         crossfadeSeconds: 3,
+        isListeningHistoryOn: true,
+        listeningNoticeSeenAt: null,
       });
     });
 
@@ -671,6 +752,8 @@ describe('PreferencesService', () => {
           studioHideExplicit: false,
           studioCrossfadeSeconds: 2,
           studioAskBeforeWarnings: true,
+          isListeningHistoryOn: true,
+          listeningNoticeSeenAt: null,
         }),
       );
 
@@ -683,6 +766,8 @@ describe('PreferencesService', () => {
         hideExplicit: false,
         crossfadeSeconds: 2,
         askBeforeWarnings: false,
+        isListeningHistoryOn: true,
+        listeningNoticeSeenAt: null,
       });
       expect(repo.save).toHaveBeenCalledWith(
         expect.objectContaining({

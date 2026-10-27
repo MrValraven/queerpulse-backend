@@ -10,6 +10,7 @@ const playlistId = '7c1e2b3a-4d5e-4f60-8a71-9b2c3d4e5f60';
 const entryId = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
 const previewToken = 'f'.repeat(64);
 const personaId = '5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d';
+const milestoneId = '6b7c8d9e-0f1a-4b2c-8d3e-4f5a6b7c8d9e';
 
 describe('isStudioListeningRequest', () => {
   it.each([
@@ -42,6 +43,14 @@ describe('isStudioListeningRequest', () => {
     `/api/studio/artists/${personaId}/press-kit?x=1`,
     `/Studio/Artists/${personaId}/Press-Kit`,
     `/studio/artists/${personaId}/press-kit/`,
+    `/studio/artists/${personaId}/stats`,
+    `/studio/artists/${personaId}/placements`,
+    `/studio/artists/${personaId}/placements?cursor=abc`,
+    `/api/studio/artists/${personaId}/milestones`,
+    `/Studio/Artists/${personaId}/Milestones/`,
+    `/studio/milestones/${milestoneId}`,
+    `/api/studio/milestones/${milestoneId}?x=1`,
+    '/studio/milestones/not-a-uuid',
     '/studio/radio',
     '/studio/radio?genre=electronic',
     '/api/studio/radio?mood=late-night',
@@ -70,6 +79,16 @@ describe('isStudioListeningRequest', () => {
     `/me/saved/lists/${playlistId}/items/studio_track:${trackId}`,
     `/me/saved/lists/${playlistId}/items/studio_track%3A${trackId}`,
     `/api/me/saved/lists/${playlistId}/items/studio_release%3a${trackId}`,
+    '/studio/plays',
+    '/v1/studio/plays/',
+    '/Studio/Plays?x=1',
+    '/me/studio-listening',
+    '/me/studio-listening?range=6m',
+    '/v1/me/studio-listening/recent?cursor=abc',
+    '/me/studio-listening/supporting',
+    `/studio/artists/${personaId}/plays?days=28`,
+    `/studio/artists/${personaId}/supporter`,
+    `/studio/artists/${personaId}/supporters`,
     `/me/saved/lists/${playlistId}/items/studio_playlist:${entryId}`,
     `/Me/Saved/Lists/${playlistId}/Items/Studio_Track:${trackId}`,
   ])('matches %s', (url) => {
@@ -77,6 +96,13 @@ describe('isStudioListeningRequest', () => {
   });
 
   it.each([
+    '/studio/playsx',
+    '/studio/plays/extra',
+    '/me/studio-listeningx',
+    '/me/studio-playback',
+    `/studio/artists/${personaId}/supportersx`,
+    `/studio/artists/${personaId}/playsx`,
+    `/admin/studio/artists/${personaId}/supporters`,
     '/studio/releases',
     '/studio/playlists',
     '/studio/playlists/',
@@ -97,7 +123,13 @@ describe('isStudioListeningRequest', () => {
     '/studio/previews/',
     `/studio/artists/${personaId}`,
     `/studio/artists/${personaId}/press-kitx`,
-    `/studio/artists/${personaId}/stats`,
+    `/studio/artists/${personaId}/statsx`,
+    `/studio/artists/${personaId}/placementsx`,
+    '/studio/milestones',
+    '/studio/milestones/',
+    `/studio/milestonesx/${milestoneId}`,
+    `/admin/studio/artists/${personaId}/stats`,
+    `/admin/studio/milestones/${milestoneId}`,
     `/admin/studio/previews/${previewToken}`,
     `/admin/studio/artists/${personaId}/press-kit`,
     `/studio/releases/${trackId}/preview-link`,
@@ -129,6 +161,29 @@ describe('isStudioListeningRequest', () => {
     `/me/saved/lists/${playlistId}/items/event%3Alisbon-pride`,
   ])('ignores %s', (url) => {
     expect(isStudioListeningRequest(url)).toBe(false);
+  });
+
+  it.each(['GET', 'OPTIONS', 'HEAD', 'POST', 'PUT', 'DELETE', undefined])(
+    'skips the listening routes for method %s',
+    (method) => {
+      for (const url of [
+        '/studio/plays',
+        '/me/studio-listening',
+        '/me/studio-listening/recent',
+        `/studio/artists/${personaId}/supporter`,
+        `/studio/artists/${personaId}/plays`,
+      ]) {
+        expect(isStudioListeningRequest(url, method)).toBe(true);
+      }
+    },
+  );
+
+  it('drops a Your listening page referer', () => {
+    const request = {
+      headers: { referer: 'https://queerpulse.test/studio/listening' },
+    };
+    expect(dropStudioListeningReferer(request)).toBe(true);
+    expect(request.headers).toEqual({});
   });
 
   it('ignores an undefined url', () => {
@@ -166,6 +221,21 @@ describe('isStudioListeningRequest', () => {
   });
 });
 
+it.each(['GET', 'OPTIONS', 'HEAD', 'POST', undefined])(
+  'skips the dashboard reads and the milestone card for method %s',
+  (method) => {
+    expect(
+      isStudioListeningRequest(
+        `/studio/artists/${personaId}/placements`,
+        method,
+      ),
+    ).toBe(true);
+    expect(
+      isStudioListeningRequest(`/studio/milestones/${milestoneId}`, method),
+    ).toBe(true);
+  },
+);
+
 describe('dropStudioListeningUrl', () => {
   it('removes the url and every query string shape from a Studio listening request', () => {
     const searchRequest = {
@@ -182,6 +252,32 @@ describe('dropStudioListeningUrl', () => {
     };
     expect(dropStudioListeningUrl(playlistRequest)).toBe(true);
     expect(playlistRequest).toEqual({});
+  });
+
+  it('removes the request body of a listening request and keeps it elsewhere', () => {
+    const playRequest = {
+      url: '/studio/plays',
+      method: 'POST',
+      data: { trackId },
+    };
+    expect(dropStudioListeningUrl(playRequest)).toBe(true);
+    expect(playRequest).toEqual({ method: 'POST' });
+
+    const supporterRequest = {
+      url: `/studio/artists/${personaId}/supporter`,
+      method: 'PUT',
+      data: '{"shownAsSubprofileId":"x"}',
+    };
+    expect(dropStudioListeningUrl(supporterRequest)).toBe(true);
+    expect(supporterRequest).toEqual({ method: 'PUT' });
+
+    const otherRequest = {
+      url: '/studio/releases?genre=house',
+      method: 'POST',
+      data: { title: 'x' },
+    };
+    expect(dropStudioListeningUrl(otherRequest)).toBe(false);
+    expect(otherRequest.data).toEqual({ title: 'x' });
   });
 
   it('removes the url and query string of a radio request', () => {
@@ -232,6 +328,16 @@ describe('dropStudioListeningUrl', () => {
 });
 
 describe('dropStudioListeningReferer', () => {
+  it('drops a milestone share link referer, which names an artist page', () => {
+    const request = {
+      headers: {
+        referer: `https://queerpulse.test/studio/artist?id=${personaId}&milestone=${milestoneId}`,
+      },
+    };
+    expect(dropStudioListeningReferer(request)).toBe(true);
+    expect(request.headers).toEqual({});
+  });
+
   it('drops a frontend collection referer', () => {
     const request = {
       headers: {

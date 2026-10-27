@@ -1,5 +1,6 @@
 /**
- * Studio records nothing about what a member listens to. The request log and
+ * Studio keeps play totals and the member's own listening history, and
+ * neither ever sits beside a member id in a log line. The request log and
  * the HTTP metrics would otherwise name each streamed track, and a playlist
  * id beside a member id is a listening list, so both skip every request whose
  * path names a track (its page, stream, playlists or persona credits) or a
@@ -8,7 +9,14 @@
  * radio genre or mood never sits beside a member id. Studio v3 adds the
  * private preview routes (`/studio/previews/<token>`, any subpath, so no
  * token and no opener is ever logged) and the press kit read
- * (`/studio/artists/<id>/press-kit`, any method). Studio artist kinds add
+ * (`/studio/artists/<id>/press-kit`, any method). The Studio dashboard adds
+ * the owner reads (`/studio/artists/<id>/stats`, `placements` and
+ * `milestones`, any subpath) and the milestone card read
+ * (`/studio/milestones/<id>`), any method, so a persona id never sits beside
+ * the member id of one of its owners. Studio listening adds the play count
+ * (`/studio/plays`), the member's history routes (`/me/studio-listening`, any
+ * subpath) and the owner reads `plays` and `supporters` plus the listener's
+ * `supporter` route under `/studio/artists/<id>/`, any method. Studio artist kinds add
  * the format list (`/studio/formats`) and the episode routes
  * (`/studio/episodes/<anything>`, any subpath); an episode publish is
  * already a `/studio/tracks/<id>` path. Liked songs adds the like and unlike
@@ -46,6 +54,12 @@ export function isStudioListeningRequest(
     ) ||
     (STUDIO_RELEASE_READ_PATTERN.test(path) && isReadMethod(method)) ||
     /(?:^|\/)studio\/artists\/[^/]+\/press-kit\/?$/i.test(path) ||
+    /(?:^|\/)studio\/artists\/[^/]+\/(?:stats|plays|placements|milestones|supporters?)(?:\/|$)/i.test(
+      path,
+    ) ||
+    /(?:^|\/)studio\/milestones\/[^/]+(?:\/|$)/i.test(path) ||
+    /(?:^|\/)studio\/plays\/?$/i.test(path) ||
+    /(?:^|\/)me\/studio-listening(?:\/|$)/i.test(path) ||
     /(?:^|\/)studio\/search\/?$/i.test(path) ||
     /(?:^|\/)studio\/radio\/?$/i.test(path) ||
     /(?:^|\/)studio\/formats\/?$/i.test(path) ||
@@ -105,12 +119,14 @@ export function redactStudioPreviewToken(
 export interface StudioListeningRequestFields {
   url?: string;
   query_string?: unknown;
+  data?: unknown;
   method?: string;
 }
 
 /**
  * Sentry's half of the rule above: a Studio listening request reaches an
- * error report with its URL and query string removed, so the report keeps
+ * error report with its URL, query string and body (`data`, such as a
+ * `{ trackId }` play count) removed, so the report keeps
  * the error and drops the track, playlist or search term. Answers whether it
  * removed anything.
  */
@@ -122,6 +138,7 @@ export function dropStudioListeningUrl(
   }
   delete request.url;
   delete request.query_string;
+  delete request.data;
   return true;
 }
 
@@ -131,10 +148,11 @@ export function dropStudioListeningUrl(
  * same listening list the request URL does, so Sentry drops the header too.
  * Studio v3 adds the private preview page and the press kit pages, which name
  * a release or an artist a member was shown. Liked songs adds `/studio/liked`,
- * the member's own liked tracks.
+ * the member's own liked tracks. Studio listening adds `/studio/listening`,
+ * the member's own history.
  */
 const STUDIO_LISTENING_PAGE_PATTERN =
-  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse|scene|preview|press|liked)(?:\/|$)/i;
+  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse|scene|preview|press|liked|listening)(?:\/|$)/i;
 
 function isStudioListeningReferer(referer: string): boolean {
   try {

@@ -54,8 +54,9 @@ export const HEADLINE_SOURCE_KEYS = [
 ] as const;
 
 /**
- * PRD-447. A report is public once every headline figure on it was entered by
- * a person: none of the five provenance columns still reads `seeded`. A
+ * PRD-447. A report is public once every headline figure on it came from
+ * people (typed in, or for `expenseTotal` summed from the spending rows they
+ * entered): none of the five provenance columns still reads `seeded`. A
  * freshly opened quarter, or a seeded row an admin only half corrected, stays
  * on the admin tab until the last figure is in.
  */

@@ -110,6 +110,16 @@ describe('GovernanceFinanceService', () => {
     expenseTotalSource: FinanceMetricSource.Manual,
   };
 
+  // The seeded spending rows: €520 + €1,240 + €740 + €800 + €380 + €470.
+  const seededSpendingTotal = 4150;
+
+  // A spending total a save already summed from the seeded rows, so the
+  // recompute on the next save finds nothing to change.
+  const computedSpendingTotal = {
+    expenseTotal: seededSpendingTotal,
+    expenseTotalSource: FinanceMetricSource.Computed,
+  };
+
   describe('getFinances', () => {
     it('reads the newest report whose figures were entered by people', async () => {
       const enteredAt = new Date('2026-10-02T09:30:00.000Z');
@@ -344,6 +354,7 @@ describe('GovernanceFinanceService', () => {
 
     it('skips an already-entered figure resubmitted as it is', async () => {
       const report = makeReport({
+        ...computedSpendingTotal,
         mrr: 1840,
         mrrSource: FinanceMetricSource.Manual,
       });
@@ -390,6 +401,7 @@ describe('GovernanceFinanceService', () => {
       const enteredAt = new Date('2026-10-02T09:30:00.000Z');
       const report = makeReport({
         ...enteredSources,
+        ...computedSpendingTotal,
         metricsEditedBy: 'admin-0',
         metricsEditedAt: enteredAt,
       });
@@ -419,6 +431,117 @@ describe('GovernanceFinanceService', () => {
       expect(manager.save).toHaveBeenCalledWith(report);
       expect(report.metricsEditedAt).toBe(enteredAt);
       expect(report.metricsEditedBy).toBe('admin-0');
+    });
+  });
+
+  describe('updateAdminFinances spending total', () => {
+    it('sums the spending rows into the total and recomputes the surplus', async () => {
+      const report = makeReport({
+        incomeTotal: 5000,
+        incomeTotalSource: FinanceMetricSource.Manual,
+      });
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      await service.updateAdminFinances(
+        { mrr: 2100, note: 'Quarter close' },
+        'admin-1',
+      );
+
+      expect(report.expenseTotal).toBe(seededSpendingTotal);
+      expect(report.expenseTotalSource).toBe(FinanceMetricSource.Computed);
+      expect(report.surplus).toBe(5000 - seededSpendingTotal);
+      expect(manager.create).toHaveBeenCalledWith(GovernanceFinanceChange, {
+        actorId: 'admin-1',
+        reportId: 'r1',
+        field: 'expenseTotal',
+        oldValue: null,
+        newValue: String(seededSpendingTotal),
+        note: 'Quarter close',
+      });
+    });
+
+    it('leaves a switched-off spending row out of the total', async () => {
+      const report = makeReport(computedSpendingTotal);
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      // Row 0 is "Platform & tools", €520.
+      await service.updateAdminFinances(
+        { expense: [{ index: 0, enabled: false }] },
+        'admin-1',
+      );
+
+      expect(report.expenseTotal).toBe(seededSpendingTotal - 520);
+      expect(manager.create).toHaveBeenCalledWith(
+        GovernanceFinanceChange,
+        expect.objectContaining({
+          field: 'expenseTotal',
+          oldValue: String(seededSpendingTotal),
+          newValue: String(seededSpendingTotal - 520),
+        }),
+      );
+    });
+
+    it('heals a hand-typed total that drifted from the rows on any save', async () => {
+      const enteredAt = new Date('2026-10-02T09:30:00.000Z');
+      const report = makeReport({
+        ...enteredSources,
+        incomeTotal: 4620,
+        expenseTotal: 3900,
+        surplus: 720,
+        metricsEditedAt: enteredAt,
+      });
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      await service.updateAdminFinances(
+        { eventNotes: [{ title: 'Hosts keep it all', body: '' }] },
+        'admin-1',
+      );
+
+      expect(report.expenseTotal).toBe(seededSpendingTotal);
+      expect(report.expenseTotalSource).toBe(FinanceMetricSource.Computed);
+      expect(report.surplus).toBe(4620 - seededSpendingTotal);
+      // The total is a figure, so moving it restamps the public date.
+      expect(report.metricsEditedAt).not.toBe(enteredAt);
+      expect(manager.save).toHaveBeenCalledWith(report);
+    });
+
+    it('relabels a matching hand-typed total as computed', async () => {
+      const report = makeReport({
+        expenseTotal: seededSpendingTotal,
+        expenseTotalSource: FinanceMetricSource.Manual,
+      });
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      await service.updateAdminFinances({}, 'admin-1');
+
+      expect(report.expenseTotalSource).toBe(FinanceMetricSource.Computed);
+      expect(manager.create).toHaveBeenCalledWith(
+        GovernanceFinanceChange,
+        expect.objectContaining({
+          field: 'expenseTotal',
+          oldValue: String(seededSpendingTotal),
+          newValue: String(seededSpendingTotal),
+        }),
+      );
+    });
+
+    it('leaves the total of a quarter with no spending rows unentered', async () => {
+      const report = makeReport({ expense: [], mrr: 1840 });
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      await service.updateAdminFinances({ mrr: 2100 }, 'admin-1');
+
+      expect(report.expenseTotal).toBeNull();
+      expect(report.expenseTotalSource).toBe(FinanceMetricSource.Seeded);
+      expect(manager.create).not.toHaveBeenCalledWith(
+        GovernanceFinanceChange,
+        expect.objectContaining({ field: 'expenseTotal' }),
+      );
     });
   });
 

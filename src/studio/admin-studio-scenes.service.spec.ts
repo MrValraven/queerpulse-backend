@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   HttpException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
@@ -90,13 +91,22 @@ describe('AdminStudioScenesService', () => {
   };
   let service: AdminStudioScenesService;
 
+  /** The row-locked cover read answers what the scene holds right now. Tests
+   *  stage that through `scenes.findOne`, the same stored cover. */
+  const lockedCoverRead = async () => {
+    const stored = (await scenes.findOne()) as { coverKey: string | null };
+    return [{ cover_key: stored.coverKey }];
+  };
+
   beforeEach(() => {
     query = jest.fn().mockResolvedValue([sceneRow]);
     manager = {
       query: jest.fn((sql: string) =>
-        Promise.resolve(
-          sql.includes('MAX("position")') ? [{ position: 4 }] : [],
-        ),
+        sql.includes('FOR UPDATE')
+          ? lockedCoverRead()
+          : Promise.resolve(
+              sql.includes('MAX("position")') ? [{ position: 4 }] : [],
+            ),
       ),
       find: jest.fn().mockResolvedValue([]),
       create: jest.fn((_entity: unknown, row: object) => row),
@@ -257,6 +267,77 @@ describe('AdminStudioScenesService', () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
       expect(manager.save).not.toHaveBeenCalled();
     });
+
+    describe('a failed create', () => {
+      it('deletes the fresh cover copy at once when the write fails', async () => {
+        manager.save.mockRejectedValue(new Error('db down'));
+
+        await expect(
+          service.create(STAFF_ID, {
+            name: 'Porto',
+            city: 'Porto',
+            coverKey: OWN_COVER,
+          }),
+        ).rejects.toThrow('db down');
+
+        expect(storage.deleteObjectByKey).toHaveBeenCalledWith(SCENE_COVER);
+        expect(storage.deleteObjectByKey).not.toHaveBeenCalledWith(OWN_COVER);
+      });
+
+      it('deletes the copy when the slug is taken, and the caller still gets the slug reason', async () => {
+        manager.save.mockRejectedValue({
+          code: '23505',
+          constraint: 'UQ_studio_scenes_slug',
+        });
+        expect(
+          await codeOf(
+            service.create(STAFF_ID, {
+              name: 'Porto',
+              city: 'Porto',
+              coverKey: OWN_COVER,
+            }),
+          ),
+        ).toBe('studio_scene_slug_taken');
+        expect(storage.deleteObjectByKey).toHaveBeenCalledWith(SCENE_COVER);
+      });
+
+      it('still reports the original failure when the cleanup delete also fails, and logs it', async () => {
+        manager.save.mockRejectedValue(new Error('db down'));
+        storage.deleteObjectByKey.mockRejectedValue(new Error('bucket down'));
+        const logSpy = jest
+          .spyOn(Logger.prototype, 'error')
+          .mockImplementation(() => undefined);
+
+        await expect(
+          service.create(STAFF_ID, {
+            name: 'Porto',
+            city: 'Porto',
+            coverKey: OWN_COVER,
+          }),
+        ).rejects.toThrow('db down');
+        expect(logSpy).toHaveBeenCalledWith(
+          expect.stringContaining('bucket down'),
+        );
+        logSpy.mockRestore();
+      });
+
+      it('deletes nothing when no cover copy was made', async () => {
+        manager.save.mockRejectedValue(new Error('db down'));
+        await expect(
+          service.create(STAFF_ID, { name: 'Porto', city: 'Porto' }),
+        ).rejects.toThrow('db down');
+        expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+      });
+
+      it('keeps the copy of a create that committed', async () => {
+        await service.create(STAFF_ID, {
+          name: 'Porto',
+          city: 'Porto',
+          coverKey: OWN_COVER,
+        });
+        expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('update', () => {
@@ -326,7 +407,9 @@ describe('AdminStudioScenesService', () => {
 
     it('refuses a slug another scene holds and leaves the scene as it was', async () => {
       manager.query.mockImplementation((sql: string) =>
-        Promise.resolve(sql.includes('"slug" = $1') ? [{ found: 1 }] : []),
+        sql.includes('FOR UPDATE')
+          ? lockedCoverRead()
+          : Promise.resolve(sql.includes('"slug" = $1') ? [{ found: 1 }] : []),
       );
       expect(
         await codeOf(service.update(STAFF_ID, SCENE_ID, { slug: 'porto' })),
@@ -339,6 +422,112 @@ describe('AdminStudioScenesService', () => {
       await expect(
         service.update(STAFF_ID, SCENE_ID, { name: 'Porto' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    describe('concurrent cover edits', () => {
+      const storedScene = (coverKey: string | null) => ({
+        id: SCENE_ID,
+        slug: 'lisbon-ballroom',
+        coverKey,
+        status: StudioSceneState.Active,
+      });
+
+      it('locks the scene row before it reads the stored cover or writes', async () => {
+        scenes.findOne.mockResolvedValue(storedScene(SCENE_COVER));
+        await service.update(STAFF_ID, SCENE_ID, { name: 'Porto' });
+
+        const lockCall = manager.query.mock.calls.findIndex(([sql]) =>
+          String(sql).includes('"studio_scenes" WHERE "id" = $1 FOR UPDATE'),
+        );
+        expect(lockCall).toBeGreaterThanOrEqual(0);
+        expect(manager.query.mock.calls[lockCall]?.[1]).toEqual([SCENE_ID]);
+        expect(manager.query.mock.invocationCallOrder[lockCall]).toBeLessThan(
+          manager.update.mock.invocationCallOrder[0] ?? 0,
+        );
+      });
+
+      it('answers a named 409 and writes nothing when a stored cover is re-sent after another edit replaced it', async () => {
+        // The read before the transaction saw SCENE_COVER, the locked read
+        // finds NEXT_SCENE_COVER: another editor won the race.
+        scenes.findOne.mockResolvedValue(storedScene(SCENE_COVER));
+        manager.query.mockImplementation((sql: string) =>
+          Promise.resolve(
+            sql.includes('FOR UPDATE') ? [{ cover_key: NEXT_SCENE_COVER }] : [],
+          ),
+        );
+
+        expect(
+          await codeOf(
+            service.update(STAFF_ID, SCENE_ID, { coverKey: SCENE_COVER }),
+          ),
+        ).toBe('studio_scene_cover_changed');
+        const error = await service
+          .update(STAFF_ID, SCENE_ID, { coverKey: SCENE_COVER })
+          .catch((caught: HttpException) => caught);
+        expect((error as HttpException).getStatus()).toBe(409);
+        expect(manager.update).not.toHaveBeenCalled();
+      });
+
+      it('never deletes the live cover when the loser of the race is refused', async () => {
+        scenes.findOne.mockResolvedValue(storedScene(SCENE_COVER));
+        manager.query.mockImplementation((sql: string) =>
+          Promise.resolve(
+            sql.includes('FOR UPDATE') ? [{ cover_key: NEXT_SCENE_COVER }] : [],
+          ),
+        );
+
+        await service
+          .update(STAFF_ID, SCENE_ID, { coverKey: SCENE_COVER })
+          .catch(() => undefined);
+
+        expect(storage.deleteObjectByKey).not.toHaveBeenCalledWith(
+          NEXT_SCENE_COVER,
+        );
+        expect(storage.deleteObjectByKey).not.toHaveBeenCalledWith(SCENE_COVER);
+      });
+
+      it('deletes the cover the locked row held, not the one read before the lock', async () => {
+        // Stale read says SCENE_COVER; another edit already stored
+        // NEXT_SCENE_COVER. This edit brings a fresh upload and replaces it.
+        const FRESH_COVER = `studio-scene/f1000000-0000-4000-8000-000000000005/f1000000-0000-4000-8000-000000000006.jpg`;
+        scenes.findOne.mockResolvedValue(storedScene(SCENE_COVER));
+        manager.query.mockImplementation((sql: string) =>
+          Promise.resolve(
+            sql.includes('FOR UPDATE') ? [{ cover_key: NEXT_SCENE_COVER }] : [],
+          ),
+        );
+        storage.copyObjectToStudioSceneScope.mockResolvedValue(FRESH_COVER);
+
+        await service.update(STAFF_ID, SCENE_ID, { coverKey: OWN_COVER });
+
+        expect(manager.update).toHaveBeenCalledWith(
+          StudioScene,
+          { id: SCENE_ID },
+          { coverKey: FRESH_COVER },
+        );
+        expect(storage.deleteObjectByKey).toHaveBeenCalledWith(
+          NEXT_SCENE_COVER,
+        );
+        expect(storage.deleteObjectByKey).not.toHaveBeenCalledWith(SCENE_COVER);
+      });
+
+      it('answers 404 and deletes nothing when the scene vanished before the lock', async () => {
+        manager.query.mockImplementation((sql: string) =>
+          Promise.resolve(sql.includes('FOR UPDATE') ? [] : []),
+        );
+        await expect(
+          service.update(STAFF_ID, SCENE_ID, { coverKey: OWN_COVER }),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(manager.update).not.toHaveBeenCalled();
+      });
+    });
+
+    it('deletes the fresh cover copy when the update write fails', async () => {
+      manager.update.mockRejectedValue(new Error('db down'));
+      await expect(
+        service.update(STAFF_ID, SCENE_ID, { coverKey: OWN_COVER }),
+      ).rejects.toThrow('db down');
+      expect(storage.deleteObjectByKey).toHaveBeenCalledWith(SCENE_COVER);
     });
   });
 

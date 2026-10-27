@@ -1029,6 +1029,8 @@ describe('MemberPreferencesExportContributor, Studio player settings', () => {
       studioHideExplicit: true,
       studioCrossfadeSeconds: 6,
       studioAskBeforeWarnings: false,
+      isListeningHistoryOn: false,
+      listeningNoticeSeenAt: new Date('2026-10-20T08:00:00.000Z'),
       updatedAt: new Date('2026-10-13T09:00:00.000Z'),
     });
     const contributor = new MemberPreferencesExportContributor(
@@ -1048,7 +1050,34 @@ describe('MemberPreferencesExportContributor, Studio player settings', () => {
         studioHideExplicit: true,
         studioCrossfadeSeconds: 6,
         studioAskBeforeWarnings: false,
+        isListeningHistoryOn: false,
+        listeningNoticeSeenAt: '2026-10-20T08:00:00.000Z',
         updatedAt: '2026-10-13T09:00:00.000Z',
+      }),
+    );
+  });
+
+  it('exports the listening history switch and the notice date, null staying null', async () => {
+    const findOne = jest.fn().mockResolvedValue({
+      userId: MEMBER_ID,
+      language: 'pt',
+      isListeningHistoryOn: true,
+      listeningNoticeSeenAt: null,
+      updatedAt: new Date('2026-10-13T09:00:00.000Z'),
+    });
+    const contributor = new MemberPreferencesExportContributor(
+      repositoryWith<MemberPreferences>({ findOne }),
+    );
+
+    const exported = (await contributor.buildContribution(MEMBER_ID)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(exported).toEqual(
+      expect.objectContaining({
+        isListeningHistoryOn: true,
+        listeningNoticeSeenAt: null,
       }),
     );
   });

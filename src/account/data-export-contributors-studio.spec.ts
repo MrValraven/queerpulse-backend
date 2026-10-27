@@ -2,6 +2,7 @@ import { DataSource } from 'typeorm';
 import { NEW_DOMAIN_EXPORT_CONTRIBUTORS } from './data-export-contributors';
 import {
   StudioCopyrightClaimsExportContributor,
+  StudioListeningExportContributor,
   StudioPersonaCreditsExportContributor,
   StudioPlaylistAdditionsExportContributor,
   StudioPlaylistSeatsExportContributor,
@@ -548,5 +549,114 @@ describe('StudioCopyrightClaimsExportContributor', () => {
       'ON "release"."id" = "claim"."release_id" AND NOT "claim"."is_severed"',
     );
     expect(sql).toContain('ON "persona"."id" = "release"."subprofile_id"');
+  });
+});
+
+describe('StudioListeningExportContributor', () => {
+  let query: jest.Mock;
+  let contributor: StudioListeningExportContributor;
+
+  const listenRow = (trackTitle: string | null, playedAt: string) => ({
+    track_title: trackTitle,
+    artist: 'Midnight Static',
+    played_at: new Date(playedAt),
+  });
+  const supporterRow = (shownAs: string | null, createdAt: string) => ({
+    artist: 'Midnight Static',
+    shown_as: shownAs,
+    created_at: new Date(createdAt),
+    updated_at: new Date('2026-10-20T08:00:00.000Z'),
+  });
+
+  beforeEach(() => {
+    query = jest.fn();
+    contributor = new StudioListeningExportContributor({
+      query,
+    } as unknown as DataSource);
+  });
+
+  it('rides on the activityLog category under its own archive key', () => {
+    expect([contributor.category, contributor.archiveKey]).toEqual([
+      'activityLog',
+      'studioListening',
+    ]);
+  });
+
+  it('is registered and has a csv file right after the copyright claims', () => {
+    expect(NEW_DOMAIN_EXPORT_CONTRIBUTORS).toContain(
+      StudioListeningExportContributor,
+    );
+    const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
+    expect(csvKeys.indexOf('studioListening')).toBe(
+      csvKeys.indexOf('studioCopyrightClaims') + 1,
+    );
+  });
+
+  it('writes the listens oldest first, then the supporter opt-ins oldest first', async () => {
+    query
+      .mockResolvedValueOnce([
+        listenRow('Night bus', '2026-10-01T08:00:00.000Z'),
+        listenRow(null, '2026-10-02T08:00:00.000Z'),
+      ])
+      .mockResolvedValueOnce([
+        supporterRow(null, '2026-10-05T08:00:00.000Z'),
+        supporterRow('Patch Notes', '2026-10-06T08:00:00.000Z'),
+      ]);
+
+    await expect(contributor.buildContribution(USER_ID)).resolves.toEqual([
+      {
+        type: 'listen',
+        trackTitle: 'Night bus',
+        artist: 'Midnight Static',
+        playedAt: '2026-10-01T08:00:00.000Z',
+      },
+      {
+        type: 'listen',
+        trackTitle: null,
+        artist: 'Midnight Static',
+        playedAt: '2026-10-02T08:00:00.000Z',
+      },
+      {
+        type: 'supporter',
+        artist: 'Midnight Static',
+        shownAs: 'account',
+        createdAt: '2026-10-05T08:00:00.000Z',
+        updatedAt: '2026-10-20T08:00:00.000Z',
+      },
+      {
+        type: 'supporter',
+        artist: 'Midnight Static',
+        shownAs: 'Patch Notes',
+        createdAt: '2026-10-06T08:00:00.000Z',
+        updatedAt: '2026-10-20T08:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('reads only the member rows, with a title while the release is published', async () => {
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+    await contributor.buildContribution(USER_ID);
+
+    const [listenSql, listenParams] = query.mock.calls[0] as [
+      string,
+      unknown[],
+    ];
+    const [supporterSql, supporterParams] = query.mock.calls[1] as [
+      string,
+      unknown[],
+    ];
+    expect([listenParams, supporterParams]).toEqual([[USER_ID], [USER_ID]]);
+    expect(listenSql).toContain('WHERE "listen"."user_id" = $1');
+    expect(listenSql).toContain(
+      `WHEN "release"."status" = 'published' THEN "track"."title"`,
+    );
+    expect(listenSql).toContain(
+      'ORDER BY "listen"."played_at" ASC, "listen"."id" ASC',
+    );
+    expect(supporterSql).toContain('WHERE "supporter"."user_id" = $1');
+    expect(supporterSql).toContain(
+      'ORDER BY "supporter"."created_at" ASC, "supporter"."subprofile_id" ASC',
+    );
   });
 });

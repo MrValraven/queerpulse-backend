@@ -7,8 +7,9 @@ import {
   StudioReleaseStatus,
   StudioReleaseType,
 } from './entities/studio-release.entity';
-import { StudioTrack } from './entities/studio-track.entity';
+import { StudioCredit, StudioTrack } from './entities/studio-track.entity';
 import { StudioOwnershipService } from './studio-ownership.service';
+import { StudioArtistStats } from './studio-stats';
 import { StudioStatsService } from './studio-stats.service';
 
 const OWNER_ID = 'a7000000-0000-4000-8000-000000000001';
@@ -16,6 +17,7 @@ const PERSONA_ID = 'a8000000-0000-4000-8000-000000000001';
 const RELEASE_ID = 'a9000000-0000-4000-8000-000000000001';
 const DRAFT_ID = 'a9000000-0000-4000-8000-000000000002';
 const SCHEDULED_ID = 'a9000000-0000-4000-8000-000000000003';
+const TAKEN_DOWN_ID = 'a9000000-0000-4000-8000-000000000004';
 const TRACK_ONE = 'aa000000-0000-4000-8000-000000000001';
 const TRACK_TWO = 'aa000000-0000-4000-8000-000000000002';
 
@@ -27,6 +29,8 @@ const releaseRow = (id: string, status: StudioReleaseStatus): StudioRelease =>
     type: StudioReleaseType.Mix,
     description: null,
     genre: null,
+    mood: null,
+    buyUrl: null,
     coverKey: null,
     releasedOn: null,
     status,
@@ -34,12 +38,17 @@ const releaseRow = (id: string, status: StudioReleaseStatus): StudioRelease =>
       status === StudioReleaseStatus.Published
         ? new Date('2026-10-01T09:00:00.000Z')
         : null,
+    publishAt:
+      status === StudioReleaseStatus.Scheduled
+        ? new Date('2026-11-02T18:00:00.000Z')
+        : null,
+    tracksChangedAt: null,
     updatedAt: new Date('2026-10-02T09:00:00.000Z'),
     takedownReason: null,
   }) as StudioRelease;
 
-const trackRow = (id: string, position: number): StudioTrack =>
-  ({
+const trackRow = (id: string, position: number): StudioTrack => {
+  const row: Partial<StudioTrack> = {
     id,
     releaseId: RELEASE_ID,
     position,
@@ -47,7 +56,13 @@ const trackRow = (id: string, position: number): StudioTrack =>
     audioKey: 'studio-audio/a/b.mp3',
     durationSeconds: 100,
     isExplicit: false,
-  }) as StudioTrack;
+    credits: [] as StudioCredit[],
+    lyrics: null,
+    syncedLyrics: null,
+    withheldAt: null,
+  };
+  return row as StudioTrack;
+};
 
 describe('StudioStatsService', () => {
   let query: jest.Mock;
@@ -56,10 +71,25 @@ describe('StudioStatsService', () => {
   let subprofiles: { findOne: jest.Mock };
   let ownership: { isPersonaMember: jest.Mock };
   let followers: { loadFollowerCountsFor: jest.Mock };
+  let followerGrowthRows: { week_start: string; new_followers: number }[];
+  let versionRows: { release_id: string; latest_created_at: Date }[];
+  let playRows: { track_id: string; plays: string; plays_28d: string }[];
   let service: StudioStatsService;
 
   beforeEach(() => {
+    followerGrowthRows = [];
+    versionRows = [];
+    playRows = [];
     query = jest.fn((sql: string) => {
+      if (sql.includes('FROM "studio_track_play_daily"')) {
+        return Promise.resolve(playRows);
+      }
+      if (sql.includes('FROM "subprofile_followers"')) {
+        return Promise.resolve(followerGrowthRows);
+      }
+      if (sql.includes('FROM "studio_release_versions"')) {
+        return Promise.resolve(versionRows);
+      }
       if (sql.includes('FROM "saved_item"')) {
         return Promise.resolve([
           {
@@ -221,8 +251,14 @@ describe('StudioStatsService', () => {
     releases.find.mockResolvedValue([]);
     const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
     expect(stats.releases).toEqual([]);
+    expect(stats.nextRelease).toBeNull();
     expect(tracks.find).not.toHaveBeenCalled();
-    expect(query).not.toHaveBeenCalled();
+    // Studio dashboard: the weekly follower read is the only query left.
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM "subprofile_followers"'),
+      expect.anything(),
+    );
   });
 
   // Studio v3: Notify me counts on scheduled releases, under the floor.
@@ -282,6 +318,299 @@ describe('StudioStatsService', () => {
     expect(stats.releases[0]?.playlistInclusions).toEqual({
       value: 6,
       isBelowThreshold: false,
+    });
+  });
+
+  // Studio dashboard: follower weeks, the next release and release health.
+  describe('dashboard extras', () => {
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-28T15:00:00.000Z'));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('reports twelve zero-filled Monday weeks ending with the current week', async () => {
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(stats.followerGrowth).toHaveLength(12);
+      expect(stats.followerGrowth[0]).toEqual({
+        weekStart: '2026-08-10',
+        newFollowers: 0,
+      });
+      expect(stats.followerGrowth[11]).toEqual({
+        weekStart: '2026-10-26',
+        newFollowers: 0,
+      });
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('FROM "subprofile_followers"'),
+        [PERSONA_ID, '2026-08-10T00:00:00.000Z'],
+      );
+    });
+
+    it('reads follower weeks for the stored persona id', async () => {
+      await service.getArtistStats(OWNER_ID, PERSONA_ID.toUpperCase());
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('FROM "subprofile_followers"'),
+        [PERSONA_ID, '2026-08-10T00:00:00.000Z'],
+      );
+    });
+
+    it('shows weekly new followers unfloored', async () => {
+      followerGrowthRows = [{ week_start: '2026-10-19', new_followers: 2 }];
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(stats.followerGrowth[10]).toEqual({
+        weekStart: '2026-10-19',
+        newFollowers: 2,
+      });
+    });
+
+    it('names the soonest scheduled release with its floored reminders', async () => {
+      releases.find.mockResolvedValue([
+        releaseRow(DRAFT_ID, StudioReleaseStatus.Draft),
+        releaseRow(RELEASE_ID, StudioReleaseStatus.Published),
+        releaseRow(SCHEDULED_ID, StudioReleaseStatus.Scheduled),
+      ]);
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(stats.nextRelease).toEqual({
+        releaseId: SCHEDULED_ID,
+        title: 'Release 3',
+        publishAt: '2026-11-02T18:00:00.000Z',
+        reminders: { value: null, isBelowThreshold: true },
+      });
+    });
+
+    it('answers a null next release when nothing is scheduled', async () => {
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(stats.nextRelease).toBeNull();
+    });
+
+    it('puts health on every release row and an empty list on a taken-down one', async () => {
+      releases.find.mockResolvedValue([
+        releaseRow(DRAFT_ID, StudioReleaseStatus.Draft),
+        releaseRow(RELEASE_ID, StudioReleaseStatus.Published),
+        releaseRow(SCHEDULED_ID, StudioReleaseStatus.Scheduled),
+        releaseRow(TAKEN_DOWN_ID, StudioReleaseStatus.TakenDown),
+      ]);
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      const rowOf = (releaseId: string) =>
+        stats.releases.find((row) => row.release.id === releaseId);
+      const fullChecklist = [
+        'cover',
+        'description',
+        'genreAndMood',
+        'creditsOnEveryTrack',
+        'lyrics',
+        'buyLink',
+      ];
+      expect(rowOf(RELEASE_ID)?.health.map((item) => item.key)).toEqual(
+        fullChecklist,
+      );
+      expect(rowOf(DRAFT_ID)?.health.map((item) => item.key)).toEqual(
+        fullChecklist,
+      );
+      expect(rowOf(SCHEDULED_ID)?.health.map((item) => item.key)).toEqual(
+        fullChecklist,
+      );
+      expect(rowOf(TAKEN_DOWN_ID)?.health).toEqual([]);
+    });
+
+    it('reads credits and lyrics from the release tracks', async () => {
+      tracks.find.mockResolvedValue([
+        {
+          ...trackRow(TRACK_ONE, 1),
+          credits: [{ role: 'producer', name: 'Ana' }],
+          lyrics: 'First line',
+        },
+        {
+          ...trackRow(TRACK_TWO, 2),
+          credits: [{ role: 'producer', name: 'Ana' }],
+          lyrics: 'Second line',
+        },
+      ]);
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      const published = stats.releases.find(
+        (row) => row.release.id === RELEASE_ID,
+      );
+      expect(
+        published?.health.filter(
+          (item) => item.key === 'creditsOnEveryTrack' || item.key === 'lyrics',
+        ),
+      ).toEqual([
+        { key: 'creditsOnEveryTrack', isDone: true, isOptional: false },
+        { key: 'lyrics', isDone: true, isOptional: true },
+      ]);
+    });
+
+    it('reads version dates only for published releases with track changes', async () => {
+      releases.find.mockResolvedValue([
+        {
+          ...releaseRow(DRAFT_ID, StudioReleaseStatus.Draft),
+          tracksChangedAt: new Date('2026-10-05T09:00:00.000Z'),
+        },
+        {
+          ...releaseRow(RELEASE_ID, StudioReleaseStatus.Published),
+          tracksChangedAt: new Date('2026-10-05T09:00:00.000Z'),
+        },
+      ]);
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      const rowOf = (releaseId: string) =>
+        stats.releases.find((row) => row.release.id === releaseId);
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('FROM "studio_release_versions"'),
+        [[RELEASE_ID]],
+      );
+      expect(rowOf(RELEASE_ID)?.health.at(-1)).toEqual({
+        key: 'versionNote',
+        isDone: false,
+        isOptional: false,
+      });
+      expect(
+        rowOf(DRAFT_ID)?.health.some((item) => item.key === 'versionNote'),
+      ).toBe(false);
+    });
+
+    it('drops the version note once a version follows the track change', async () => {
+      releases.find.mockResolvedValue([
+        {
+          ...releaseRow(RELEASE_ID, StudioReleaseStatus.Published),
+          tracksChangedAt: new Date('2026-10-05T09:00:00.000Z'),
+        },
+      ]);
+      versionRows = [
+        {
+          release_id: RELEASE_ID,
+          latest_created_at: new Date('2026-10-06T09:00:00.000Z'),
+        },
+      ];
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(
+        stats.releases[0]?.health.some((item) => item.key === 'versionNote'),
+      ).toBe(false);
+    });
+
+    it('skips the version read when no published release changed', async () => {
+      await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(query).not.toHaveBeenCalledWith(
+        expect.stringContaining('FROM "studio_release_versions"'),
+        expect.anything(),
+      );
+    });
+  });
+
+  // Studio dashboard listening: plays from the anonymous daily totals.
+  describe('plays', () => {
+    const BELOW = { value: null, isBelowThreshold: true };
+    const ZERO = { value: 0, isBelowThreshold: false };
+
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-28T15:00:00.000Z'));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    const rowOf = (stats: StudioArtistStats, releaseId: string) =>
+      stats.releases.find((row) => row.release.id === releaseId);
+
+    it('reads plays per track from the window start 27 days before today', async () => {
+      await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('FROM "studio_track_play_daily"'),
+        [[TRACK_ONE, TRACK_TWO], '2026-10-01'],
+      );
+    });
+
+    it('floors each track and sums the release before its own floor', async () => {
+      playRows = [
+        { track_id: TRACK_ONE, plays: '3', plays_28d: '3' },
+        { track_id: TRACK_TWO, plays: '3', plays_28d: '0' },
+      ];
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(
+        rowOf(stats, RELEASE_ID)?.tracks.map((row) => [
+          row.plays,
+          row.plays28d,
+        ]),
+      ).toEqual([
+        [BELOW, BELOW],
+        [BELOW, ZERO],
+      ]);
+      expect([
+        rowOf(stats, RELEASE_ID)?.plays,
+        rowOf(stats, RELEASE_ID)?.plays28d,
+      ]).toEqual([{ value: 6, isBelowThreshold: false }, BELOW]);
+      expect([
+        rowOf(stats, DRAFT_ID)?.plays,
+        rowOf(stats, DRAFT_ID)?.plays28d,
+      ]).toEqual([ZERO, ZERO]);
+    });
+
+    it('sums withheld tracks into the release', async () => {
+      tracks.find.mockResolvedValue([
+        {
+          ...trackRow(TRACK_ONE, 1),
+          withheldAt: new Date('2026-10-20T09:00:00.000Z'),
+        },
+        trackRow(TRACK_TWO, 2),
+      ]);
+      playRows = [
+        { track_id: TRACK_ONE, plays: '4', plays_28d: '4' },
+        { track_id: TRACK_TWO, plays: '2', plays_28d: '1' },
+      ];
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect([
+        rowOf(stats, RELEASE_ID)?.plays,
+        rowOf(stats, RELEASE_ID)?.plays28d,
+      ]).toEqual([
+        { value: 6, isBelowThreshold: false },
+        { value: 5, isBelowThreshold: false },
+      ]);
+      expect(
+        rowOf(stats, RELEASE_ID)?.tracks.map((row) => [
+          row.track.id,
+          row.plays,
+        ]),
+      ).toEqual([
+        [TRACK_ONE, BELOW],
+        [TRACK_TWO, BELOW],
+      ]);
+    });
+
+    it('answers zero plays on a show, whatever its episodes hold', async () => {
+      releases.find.mockResolvedValue([
+        {
+          ...releaseRow(RELEASE_ID, StudioReleaseStatus.Published),
+          type: StudioReleaseType.Podcast,
+        },
+      ]);
+      playRows = [
+        { track_id: TRACK_ONE, plays: '9', plays_28d: '9' },
+        { track_id: TRACK_TWO, plays: '9', plays_28d: '9' },
+      ];
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect([
+        rowOf(stats, RELEASE_ID)?.plays,
+        rowOf(stats, RELEASE_ID)?.plays28d,
+        rowOf(stats, RELEASE_ID)?.tracks,
+      ]).toEqual([ZERO, ZERO, []]);
+    });
+
+    it('skips the play read when the persona has no tracks', async () => {
+      tracks.find.mockResolvedValue([] as StudioTrack[]);
+      const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+      expect(
+        query.mock.calls.some(([sql]: [string]) =>
+          sql.includes('FROM "studio_track_play_daily"'),
+        ),
+      ).toBe(false);
+      expect(
+        stats.releases.map((row) => [row.release.id, row.plays, row.plays28d]),
+      ).toEqual([
+        [RELEASE_ID, ZERO, ZERO],
+        [DRAFT_ID, ZERO, ZERO],
+      ]);
     });
   });
 });

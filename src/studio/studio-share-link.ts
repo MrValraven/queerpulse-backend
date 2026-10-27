@@ -8,19 +8,23 @@ import { resolveAllowedOrigins } from '../config/frontend-origins';
  *
  * A Studio link is an absolute URL on one of this deployment's frontend
  * origins, or a root-relative path, whose path is `/studio/track`,
- * `/studio/album` or `/studio/collection` and whose `id` is a uuid. Preview
- * links (`/studio/preview/<token>`) are bearer secrets and never parse;
- * artist pages, scenes and shelves stay plain links. This module reads no
+ * `/studio/album` or `/studio/collection` and whose `id` is a uuid. A
+ * milestone link is `/studio/artist` with an `id` uuid and a `milestone` uuid.
+ * Preview links (`/studio/preview/<token>`) are bearer secrets and never
+ * parse; artist pages stay plain links unless they carry a `milestone` uuid,
+ * and scenes and shelves stay plain links. This module reads no
  * database, logs nothing and imports only the origin parser and the decode
  * depth `common/redact-url.ts` uses.
  */
 
-export type StudioShareKind = 'track' | 'release' | 'playlist';
+export type StudioShareKind = 'track' | 'release' | 'playlist' | 'milestone';
 
 export interface StudioShareLink {
   kind: StudioShareKind;
-  /** The uuid from `id`, lower-cased. */
+  /** The uuid from `id`, lower-cased. A milestone link holds the milestone uuid here. */
   id: string;
+  /** Milestone links only: the persona uuid from `id`, lower-cased; `id` holds the milestone. */
+  artistId?: string;
   /** Track links only: the `t` timestamp in whole seconds, else null. */
   startAtSeconds: number | null;
   /**
@@ -54,6 +58,7 @@ const PATH_BY_KIND: Readonly<Record<StudioShareKind, string>> = {
   track: '/studio/track',
   release: '/studio/album',
   playlist: '/studio/collection',
+  milestone: '/studio/artist',
 };
 
 const UUID_PATTERN =
@@ -211,6 +216,19 @@ export function textWithoutStudioShareLink(
 }
 
 /**
+ * The text with its first Studio link taken out (post-surface reading), for a
+ * notification or activity excerpt that is cut afterwards, so a raw Studio
+ * URL never reaches an excerpt. Text with no Studio link comes back as is.
+ */
+export function textWithoutFirstStudioShareLink(
+  text: string,
+  origins: readonly string[],
+): string {
+  const match = findStudioShareLinkMatch(text, origins);
+  return match ? postTextWithoutStudioShareLink(text, match) : text;
+}
+
+/**
  * The post-surface reading of {@link textWithoutStudioShareLink}: when the
  * matched link is the target of a markdown link `[label](url)` (a label on
  * one line, holding no bracket), the whole markdown link reads as its label,
@@ -300,6 +318,9 @@ function parseWithOriginSet(
   if (!parsed) {
     return null;
   }
+  if (parsed.pathname === PATH_BY_KIND.milestone) {
+    return parseMilestoneLink(parsed.searchParams);
+  }
   const kind = KIND_BY_PATH.get(parsed.pathname);
   if (!kind) {
     return null;
@@ -325,6 +346,25 @@ function parseWithOriginSet(
     startAtSeconds,
     lineIndex,
     path: `${timedPath}&line=${lineIndex}`,
+  };
+}
+
+function parseMilestoneLink(
+  searchParams: URLSearchParams,
+): StudioShareLink | null {
+  const rawArtistId = searchParams.get('id') ?? '';
+  const rawMilestoneId = searchParams.get('milestone') ?? '';
+  if (!UUID_PATTERN.test(rawArtistId) || !UUID_PATTERN.test(rawMilestoneId)) {
+    return null;
+  }
+  const artistId = rawArtistId.toLowerCase();
+  const id = rawMilestoneId.toLowerCase();
+  return {
+    kind: 'milestone',
+    id,
+    artistId,
+    startAtSeconds: null,
+    path: `${PATH_BY_KIND.milestone}?id=${artistId}&milestone=${id}`,
   };
 }
 

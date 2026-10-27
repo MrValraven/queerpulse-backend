@@ -14,8 +14,11 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { Feature } from '../common/feature.decorator';
 import { PaginationQuery } from '../common/pagination.query';
 import { ConnectionsService } from '../connections/connections.service';
+import { EventsService } from '../events/events.service';
+import type { ProfileEventsResponse } from '../events/member-profile-events';
 import { VouchService } from '../vouch/vouch.service';
 import { CloseBoardItemDto } from './dto/close-board-item.dto';
 import { UpdateActivityVisibilityDto } from './dto/update-activity-visibility.dto';
@@ -54,6 +57,7 @@ export class ProfilesController {
     private readonly connectionsService: ConnectionsService,
     private readonly lastActive: LastActiveService,
     private readonly nowInsights: NowInsightsService,
+    private readonly eventsService: EventsService,
   ) {}
 
   // pending-ok: edit your own draft profile.
@@ -316,6 +320,41 @@ export class ProfilesController {
       return { count: 0, members: [] };
     }
     return this.connectionsService.mutualMembers(user.userId, target.userId);
+  }
+
+  // Declared AFTER ':slug'; Express matches this two-segment path on its own,
+  // as with ':slug/mutuals' above.
+  @ApiOperation({
+    summary: 'Events a member hosts or co-hosts',
+  })
+  @ApiOkResponse({
+    description:
+      'Up to 12 upcoming or underway events (soonest first) and up to 6 past ones (latest first), each card carrying the member’s role (host or cohost). Both lists are empty when the viewer only gets the limited profile card.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiNotFoundResponse({
+    description:
+      'No profile with that slug. When the slug is a username its owner renamed away from and the reclaim cooldown is still running, the body carries code PROFILE_MOVED and the current slug to redirect to.',
+  })
+  @Get(':slug/events')
+  @Feature('events')
+  @UseGuards(ActiveMemberGuard)
+  async getEvents(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ): Promise<ProfileEventsResponse> {
+    const target = await this.profilesService.findBySlugOrThrow(
+      slug,
+      user.userId,
+      user.role,
+    );
+    // A viewer held to the limited card learns nothing more here: the
+    // section answers empty before any event query runs.
+    if (!(await this.profilesService.canViewFull(target, user.userId))) {
+      return { upcoming: [], past: [] };
+    }
+    return this.eventsService.listForMemberProfile(target.userId, user.userId);
   }
 
   // Declared AFTER ':slug' but is not shadowed by it — ':slug/board/:postSlug/

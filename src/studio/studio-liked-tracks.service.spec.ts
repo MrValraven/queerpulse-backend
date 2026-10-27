@@ -440,4 +440,20 @@ describe('StudioLikedTracksService', () => {
       }),
     );
   });
+  describe('likedAmong', () => {
+    it('answers which named tracks the caller has liked, on any page', async () => {
+      const builder = queryBuilderMock({
+        raw: [{ subject_id: TRACK_A.toUpperCase() }],
+      });
+      queueBuilders(savedItems, [builder]);
+
+      const result = await service.likedAmong(VIEWER_ID, [TRACK_A, TRACK_B]);
+
+      expect(result).toEqual({ likedTrackIds: [TRACK_A] });
+      expect(parametersOf(builder)).toContainEqual({
+        lookupIds: [TRACK_A, TRACK_B],
+      });
+      expect(parametersOf(builder)).toContainEqual({ likedOwnerId: VIEWER_ID });
+    });
+  });
 });

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminFeatureUsageController } from './admin-feature-usage.controller';
+import { AdminFeatureUsageDetailService } from './admin-feature-usage-detail.service';
 import { AdminFeatureUsageService } from './admin-feature-usage.service';
 import { FeatureUsageDaily } from './entities/feature-usage-daily.entity';
 import { FeatureUsageFlushService } from './feature-usage-flush.service';
@@ -13,11 +14,12 @@ import { UserStaffRole } from '../users/entities/user-staff-role.entity';
     // FeatureUsageDaily is the only entity this module ever injects with
     // `@InjectRepository` (in FeatureUsageFlushService,
     // FeatureUsageRetentionService, and AdminFeatureUsageService). Every
-    // depth and drill-down count in AdminFeatureUsageService goes through the
-    // injected `DataSource` instead (`this.dataSource.createQueryBuilder(entity, …)`
-    // and `this.dataSource.getRepository(Community)`), which needs the
-    // target entity registered on the DataSource, not a `forFeature` entry in
-    // this module. That registration already happens in each entity's own
+    // depth and drill-down count in AdminFeatureUsageService, and every
+    // per-day created count in AdminFeatureUsageDetailService, goes through
+    // the injected `DataSource` (`this.dataSource.createQueryBuilder(entity, …)`
+    // and `this.dataSource.getRepository(Community)`), which only needs the
+    // target entity registered on the DataSource; this module needs no
+    // `forFeature` entry for it. That registration already happens in each entity's own
     // home module (`CommunitiesModule` for `Community`, `ForumModule` for
     // `ForumPost`/`ForumThread`, and so on), all of which `AppModule` imports,
     // and `autoLoadEntities: true` (`src/database/database.module.ts`) makes
@@ -39,6 +41,7 @@ import { UserStaffRole } from '../users/entities/user-staff-role.entity';
     FeatureUsageFlushService,
     FeatureUsageRetentionService,
     AdminFeatureUsageService,
+    AdminFeatureUsageDetailService,
   ],
   exports: [FeatureUsageTallyService],
 })

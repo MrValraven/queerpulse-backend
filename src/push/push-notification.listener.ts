@@ -8,6 +8,7 @@ import {
 } from '../notifications/entities/notification.entity';
 import { NOTIFICATION_BATCH_CREATED } from '../notifications/notification.events';
 import type { NotificationBatchCreatedEvent } from '../notifications/notification.events';
+import { bundleKeyFor } from '../notifications/notification-bundling';
 import { actorIdOf } from '../notifications/notification-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
@@ -98,6 +99,10 @@ export class PushNotificationListener {
     // matched Go together chat, where members see first names only.
     @InjectRepository(Conversation)
     private readonly conversations: Repository<Conversation>,
+    // Studio new-release push: the once-per-artist-per-UTC-day claim stamps
+    // `pushed_at` on the recipient's row.
+    @InjectRepository(Notification)
+    private readonly notificationRows: Repository<Notification>,
   ) {}
 
   @OnEvent(NOTIFICATION_BATCH_CREATED)
@@ -864,6 +869,47 @@ export class PushNotificationListener {
   }
 
   /**
+   * At most one new-release push per recipient per artist per UTC day. In one
+   * statement, stamps `pushed_at` on each recipient's persona-bundle row and
+   * returns the recipients that had no stamp from today yet; the rest already
+   * heard from this artist today and get the in-app row only. Bundle
+   * absorption leaves `pushed_at` alone, so the stamp outlives a later release
+   * folding into the row. A payload with no persona id has no bundle to
+   * limit, so every recipient passes.
+   */
+  private async claimTodaysReleasePush(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<string[]> {
+    const bundleKey = bundleKeyFor(notification.type, notification.payload);
+    if (!bundleKey) return userIds;
+    const now = new Date();
+    const startOfUtcDay = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    const claimed: { user_id: string }[] = await this.notificationRows.query(
+      `UPDATE "notifications" AS "row"
+          SET "pushed_at" = now()
+        WHERE "row"."user_id" = ANY($1::uuid[])
+          AND "row"."type" = $2::notifications_type_enum
+          AND "row"."bundle_key" = $3
+          AND "row"."created_at" >= $4
+          AND ("row"."pushed_at" IS NULL OR "row"."pushed_at" < $4)
+          AND NOT EXISTS (
+            SELECT 1 FROM "notifications" "earlier"
+             WHERE "earlier"."user_id" = "row"."user_id"
+               AND "earlier"."type" = "row"."type"
+               AND "earlier"."bundle_key" = "row"."bundle_key"
+               AND "earlier"."pushed_at" >= $4
+          )
+       RETURNING "row"."user_id"::text AS "user_id"`,
+      [userIds, notification.type, bundleKey, startOfUtcDay],
+    );
+    const claimedUserIds = new Set(claimed.map((row) => row.user_id));
+    return userIds.filter((userId) => claimedUserIds.has(userId));
+  }
+
+  /**
    * "A persona you follow put out a release" (Studio v2).
    *
    * NAMES THE PERSONA AND THE RELEASE AND LEAVES THE OWNER OUT: `resolveActor`
@@ -887,11 +933,16 @@ export class PushNotificationListener {
       NotificationPreferenceCategory.PersonaFollows,
     );
     if (recipientUserIds.length === 0) return;
+    const pushableUserIds = await this.claimTodaysReleasePush(
+      recipientUserIds,
+      notification,
+    );
+    if (pushableUserIds.length === 0) return;
     const releaseId = this.payloadString(notification, 'releaseId');
     const url = releaseId
       ? `/studio/album?id=${encodeURIComponent(releaseId)}`
       : '/studio';
-    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+    await this.previewPrivacy.sendSplitByPreviewPreference(pushableUserIds, {
       title: 'New from an artist you follow',
       body: `${persona} released ${title}`,
       tag: `notification:${notification.id}`,

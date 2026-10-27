@@ -28,7 +28,7 @@ import { StudioAccessGuard } from './studio-access.guard';
  * `StudioModule` imports `PreferencesModule`, so serving this route from
  * `PreferencesModule` would need the reverse import to reach
  * `StudioAccessGuard` and would close an import cycle. The routes store
- * preferences only and record nothing about what anyone plays.
+ * the player settings, the listening history switch and the first-play notice date.
  */
 @Feature('studio')
 @ApiTags('Studio')

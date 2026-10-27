@@ -836,7 +836,14 @@ export class StudioCatalogService {
       EMPTY_CATALOG_STATS;
     return toStudioTrackResponse(
       track,
-      toStudioReleaseCard(release, release.subprofile, listenerStats(stats)),
+      {
+        ...toStudioReleaseCard(
+          release,
+          release.subprofile,
+          listenerStats(stats),
+        ),
+        status: release.status,
+      },
       await this.trackPublicCredits(viewerId, track.id),
       { isOwner },
       isOwner

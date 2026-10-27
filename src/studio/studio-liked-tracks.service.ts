@@ -140,6 +140,24 @@ export class StudioLikedTracksService {
     };
   }
 
+  /** Which of the named tracks the caller has liked. A like of a withdrawn
+   *  or unavailable track still counts: the heart shows what the member
+   *  holds, as Liked songs lists it. Ids come back in the lowercase form the
+   *  request named. */
+  async likedAmong(
+    viewerId: string,
+    trackIds: readonly string[],
+  ): Promise<{ likedTrackIds: string[] }> {
+    const lookupIds = trackIds.map(trackIdOf);
+    const rows = await this.ownLikes(viewerId)
+      .select('"saved"."subject_id"', 'subject_id')
+      .andWhere('lower("saved"."subject_id") IN (:...lookupIds)', {
+        lookupIds,
+      })
+      .getRawMany<{ subject_id: string }>();
+    return { likedTrackIds: rows.map((row) => trackIdOf(row.subject_id)) };
+  }
+
   // The caller's own likes. Every read here starts from this predicate.
   private ownLikes(viewerId: string): SelectQueryBuilder<SavedItem> {
     return this.savedItems

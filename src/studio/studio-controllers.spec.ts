@@ -63,6 +63,21 @@ import { StudioScenesController } from './studio-scenes.controller';
 import { StudioScenesService } from './studio-scenes.service';
 import { StudioScheduledReleasesService } from './studio-scheduled-releases.service';
 import { StudioSchedulingService } from './studio-scheduling.service';
+import { StudioArtistMilestonesService } from './studio-artist-milestones.service';
+import { StudioArtistPlacementsService } from './studio-artist-placements.service';
+import { StudioArtistSupporterController } from './studio-artist-supporter.controller';
+import { StudioListeningHistoryController } from './studio-listening-history.controller';
+import { StudioListeningHistoryService } from './studio-listening-history.service';
+import { StudioListeningPruneService } from './studio-listening-prune.service';
+import { StudioPlayGate } from './studio-play-gate';
+import { StudioPlayMilestonesService } from './studio-play-milestones.service';
+import { StudioPlaysController } from './studio-plays.controller';
+import { StudioPlaysService } from './studio-plays.service';
+import { StudioArtistPlaysService } from './studio-artist-plays.service';
+import { StudioSupportersService } from './studio-supporters.service';
+import { StudioFollowerMilestonesListener } from './studio-follower-milestones.listener';
+import { StudioMilestoneSweepService } from './studio-milestone-sweep.service';
+import { StudioMilestonesController } from './studio-milestones.controller';
 import { StudioStatsController } from './studio-stats.controller';
 import { StudioTracksController } from './studio-tracks.controller';
 import { StudioModule } from './studio.module';
@@ -83,6 +98,12 @@ const routePathOf = (
   return Reflect.getMetadata(PATH_METADATA, handler);
 };
 
+const handlerOf = (
+  controller: { prototype: unknown },
+  methodName: string,
+): object =>
+  (controller.prototype as Record<string, object>)[methodName] as object;
+
 // The metadata keys `@Throttle({ default: ... })` writes on a handler.
 const THROTTLE_LIMIT_KEY = 'THROTTLER:LIMITdefault';
 const THROTTLE_TTL_KEY = 'THROTTLER:TTLdefault';
@@ -95,6 +116,10 @@ const memberControllers = [
   StudioPlaylistEditorsController,
   StudioPlaylistListingsController,
   StudioStatsController,
+  StudioMilestonesController,
+  StudioPlaysController,
+  StudioListeningHistoryController,
+  StudioArtistSupporterController,
   StudioReleaseToolsController,
   StudioPreviewsController,
   StudioPressKitController,
@@ -636,5 +661,205 @@ describe('Studio controllers', () => {
         ).publishEpisode!,
       ),
     ).toBe(200);
+  });
+
+  it('mounts the dashboard reads at the contract paths', () => {
+    expect(routePathOf(StudioStatsController, 'listPlacements')).toBe(
+      ':subprofileId/placements',
+    );
+    expect(routePathOf(StudioStatsController, 'listMilestones')).toBe(
+      ':subprofileId/milestones',
+    );
+    expect(Reflect.getMetadata(PATH_METADATA, StudioMilestonesController)).toBe(
+      'studio/milestones',
+    );
+    expect(routePathOf(StudioMilestonesController, 'getMilestoneCard')).toBe(
+      ':milestoneId',
+    );
+  });
+
+  it('registers the dashboard services, the follower milestone listener and the sweep', () => {
+    expect(
+      Reflect.getMetadata(MODULE_METADATA.PROVIDERS, StudioModule),
+    ).toEqual(
+      expect.arrayContaining([
+        StudioArtistPlacementsService,
+        StudioArtistMilestonesService,
+        StudioFollowerMilestonesListener,
+        StudioMilestoneSweepService,
+      ]),
+    );
+  });
+
+  it('hands the milestone id to the card read as typed, so a malformed id gets the same 404', async () => {
+    const milestones = { getMilestoneCard: jest.fn().mockResolvedValue({}) };
+    await new StudioMilestonesController(
+      milestones as unknown as StudioArtistMilestonesService,
+    ).getMilestoneCard({ userId: 'viewer-1' } as CurrentUserData, 'not-a-uuid');
+    expect(milestones.getMilestoneCard).toHaveBeenCalledWith(
+      'viewer-1',
+      'not-a-uuid',
+    );
+  });
+
+  it('passes the placements cursor through', async () => {
+    const placements = {
+      listPlacements: jest.fn().mockResolvedValue({ items: [] }),
+    };
+    await new StudioStatsController(
+      {} as never,
+      placements as unknown as StudioArtistPlacementsService,
+      {} as never,
+      {} as never,
+      {} as never,
+    ).listPlacements({ userId: 'viewer-1' } as CurrentUserData, 'persona-1', {
+      cursor: 'abc',
+    });
+    expect(placements.listPlacements).toHaveBeenCalledWith(
+      'viewer-1',
+      'persona-1',
+      'abc',
+    );
+  });
+
+  describe('Studio listening', () => {
+    const VIEWER_ID = 'viewer-1';
+    const TRACK_ID = '11111111-1111-4111-8111-111111111111';
+    const viewer = { userId: VIEWER_ID } as CurrentUserData;
+
+    it('mounts the listening routes at the contract paths', () => {
+      expect(routePathOf(StudioPlaysController, 'recordPlay')).toBe('plays');
+      expect(
+        ['getSummary', 'listRecent', 'clearHistory', 'listSupporting'].map(
+          (handler) => routePathOf(StudioListeningHistoryController, handler),
+        ),
+      ).toEqual([
+        'studio-listening',
+        'studio-listening/recent',
+        'studio-listening',
+        'studio-listening/supporting',
+      ]);
+      expect(
+        ['getSupporter', 'setSupporter', 'removeSupporter'].map((handler) =>
+          routePathOf(StudioArtistSupporterController, handler),
+        ),
+      ).toEqual([
+        ':subprofileId/supporter',
+        ':subprofileId/supporter',
+        ':subprofileId/supporter',
+      ]);
+      expect([
+        routePathOf(StudioStatsController, 'getPlays'),
+        routePathOf(StudioStatsController, 'listTopSupporters'),
+      ]).toEqual([':subprofileId/plays', ':subprofileId/supporters']);
+    });
+
+    it('declares HttpCode 204 on a void play handler that carries no throttle override', async () => {
+      const plays = { recordPlay: jest.fn().mockResolvedValue(undefined) };
+      const controller = new StudioPlaysController(
+        plays as unknown as StudioPlaysService,
+      );
+      const playHandler = handlerOf(StudioPlaysController, 'recordPlay');
+      await expect(
+        controller.recordPlay(viewer, { trackId: TRACK_ID }),
+      ).resolves.toBeUndefined();
+      expect(Reflect.getMetadata(HTTP_CODE_METADATA, playHandler)).toBe(204);
+      expect(
+        Reflect.getMetadata(THROTTLE_LIMIT_KEY, playHandler),
+      ).toBeUndefined();
+      expect(plays.recordPlay).toHaveBeenCalledWith(VIEWER_ID, TRACK_ID);
+    });
+
+    it('answers 204 to a cleared history and a withdrawn opt-in', async () => {
+      const history = { clearHistory: jest.fn().mockResolvedValue(undefined) };
+      const supporters = {
+        removeSupporter: jest.fn().mockResolvedValue(undefined),
+      };
+      await expect(
+        new StudioListeningHistoryController(
+          history as unknown as StudioListeningHistoryService,
+          {} as never,
+        ).clearHistory(viewer),
+      ).resolves.toBeUndefined();
+      await expect(
+        new StudioArtistSupporterController(
+          supporters as unknown as StudioSupportersService,
+        ).removeSupporter(viewer, TRACK_ID),
+      ).resolves.toBeUndefined();
+      expect(
+        [
+          handlerOf(StudioListeningHistoryController, 'clearHistory'),
+          handlerOf(StudioArtistSupporterController, 'removeSupporter'),
+        ].map((handler) => Reflect.getMetadata(HTTP_CODE_METADATA, handler)),
+      ).toEqual([204, 204]);
+      expect(history.clearHistory).toHaveBeenCalledWith(VIEWER_ID);
+      expect(supporters.removeSupporter).toHaveBeenCalledWith(
+        VIEWER_ID,
+        TRACK_ID,
+      );
+    });
+
+    it('reads the default range when none is sent', async () => {
+      const history = { getSummary: jest.fn().mockResolvedValue({}) };
+      const controller = new StudioListeningHistoryController(
+        history as unknown as StudioListeningHistoryService,
+        {} as never,
+      );
+      await controller.getSummary(viewer, {});
+      await controller.getSummary(viewer, { range: '12m' });
+      expect(history.getSummary.mock.calls).toEqual([
+        [VIEWER_ID, '4w'],
+        [VIEWER_ID, '12m'],
+      ]);
+    });
+
+    it('passes the supporter identity and the artist route reads to the services', async () => {
+      const supporters = {
+        setSupporter: jest.fn().mockResolvedValue({}),
+        listTopSupporters: jest.fn().mockResolvedValue({}),
+      };
+      const artistPlays = { getArtistPlays: jest.fn().mockResolvedValue({}) };
+      await new StudioArtistSupporterController(
+        supporters as unknown as StudioSupportersService,
+      ).setSupporter(viewer, 'persona-1', { shownAsSubprofileId: null });
+      const stats = new StudioStatsController(
+        {} as never,
+        {} as never,
+        {} as never,
+        artistPlays as unknown as StudioArtistPlaysService,
+        supporters as unknown as StudioSupportersService,
+      );
+      await stats.getPlays(viewer, 'persona-1', { days: 28 });
+      await stats.listTopSupporters(viewer, 'persona-1');
+      expect(supporters.setSupporter).toHaveBeenCalledWith(
+        VIEWER_ID,
+        'persona-1',
+        null,
+      );
+      expect(artistPlays.getArtistPlays).toHaveBeenCalledWith(
+        VIEWER_ID,
+        'persona-1',
+      );
+      expect(supporters.listTopSupporters).toHaveBeenCalledWith(
+        VIEWER_ID,
+        'persona-1',
+      );
+    });
+
+    it('registers the listening entities, services, gate and prune', () => {
+      expect(
+        Reflect.getMetadata(MODULE_METADATA.PROVIDERS, StudioModule),
+      ).toEqual(
+        expect.arrayContaining([
+          StudioPlayGate,
+          StudioPlaysService,
+          StudioPlayMilestonesService,
+          StudioListeningHistoryService,
+          StudioSupportersService,
+          StudioArtistPlaysService,
+          StudioListeningPruneService,
+        ]),
+      );
+    });
   });
 });

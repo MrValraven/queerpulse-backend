@@ -39,6 +39,21 @@ describe('issueFreshPersonaId', () => {
     ]);
   });
 
+  it('forgets the listening data before the releases get fresh ids', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const statements = query.mock.calls.map(([sql]) => sql);
+    const listeningIndex = statements.findIndex((sql) =>
+      sql.includes('DELETE FROM "studio_listens"'),
+    );
+    const releaseIndex = statements.findIndex((sql) =>
+      sql.includes('UPDATE "studio_releases"'),
+    );
+    expect(listeningIndex).toBeGreaterThan(-1);
+    expect(listeningIndex).toBeLessThan(releaseIndex);
+    expect(query.mock.calls[listeningIndex]?.[1]).toEqual([freshId]);
+  });
+
   it('issues a different id on every call', async () => {
     const firstId = await issueFreshPersonaId(manager, PREVIOUS_ID);
     const secondId = await issueFreshPersonaId(manager, PREVIOUS_ID);
@@ -256,6 +271,17 @@ describe('issueFreshPersonaId', () => {
       statementTouching('studio_press_kits') ?? [];
     expect(pressKitSql).toContain(`"featured_track_ids" = '{}'`);
     expect(pressKitParameters).toEqual([freshId]);
+  });
+
+  it('deletes the milestones the named persona reached', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const milestoneStatement = query.mock.calls.find(([sql]) =>
+      sql.includes('DELETE FROM "studio_artist_milestones"'),
+    );
+    const [milestoneSql, milestoneParameters] = milestoneStatement ?? [];
+    expect(milestoneSql).toContain('DELETE FROM "studio_artist_milestones"');
+    expect(milestoneParameters).toEqual([freshId]);
   });
 
   it('gives every persona post a fresh id and clears its edit stamp', async () => {

@@ -207,22 +207,33 @@ export function slugifyDisplayName(displayName: string): string {
 }
 
 /** The Studio artist page layouts an owner can store in
- *  `skinData.studioHero`. Absent resolves on the frontend. */
-export const STUDIO_HERO_LAYOUTS = ['full-bleed', 'avatar'] as const;
+ *  `skinData.studioHero`: 'banner' shows the wide cover photo alone,
+ *  'portrait' the round avatar alone, and 'both' the banner with the avatar
+ *  on it. Absent resolves on the frontend. Must stay identical to the
+ *  frontend mirror in `src/features/studio/studioHeroChoice.ts` of the
+ *  sibling `queerpulse` repo. */
+export const STUDIO_HERO_LAYOUTS = ['banner', 'portrait', 'both'] as const;
 
-/** Rejects a `skinData.studioHero` that is not one of the allowed layouts.
- *  Absent or null is valid. */
+/** Earlier layout values that older rows can still hold. They stay valid on
+ *  write because the frontend merges the loaded skinData blob into a PATCH,
+ *  so an old value can ride along unchanged. Reads map 'full-bleed' to
+ *  'banner' and 'avatar' to 'both' (see `toStudioArtistHeroFields`). */
+export const LEGACY_STUDIO_HERO_LAYOUTS = ['full-bleed', 'avatar'] as const;
+
+/** Rejects a `skinData.studioHero` that is neither an allowed layout nor a
+ *  legacy one. Absent or null is valid. */
 export function assertValidStudioHero(
   skinData: { studioHero?: unknown } | null | undefined,
 ): void {
   const studioHero = skinData?.studioHero;
   if (studioHero === undefined || studioHero === null) return;
-  if (
-    typeof studioHero !== 'string' ||
-    !(STUDIO_HERO_LAYOUTS as readonly string[]).includes(studioHero)
-  ) {
+  const isAllowedLayout =
+    typeof studioHero === 'string' &&
+    ((STUDIO_HERO_LAYOUTS as readonly string[]).includes(studioHero) ||
+      (LEGACY_STUDIO_HERO_LAYOUTS as readonly string[]).includes(studioHero));
+  if (!isAllowedLayout) {
     throw new BadRequestException(
-      `skinData.studioHero must be 'full-bleed' or 'avatar', received ${JSON.stringify(studioHero)}`,
+      `skinData.studioHero must be 'banner', 'portrait' or 'both', received ${JSON.stringify(studioHero)}`,
     );
   }
 }

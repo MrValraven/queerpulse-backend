@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
@@ -21,19 +22,29 @@ import { FeatureUsageDaily } from './entities/feature-usage-daily.entity';
 import {
   AdminFeatureUsageDTO,
   classifyFeatures,
+  computeReachMedian,
   FeatureUsageRow,
   FeatureUsageState,
   hasReachSignal,
 } from './feature-usage-response';
+import {
+  describeUsageRange,
+  listUtcDays,
+  resolveUsageRange,
+  toDateOnlyString,
+  UsageRange,
+  UsageRangeQuery,
+} from './feature-usage-range';
 
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+/** Fallback for `retention.featureUsageDays`, matching
+ *  `FeatureUsageRetentionService` and `retention.config.ts`. */
+const DEFAULT_FEATURE_USAGE_RETENTION_DAYS = 730;
 
 /**
  * Caps the fan-out of per-entity depth counts against the shared pool.
  * `FEATURE_DEPTH` names 26 entities across its `rows`-kind features, each
  * queried at two cutoffs (`depth` and `depthTotal`), plus 7 drill-down
- * counts, for roughly 59 queries issued through this one cap rather than a
- * bare `Promise.all`. Mirrors `MAX_CONCURRENT_QUEUE_COUNTS` in
+ * counts, for roughly 59 queries, all issued through this one cap. Mirrors `MAX_CONCURRENT_QUEUE_COUNTS` in
  * `admin-queues.service.ts`.
  */
 const MAX_CONCURRENT_USAGE_COUNTS = 6;
@@ -52,31 +63,16 @@ const STATE_SORT_ORDER: Record<FeatureUsageState, number> = {
   'not-launched': 3,
 };
 
-/** `feature_usage_daily.day` is a `date` column; compares correctly against a
- *  bare `YYYY-MM-DD` string taken from a UTC instant. */
-function toDateOnlyString(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-/** Midnight UTC on `date`'s own calendar day. Used to anchor every window in
- *  `getUsage` to a whole-day boundary, rather than the exact instant the
- *  request happened to arrive. */
-function startOfUtcDay(date: Date): Date {
-  return new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-  );
-}
-
 /** The feature key and cutoff kind for one entity's depth count. The entity
  *  itself is not carried here: it lives only in the matching closure pushed
  *  onto `depthCountThunks` at the same index. `depthCountTasks[i]`,
  *  `depthCountThunks[i]`, and therefore `depthCountResults[i]` are pushed in
  *  lockstep below and must stay aligned by index, which is what lets the
  *  results be folded back onto the right feature key afterward. Kept as a
- *  flat list of single-entity, single-cutoff tasks (rather than one task per
- *  feature summing across its entities) so `runWithConcurrency`'s cap bounds
- *  the true number of simultaneous queries rather than the coarser count of
- *  features. */
+ *  flat list of single-entity, single-cutoff tasks, one per query, so
+ *  `runWithConcurrency`'s cap bounds the true number of simultaneous queries.
+ *  One task per feature summing across its entities would only bound the
+ *  coarser count of features. */
 interface DepthCountTask {
   featureKey: FeatureKey;
   kind: 'depth' | 'depthTotal';
@@ -85,6 +81,10 @@ interface DepthCountTask {
 interface DepthTotals {
   depth: number;
   depthTotal: number;
+}
+
+function sumValues(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0);
 }
 
 /**
@@ -96,8 +96,8 @@ interface DepthTotals {
  * and orders the result so the states that most need a human decision sort
  * first.
  *
- * `depth` is reconstructed historically rather than tallied going forward:
- * every count is `created_at < cutoff` against the entity's own table, which
+ * `depth` is reconstructed historically from rows already on disk: every
+ * count is `created_at < cutoff` against the entity's own table, which
  * works for a date range entirely before this feature shipped because the
  * rows that answer it were already there. `reach`, by contrast, has no
  * history before `feature_usage_daily` started being written, since nothing
@@ -105,12 +105,13 @@ interface DepthTotals {
  *
  * DAY-BOUNDARY CONVENTION: `reach` is stored in whole UTC calendar days
  * (`feature_usage_daily.day`), so every window this service computes is
- * anchored to UTC midnight rather than the exact instant the request
- * happened to arrive. `rangeEnd` is midnight UTC at the START of today, and
- * it is EXCLUSIVE on every predicate that uses it (`< rangeEnd` for reach,
- * `depth`, `depthTotal`, and the range-scoped drill-downs): today itself,
- * still partial, is outside every range. `rangeStart` is `rangeEnd` minus
- * `rangeDays` whole days and is INCLUSIVE (`>= rangeStart`). `depthTotal`
+ * anchored to UTC midnight, whatever instant the request arrives at. The
+ * window itself comes from `resolveUsageRange` (`feature-usage-range.ts`):
+ * `rangeEnd` is EXCLUSIVE on every predicate that uses it (`< rangeEnd` for
+ * reach, `depth`, `depthTotal`, and the range-scoped drill-downs), and is at
+ * the latest midnight UTC at the START of today, so today itself, still
+ * partial, is outside every range. `rangeStart` is INCLUSIVE
+ * (`>= rangeStart`), `rangeDays` whole days before `rangeEnd`. `depthTotal`
  * reads "rows in existence at the end of the range" as `created_at <
  * rangeEnd`, the same exclusive boundary reach and depth already use, so a
  * feature's depth and depthTotal for a given day are always computed from
@@ -122,21 +123,35 @@ export class AdminFeatureUsageService {
     @InjectRepository(FeatureUsageDaily)
     private readonly featureUsageDailies: Repository<FeatureUsageDaily>,
     private readonly dataSource: DataSource,
+    private readonly config: ConfigService,
   ) {}
 
-  async getUsage(rangeDays: number): Promise<AdminFeatureUsageDTO> {
-    const rangeEnd = startOfUtcDay(new Date());
-    const rangeStart = new Date(
-      rangeEnd.getTime() - rangeDays * MILLISECONDS_PER_DAY,
+  /**
+   * Resolves the raw query into a `UsageRange` against the current instant
+   * and the configured `retention.featureUsageDays`. Throws a
+   * `BadRequestException` carrying a `feature_usage_range_*` code when the
+   * query is rejected; see `resolveUsageRange`.
+   */
+  resolveRange(query: UsageRangeQuery): UsageRange {
+    const retentionDays = this.config.get<number>(
+      'retention.featureUsageDays',
+      DEFAULT_FEATURE_USAGE_RETENTION_DAYS,
     );
-    const previousRangeStart = new Date(
-      rangeStart.getTime() - rangeDays * MILLISECONDS_PER_DAY,
-    );
+    return resolveUsageRange(query, new Date(), retentionDays);
+  }
 
-    const [reachByFeature, previousReachByFeature] = await Promise.all([
-      this.sumRequestsByFeature(rangeStart, rangeEnd),
-      this.sumRequestsByFeature(previousRangeStart, rangeStart),
-    ]);
+  async getUsage(range: UsageRange): Promise<AdminFeatureUsageDTO> {
+    const { rangeDays, rangeStart, rangeEnd, previousRangeStart } = range;
+
+    // One grouped query covers both windows, `[previousRangeStart,
+    // rangeEnd)`, split by day afterward, so the current and previous daily
+    // series always come from the same read.
+    const requestsByFeatureAndDay = await this.sumRequestsByDayAndFeature(
+      previousRangeStart,
+      rangeEnd,
+    );
+    const currentRangeDays = listUtcDays(rangeStart, rangeDays);
+    const previousRangeDays = listUtcDays(previousRangeStart, rangeDays);
 
     // Untracked keys (Go together) have no depth entry, so they get no row.
     const featureKeys = Object.keys(FEATURE_DEPTH) as TrackedFeatureKey[];
@@ -215,8 +230,15 @@ export class AdminFeatureUsageService {
     const rows: FeatureUsageRow[] = featureKeys.map((featureKey) => {
       const spec = FEATURE_DEPTH[featureKey];
       const isLaunched = launchedFeatures[featureKey].launched;
-      const reach = reachByFeature.get(featureKey) ?? 0;
-      const reachPrevious = previousReachByFeature.get(featureKey) ?? 0;
+      const requestsByDay = requestsByFeatureAndDay.get(featureKey);
+      const reachDaily = currentRangeDays.map(
+        (day) => requestsByDay?.get(day) ?? 0,
+      );
+      const reachPreviousDaily = previousRangeDays.map(
+        (day) => requestsByDay?.get(day) ?? 0,
+      );
+      const reach = sumValues(reachDaily);
+      const reachPrevious = sumValues(reachPreviousDaily);
 
       if (spec.kind === 'reach-only') {
         return {
@@ -226,6 +248,8 @@ export class AdminFeatureUsageService {
           depth: null,
           depthTotal: null,
           reachPrevious,
+          reachDaily,
+          reachPreviousDaily,
           reason: spec.reason,
         };
       }
@@ -241,6 +265,8 @@ export class AdminFeatureUsageService {
         depth: totals.depth,
         depthTotal: totals.depthTotal,
         reachPrevious,
+        reachDaily,
+        reachPreviousDaily,
         reason: null,
       };
     });
@@ -254,7 +280,9 @@ export class AdminFeatureUsageService {
 
     return {
       rangeDays,
+      ...describeUsageRange(range),
       hasReachSignal: hasReachSignal(rows),
+      reachMedian: computeReachMedian(rows),
       features,
       drillDowns: {
         housingListings: {
@@ -274,22 +302,34 @@ export class AdminFeatureUsageService {
     };
   }
 
-  /** Sums `requestCount` from `feature_usage_daily`, grouped by feature key,
-   *  over `[start, end)`. One grouped query, covering every feature at once. */
-  private async sumRequestsByFeature(
+  /** Sums `requestCount` from `feature_usage_daily` over `[start, end)`,
+   *  grouped by day and feature key. One grouped query, covering every
+   *  feature and every day at once. Keyed by feature key, then by
+   *  `YYYY-MM-DD` day; a day with no row is absent and reads as zero. */
+  private async sumRequestsByDayAndFeature(
     start: Date,
     end: Date,
-  ): Promise<Map<string, number>> {
+  ): Promise<Map<string, Map<string, number>>> {
     const rows = await this.featureUsageDailies
       .createQueryBuilder('daily')
-      .select('daily.featureKey', 'featureKey')
+      .select("to_char(daily.day, 'YYYY-MM-DD')", 'day')
+      .addSelect('daily.featureKey', 'featureKey')
       .addSelect('SUM(daily.requestCount)', 'total')
       .where('daily.day >= :start', { start: toDateOnlyString(start) })
       .andWhere('daily.day < :end', { end: toDateOnlyString(end) })
-      .groupBy('daily.featureKey')
-      .getRawMany<{ featureKey: string; total: string }>();
+      .groupBy('daily.day')
+      .addGroupBy('daily.featureKey')
+      .getRawMany<{ day: string; featureKey: string; total: string }>();
 
-    return new Map(rows.map((row) => [row.featureKey, Number(row.total)]));
+    const requestsByFeatureAndDay = new Map<string, Map<string, number>>();
+    for (const row of rows) {
+      const requestsByDay =
+        requestsByFeatureAndDay.get(row.featureKey) ??
+        new Map<string, number>();
+      requestsByDay.set(row.day, Number(row.total));
+      requestsByFeatureAndDay.set(row.featureKey, requestsByDay);
+    }
+    return requestsByFeatureAndDay;
   }
 
   /** Rows of `entity` created inside `[rangeStart, rangeEnd)`, the `depth`

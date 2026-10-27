@@ -210,6 +210,16 @@ const STUDIO_SHARE_PUSH_COPY: Record<StudioShareKind, StudioSharePushCopy> = {
     mentionBodyKey: 'push:messages.group.mention.studio.playlist',
     mentionNoteBodyKey: 'push:messages.group.mention.studio.playlistWithNote',
   },
+  milestone: {
+    directPhrase: 'Shared a milestone from Studio',
+    groupPhrase: 'shared a milestone from Studio',
+    directBodyKey: 'push:messages.studio.milestone',
+    directNoteBodyKey: 'push:messages.studio.milestoneWithNote',
+    groupBodyKey: 'push:messages.group.studio.milestone',
+    groupNoteBodyKey: 'push:messages.group.studio.milestoneWithNote',
+    mentionBodyKey: 'push:messages.group.mention.studio.milestone',
+    mentionNoteBodyKey: 'push:messages.group.mention.studio.milestoneWithNote',
+  },
 };
 
 /** The two things a Studio share push reads off a message. */

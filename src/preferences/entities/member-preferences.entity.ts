@@ -132,6 +132,9 @@ export const DEFAULT_STUDIO_HIDE_EXPLICIT = false;
 export const DEFAULT_STUDIO_CROSSFADE_SECONDS = 0;
 /** Studio safety and moderation: the player asks before a warned track. */
 export const DEFAULT_STUDIO_ASK_BEFORE_WARNINGS = true;
+/** Studio listening: the member's own listening history is kept. Pausing it
+ *  deletes nothing; daily play totals count either way. */
+export const DEFAULT_STUDIO_LISTENING_HISTORY_ON = true;
 /** The longest crossfade, in seconds. Also the column's CHECK bound. */
 export const STUDIO_CROSSFADE_MAX_SECONDS = 12;
 
@@ -402,6 +405,17 @@ export class MemberPreferences {
    *  Migration `1834000100000-AddStudioSafety`. */
   @Column({ type: 'boolean', default: DEFAULT_STUDIO_ASK_BEFORE_WARNINGS })
   studioAskBeforeWarnings!: boolean;
+
+  /** Studio listening: the listening history switch. It governs the member's
+   *  own history; daily totals count either way. Pausing deletes nothing.
+   *  Read by the plays service as `is_listening_history_on`. */
+  @Column({ type: 'boolean', default: DEFAULT_STUDIO_LISTENING_HISTORY_ON })
+  isListeningHistoryOn!: boolean;
+
+  /** When the member first saw the first-play listening notice; null until
+   *  then. Stamped once and never moved. */
+  @Column({ type: 'timestamptz', nullable: true })
+  listeningNoticeSeenAt!: Date | null;
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

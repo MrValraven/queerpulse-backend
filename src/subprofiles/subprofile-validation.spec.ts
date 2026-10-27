@@ -66,14 +66,22 @@ describe('validatePublish tagline screen (ENG-453)', () => {
 });
 
 describe('assertValidStudioHero', () => {
-  it('accepts full-bleed, avatar, an absent key and no skin data', () => {
+  it('accepts banner, portrait, both, an absent key and no skin data', () => {
+    expect(() => assertValidStudioHero({ studioHero: 'banner' })).not.toThrow();
+    expect(() =>
+      assertValidStudioHero({ studioHero: 'portrait' }),
+    ).not.toThrow();
+    expect(() => assertValidStudioHero({ studioHero: 'both' })).not.toThrow();
+    expect(() => assertValidStudioHero({})).not.toThrow();
+    expect(() => assertValidStudioHero(null)).not.toThrow();
+    expect(() => assertValidStudioHero(undefined)).not.toThrow();
+  });
+
+  it('still accepts the legacy full-bleed and avatar on write so a merged PATCH keeps working', () => {
     expect(() =>
       assertValidStudioHero({ studioHero: 'full-bleed' }),
     ).not.toThrow();
     expect(() => assertValidStudioHero({ studioHero: 'avatar' })).not.toThrow();
-    expect(() => assertValidStudioHero({})).not.toThrow();
-    expect(() => assertValidStudioHero(null)).not.toThrow();
-    expect(() => assertValidStudioHero(undefined)).not.toThrow();
   });
 
   it('rejects any other value with a message naming the key and the allowed values', () => {
@@ -87,8 +95,10 @@ describe('assertValidStudioHero', () => {
       expect(caught).toBeInstanceOf(BadRequestException);
       const message = (caught as BadRequestException).message;
       expect(message).toContain('skinData.studioHero');
-      expect(message).toContain("'full-bleed'");
-      expect(message).toContain("'avatar'");
+      expect(message).toContain("'banner'");
+      expect(message).toContain("'portrait'");
+      expect(message).toContain("'both'");
+      expect(message).not.toContain("'full-bleed'");
     }
   });
 });

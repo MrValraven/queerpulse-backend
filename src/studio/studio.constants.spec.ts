@@ -12,6 +12,8 @@ import { StudioReleaseDisputeStatus } from './entities/studio-release-dispute.en
 import { StudioCuratedPickShelf } from './entities/studio-curated-pick.entity';
 import { StudioPersonaCreditState } from './entities/studio-persona-credit.entity';
 import { StudioSceneState } from './entities/studio-scene.entity';
+import { StudioArtistMilestoneKind } from './entities/studio-artist-milestone.entity';
+import { STUDIO_MILESTONE_KINDS } from './studio-milestones';
 import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
 import {
   STUDIO_ARTIST_PERSONA_KINDS,
@@ -642,6 +644,48 @@ describe('studioError', () => {
         statusCode: HttpStatus.CONFLICT,
       }),
     );
+  });
+});
+
+describe('Studio milestone vocabulary', () => {
+  it('keeps the milestone entity enum identical to the wire vocabulary', () => {
+    expect(Object.values(StudioArtistMilestoneKind)).toEqual([
+      ...STUDIO_MILESTONE_KINDS,
+    ]);
+  });
+
+  it('answers 404 with its code for a milestone card that is not available', () => {
+    const error = studioError('studio_milestone_not_found');
+    expect(error.getStatus()).toBe(404);
+    expect(error.getResponse()).toEqual({
+      statusCode: 404,
+      code: 'studio_milestone_not_found',
+      message: 'This milestone is not available to you.',
+    });
+  });
+});
+
+describe('Studio supporter errors', () => {
+  it.each([
+    [
+      'studio_supporter_artist_not_found',
+      404,
+      'This artist is not available to support.',
+    ],
+    [
+      'studio_supporter_own_persona',
+      403,
+      'You are a member of this artist, so you cannot be its supporter.',
+    ],
+    [
+      'studio_supporter_identity_not_yours',
+      403,
+      'You can show yourself only as your account or a persona you are a member of.',
+    ],
+  ] as const)('answers %s with %i and its reason', (code, status, message) => {
+    const error = studioError(code);
+    expect(error.getStatus()).toBe(status);
+    expect(error.getResponse()).toEqual({ statusCode: status, code, message });
   });
 });
 

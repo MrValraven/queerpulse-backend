@@ -1,6 +1,11 @@
 import { Test } from '@nestjs/testing';
+import { DataSource } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { AdminMediaService } from './admin-media.service';
 import { StorageService } from '../storage/storage.service';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
@@ -17,6 +22,7 @@ import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import { PERSONA_SCOPED_PREFIX } from '../storage/storage-key';
 
 const ownerId = '11111111-1111-1111-1111-111111111111';
+const releaseId = '77777777-7777-7777-7777-777777777777';
 const actorId = '22222222-2222-2222-2222-222222222222';
 const avatarKey = `avatars/${ownerId}/33333333-3333-3333-3333-333333333333.jpg`;
 const communityAvatarKey = `community-avatars/${ownerId}/66666666-6666-6666-6666-666666666666.png`;
@@ -44,6 +50,7 @@ function storedObject(key: string) {
 async function makeService(
   storageOverrides: Record<string, jest.Mock> = {},
   personaOverrides: Record<string, jest.Mock> = {},
+  coverHolders: { kind: string; id: string; label: string }[] = [],
 ) {
   const storage = {
     listObjects: jest
@@ -77,6 +84,9 @@ async function makeService(
     ...personaOverrides,
   };
 
+  // The live-cover guard reads scenes and releases through one query.
+  const dataSource = { query: jest.fn().mockResolvedValue(coverHolders) };
+
   const moduleRef = await Test.createTestingModule({
     providers: [
       AdminMediaService,
@@ -85,6 +95,7 @@ async function makeService(
       { provide: ModAuditService, useValue: modAudit },
       { provide: getRepositoryToken(Profile), useValue: profiles },
       { provide: PersonaImageKeysService, useValue: personaImageKeys },
+      { provide: DataSource, useValue: dataSource },
     ],
   }).compile();
 
@@ -95,6 +106,7 @@ async function makeService(
     modAudit,
     profiles,
     personaImageKeys,
+    dataSource,
   };
 }
 
@@ -420,4 +432,100 @@ describe('AdminMediaService.delete', () => {
       expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
     },
   );
+
+  describe('a key that a live scene or release names as its cover', () => {
+    const sceneCoverKey =
+      'studio-scene/f1000000-0000-4000-8000-000000000001/f1000000-0000-4000-8000-000000000002.jpg';
+    const holders = [
+      {
+        kind: 'studio-scene',
+        id: 'e9000000-0000-4000-8000-000000000011',
+        label: 'Lisbon ballroom',
+      },
+    ];
+
+    it('refuses an unforced delete with the media_live_cover reason and deletes nothing', async () => {
+      const { service, storage, modAudit, personaImageKeys } =
+        await makeService({}, {}, holders);
+
+      const error = await service
+        .delete(sceneCoverKey, actorId, false)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        code: 'media_live_cover',
+        coverHolders: [
+          {
+            kind: 'studio-scene',
+            entityId: holders[0]!.id,
+            label: 'Lisbon ballroom',
+          },
+        ],
+      });
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+      expect(personaImageKeys.forgetDeletedKeys).not.toHaveBeenCalled();
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('lets a forced delete through and records the live cover holders in the audit row', async () => {
+      const { service, storage, modAudit, personaImageKeys } =
+        await makeService({}, {}, holders);
+
+      await service.delete(sceneCoverKey, actorId, true);
+
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        actorId,
+        'media_force_delete',
+        undefined,
+        `${sceneCoverKey} (media_live_cover) live cover of studio-scene ${holders[0]!.id} "Lisbon ballroom"`,
+      );
+      expect(storage.deleteObjectByKey).toHaveBeenCalledWith(sceneCoverKey);
+      expect(personaImageKeys.forgetDeletedKeys).toHaveBeenCalledWith([
+        sceneCoverKey,
+      ]);
+      expect(modAudit.writeAuditLog.mock.invocationCallOrder[0]!).toBeLessThan(
+        storage.deleteObjectByKey.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('names a Studio release cover the same way', async () => {
+      const { service, storage } = await makeService({}, {}, [
+        { kind: 'studio-release', id: releaseId, label: 'Night songs' },
+      ]);
+      await expect(
+        service.delete(personaKey, actorId, false),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'media_live_cover' }),
+      });
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+    });
+
+    it('looks the key up in the scenes and releases tables', async () => {
+      const { service, dataSource } = await makeService();
+      await service.delete(avatarKey, actorId, false);
+      const [sql, parameters] = dataSource.query.mock.calls[0] as [
+        string,
+        string[],
+      ];
+      expect(sql).toContain('"studio_scenes"');
+      expect(sql).toContain('"studio_releases"');
+      expect(parameters).toEqual([avatarKey]);
+    });
+
+    it('lets an unreferenced key through to the normal reference check and delete', async () => {
+      const { service, storage } = await makeService();
+      await service.delete(avatarKey, actorId, false);
+      expect(storage.deleteObjectByKey).toHaveBeenCalledWith(avatarKey);
+    });
+
+    it('does not look anything up for a private message key', async () => {
+      const { service, dataSource } = await makeService();
+      await expect(
+        service.delete(messageImageKey, actorId, true),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(dataSource.query).not.toHaveBeenCalled();
+    });
+  });
 });
