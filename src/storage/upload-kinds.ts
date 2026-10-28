@@ -44,7 +44,7 @@ export interface UploadKindSpec {
 const MB = 1024 * 1024;
 
 export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
-  avatar: { prefix: 'avatars', maxBytes: 5 * MB, requiresSession: false },
+  avatar: { prefix: 'avatars', maxBytes: 7 * MB, requiresSession: false },
   'work-image': { prefix: 'work', maxBytes: 10 * MB, requiresSession: false },
   'story-cover': {
     prefix: 'story-covers',
@@ -75,7 +75,7 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   },
   'gathering-photo': {
     prefix: 'gathering-photos',
-    maxBytes: 5 * MB,
+    maxBytes: 7 * MB,
     requiresSession: true,
   },
   // A group chat's photo. Same size/type constraints as a member `avatar`, and
@@ -92,7 +92,7 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   // don't administer.
   'group-avatar': {
     prefix: 'group-avatars',
-    maxBytes: 5 * MB,
+    maxBytes: 7 * MB,
     requiresSession: false,
   },
   // A business listing's gallery photo. `requiresSession: false` for the SAME
@@ -100,11 +100,11 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   // route in `listings/directory.controller.ts` is `@Public()`, and listing
   // responses resolve these keys through `toImageUrl` into `GET /files/*` — so
   // gating them would blank every listing photo for logged-out directory
-  // visitors and shared-link unfurlers. 5 MB matches the frontend hint
-  // ("≥1200px wide · under 5 MB") and its `UPLOAD_LIMITS['listing-photo']`.
+  // visitors and shared-link unfurlers. 7 MB matches the frontend hint
+  // ("≥1200px wide · under 7 MB") and its `UPLOAD_LIMITS['listing-photo']`.
   'listing-photo': {
     prefix: 'listing-photos',
-    maxBytes: 5 * MB,
+    maxBytes: 7 * MB,
     requiresSession: false,
   },
   // A business listing's cover for directory cards. Public for the same reason
@@ -184,12 +184,12 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   // StorageKeyOwnershipInterceptor rejects a PATCH referencing someone else's
   // key, and `CommunitiesService.update` re-checks the caller is staff and
   // that no FOREIGN upload is being introduced
-  // (`assertNoForeignUploadIntroduced`) before persisting it. 5 MB matches the
+  // (`assertNoForeignUploadIntroduced`) before persisting it. 7 MB matches the
   // other square marks (`avatar`, `group-avatar`) rather than the 10 MB
   // full-bleed cover cap: this is a thumbnail, not a hero.
   'community-avatar': {
     prefix: 'community-avatars',
-    maxBytes: 5 * MB,
+    maxBytes: 7 * MB,
     requiresSession: false,
   },
   // A message-composer image attachment (MSG-8). `requiresSession: true`, but
