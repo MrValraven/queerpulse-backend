@@ -637,6 +637,85 @@ describe('ListingsService.adminUpdate', () => {
     });
   });
 
+  describe('the menu and its sub-sections', () => {
+    const storedWithoutSubsections = () =>
+      baseListing({
+        ownerId: OWNER_ID,
+        status: ListingStatus.Live,
+        menu: {
+          sections: [
+            {
+              title: 'Coffee',
+              items: [
+                { name: 'Bica', price: '0.90', description: '', dietary: [] },
+              ],
+            },
+          ],
+          file: null,
+          link: '',
+        },
+      });
+
+    it('writes no audit row when the PATCH re-sends a menu stored without subsections', async () => {
+      listings.findOne.mockResolvedValue(storedWithoutSubsections());
+
+      await service.update(LISTING_REF, OWNER_ID, {
+        menu: {
+          sections: [
+            {
+              title: 'Coffee',
+              items: [
+                { name: 'Bica', price: '0.90', description: '', dietary: [] },
+              ],
+            },
+          ],
+          file: null,
+          link: '',
+        },
+      });
+
+      expect(auditRows()).toHaveLength(0);
+    });
+
+    it('writes owner_edited naming the menu when the PATCH adds a sub-section', async () => {
+      listings.findOne.mockResolvedValue(storedWithoutSubsections());
+
+      await service.update(LISTING_REF, OWNER_ID, {
+        menu: {
+          sections: [
+            {
+              title: 'Coffee',
+              items: [
+                { name: 'Bica', price: '0.90', description: '', dietary: [] },
+              ],
+              subsections: [
+                {
+                  title: 'Beans',
+                  items: [
+                    {
+                      name: 'House blend',
+                      price: '',
+                      priceBottle: '9.00',
+                      description: '',
+                      dietary: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          file: null,
+          link: '',
+        },
+      });
+
+      const rows = auditRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.changedFields).toEqual(['menu']);
+      expect(savedListings()[0]?.menu.sections[0]?.subsections).toHaveLength(1);
+    });
+  });
+
   // The owner's `update` now runs through the same edit core. Its audit rule
   // has to come out the other side unchanged.
   describe('the owner update it shares the edit core with', () => {

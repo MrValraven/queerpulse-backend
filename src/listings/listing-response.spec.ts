@@ -536,25 +536,28 @@ describe('listing photo gallery on the response DTOs', () => {
 });
 
 describe('the menu and pricing mode on the response DTOs', () => {
-  const menuListing = () =>
+  const menuListing = (
+    sections: NonNullable<Listing['menu']>['sections'] = [
+      {
+        title: 'Coffee',
+        items: [
+          {
+            name: 'Bica',
+            price: '0.90',
+            description: '',
+            dietary: ['vegan'],
+          },
+        ],
+      },
+    ],
+  ) =>
     makeDirectoryListing({
       pricingMode: 'menu',
       menu: {
-        sections: [
-          {
-            title: 'Coffee',
-            items: [
-              {
-                name: 'Bica',
-                price: '0.90 EUR',
-                description: '',
-                dietary: ['vegan'],
-              },
-            ],
-          },
-        ],
+        sections,
         file: null,
         link: '',
+        currency: 'GBP',
       },
     });
 
@@ -562,6 +565,56 @@ describe('the menu and pricing mode on the response DTOs', () => {
     const detail = toDirectoryDetail(menuListing(), [], [], 0);
     expect(detail.pricingMode).toBe('menu');
     expect(detail.menu.sections[0]?.items[0]?.name).toBe('Bica');
+    expect(detail.menu.currency).toBe('GBP');
+  });
+
+  it('answers an empty subsections list on a section stored before sub-sections', () => {
+    const detail = toDirectoryDetail(menuListing(), [], [], 0);
+    expect(detail.menu.sections[0]?.subsections).toEqual([]);
+  });
+
+  it('carries the stored sub-sections with their glass and bottle prices', () => {
+    const detail = toDirectoryDetail(
+      menuListing([
+        {
+          title: 'Wines',
+          items: [],
+          subsections: [
+            {
+              title: 'Red',
+              items: [
+                {
+                  name: 'Douro',
+                  price: '',
+                  priceGlass: '5.50',
+                  priceBottle: '24.00',
+                  description: '',
+                  dietary: ['vegan'],
+                },
+              ],
+            },
+          ],
+        },
+      ]),
+      [],
+      [],
+      0,
+    );
+    expect(detail.menu.sections[0]?.subsections).toEqual([
+      {
+        title: 'Red',
+        items: [
+          {
+            name: 'Douro',
+            price: '',
+            priceGlass: '5.50',
+            priceBottle: '24.00',
+            description: '',
+            dietary: ['vegan'],
+          },
+        ],
+      },
+    ]);
   });
 
   it('keeps the menu off the card response', () => {
@@ -642,7 +695,7 @@ describe('toListingDTO (the owner/managed response)', () => {
             items: [
               {
                 name: 'Bica',
-                price: '0.90 EUR',
+                price: '0.90',
                 description: '',
                 dietary: ['vegan'],
               },
@@ -651,6 +704,7 @@ describe('toListingDTO (the owner/managed response)', () => {
         ],
         file: null,
         link: '',
+        currency: 'GBP',
       },
       langs: [],
       online: false,
@@ -701,16 +755,64 @@ describe('toListingDTO (the owner/managed response)', () => {
           items: [
             {
               name: 'Bica',
-              price: '0.90 EUR',
+              price: '0.90',
               description: '',
               dietary: ['vegan'],
             },
           ],
+          subsections: [],
         },
       ],
       file: null,
       link: '',
+      currency: 'GBP',
     });
+  });
+
+  it('carries stored sub-sections on the owner response and heals a legacy section', () => {
+    const dto = toListingDTO(
+      makeManagedListing({
+        menu: {
+          sections: [
+            {
+              title: 'Wines',
+              items: [],
+              subsections: [
+                {
+                  title: 'White',
+                  items: [
+                    {
+                      name: 'Alvarinho',
+                      price: '',
+                      priceBottle: '28.00',
+                      description: '',
+                      dietary: [],
+                    },
+                  ],
+                },
+              ],
+            },
+            { title: 'Coffee', items: [] },
+          ],
+          file: null,
+          link: '',
+          currency: 'GBP',
+        },
+      }),
+      null,
+    );
+    expect(dto.menu.sections[0]?.subsections[0]?.items[0]?.priceBottle).toBe(
+      '28.00',
+    );
+    expect(dto.menu.sections[1]?.subsections).toEqual([]);
+  });
+
+  it('answers EUR for a stored menu saved before currencies', () => {
+    const dto = toListingDTO(
+      makeManagedListing({ menu: { sections: [], file: null, link: '' } }),
+      null,
+    );
+    expect(dto.menu.currency).toBe('EUR');
   });
 
   it('carries ownedBy for the owner’s edit wizard, always as an array', () => {

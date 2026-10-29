@@ -153,6 +153,7 @@ import {
 } from './listing-mobile-rules';
 import {
   defaultPricingModeForCats,
+  healStoredListingMenu,
   normalizeListingMenu,
 } from './listing-menu';
 import { UpdateListingVisibilityDto } from './dto/update-listing-visibility.dto';
@@ -683,8 +684,11 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.services !== undefined
       ? { services: normalizeServices(dto.services) }
       : {}),
-    // Replaced wholesale, the same reasoning as `services`.
-    ...(dto.menu !== undefined ? { menu: normalizeListingMenu(dto.menu) } : {}),
+    // Replaced wholesale, the same reasoning as `services`. The stored menu
+    // lets a legacy free-text price pass when the client resends it as is.
+    ...(dto.menu !== undefined
+      ? { menu: normalizeListingMenu(dto.menu, listing.menu) }
+      : {}),
     ...(dto.pricingMode !== undefined ? { pricingMode: dto.pricingMode } : {}),
     ...(dto.langs !== undefined ? { langs: dto.langs } : {}),
     // A `null` the validator lets through stores the column default `''`.
@@ -2183,6 +2187,7 @@ export class ListingsService {
     // unrelated PATCH writes no audit row and stamps no freshness.
     healStoredListingColumns(listing);
     healStoredMobileDetails(listing);
+    listing.menu = healStoredListingMenu(listing.menu);
     if (listing.online) {
       Object.assign(listing, {
         hood: '',

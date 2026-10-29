@@ -161,6 +161,7 @@ describe('toListingDraftPreview', () => {
     expect(withKey.menu).toEqual({
       sections: [],
       link: '',
+      currency: 'EUR',
       file: {
         url: `${FILES_BASE}/${menuKey}`,
         contentType: 'application/pdf',
@@ -170,11 +171,49 @@ describe('toListingDraftPreview', () => {
     const withExtra = toListingDraftPreview({
       draft: { menu: { sections: [], link: 'l', note: 'hidden', file: null } },
     });
-    expect(withExtra.menu).toEqual({ sections: [], link: 'l', file: null });
+    expect(withExtra.menu).toEqual({
+      sections: [],
+      link: 'l',
+      currency: 'EUR',
+      file: null,
+    });
+    const withCurrency = toListingDraftPreview({
+      draft: { menu: { sections: [], link: '', currency: 'GBP', file: null } },
+    });
+    expect((withCurrency.menu as { currency: unknown }).currency).toBe('GBP');
     const junk = toListingDraftPreview({
       draft: { menu: { sections: [], link: '', file: { url: 'junk' } } },
     });
     expect((junk.menu as { file: unknown }).file).toBeNull();
+  });
+
+  it('passes menu sections with sub-sections and glass and bottle prices through untouched', () => {
+    const sections = [
+      {
+        title: 'Wines',
+        items: [],
+        subsections: [
+          {
+            title: 'Red',
+            items: [
+              {
+                name: 'Douro',
+                price: '',
+                priceGlass: '5.50',
+                priceBottle: '24.00',
+                description: '',
+                dietary: ['vegan'],
+              },
+            ],
+          },
+        ],
+      },
+      { title: 'Coffee', items: [] },
+    ];
+    const preview = toListingDraftPreview({
+      draft: { menu: { sections, link: '', file: null } },
+    });
+    expect((preview.menu as { sections: unknown }).sections).toEqual(sections);
   });
 
   it('nulls photos, coverPhoto, shopItems and menu in an unexpected shape', () => {

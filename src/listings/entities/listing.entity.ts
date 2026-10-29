@@ -176,18 +176,37 @@ export type ListingPricingMode = 'services' | 'menu' | 'shop';
 export type ListingMenuDietary =
   'vegan' | 'vegetarian' | 'glutenFree' | 'alcoholFree';
 
-/** One thing on the menu. `price` is free text like a service's price. */
+/** The currencies a menu can be priced in, one per menu. */
+export type ListingMenuCurrency = 'EUR' | 'GBP' | 'USD' | 'BRL' | 'CHF' | 'CAD';
+
+/**
+ * One thing on the menu. `price` is a number in the menu's currency, written
+ * like "2.50". A row saved before prices were numbers can still hold free
+ * text, which stays until the owner edits that item.
+ */
 export interface ListingMenuItem {
   name: string;
   price: string;
+  /** Only on items inside a sub-section; the key is absent when blank. */
+  priceGlass?: string;
+  /** Only on items inside a sub-section; the key is absent when blank. */
+  priceBottle?: string;
   description: string;
   dietary: ListingMenuDietary[];
+}
+
+/** One titled group inside a menu section ("Red", "White" under "Wines"). */
+export interface ListingMenuSubsection {
+  title: string;
+  items: ListingMenuItem[];
 }
 
 /** One titled part of the menu ("Coffee", "Brunch"). */
 export interface ListingMenuSection {
   title: string;
   items: ListingMenuItem[];
+  /** Absent on rows saved before sub-sections; read it through `toListingMenuView`. */
+  subsections?: ListingMenuSubsection[];
 }
 
 /**
@@ -207,6 +226,11 @@ export interface ListingMenu {
   sections: ListingMenuSection[];
   file: ListingMenuFile | null;
   link: string;
+  /**
+   * Absent on rows saved before menus had a currency. Read it through
+   * `toListingMenuView`, which answers EUR for those rows.
+   */
+  currency?: ListingMenuCurrency;
 }
 
 /** Mirrors the frontend's `ListingDraft["social"]`. */

@@ -49,6 +49,7 @@ import {
 import { LISTING_OWNED_BY_VALUES, ListingOwnedBy } from '../listing-owned-by';
 import { MAX_LISTING_GALLERY_PHOTOS } from '../listing-photo-gallery';
 import type {
+  ListingMenuCurrency,
   ListingMenuDietary,
   ListingPricingMode,
 } from '../entities/listing.entity';
@@ -344,6 +345,26 @@ export const LISTING_MENU_DIETARY = [
   'alcoholFree',
 ] as const;
 
+/** The currencies a menu can be priced in. One currency covers the whole menu. */
+export const LISTING_MENU_CURRENCIES = [
+  'EUR',
+  'GBP',
+  'USD',
+  'BRL',
+  'CHF',
+  'CAD',
+] as const;
+
+/** A menu with no currency (saved before currencies existed) reads as euros. */
+export const DEFAULT_LISTING_MENU_CURRENCY: ListingMenuCurrency = 'EUR';
+
+/**
+ * A menu item price: up to six digits, then an optional dot and one or two
+ * decimals ("3", "2.50", "0.90"). Checked by `normalizeListingMenu`, which
+ * also lets through a price already stored on the listing.
+ */
+export const LISTING_MENU_PRICE_PATTERN = /^\d{1,6}(\.\d{1,2})?$/;
+
 /** A real menu with headroom: brunch, drinks, a bar list, specials. */
 export const MAX_LISTING_MENU_SECTIONS = 12;
 
@@ -353,6 +374,9 @@ export const MAX_LISTING_MENU_SECTIONS = 12;
  * `ArrayMaxSize` below uses the same number as an outer bound.
  */
 export const MAX_LISTING_MENU_ITEMS = 150;
+
+/** Sub-sections inside one menu section ("Red", "White" and "Rosé" under "Wines"). */
+export const MAX_LISTING_MENU_SUBSECTIONS = 8;
 
 export class ListingMenuItemDto {
   @IsString() @IsNotEmpty() @MaxLength(120) name!: string;
@@ -365,6 +389,33 @@ export class ListingMenuItemDto {
   dietary?: ListingMenuDietary[];
 }
 
+// An item inside a sub-section. Every price is optional (a wine can list only
+// a bottle price); `normalizeListingMenu` checks the numbers.
+export class ListingMenuSubsectionItemDto {
+  @IsString() @IsNotEmpty() @MaxLength(120) name!: string;
+  @IsOptional() @IsString() @MaxLength(80) price?: string;
+  @IsOptional() @IsString() @MaxLength(80) priceGlass?: string;
+  @IsOptional() @IsString() @MaxLength(80) priceBottle?: string;
+  @IsOptional() @IsString() @MaxLength(200) description?: string;
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(LISTING_MENU_DIETARY.length)
+  @IsIn(LISTING_MENU_DIETARY, { each: true })
+  dietary?: ListingMenuDietary[];
+}
+
+export class ListingMenuSubsectionDto {
+  // May be blank here: a sub-section with no items is dropped on save, and one
+  // with items and no title is refused by `normalizeListingMenu`.
+  @IsString() @MaxLength(80) title!: string;
+
+  @IsArray()
+  @ArrayMaxSize(MAX_LISTING_MENU_ITEMS)
+  @ValidateNested({ each: true })
+  @Type(() => ListingMenuSubsectionItemDto)
+  items!: ListingMenuSubsectionItemDto[];
+}
+
 export class ListingMenuSectionDto {
   // May be blank here: a section with no items is dropped on save, and a
   // section with items and no title is refused by `normalizeListingMenu`.
@@ -375,6 +426,13 @@ export class ListingMenuSectionDto {
   @ValidateNested({ each: true })
   @Type(() => ListingMenuItemDto)
   items!: ListingMenuItemDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_LISTING_MENU_SUBSECTIONS)
+  @ValidateNested({ each: true })
+  @Type(() => ListingMenuSubsectionDto)
+  subsections?: ListingMenuSubsectionDto[];
 }
 
 export class ListingMenuFileDto {
@@ -395,6 +453,10 @@ export class ListingMenuDto {
   @ValidateNested()
   @Type(() => ListingMenuFileDto)
   file?: ListingMenuFileDto | null;
+
+  @IsOptional()
+  @IsIn(LISTING_MENU_CURRENCIES)
+  currency?: ListingMenuCurrency;
 
   // Same validators as `social.website`.
   @IsOptional()

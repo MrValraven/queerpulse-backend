@@ -13,7 +13,6 @@ import {
   Listing,
   ListingDayHours,
   ListingHoursException,
-  ListingMenu,
   ListingOperatingState,
   ListingPhotoSet,
   ListingPricingMode,
@@ -26,7 +25,7 @@ import {
   SafeSpaceStatus,
   SafeSpaceVouch,
 } from './entities/listing.entity';
-import { toListingMenuView } from './listing-menu';
+import { ListingMenuView, toListingMenuView } from './listing-menu';
 import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
 import {
   ListingCoverPolicy,
@@ -527,7 +526,7 @@ export interface ListingDTO {
   /** Which list the page shows: `services`, `menu` or `shop`. */
   pricingMode: ListingPricingMode;
   /** The menu, with `file.url` resolved to its served URL. */
-  menu: ListingMenu;
+  menu: ListingMenuView;
   /** Languages spoken, as codes (`LISTING_LANGUAGE_CODES`). */
   langs: string[];
   /** Any other language, as the owner wrote it. `''` when none. */
@@ -1532,7 +1531,7 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   /** Which list the page shows: `services`, `menu` or `shop`. */
   pricingMode: ListingPricingMode;
   /** The menu, with `file.url` resolved to its served URL. */
-  menu: ListingMenu;
+  menu: ListingMenuView;
   /** The "Ordering & delivery" block, for a listing that sells online. `null`
    * for every other listing. Carries no `adultTermsAcceptedAt`, which is the
    * owner's own record. */

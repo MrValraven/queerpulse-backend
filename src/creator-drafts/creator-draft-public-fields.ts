@@ -1,4 +1,8 @@
 import { toImageUrl } from '../common/image-url';
+import {
+  DEFAULT_LISTING_MENU_CURRENCY,
+  LISTING_MENU_CURRENCIES,
+} from '../listings/dto/create-listing.dto';
 import { LISTING_DRAFT_BUSINESS_KEYS } from '../listing-drafts/listing-draft-response';
 import type {
   CommunityDraftPreview,
@@ -187,7 +191,10 @@ function toShopItemsPreview(value: unknown): Record<string, unknown>[] | null {
   return value.filter(isRecord).map(toShopItemPreview);
 }
 
-/** Like `toListingMenuView`: the file URL resolves, or the whole file is null. */
+/**
+ * Like `toListingMenuView`: the file URL resolves or the whole file is null,
+ * and a missing or unknown currency reads as the default.
+ */
 function toMenuPreview(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const file = isRecord(value.file) ? value.file : null;
@@ -195,6 +202,9 @@ function toMenuPreview(value: unknown): Record<string, unknown> | null {
   return {
     sections: Array.isArray(value.sections) ? value.sections : [],
     link: readText(value.link) ?? '',
+    currency:
+      LISTING_MENU_CURRENCIES.find((currency) => currency === value.currency) ??
+      DEFAULT_LISTING_MENU_CURRENCY,
     file:
       file && fileUrl
         ? {

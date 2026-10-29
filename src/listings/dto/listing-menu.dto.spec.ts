@@ -27,7 +27,7 @@ describe('CreateListingDto menu', () => {
               items: [
                 {
                   name: 'Bica',
-                  price: '0.90 EUR',
+                  price: '0.90',
                   description: '',
                   dietary: ['vegan'],
                 },
@@ -40,6 +40,16 @@ describe('CreateListingDto menu', () => {
         'menu',
       ),
     ).toHaveLength(0);
+  });
+
+  it('accepts a supported currency', async () => {
+    expect(await menuErrors({ sections: [], currency: 'GBP' })).toHaveLength(0);
+  });
+
+  it('rejects a currency outside the supported six', async () => {
+    expect(
+      await menuErrors({ sections: [], currency: 'JPY' }),
+    ).not.toHaveLength(0);
   });
 
   it('rejects an unknown pricing mode', async () => {
@@ -87,6 +97,130 @@ describe('CreateListingDto menu', () => {
     ).not.toHaveLength(0);
   });
 
+  it('accepts a sub-section item with only a glass price', async () => {
+    expect(
+      await menuErrors({
+        sections: [
+          {
+            title: 'Wines',
+            items: [],
+            subsections: [
+              {
+                title: 'Red',
+                items: [{ name: 'Douro', priceGlass: '5.50' }],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toHaveLength(0);
+  });
+
+  it('accepts a sub-section item with glass and bottle prices and no price', async () => {
+    expect(
+      await menuErrors({
+        sections: [
+          {
+            title: 'Wines',
+            items: [],
+            subsections: [
+              {
+                title: 'Red',
+                items: [
+                  { name: 'Douro', priceGlass: '5.50', priceBottle: '24' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toHaveLength(0);
+  });
+
+  it('rejects a sub-section item with no name', async () => {
+    expect(
+      await menuErrors({
+        sections: [
+          {
+            title: 'Wines',
+            items: [],
+            subsections: [
+              { title: 'Red', items: [{ name: '', priceGlass: '5' }] },
+            ],
+          },
+        ],
+      }),
+    ).not.toHaveLength(0);
+  });
+
+  it('rejects a ninth sub-section in one section', async () => {
+    const subsection = { title: 'S', items: [] };
+    expect(
+      await menuErrors({
+        sections: [
+          {
+            title: 'Wines',
+            items: [],
+            subsections: Array.from({ length: 9 }, () => subsection),
+          },
+        ],
+      }),
+    ).not.toHaveLength(0);
+  });
+
+  it('accepts eight sub-sections in one section', async () => {
+    const subsection = { title: 'S', items: [] };
+    expect(
+      await menuErrors({
+        sections: [
+          {
+            title: 'Wines',
+            items: [],
+            subsections: Array.from({ length: 8 }, () => subsection),
+          },
+        ],
+      }),
+    ).toHaveLength(0);
+  });
+
+  it('rejects a glass price over 80 characters', async () => {
+    expect(
+      await menuErrors({
+        sections: [
+          {
+            title: 'Wines',
+            items: [],
+            subsections: [
+              {
+                title: 'Red',
+                items: [{ name: 'Douro', priceGlass: '1'.repeat(81) }],
+              },
+            ],
+          },
+        ],
+      }),
+    ).not.toHaveLength(0);
+  });
+
+  it('rejects a bottle price over 80 characters', async () => {
+    expect(
+      await menuErrors({
+        sections: [
+          {
+            title: 'Wines',
+            items: [],
+            subsections: [
+              {
+                title: 'Red',
+                items: [{ name: 'Douro', priceBottle: '1'.repeat(81) }],
+              },
+            ],
+          },
+        ],
+      }),
+    ).not.toHaveLength(0);
+  });
+
   it('rejects a javascript: link', async () => {
     expect(
       await menuErrors({ sections: [], link: 'javascript:alert(1)' }),
@@ -117,7 +251,7 @@ describe('CreateListingDto menu through the real ValidationPipe', () => {
   const MENU_KEY =
     'listing-menus/0b8f7c9e-1d2a-4b3c-9e8f-7a6b5c4d3e2f/5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a.pdf';
 
-  function bodyWithMenuFile(file: Record<string, unknown>) {
+  function bodyWithMenuFile(file: Record<string, unknown> | null) {
     return {
       path: 'suggest',
       name: 'Café X',
@@ -142,6 +276,110 @@ describe('CreateListingDto menu through the real ValidationPipe', () => {
       url: MENU_KEY,
       fileName: 'Menu.pdf',
     });
+  });
+
+  it('whitelists the menu currency instead of refusing it as an unknown field', async () => {
+    const transformed = (await pipe.transform(
+      {
+        ...bodyWithMenuFile(null),
+        menu: { sections: [], link: '', currency: 'BRL' },
+      },
+      metadata,
+    )) as CreateListingDto;
+    expect(transformed.menu?.currency).toBe('BRL');
+  });
+
+  it('passes a sub-section item carrying only a glass price', async () => {
+    const transformed = (await pipe.transform(
+      {
+        ...bodyWithMenuFile(null),
+        menu: {
+          sections: [
+            {
+              title: 'Wines',
+              items: [],
+              subsections: [
+                {
+                  title: 'Red',
+                  items: [{ name: 'Douro', priceGlass: '5.50' }],
+                },
+              ],
+            },
+          ],
+          link: '',
+        },
+      },
+      metadata,
+    )) as CreateListingDto;
+    expect(
+      transformed.menu?.sections[0]?.subsections?.[0]?.items[0]?.priceGlass,
+    ).toBe('5.50');
+  });
+
+  it('rejects a direct item carrying a glass price, with a 400', async () => {
+    await expect(
+      pipe.transform(
+        {
+          ...bodyWithMenuFile(null),
+          menu: {
+            sections: [
+              {
+                title: 'Coffee',
+                items: [{ name: 'Bica', price: '1', priceGlass: '1' }],
+              },
+            ],
+            link: '',
+          },
+        },
+        metadata,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a direct item carrying a bottle price, with a 400', async () => {
+    await expect(
+      pipe.transform(
+        {
+          ...bodyWithMenuFile(null),
+          menu: {
+            sections: [
+              {
+                title: 'Coffee',
+                items: [{ name: 'Bica', price: '1', priceBottle: '1' }],
+              },
+            ],
+            link: '',
+          },
+        },
+        metadata,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects an unknown field on a sub-section item, with a 400', async () => {
+    await expect(
+      pipe.transform(
+        {
+          ...bodyWithMenuFile(null),
+          menu: {
+            sections: [
+              {
+                title: 'Wines',
+                items: [],
+                subsections: [
+                  {
+                    title: 'Red',
+                    items: [{ name: 'Douro', priceMagnum: '90' }],
+                  },
+                ],
+              },
+            ],
+            link: '',
+          },
+        },
+        metadata,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('rejects the same file with contentType added, with a 400', async () => {

@@ -1413,6 +1413,186 @@ describe('ListingsService', () => {
       expect(listings.save).toHaveBeenCalled();
     });
 
+    // A row saved before menus had a currency holds no `currency` key. The
+    // edit path heals it before the "before" snapshot, so an unrelated PATCH
+    // compares like with like and records nothing.
+    it('records no edit for an unrelated PATCH on a menu saved before currencies', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: 'owner-1',
+          status: ListingStatus.Live,
+          menu: {
+            sections: [
+              {
+                title: 'Coffee',
+                items: [
+                  {
+                    name: 'Bica',
+                    price: 'market price',
+                    description: '',
+                    dietary: [],
+                  },
+                ],
+              },
+            ],
+            file: null,
+            link: '',
+          },
+        }),
+      );
+
+      const dto = await service.update('QPL-2026-0001', 'owner-1', {
+        contactEmail: 'ana@example.com',
+      });
+
+      expect(dto.detailsConfirmedAt).toBeNull();
+      expect(transactionManager.save).not.toHaveBeenCalled();
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.menu.currency).toBe('EUR');
+      expect(savedListing.menu.sections[0]?.items[0]?.price).toBe(
+        'market price',
+      );
+    });
+
+    // A row saved before sub-sections holds sections with no `subsections`
+    // key. The normalizer writes `subsections: []` on every section, so the
+    // edit path heals the stored sections first and re-sending the same menu
+    // compares equal.
+    it('records no edit when a PATCH re-sends a menu stored without subsections', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: 'owner-1',
+          status: ListingStatus.Live,
+          menu: {
+            sections: [
+              {
+                title: 'Coffee',
+                items: [
+                  {
+                    name: 'Bica',
+                    price: '0.90',
+                    description: '',
+                    dietary: [],
+                  },
+                ],
+              },
+            ],
+            file: null,
+            link: '',
+          },
+        }),
+      );
+
+      const dto = await service.update('QPL-2026-0001', 'owner-1', {
+        menu: {
+          sections: [
+            {
+              title: 'Coffee',
+              items: [
+                { name: 'Bica', price: '0.90', description: '', dietary: [] },
+              ],
+            },
+          ],
+          file: null,
+          link: '',
+        },
+      });
+
+      expect(dto.detailsConfirmedAt).toBeNull();
+      expect(transactionManager.save).not.toHaveBeenCalled();
+    });
+
+    it('heals a section stored without subsections on an unrelated PATCH and records no edit', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: 'owner-1',
+          status: ListingStatus.Live,
+          menu: {
+            sections: [{ title: 'Coffee', items: [] }],
+            file: null,
+            link: '',
+          },
+        }),
+      );
+
+      const dto = await service.update('QPL-2026-0001', 'owner-1', {
+        contactEmail: 'ana@example.com',
+      });
+
+      expect(dto.detailsConfirmedAt).toBeNull();
+      expect(transactionManager.save).not.toHaveBeenCalled();
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.menu.sections[0]?.subsections).toEqual([]);
+    });
+
+    // Postgres hands jsonb keys back in its own order, so the stored
+    // sub-section item below lists its keys differently from the
+    // normalizer's own `name, price, priceGlass, priceBottle, ...` order.
+    it('does not treat a differently-ordered sub-section item as a change', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: 'owner-1',
+          status: ListingStatus.Live,
+          menu: {
+            link: '',
+            file: null,
+            sections: [
+              {
+                subsections: [
+                  {
+                    items: [
+                      {
+                        dietary: ['vegan'],
+                        name: 'Douro',
+                        priceBottle: '24.00',
+                        priceGlass: '5.50',
+                        price: '',
+                        description: '',
+                      },
+                    ],
+                    title: 'Red',
+                  },
+                ],
+                items: [],
+                title: 'Wines',
+              },
+            ],
+          },
+        }),
+      );
+
+      const dto = await service.update('QPL-2026-0001', 'owner-1', {
+        menu: {
+          sections: [
+            {
+              title: 'Wines',
+              items: [],
+              subsections: [
+                {
+                  title: 'Red',
+                  items: [
+                    {
+                      name: 'Douro',
+                      price: '',
+                      priceGlass: '5.50',
+                      priceBottle: '24.00',
+                      description: '',
+                      dietary: ['vegan'],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          file: null,
+          link: '',
+        },
+      });
+
+      expect(dto.detailsConfirmedAt).toBeNull();
+      expect(transactionManager.save).not.toHaveBeenCalled();
+    });
+
     // `contactEmail` is retired: a stale client may still PATCH it, and the
     // service leaves the stored value alone, so no `owner_edited` row or
     // freshness stamp can ever name it.
