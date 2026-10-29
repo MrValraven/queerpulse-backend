@@ -6,6 +6,8 @@ const EMAIL_VARIABLES = [
   'RESEND_FROM',
   'RESEND_SIGNIN_TEMPLATE_ID_EN',
   'RESEND_SIGNIN_TEMPLATE_ID_PT',
+  'RESEND_WELCOME_TEMPLATE_ID_EN',
+  'RESEND_WELCOME_TEMPLATE_ID_PT',
   'EMAIL_CODE_SECRET',
   'EMAIL_CODE_DEV_LOG',
 ] as const;
@@ -35,6 +37,18 @@ describe('email config', () => {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
+  });
+
+  it('reads the welcome template ids without changing enabled', () => {
+    const config = loadWith({
+      NODE_ENV: 'production',
+      RESEND_API_KEY: 're_test_key',
+      RESEND_WELCOME_TEMPLATE_ID_EN: 'welcome-en',
+      RESEND_WELCOME_TEMPLATE_ID_PT: 'welcome-pt',
+    });
+    expect(config.welcomeTemplateIdEn).toBe('welcome-en');
+    expect(config.welcomeTemplateIdPt).toBe('welcome-pt');
+    expect(config.enabled).toBe(false);
   });
 
   it('is enabled in production when the key and both template ids are set', () => {

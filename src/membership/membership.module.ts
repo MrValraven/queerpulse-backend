@@ -13,6 +13,8 @@ import { InviteExpirySweeperService } from './invite-expiry-sweeper.service';
 import { AdminJoinRequestsController } from './admin-join-requests.controller';
 import { JoinRequestsController } from './join-requests.controller';
 import { JoinRequestsService } from './join-requests.service';
+import { WelcomeInviteMailer } from './welcome-invite.mailer';
+import { WelcomeInviteService } from './welcome-invite.service';
 
 @Module({
   imports: [
@@ -34,7 +36,14 @@ import { JoinRequestsService } from './join-requests.service';
     JoinRequestsController,
     AdminJoinRequestsController,
   ],
-  providers: [InvitesService, InviteExpirySweeperService, JoinRequestsService],
+  providers: [
+    InvitesService,
+    InviteExpirySweeperService,
+    JoinRequestsService,
+    // The reviewer-triggered welcome email (ConfigModule is global).
+    WelcomeInviteMailer,
+    WelcomeInviteService,
+  ],
   // JoinRequestsService is exported for ONE caller: the Google callback's
   // `invite_required` branch (`AuthController`), which asks
   // `recoverStatusTokenForVerifiedEmail` whether the address Google just

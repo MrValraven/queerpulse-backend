@@ -21,17 +21,17 @@ export type SignInCodeSendResult =
     };
 
 /** Three tries in all: the first send plus two retries. */
-const MAX_ATTEMPTS = 3;
+export const MAX_ATTEMPTS = 3;
 /** Wait before attempt 2 and attempt 3 when Resend sends no `retry-after`. */
-const DEFAULT_RETRY_DELAYS_MS = [300, 900];
+export const DEFAULT_RETRY_DELAYS_MS = [300, 900];
 /** A longer `retry-after` would hold the request open too long, so the send ends. */
-const MAX_RETRY_AFTER_MS = 1500;
+export const MAX_RETRY_AFTER_MS = 1500;
 /**
  * Worst case per send stays within the frontend's 15 s request timeout:
  * 3 x 4 s + 0.3 s + 0.9 s = 13.2 s with the default backoff, and
  * 3 x 4 s + 1.5 s + 1.5 s = 15 s with an honoured `retry-after`.
  */
-const SEND_ATTEMPT_TIMEOUT_MS = 4000;
+export const SEND_ATTEMPT_TIMEOUT_MS = 4000;
 
 /**
  * Sends the 6-digit sign-in code through a published Resend template.
@@ -177,7 +177,7 @@ export class EmailCodeMailer {
 }
 
 /** Network errors (no status), rate limits and server errors get a retry. */
-function isRetryable(statusCode: number | null): boolean {
+export function isRetryable(statusCode: number | null): boolean {
   return statusCode === null || statusCode === 429 || statusCode >= 500;
 }
 
@@ -186,7 +186,7 @@ function isRetryable(statusCode: number | null): boolean {
  * seconds when the header holds a number, else the default backoff step.
  * The SDK lowercases every response header name.
  */
-function retryDelayMs(
+export function retryDelayMs(
   headers: Record<string, string> | null,
   retryIndex: number,
 ): number {
@@ -200,6 +200,6 @@ function retryDelayMs(
   return DEFAULT_RETRY_DELAYS_MS[retryIndex] ?? 900;
 }
 
-function sleep(milliseconds: number): Promise<void> {
+export function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

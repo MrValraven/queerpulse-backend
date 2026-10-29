@@ -23,17 +23,21 @@ import { UserRole } from '../users/entities/user.entity';
 import { BulkReviewJoinRequestsDto } from './dto/bulk-review-join-requests.dto';
 import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
 import { ReviewJoinRequestDto } from './dto/review-join-request.dto';
+import { SendWelcomeInviteEmailDto } from './dto/send-welcome-invite-email.dto';
 import { SampleJoinRequestsQuery } from './dto/sample-join-requests.query';
 import { UpdateJoinRequestNoteDto } from './dto/update-join-request-note.dto';
 import { JoinRequestView } from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
+import { WelcomeInviteService } from './welcome-invite.service';
 import {
+  ApiBadGatewayResponse,
   ApiConflictResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiServiceUnavailableResponse,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -63,7 +67,10 @@ import {
 @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
 @Controller(['admin/join-requests', 'join-requests'])
 export class AdminJoinRequestsController {
-  constructor(private readonly joinRequestsService: JoinRequestsService) {}
+  constructor(
+    private readonly joinRequestsService: JoinRequestsService,
+    private readonly welcomeInviteService: WelcomeInviteService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List invite requests for the review queue' })
@@ -148,8 +155,7 @@ export class AdminJoinRequestsController {
   /**
    * Revoke the still-valid invite an approval minted.
    *
-   * QueerPulse sends no email, so reviewers hand approval links over by hand. A
-   * link sent to the wrong place, or an approval that should be pulled back,
+   * A link sent to the wrong place, or an approval that should be pulled back,
    * needs a lever. The member-facing revoke is scoped to the inviter (the
    * reviewer who approved), so a second moderator picking the case up could
    * not use it. Guarded at class level with the rest of this queue.
@@ -170,6 +176,44 @@ export class AdminJoinRequestsController {
     @CurrentUser() user: CurrentUserData,
   ): Promise<JoinRequestView> {
     return this.joinRequestsService.revokeInvite(id, user.userId);
+  }
+
+  /**
+   * Email the applicant their invite link through the published welcome
+   * template. Only a reviewer's click triggers it; approving never does.
+   *
+   * The recipient is the address on the request, never one from the body. The
+   * error body is `{ reason, message: reason }` with one of
+   * `join_request_not_found` (404), `invite_not_usable` (409),
+   * `welcome_email_not_configured` (503), `welcome_email_rejected` (502) or
+   * `welcome_email_unavailable` (503).
+   */
+  @Post(':id/invite/email')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Email the welcome message with the invite link' })
+  @ApiOkResponse({ description: 'The email was accepted: `{ sent: true }`.' })
+  @ApiNotFoundResponse({ description: 'Reason `join_request_not_found`.' })
+  @ApiConflictResponse({
+    description:
+      'Reason `invite_not_usable`: no invite, or it is revoked, accepted or expired.',
+  })
+  @ApiBadGatewayResponse({
+    description: 'Reason `welcome_email_rejected`: Resend refused the email.',
+  })
+  @ApiServiceUnavailableResponse({
+    description:
+      'Reason `welcome_email_not_configured` or `welcome_email_unavailable`.',
+  })
+  sendWelcomeEmail(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: SendWelcomeInviteEmailDto,
+  ): Promise<{ sent: true }> {
+    return this.welcomeInviteService.sendWelcomeEmail(
+      id,
+      user.userId,
+      dto.locale,
+    );
   }
 
   /**
