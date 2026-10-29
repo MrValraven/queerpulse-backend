@@ -81,11 +81,9 @@ export const APPEAL_WINDOW_CLOSED_CODE = 'APPEAL_WINDOW_CLOSED';
  *    content FK is `ON DELETE SET NULL`), a `venue` report that describes a
  *    place in prose, a subject row that no longer exists.
  *  - `ambiguous_authors`: the subject covers content written by more than one
- *    member and the report does not record which of them was reported. Two
- *    subject types today, both the same shape: `listing_public_question` (a
- *    member's question AND the listing owner's answer under it) and `review`
- *    (a member's review AND the reviewed party's public reply under it, on a
- *    directory listing, an employer or a home).
+ *    member and the report does not record which of them was reported. Today
+ *    that is the `review` subject (a member's review AND the reviewed party's
+ *    public reply under it, on a directory listing, an employer or a home).
  *
  * The two are worth separating because the moderator's next move differs. On
  * `no_account` there is no member to reach at all. On `ambiguous_authors`
@@ -109,9 +107,9 @@ const NO_ACCOUNT_MESSAGE =
   'Could not resolve the "%s" this report names to an account. ' +
   'Act on the content instead, or find the member and act from their drawer.';
 
-// Deliberately names no single surface. It answers a `listing_public_question`
-// (a question and the answer under it) and a `review` (a review and the reply
-// under it) alike, and a third pairing would read correctly too.
+// Deliberately names no single surface. It answers a `review` (a review and
+// the reply under it) on any of its surfaces, and a later pairing of the same
+// shape would read correctly too.
 const AMBIGUOUS_AUTHORS_MESSAGE =
   'This report covers a statement and the answer posted under it, written by two ' +
   'different members, and it does not record which of them was reported. ' +

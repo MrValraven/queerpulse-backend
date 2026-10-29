@@ -15,7 +15,6 @@ import { ReportsService } from '../reports/reports.service';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ListingModerationEvent } from './entities/listing-moderation-event.entity';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
@@ -51,6 +50,11 @@ import { ListingsService } from './listings.service';
  * A route that quietly moves to the wrong one is either a co-manager who cannot
  * do their job or a privilege escalation, so each direction is asserted here
  * rather than left to a reading of the call sites.
+ *
+ * Photo framing (`updatePhotoFraming`) sits on the owner-or-co-manager side
+ * with an existence check of its own, because it must answer 403 to an outsider
+ * only where the directory already publishes the ref. Any other listing keeps
+ * the 404, so the route reveals nothing a member could not open for themselves.
  */
 
 const OWNER_ID = 'owner-1';
@@ -156,6 +160,21 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   ...overrides,
 });
 
+const PHOTO_KEY =
+  'listing-photos/11111111-1111-1111-1111-111111111111/55555555-5555-5555-5555-555555555555.jpg';
+
+const framedGalleryListing = (overrides: Partial<Listing> = {}): Listing =>
+  baseListing({
+    photoGallery: [{ image: PHOTO_KEY, alt: 'Front', caption: '' }],
+    ...overrides,
+  });
+
+const framingBody = {
+  photos: [
+    { image: PHOTO_KEY, framing: { focusX: 0.25, focusY: 0.75, zoom: 2 } },
+  ],
+};
+
 interface QueryBuilderStub extends Record<string, jest.Mock> {
   getManyAndCount: jest.Mock;
 }
@@ -196,6 +215,7 @@ describe('listing co-manager permission boundary', () => {
   };
   let transactionManager: {
     save: jest.Mock;
+    update: jest.Mock;
     remove: jest.Mock;
     getRepository: jest.Mock;
   };
@@ -210,6 +230,13 @@ describe('listing co-manager permission boundary', () => {
   const hasSavedTheListing = () =>
     listings.save.mock.calls.length > 0 ||
     transactionManager.save.mock.calls.length > 0;
+
+  /** Whether any listing read asked for a row lock. The transaction hands out
+   *  the same `listings` mock, so the locked read lands here too. */
+  const hasTakenARowLock = () =>
+    (listings.findOne.mock.calls as [{ lock?: unknown } | undefined][]).some(
+      ([options]) => options?.lock !== undefined,
+    );
 
   /** Loads by `ref` alone, exactly as `loadOr404` does, so a test that expects
    * a 404 for a non-owner is proving the SEAT check rather than an empty
@@ -258,6 +285,7 @@ describe('listing co-manager permission boundary', () => {
           second !== undefined ? { id: 'event-1', ...second } : first,
         ),
       ),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       remove: jest.fn((entity: object) => Promise.resolve(entity)),
       getRepository: jest.fn(() => listings),
     };
@@ -287,15 +315,6 @@ describe('listing co-manager permission boundary', () => {
           },
         },
         { provide: getRepositoryToken(ListingQuestion), useValue: questions },
-        {
-          provide: getRepositoryToken(ListingPublicQuestion),
-          useValue: {
-            findOne: jest.fn().mockResolvedValue(null),
-            find: jest.fn().mockResolvedValue([]),
-            save: jest.fn(),
-            count: jest.fn().mockResolvedValue(0),
-          },
-        },
         {
           provide: DataSource,
           useValue: {
@@ -545,6 +564,15 @@ describe('listing co-manager permission boundary', () => {
         service.getOwnerListingHistory('QPL-2026-0001', CO_MANAGER_ID),
       ).resolves.toBeDefined();
     });
+
+    it('reposition the gallery photos', async () => {
+      listingExists(framedGalleryListing());
+
+      await expect(
+        service.updatePhotoFraming('QPL-2026-0001', CO_MANAGER_ID, framingBody),
+      ).resolves.toBeDefined();
+      expect(transactionManager.update).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('routes a co-manager may NOT reach', () => {
@@ -608,6 +636,44 @@ describe('listing co-manager permission boundary', () => {
 
       expect(coManagers.isActiveCoManager).not.toHaveBeenCalled();
     });
+
+    it('answers 403 LISTING_NOT_MANAGER on photo framing only for a listing the directory shows, whose ref is already public', async () => {
+      listingExists(framedGalleryListing());
+
+      const refusal: unknown = await service
+        .updatePhotoFraming('QPL-2026-0001', STRANGER_ID, framingBody)
+        .catch((error: unknown) => error);
+
+      expect(refusal).toBeInstanceOf(ForbiddenException);
+      expect((refusal as ForbiddenException).getResponse()).toMatchObject({
+        code: 'LISTING_NOT_MANAGER',
+      });
+      expect(transactionManager.update).not.toHaveBeenCalled();
+      // The refusal comes from the unlocked read, before any row lock.
+      expect(hasTakenARowLock()).toBe(false);
+    });
+
+    it.each([
+      ['in review', { status: ListingStatus.Review }],
+      ['in question', { status: ListingStatus.Question }],
+      ['paused', { isHiddenByOwner: true }],
+    ])(
+      '404s on photo framing for a listing that is %s',
+      async (_state, overrides: Partial<Listing>) => {
+        listingExists(framedGalleryListing(overrides));
+
+        const refusal: unknown = await service
+          .updatePhotoFraming('QPL-2026-0001', STRANGER_ID, framingBody)
+          .catch((error: unknown) => error);
+
+        expect(refusal).toBeInstanceOf(NotFoundException);
+        expect((refusal as NotFoundException).getResponse()).toMatchObject({
+          code: 'LISTING_NOT_FOUND',
+        });
+        expect(transactionManager.update).not.toHaveBeenCalled();
+        expect(hasTakenARowLock()).toBe(false);
+      },
+    );
   });
 
   // ---------------------------------------------------------------------------

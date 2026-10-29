@@ -984,10 +984,10 @@ export class AccountEnforcementService {
     }
     const resolution = await this.subjectResolver.resolve(report);
     // Ambiguity outranks a resolved author on purpose. The resolver DOES
-    // return an author for an answered public question (the asker), and taking
-    // it would be the whole defect: a member reporting the owner's ANSWER
-    // files a report that names the asker, so `restrict`/`suspend`/`ban` would
-    // land on the person who asked "is the entrance step-free".
+    // return an author for a review with a reply under it (the reviewer), and
+    // taking it would be the whole defect: a member reporting the employer's
+    // REPLY files a report that names the reviewer, so `restrict`/`suspend`/
+    // `ban` would land on the person the reply was aimed at.
     if (resolution.isAuthorAmbiguous) {
       return { userId: null, problem: 'ambiguous_authors' };
     }

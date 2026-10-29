@@ -991,7 +991,6 @@ describe('ListingActivityExportContributor', () => {
       emptyRepository(),
       emptyRepository(),
       emptyRepository(),
-      emptyRepository(),
       repositoryWith({
         find: jest.fn().mockResolvedValue([
           {

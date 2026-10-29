@@ -115,6 +115,12 @@ export class ListingSocialDto {
  * - `caption` is copy shown to everyone under the photo, and is genuinely
  *   optional. It is NOT a place to put alt text: a caption is read by people
  *   who can already see the picture.
+ *
+ * The editor sends exactly these three. A photo's framing (how it is
+ * positioned inside its frame) is written only through
+ * `PATCH /listings/:ref/photo-framing` and its admin twin, and the global
+ * `forbidNonWhitelisted` pipe answers 400 to a `framing` key on a gallery
+ * photo here.
  */
 export class ListingGalleryPhotoDto {
   @IsImageReference() image!: string;

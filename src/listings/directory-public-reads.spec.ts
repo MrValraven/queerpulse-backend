@@ -21,7 +21,6 @@ import {
   DirectoryService,
   HOSTED_GATHERING_LOOKBACK_DAYS,
 } from './directory.service';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import { Listing, SafeSpaceStatus } from './entities/listing.entity';
@@ -182,10 +181,6 @@ describe('DirectoryService public reads', () => {
         {
           provide: getRepositoryToken(ListingReviewHelpfulVote),
           useValue: {},
-        },
-        {
-          provide: getRepositoryToken(ListingPublicQuestion),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
         },
         {
           provide: getRepositoryToken(Profile),
@@ -949,15 +944,12 @@ describe('DirectoryService public reads', () => {
       expect(detail.isAdultsOnly).toBe(true);
     });
 
-    it('404s the reviews and questions of an 18+ listing for an anonymous caller', async () => {
+    it('404s the reviews of an 18+ listing for an anonymous caller', async () => {
       listings.findOne.mockResolvedValue(
         makeListing({ cats: ['intimacy'], online: true }),
       );
 
       await expect(service.listReviews('casa-t')).rejects.toThrow(
-        NotFoundException,
-      );
-      await expect(service.listQuestions('casa-t')).rejects.toThrow(
         NotFoundException,
       );
     });

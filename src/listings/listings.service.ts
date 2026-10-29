@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
+import { storageKeyFromImageUrl } from '../common/image-url';
 import {
   LISTING_CITY,
   resolveListingLocation,
@@ -21,7 +22,6 @@ import {
   resolveListingAttributeFields,
 } from './listing-attribute-rules';
 import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
-import { toImageUrl } from '../common/image-url';
 import {
   Brackets,
   DataSource,
@@ -98,6 +98,7 @@ import { CreateListingDto, ListingDayHoursDto } from './dto/create-listing.dto';
 import { UpdateOperatingStateDto } from './dto/update-operating-state.dto';
 import { ReplyToReviewDto } from './dto/reply-to-review.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
+import { UpdateListingPhotoFramingDto } from './dto/update-listing-photo-framing.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
 import { SafeSpaceVisitsService } from '../safe-space-vouches/safe-space-visits.service';
 import {
@@ -109,12 +110,7 @@ import {
   ListingModerationAction,
   ListingModerationEvent,
 } from './entities/listing-moderation-event.entity';
-import {
-  ListingPublicQuestionDTO,
-  toListingPublicQuestionDTO,
-} from './dto/listing-public-question.dto';
 import { ListingCoManager } from './entities/listing-co-manager.entity';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
@@ -166,9 +162,11 @@ import {
   isOwnerPubliclyNamed,
   ConfirmedDetailsDTO,
   ListingDTO,
+  ListingGalleryPhotoView,
   ReviewDTO,
   SimilarListingDTO,
   ManagedListingItem,
+  toGalleryView,
   toListingDTO,
   toManagedListingItem,
   toReviewDTO,
@@ -179,6 +177,7 @@ import {
   coverImageReferences,
   galleryFromLegacySlots,
   galleryImageReferences,
+  galleryWithFramingPatch,
   galleryWithLegacySlotPatch,
   legacySlotsFromGallery,
   normalizeCoverPhoto,
@@ -590,10 +589,13 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
   // one slot cannot delete a fifth photo or a caption it has no way to send
   // (see `galleryWithLegacySlotPatch`). A body carrying both shapes: the
   // gallery wins, matching `galleryFromCreateInput`.
+  //
+  // Framing rides along by image on both shapes, so a photo that stays keeps
+  // the position a manager gave it.
   const currentGallery = listing.photoGallery ?? [];
   const nextGallery: ListingGalleryPhoto[] | null =
     dto.photoGallery !== undefined
-      ? normalizeGallery(dto.photoGallery)
+      ? normalizeGallery(dto.photoGallery, currentGallery)
       : dto.photos !== undefined || dto.alt !== undefined
         ? galleryWithLegacySlotPatch(currentGallery, dto.photos, dto.alt)
         : null;
@@ -919,6 +921,23 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
 };
 
 /**
+ * Names a history row can carry that are no `Listing` column. They are kept
+ * apart from `OWNER_EDITABLE_FIELD_LABELS` because that map doubles as the
+ * column list `applyListingEdit` diffs, and a name with no column behind it
+ * would make that diff read a property the row never has.
+ *
+ * `photoFraming` is what a photo reposition records: the save writes the
+ * `photoGallery` column, but the edit a moderator should read is the photo
+ * positions, which the gallery label would misreport as an added or removed
+ * photo.
+ */
+type HistoryChangedField = keyof Listing | 'photoFraming';
+
+const HISTORY_ONLY_FIELD_LABELS: Record<'photoFraming', string> = {
+  photoFraming: 'the photo positions',
+};
+
+/**
  * `JSON.stringify` with object keys sorted recursively (arrays keep their own
  * order; only plain-object keys are reordered). `undefined` properties are
  * dropped exactly as plain `JSON.stringify` drops them: the replacer only
@@ -978,11 +997,14 @@ function changedListingFields(
  * label once, in the order the fields changed.
  */
 function summarizeEditedFields(
-  changedFields: readonly (keyof Listing)[],
+  changedFields: readonly HistoryChangedField[],
 ): string {
   const changedLabels: string[] = [];
   for (const field of changedFields) {
-    const label = OWNER_EDITABLE_FIELD_LABELS[field];
+    const label =
+      field === 'photoFraming'
+        ? HISTORY_ONLY_FIELD_LABELS.photoFraming
+        : OWNER_EDITABLE_FIELD_LABELS[field];
     if (label !== undefined && !changedLabels.includes(label)) {
       changedLabels.push(label);
     }
@@ -1009,7 +1031,7 @@ function queerOwnedBadgeClearedNote(
  * owner changed, and whether the edit cost the listing its queer-owned badge.
  */
 function describeOwnerEdit(
-  changedFields: readonly (keyof Listing)[],
+  changedFields: readonly HistoryChangedField[],
   wasQueerOwnedBadgeCleared: boolean,
 ): string {
   const changeSummary = summarizeEditedFields(changedFields);
@@ -1028,7 +1050,7 @@ function describeOwnerEdit(
  * both. The field list and the badge note are the owner's, word for word.
  */
 function describeStaffEdit(
-  changedFields: readonly (keyof Listing)[],
+  changedFields: readonly HistoryChangedField[],
   wasQueerOwnedBadgeCleared: boolean,
 ): string {
   const changeSummary = summarizeEditedFields(changedFields);
@@ -1070,6 +1092,53 @@ export interface ListingQueueResult extends Paginated<ListingDTO> {
 }
 
 /**
+ * What both photo-framing routes answer with: the listing's whole gallery as
+ * the read side shows it, framing included, so the client can patch its cached
+ * detail from this one response.
+ */
+export interface ListingPhotoFramingResult {
+  photoGallery: ListingGalleryPhotoView[];
+}
+
+/**
+ * Whether the directory shows this listing to members: live, with its team's
+ * pause off. The same rule the directory's own reads apply
+ * (`status: Live, isHiddenByOwner: false` in `directory.service.ts`).
+ */
+function isListingShownInDirectory(
+  listing: Pick<Listing, 'status' | 'isHiddenByOwner'>,
+): boolean {
+  return listing.status === ListingStatus.Live && !listing.isHiddenByOwner;
+}
+
+/**
+ * The 404 both photo-framing routes answer when the ref names no listing, and
+ * the member route also answers when a listing the directory hides is asked
+ * for by someone outside its team (see `updatePhotoFraming`).
+ */
+function photoFramingListingNotFound(): NotFoundException {
+  return new NotFoundException({
+    message: 'No listing has this reference.',
+    code: 'LISTING_NOT_FOUND',
+  });
+}
+
+/**
+ * The stored reference a photo-framing entry names, with our own resolved
+ * `/files/<key>` URL collapsed back to its bare key so it matches the gallery.
+ *
+ * `@IsImageReference()` lets a `null` or empty image through the pipe. Either
+ * one reads as the empty reference, which matches no gallery photo, so the
+ * save is refused as naming a photo the gallery lacks and the URL helper
+ * never sees a value it cannot read.
+ */
+function photoFramingImageReference(image: string | null | undefined): string {
+  return typeof image === 'string' && image.length > 0
+    ? storageKeyFromImageUrl(image)
+    : '';
+}
+
+/**
  * Member-submitted business directory listings (spec §3 Tier 4 "listings").
  * `ref` (`QPL-<year>-<seq>`) is the frontend's path identifier for every
  * mutation (`listings.api.ts`); `GET/PATCH/DELETE /listings/:ref` are all
@@ -1100,8 +1169,6 @@ export class ListingsService {
     // Moderation audit trail (#16) + Q&A thread (#17).
     @InjectRepository(ListingModerationEvent)
     private readonly moderationEvents: Repository<ListingModerationEvent>,
-    @InjectRepository(ListingPublicQuestion)
-    private readonly publicQuestions: Repository<ListingPublicQuestion>,
     @InjectRepository(ListingQuestion)
     private readonly questions: Repository<ListingQuestion>,
     private readonly dataSource: DataSource,
@@ -2802,8 +2869,7 @@ export class ListingsService {
    * review of <business>", exactly as the page reads.
    *
    * `isOwnerPubliclyNamed` is the SAME exported predicate `ownerIdentity` in
-   * `listing-response.ts` uses to build the public page, and
-   * `notifyQuestionAnsweredBestEffort` calls it too. It was a hand-copied
+   * `listing-response.ts` uses to build the public page. It was a hand-copied
    * duplicate here until the two copies were merged: a privacy rule written
    * twice drifts, and drift in this direction names somebody who asked not to
    * be named.
@@ -2814,9 +2880,7 @@ export class ListingsService {
    * through the bell. That is a second field because it was one field until
    * recently: `replyingSubjectId` carried both jobs, so passing `null` to hide
    * an anonymous owner's name also dropped the gate and delivered the row to
-   * somebody who had blocked them. `notifyQuestionAnsweredBestEffort` below
-   * splits the same two questions the same way, into `memberUserId` and
-   * `isNamedToTheAsker`.
+   * somebody who had blocked them.
    */
   private async notifyReviewRepliedBestEffort(options: {
     review: ListingReview;
@@ -2869,8 +2933,7 @@ export class ListingsService {
     } catch (error) {
       // Belt and braces. `ReviewReplyNotifier` already swallows its own
       // failures, so nothing should reach here; the guard is what makes this
-      // method's name true no matter what that class does later. Same shape as
-      // `notifyQuestionAnsweredBestEffort` above.
+      // method's name true no matter what that class does later.
       this.logger.warn(
         `Failed to notify a reply to review ${review.id}: ${
           error instanceof Error ? error.message : String(error)
@@ -3165,10 +3228,9 @@ export class ListingsService {
    * OWNER ONLY, and it stays on `loadOwnedOr404` deliberately — the one route
    * a reader might expect co-managers to reach and they do not.
    *
-   * This is not the public Q&A on the listing page (that is
-   * `answerPublicQuestion`, which IS co-manager-allowed). It is the moderator's
-   * private compliance thread from review time, and `askQuestion` delivers each
-   * one as a DM to `listing.ownerId` personally. The questions are the vetting
+   * This is the moderator's private compliance thread from review time, and
+   * `askQuestion` delivers each one as a DM to `listing.ownerId` personally.
+   * The questions are the vetting
    * questions: who are you to this business, what is your evidence for the
    * badge. Answering them is the accountable owner speaking for themselves to a
    * moderator, and it is the closest thing on this controller to "anything
@@ -3226,236 +3288,6 @@ export class ListingsService {
       : null;
     return toListingQuestionDTO(saved, toMemberRef(asker));
   }
-
-  /**
-   * Answer a member's PUBLIC question on a listing, as the listing OWNER.
-   *
-   * Distinct from `answerQuestion` directly above, which answers a MODERATOR's
-   * private question during review. That one is a compliance thread in the
-   * admin drawer; this one is words that appear on a public marketing page.
-   * Separate tables, separate routes (`public-questions` rather than
-   * `questions` under `:ref`), and this comment is here so the two never get
-   * quietly merged.
-   *
-   * Owner-gated by `loadOwnedOr404`, the same check `update`/`remove`/
-   * `replyToReview` use, and the question is looked up SCOPED TO THIS LISTING
-   * so an answer cannot be attached to another owner's question through a
-   * guessed id.
-   */
-  async answerPublicQuestion(
-    ref: string,
-    questionId: string,
-    userId: string,
-    answer: string,
-  ): Promise<ListingPublicQuestionDTO> {
-    // CO-MANAGER-ALLOWED. Same reasoning as `replyToReview`: the answer appears
-    // under the business's name on its own page, and leaving it owner-only
-    // would mean the person actually running the page watches questions go
-    // unanswered.
-    const { listing, isOwner } = await this.loadOwnedOrCoManagedOr404(
-      ref,
-      userId,
-    );
-    // `isOwner` rides through only so the notification can tell an OWNER from a
-    // co-manager. The answer itself is recorded and published identically for
-    // both: the page attributes it to the business.
-    return this.writePublicAnswer(
-      listing,
-      questionId,
-      userId,
-      answer,
-      false,
-      isOwner,
-    );
-  }
-
-  /**
-   * Answer a member's public question as a MODERATOR, from
-   * `POST /admin/listings/:ref/public-questions/:id/answer`.
-   *
-   * WHY MODERATORS CAN ANSWER AT ALL. Owner-only was the obvious rule and it is
-   * the wrong one here, for a reason specific to this directory: a large share
-   * of listings have no owner. A suggestion is held by the platform with a
-   * null `owner_id`; the suggester is `suggested_by_user_id`. Staff-authored
-   * entries also wait for their business to claim the page, and those
-   * unclaimed pages are frequently exactly the venues people have questions
-   * about. Under an owner-only rule the question box on every one of them would
-   * be a form that accepts questions nobody is able to answer, which is worse
-   * than not offering it. Abandoned owned listings fail the same way, more
-   * slowly.
-   *
-   * WHAT IT DOES NOT DO. A moderator answering does not get to speak as the
-   * business. `is_answered_by_moderator` is stamped on the row and surfaces as
-   * `answeredByRole: 'moderator'` in the DTO, so the page labels it as coming
-   * from platform staff. That distinction is load-bearing: an accessibility or
-   * safety answer attributed to the venue is a commitment BY the venue, and
-   * staff must not be able to make one on their behalf. The individual
-   * moderator is never named in the response either — the role is the part a
-   * reader needs, and naming staff on a public business page exposes them to
-   * exactly the pressure the role label avoids.
-   *
-   * Unlike the owner path this does NOT require ownership, so it loads with
-   * `loadOr404`; the route's `RolesGuard` is the gate.
-   */
-  async answerPublicQuestionAsModerator(
-    ref: string,
-    questionId: string,
-    moderatorUserId: string,
-    answer: string,
-  ): Promise<ListingPublicQuestionDTO> {
-    const listing = await this.loadOr404(ref);
-    return this.writePublicAnswer(
-      listing,
-      questionId,
-      moderatorUserId,
-      answer,
-      true,
-      // Staff are never the listing's owner on this path, whoever owns it.
-      false,
-    );
-  }
-
-  /**
-   * The write both answer paths share. Everything except WHO is allowed to get
-   * here is identical, which is the point of factoring it: the owner path and
-   * the moderator path cannot drift apart in what they record or who they
-   * notify.
-   */
-  private async writePublicAnswer(
-    listing: Listing,
-    questionId: string,
-    actorUserId: string,
-    answer: string,
-    isModerator: boolean,
-    isActorTheOwner: boolean,
-  ): Promise<ListingPublicQuestionDTO> {
-    const question = await this.publicQuestions.findOne({
-      where: { id: questionId, listingId: listing.id },
-    });
-    if (!question) {
-      throw new NotFoundException('Question not found');
-    }
-
-    // Same post-trim re-check `replyToReview` documents: `@MinLength(1)` lets
-    // `" "` through, which would store an `answeredAt` with nothing under it and
-    // render as answered-but-blank.
-    const text = answer.trim();
-    if (!text) {
-      throw new BadRequestException('Answer cannot be empty');
-    }
-
-    question.answer = text;
-    question.answeredAt = new Date();
-    question.answeredById = actorUserId;
-    question.isAnsweredByModerator = isModerator;
-    const saved = await this.publicQuestions.save(question);
-
-    await this.notifyQuestionAnsweredBestEffort(saved.askerId, listing, {
-      // Platform staff are not a member the asker is in a conversation with,
-      // so a moderator answer carries no member at all. See the helper.
-      memberUserId: isModerator ? null : actorUserId,
-      isNamedToTheAsker:
-        !isModerator && isActorTheOwner && isOwnerPubliclyNamed(listing),
-    });
-
-    const asker = saved.askerId
-      ? await this.profiles.findOne({
-          where: { userId: saved.askerId },
-          select: { slug: true, avatarUrl: true, photoVisible: true },
-        })
-      : null;
-    return toListingPublicQuestionDTO(
-      saved,
-      asker
-        ? {
-            slug: asker.slug,
-            avatarUrl: asker.photoVisible ? toImageUrl(asker.avatarUrl) : null,
-          }
-        : null,
-    );
-  }
-
-  /**
-   * Best-effort "your question was answered" notification to the asker. Never
-   * throws: the answer has already committed, and the same never-block ordering
-   * every other notification in this module uses.
-   *
-   * `answerer` splits the two things "who answered" is used for, because they
-   * are not the same person-shaped question:
-   *
-   * - `memberUserId` is the MEMBER who wrote the answer, owner or co-manager,
-   *   and `null` when platform staff did. It is what
-   *   `NotificationsService.create`'s block/mute gate keys on, so an asker who
-   *   has blocked this member is never reached through the bell. It is `null`
-   *   for a moderator on purpose: block/mute is a member-to-member control and
-   *   must not let one member silence platform staff.
-   * - `isNamedToTheAsker` decides whether that member also becomes
-   *   `payload.actorId`, which is the field the bell reads to give the row a
-   *   name, a face and a link to their profile (`actorIdOf` in
-   *   `notification-response.ts`, and `resolveActor` on the push side).
-   *
-   * WHY THOSE ARE SPLIT, which is a change to a shipped feature. This bell row
-   * used to carry the answering owner as `actorId` unconditionally. Meanwhile
-   * the public Q&A names nobody: `ListingPublicQuestionDTO` attributes an
-   * answer by ROLE only (`answeredByRole: 'owner' | 'moderator'`), a
-   * co-manager is invisible on the public page by design
-   * (`listing-owner-personal-fields.ts`), and an owner on `visibility: 'anon'`
-   * or `'role'`, or one who withheld `linkToProfile`, has told this platform
-   * not to tie their name to this business. So the asker's bell was handing out
-   * an identity the page they asked on deliberately withholds, which on this
-   * platform outs a queer business owner. Now the actor rides along only where
-   * `isOwnerPubliclyNamed` says the public detail read already links that
-   * owner's profile, the same predicate `ownerIdentity` builds the page from
-   * and the same one `notifyReviewRepliedBestEffort` uses.
-   *
-   * The row stays USEFUL when the actor is withheld: the asker is owed the
-   * answer. `listingName` still rides along for the copy, `source` +
-   * `listingSlug` still build the deep link to the page the answer is published
-   * on, and an actorless row keeps its generic text and bell icon rather than
-   * rendering empty (`notifications.adapters.ts` only upgrades a row to an
-   * avatar and a profile link when the backend resolved an actor). The answer
-   * text itself was never in the payload and still is not: it lives on the page
-   * this row opens.
-   */
-  private async notifyQuestionAnsweredBestEffort(
-    askerId: string | null,
-    listing: Listing,
-    answerer: { memberUserId: string | null; isNamedToTheAsker: boolean },
-  ): Promise<void> {
-    // Null after an account erasure nulled the FK out. The question and its
-    // answer survive for other readers; there is simply nobody left to tell.
-    if (!askerId) return;
-    // Somebody answering their own question would be a notification to
-    // themselves. `askQuestion` blocks the OWNER from asking, so the reachable
-    // case is a co-manager who asked before taking the seat. Guarded on the
-    // real member rather than on the published actor, so withholding a name
-    // above can never resurrect a self-notification here.
-    if (answerer.memberUserId && answerer.memberUserId === askerId) return;
-    try {
-      await this.notifications.create(
-        askerId,
-        NotificationType.ListingPublicQuestionAnswered,
-        {
-          // Spread only where the public page already links this owner's
-          // profile. Everything else answers the question without naming
-          // anyone, exactly as the page does.
-          ...(answerer.isNamedToTheAsker && answerer.memberUserId
-            ? { actorId: answerer.memberUserId }
-            : {}),
-          source: 'listing',
-          listingSlug: listing.slug,
-          listingName: listing.name,
-        },
-        // The block/mute gate, passed even where the payload omits the id: the
-        // same split `SafeSpaceVouch` uses for an anonymous vouch, so an asker
-        // who blocked this member is still not reached.
-        answerer.memberUserId ?? undefined,
-      );
-    } catch {
-      // Intentionally ignored — the answer already committed.
-    }
-  }
-
   /**
    * Moderator/admin-only (`ListingsController.getHistory`'s `RolesGuard`
    * gate): a listing's full moderation audit trail (item #16) and Q&A thread
@@ -3879,6 +3711,198 @@ export class ListingsService {
     }
 
     return this.buildManagedDTO(listing, isOwner);
+  }
+
+  /**
+   * CO-MANAGER-ALLOWED (`PATCH /listings/:ref/photo-framing`): save where the
+   * photos of a live listing sit inside their frames. The owner and every
+   * active co-manager may reposition, the same team `update` admits, because
+   * framing is part of looking after the listing's page.
+   *
+   * This route draws its own 404/403 line, and the shared
+   * `loadOwnedOrCoManagedOr404` stays as it is. A member outside the team gets
+   * 403 `LISTING_NOT_MANAGER` only on a listing the directory shows. That split
+   * is safe because every member can already open a shown listing's page, so
+   * the 403 confirms nothing they could not see for themselves. A listing in
+   * review or paused by its team is hidden from members, and there the answer
+   * stays the 404 `LISTING_NOT_FOUND`, so refs (a monotonic sequence) still
+   * cannot be enumerated through this route.
+   *
+   * The access check reads the row unlocked and finishes before the save
+   * opens its transaction. The seat lookup runs on a pooled connection of its
+   * own, so holding the transaction's connection and row lock across it would
+   * let a burst of these requests drain the pool, and a member outside the
+   * team is refused before any row lock is taken.
+   */
+  async updatePhotoFraming(
+    ref: string,
+    userId: string,
+    dto: UpdateListingPhotoFramingDto,
+  ): Promise<ListingPhotoFramingResult> {
+    const listing = await this.listings.findOne({ where: { ref } });
+    if (!listing) throw photoFramingListingNotFound();
+
+    // The ownership test is a plain comparison against the row already
+    // loaded, so the owner's own save never pays for the seat lookup.
+    const isOwner = listing.ownerId === userId;
+    if (
+      !isOwner &&
+      !(await this.coManagers.isActiveCoManager(listing.id, userId))
+    ) {
+      if (isListingShownInDirectory(listing)) {
+        throw new ForbiddenException({
+          message:
+            'Only the owner or an active co-manager of this listing can reposition its photos.',
+          code: 'LISTING_NOT_MANAGER',
+        });
+      }
+      throw photoFramingListingNotFound();
+    }
+
+    return this.savePhotoFraming(
+      ref,
+      userId,
+      dto,
+      ListingModerationAction.OwnerEdited,
+    );
+  }
+
+  /**
+   * ADMIN (`PATCH /admin/listings/:ref/photo-framing`): save where the photos
+   * of a live listing sit inside their frames, on a listing somebody owns as
+   * well as on one the platform holds.
+   *
+   * This is the one field staff may change on a listing that has an owner. A
+   * reposition only alters how a photo the team chose sits in its frame on the
+   * page; every word, photo and fact the team wrote keeps its stored value.
+   * `adminUpdate` keeps refusing everything else with `LISTING_HAS_OWNER`.
+   * Every save leaves a `staff_edited` row with the admin as its actor, so the
+   * team reading its history can see who moved their photos.
+   */
+  async adminUpdatePhotoFraming(
+    ref: string,
+    staffUserId: string,
+    dto: UpdateListingPhotoFramingDto,
+  ): Promise<ListingPhotoFramingResult> {
+    // The admin role on the route is the whole gate, so every listing that
+    // exists is open to the reposition and the save runs with no check first.
+    return this.savePhotoFraming(
+      ref,
+      staffUserId,
+      dto,
+      ListingModerationAction.StaffEdited,
+    );
+  }
+
+  /**
+   * The framing write both routes share.
+   *
+   * The listing row is locked from the read to the write, so two framing
+   * saves landing together apply one after the other, each to the gallery the
+   * other committed. Each caller runs its access check before calling this,
+   * so the live check below only ever answers someone the route admits, and
+   * a member outside the team learns nothing about a hidden listing's state.
+   * The transaction reaches for no other pooled connection while it holds the
+   * lock. The locked read checks existence again, since the row can be
+   * removed between the caller's check and the lock.
+   *
+   * It writes the `photo_gallery` column alone, through a targeted update, and
+   * skips these side effects of `applyListingEdit` on purpose:
+   *
+   * - `status`: a reposition moves no moderation state.
+   * - `detailsConfirmedAt`: moving a photo inside its frame vouches for none of
+   *   the listing's details.
+   * - the queer-owned badge: framing changes nothing about who the business is.
+   * - the legacy `photos`/`alt` mirror: framing has no slot there.
+   * - orphan cleanup: the gallery holds the same images before and after.
+   *
+   * A save that leaves the gallery exactly as stored writes nothing, history
+   * included, and answers with the current gallery.
+   */
+  private async savePhotoFraming(
+    ref: string,
+    actorId: string,
+    dto: UpdateListingPhotoFramingDto,
+    auditAction:
+      ListingModerationAction.OwnerEdited | ListingModerationAction.StaffEdited,
+  ): Promise<ListingPhotoFramingResult> {
+    const { listing, nextGallery } = await this.dataSource.transaction(
+      async (manager) => {
+        const lockedListing = await manager.getRepository(Listing).findOne({
+          where: { ref },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedListing) throw photoFramingListingNotFound();
+
+        if (lockedListing.status !== ListingStatus.Live) {
+          throw new ConflictException({
+            message:
+              'This listing is not live in the directory, so its photos cannot be repositioned.',
+            code: 'LISTING_NOT_LIVE',
+          });
+        }
+        if (lockedListing.isHiddenByOwner) {
+          throw new ConflictException({
+            message:
+              'This listing is paused in the directory, so its photos cannot be repositioned.',
+            code: 'LISTING_NOT_LIVE',
+          });
+        }
+
+        const currentGallery = lockedListing.photoGallery ?? [];
+        const { gallery: framedGallery, unmatchedImages } =
+          galleryWithFramingPatch(
+            currentGallery,
+            dto.photos.map((entry) => ({
+              image: photoFramingImageReference(entry.image),
+              framing: entry.framing,
+            })),
+          );
+        // The service half of `SHARED_UPLOAD_HANDLERS`: the interceptor lets a
+        // key somebody else uploaded through on this route, and this check is
+        // what limits that to keys the gallery already holds. It also refuses
+        // a save made against a gallery that has since lost the photo, and
+        // writes nothing for the photos that did match.
+        if (unmatchedImages.length > 0) {
+          throw new BadRequestException({
+            message:
+              'A photo in this save is no longer in the listing gallery. Nothing was saved.',
+            code: 'PHOTO_NOT_IN_GALLERY',
+          });
+        }
+
+        // Compared through `canonicalJson`, because jsonb hands the stored
+        // framing back with its keys in its own order.
+        if (canonicalJson(framedGallery) === canonicalJson(currentGallery)) {
+          return { listing: lockedListing, nextGallery: currentGallery };
+        }
+
+        await manager.update(
+          Listing,
+          { id: lockedListing.id },
+          { photoGallery: framedGallery },
+        );
+        await manager.save(ListingModerationEvent, {
+          listingId: lockedListing.id,
+          actorId,
+          action: auditAction,
+          fromStatus: null,
+          toStatus: null,
+          reason:
+            auditAction === ListingModerationAction.StaffEdited
+              ? describeStaffEdit(['photoFraming'], false)
+              : describeOwnerEdit(['photoFraming'], false),
+          changedFields: ['photoFraming'],
+        });
+        return { listing: lockedListing, nextGallery: framedGallery };
+      },
+    );
+
+    listing.photoGallery = nextGallery;
+    const crops = await this.mediaCropService.getMany(
+      galleryImageReferences(nextGallery),
+    );
+    return { photoGallery: toGalleryView(listing, crops) };
   }
 
   /**

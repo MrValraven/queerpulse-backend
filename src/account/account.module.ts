@@ -136,7 +136,6 @@ import { ListingCoManager } from '../listings/entities/listing-co-manager.entity
 import { ListingEditSuggestion } from '../listings/entities/listing-edit-suggestion.entity';
 import { ListingEnquiry } from '../listings/entities/listing-enquiry.entity';
 import { ListingOwnerOffer } from '../listings/entities/listing-owner-offer.entity';
-import { ListingPublicQuestion } from '../listings/entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from '../listings/entities/listing-review-helpful-vote.entity';
 import { MagazineArticleComment } from '../magazine/entities/magazine-article-comment.entity';
 import { MagazinePieceMessage } from '../magazine/entities/magazine-piece-message.entity';
@@ -436,7 +435,6 @@ import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affili
       ListingEditSuggestion,
       ListingEnquiry,
       ListingOwnerOffer,
-      ListingPublicQuestion,
       ListingReviewHelpfulVote,
       MagazineArticleComment,
       MagazinePieceMessage,

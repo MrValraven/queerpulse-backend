@@ -66,7 +66,6 @@ import { ListingCoManager } from '../listings/entities/listing-co-manager.entity
 import { ListingEditSuggestion } from '../listings/entities/listing-edit-suggestion.entity';
 import { ListingEnquiry } from '../listings/entities/listing-enquiry.entity';
 import { ListingOwnerOffer } from '../listings/entities/listing-owner-offer.entity';
-import { ListingPublicQuestion } from '../listings/entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from '../listings/entities/listing-review-helpful-vote.entity';
 import { MagazineArticleComment } from '../magazine/entities/magazine-article-comment.entity';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
@@ -1934,10 +1933,8 @@ export class ResourceFeedbackExportContributor implements DataExportContribution
  * listings beyond owning them. Ownership claims, edit suggestions, offers to
  * take a listing over (with the note staff addressed to them, which
  * `listForMember` already shows), co-manager seats they hold and co-manager
- * invites they sent (the invitee by id), enquiries, the public questions they
- * asked (with the answer they got), the answers they gave to public questions
- * (the asker stays out), helpful votes on reviews, and their unfinished
- * listing drafts. The draft's resume token is a credential and stays out.
+ * invites they sent (the invitee by id), enquiries, helpful votes on reviews,
+ * and their unfinished listing drafts. The draft's resume token is a credential and stays out.
  *
  * `listing_questions` is left out on purpose: its `askedBy` is the moderator
  * who asked, so reading by that column would put submitters' answers from a
@@ -1959,8 +1956,6 @@ export class ListingActivityExportContributor implements DataExportContribution 
     private readonly coManagers: Repository<ListingCoManager>,
     @InjectRepository(ListingEnquiry)
     private readonly enquiries: Repository<ListingEnquiry>,
-    @InjectRepository(ListingPublicQuestion)
-    private readonly publicQuestions: Repository<ListingPublicQuestion>,
     @InjectRepository(ListingReviewHelpfulVote)
     private readonly helpfulVotes: Repository<ListingReviewHelpfulVote>,
     @InjectRepository(ListingDraft)
@@ -1975,8 +1970,6 @@ export class ListingActivityExportContributor implements DataExportContribution 
       ownerOffers,
       coManagers,
       enquiries,
-      publicQuestions,
-      answeredQuestions,
       helpfulVotes,
       drafts,
     ] = await Promise.all([
@@ -1991,11 +1984,6 @@ export class ListingActivityExportContributor implements DataExportContribution 
         ...byCreatedAt,
       }),
       this.enquiries.find({ where: { senderId: userId }, ...byCreatedAt }),
-      this.publicQuestions.find({ where: { askerId: userId }, ...byCreatedAt }),
-      this.publicQuestions.find({
-        where: { answeredById: userId },
-        ...byCreatedAt,
-      }),
       this.helpfulVotes.find({ where: { voterId: userId }, ...byCreatedAt }),
       this.listingDrafts.find({ where: { userId }, ...byCreatedAt }),
     ]);
@@ -2055,24 +2043,6 @@ export class ListingActivityExportContributor implements DataExportContribution 
         listingId: enquiry.listingId,
         conversationId: enquiry.conversationId,
         createdAt: enquiry.createdAt.toISOString(),
-      })),
-      ...publicQuestions.map((question) => ({
-        type: 'publicQuestion' as const,
-        id: question.id,
-        listingId: question.listingId,
-        askerName: question.askerName,
-        body: question.body,
-        answer: question.answer,
-        isAnsweredByModerator: question.isAnsweredByModerator,
-        answeredAt: isoOrNull(question.answeredAt),
-        createdAt: question.createdAt.toISOString(),
-      })),
-      ...answeredQuestions.map((question) => ({
-        type: 'publicAnswer' as const,
-        questionId: question.id,
-        listingId: question.listingId,
-        answer: question.answer,
-        answeredAt: isoOrNull(question.answeredAt),
       })),
       ...helpfulVotes.map((vote) => ({
         type: 'helpfulVote' as const,

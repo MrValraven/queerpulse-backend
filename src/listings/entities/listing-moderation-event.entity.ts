@@ -82,6 +82,10 @@ export enum ListingModerationAction {
    * `fromStatus`/`toStatus` are both null on this action: an owner edit changes
    * the listing's content and leaves its moderation state alone. See migration
    * `AddListingOwnerEditedAction1793960000000`.
+   *
+   * `ListingsService.updatePhotoFraming` writes this action too, with
+   * `changedFields: ['photoFraming']`, once per photo-position save that moved
+   * at least one photo.
    */
   OwnerEdited = 'owner_edited',
   /**
@@ -174,6 +178,10 @@ export enum ListingModerationAction {
    * `reason` is the same fixed plain-language sentence `owner_edited` uses.
    * `fromStatus`/`toStatus` are both null: an edit moves no moderation state.
    * See migration `MoveSuggestedListingsToPlatform1822600000000`.
+   *
+   * `ListingsService.adminUpdatePhotoFraming` also writes this action, and it
+   * reaches owned listings for photo framing alone, with
+   * `changedFields: ['photoFraming']`.
    */
   StaffEdited = 'staff_edited',
 }
@@ -247,6 +255,9 @@ export class ListingModerationEvent {
    * column the edit changed) and `suggestion_applied` (the one column
    * written). Null on every other action and on rows written before migration
    * `AddListingHistoryActionsAndChangedFields1821900000000`.
+   *
+   * Each entry is a `Listing` property name, plus `photoFraming` for a
+   * photo-position save, which names no column.
    */
   @Column({ type: 'text', array: true, nullable: true })
   changedFields!: string[] | null;

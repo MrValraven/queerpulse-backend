@@ -22,27 +22,19 @@ export interface ReportSubjectResolution {
    * the report does not record which of them was reported, so
    * {@link authorUserId} is one of the candidates rather than the answer.
    *
-   * Two subject types can be true today, for the same structural reason.
-   *
-   *  - `listing_public_question`: one row holds a member's question AND the
-   *    listing owner's answer posted under it, and the single "Report this"
-   *    control on the card sits below both halves
-   *    (`DirectoryQuestionCard.tsx`). A member reporting the ANSWER files a
-   *    report indistinguishable from one about the question.
-   *  - `review`: one row holds a member's review AND the reviewed party's
-   *    single public reply under it (a listing owner, an employer, or a
-   *    lister), and again one report control sits below both halves
-   *    (`CompanyTabs.tsx`, `HousingReviewCard.tsx`). The taxonomy says so
-   *    itself: `ReportSubjectType.Review`'s own doc records that a review's
-   *    reply is deliberately not separately takedown-able, because a reply
-   *    read without the review it answers is not the same statement. That
-   *    reasoning makes the pair one subject, and it makes the author of the
-   *    reported half unknowable in exactly the same way.
+   * Only the `review` subject can be true today. One row holds a member's
+   * review AND the reviewed party's single public reply under it (a listing
+   * owner, an employer, or a lister), and one report control sits below both
+   * halves (`CompanyTabs.tsx`, `HousingReviewCard.tsx`). The taxonomy says so
+   * itself: `ReportSubjectType.Review`'s own doc records that a review's reply
+   * is deliberately not separately takedown-able, because a reply read without
+   * the review it answers is not the same statement. That reasoning makes the
+   * pair one subject, and it makes the author of the reported half unknowable.
    *
    * Read by the enforcement path, which must refuse rather than sanction a
    * coin-flip: a wrong ban costs someone their place in a community they are
    * probably relying on, and the platform never learns it was wrong. The read
-   * path is free to keep showing `authorUserId` (the asker opened the
+   * path is free to keep showing `authorUserId` (the reviewer opened the
    * exchange), because naming who is on screen is not the same act as
    * choosing who to punish.
    */
@@ -263,9 +255,6 @@ export class ReportSubjectResolverService {
 
       case ReportSubjectType.MagazineComment:
         return this.queryByUuid(MAGAZINE_COMMENT_SQL, subjectIds);
-
-      case ReportSubjectType.ListingPublicQuestion:
-        return this.queryByUuid(LISTING_PUBLIC_QUESTION_SQL, subjectIds);
 
       case ReportSubjectType.Subprofile:
         // Addressed by uuid from the persona page, but a slug is a legitimate
@@ -561,13 +550,12 @@ const MESSAGE_SQL = `
  *  1. The excerpt SHOWS THE REPLY when there is one. A moderator reading only
  *     the review is judging half an exchange, and the half they cannot see is
  *     the half a reporter may well have meant.
- *  2. `is_author_ambiguous` is TRUE when a reply exists, exactly as it is for
- *     `listing_public_question`. `author_user_id` stays the reviewer, because
- *     the drawer has to name somebody and they opened the exchange; the flag is
- *     what stops `restrict`/`suspend`/`ban` landing on them for words the
- *     employer, the listing owner or the lister wrote. Without it, a report
- *     filed against an abusive employer reply resolves to the REVIEWER and bans
- *     the person the reply was aimed at.
+ *  2. `is_author_ambiguous` is TRUE when a reply exists. `author_user_id`
+ *     stays the reviewer, because the drawer has to name somebody and they
+ *     opened the exchange; the flag is what stops `restrict`/`suspend`/`ban`
+ *     landing on them for words the employer, the listing owner or the lister
+ *     wrote. Without it, a report filed against an abusive employer reply
+ *     resolves to the REVIEWER and bans the person the reply was aimed at.
  *
  * A blank or absent reply is not two authors, so the flag is false there and
  * the ordinary case (a review nobody has answered) stays fully actionable.
@@ -697,39 +685,6 @@ const MAGAZINE_COMMENT_SQL = `
          NULL::uuid    AS community_id
   FROM magazine_reader_comment mrc
   WHERE mrc.id = ANY($1::uuid[])
-`;
-
-// One subject covers the question AND the answer posted under it (see
-// `ReportSubjectType.ListingPublicQuestion`), so the excerpt shows the question
-// with the answer appended when there is one.
-//
-// THE AUTHOR IS THEREFORE NOT ALWAYS KNOWABLE, and this is the only statement
-// in this file where that is true. The asker wrote the question; somebody else
-// (the listing's owner, a later owner after a claim, or a moderator; see
-// `ListingPublicQuestion.isAnsweredByModerator`) wrote the answer. The single
-// "Report this" control on the card sits below both halves and sends only the
-// question's uuid, so nothing on the wire says which half a member meant.
-//
-// `author_user_id` stays the asker, which is right for the READ path: they
-// opened the exchange and the drawer has to name somebody. `is_author_ambiguous`
-// is how the ENFORCEMENT path learns not to trust it. Answered by the asker
-// themselves is not ambiguous at all (both halves are then the same member),
-// and neither is an answer that is absent or blank.
-const LISTING_PUBLIC_QUESTION_SQL = `
-  SELECT lpq.id::text AS key,
-         lpq.asker_id AS author_user_id,
-         CASE
-           WHEN lpq.answer IS NULL OR lpq.answer = '' THEN lpq.body
-           ELSE lpq.body || ' / ' || lpq.answer
-         END        AS excerpt,
-         NULL::uuid AS community_id,
-         (
-           lpq.answer IS NOT NULL
-           AND btrim(lpq.answer) <> ''
-           AND lpq.answered_by_id IS DISTINCT FROM lpq.asker_id
-         )          AS is_author_ambiguous
-  FROM listing_public_questions lpq
-  WHERE lpq.id = ANY($1::uuid[])
 `;
 
 const SUBPROFILE_BY_ID_SQL = `

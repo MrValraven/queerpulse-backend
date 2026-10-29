@@ -1,6 +1,8 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { HttpStatus, NotFoundException } from '@nestjs/common';
-import { HttpException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityManager, FindOperator } from 'typeorm';
@@ -11,7 +13,6 @@ import {
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Event } from '../events/entities/event.entity';
 import { MediaCropService } from '../media-crops/media-crops.service';
-import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
@@ -24,7 +25,6 @@ import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
 import { DirectoryService } from './directory.service';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
@@ -35,8 +35,8 @@ import {
 } from './entities/listing.entity';
 
 /**
- * Covers the three member-facing write paths added to the directory: editing
- * your own review, helpful votes, and the public question box. The read paths
+ * Covers the member-facing write paths added to the directory: editing your
+ * own review and helpful votes. The read paths
  * this service has always had are exercised through the listings specs and are
  * deliberately not re-covered here. The one read covered below is the privacy
  * filter on `listByMemberSlug`, which decides whose name a profile publishes.
@@ -46,14 +46,6 @@ describe('DirectoryService', () => {
   let listings: { findOne: jest.Mock; query: jest.Mock };
   let reviews: { findOne: jest.Mock; save: jest.Mock; find: jest.Mock };
   let helpfulVotes: Record<string, jest.Mock>;
-  let publicQuestions: {
-    findOne: jest.Mock;
-    find: jest.Mock;
-    create: jest.Mock;
-    save: jest.Mock;
-    count: jest.Mock;
-    createQueryBuilder: jest.Mock;
-  };
   let profiles: { find: jest.Mock; findOne: jest.Mock };
   let contentModeration: { statesFor: jest.Mock; statesForAnyType: jest.Mock };
   let notifications: { create: jest.Mock };
@@ -117,23 +109,6 @@ describe('DirectoryService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     helpfulVotes = {};
-    publicQuestions = {
-      findOne: jest.fn(),
-      find: jest.fn().mockResolvedValue([]),
-      create: jest.fn((row: object) => row),
-      save: jest.fn((row: object) =>
-        Promise.resolve({
-          id: 'public-question-1',
-          createdAt: new Date('2026-03-01T10:00:00.000Z'),
-          answer: null,
-          answeredAt: null,
-          isAnsweredByModerator: false,
-          ...row,
-        }),
-      ),
-      count: jest.fn().mockResolvedValue(0),
-      createQueryBuilder: jest.fn(),
-    };
     profiles = {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
@@ -167,10 +142,6 @@ describe('DirectoryService', () => {
         {
           provide: getRepositoryToken(ListingReviewHelpfulVote),
           useValue: helpfulVotes,
-        },
-        {
-          provide: getRepositoryToken(ListingPublicQuestion),
-          useValue: publicQuestions,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(Event), useValue: { find: jest.fn() } },
@@ -449,108 +420,6 @@ describe('DirectoryService', () => {
       expect(transactionManager.delete).toHaveBeenCalledWith(
         ListingReviewHelpfulVote,
         { reviewId: 'review-1', voterId: 'member-1' },
-      );
-    });
-  });
-
-  describe('askQuestion', () => {
-    const question = { body: 'Is the entrance step-free?' };
-
-    it('blocks the owner from asking on their own listing', async () => {
-      await expect(
-        service.askQuestion('lux-cafe', 'owner-1', question),
-      ).rejects.toBeInstanceOf(BadRequestException);
-      expect(publicQuestions.save).not.toHaveBeenCalled();
-    });
-
-    it('rejects a question that is only long enough because of whitespace', async () => {
-      await expect(
-        service.askQuestion('lux-cafe', 'member-1', { body: 'Hi?     ' }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-    });
-
-    it('429s a member stacking unanswered questions on one listing', async () => {
-      // Three already outstanding and unanswered on this listing.
-      publicQuestions.count.mockResolvedValueOnce(3);
-
-      const failure = await service
-        .askQuestion('lux-cafe', 'member-1', question)
-        .catch((error: unknown) => error);
-
-      expect(failure).toBeInstanceOf(HttpException);
-      expect((failure as HttpException).getStatus()).toBe(
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-      expect(publicQuestions.save).not.toHaveBeenCalled();
-    });
-
-    it('429s a member who has asked too many questions across the directory today', async () => {
-      publicQuestions.count
-        .mockResolvedValueOnce(0) // nothing outstanding here
-        .mockResolvedValueOnce(10); // but ten asked in the last 24h
-
-      const failure = await service
-        .askQuestion('lux-cafe', 'member-1', question)
-        .catch((error: unknown) => error);
-
-      expect(failure).toBeInstanceOf(HttpException);
-      expect((failure as HttpException).getStatus()).toBe(
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    });
-
-    it('snapshots the asker name and notifies the owner with the asker as actor', async () => {
-      profiles.findOne.mockResolvedValue({
-        slug: 'ana-silva',
-        firstName: 'Ana',
-        lastName: 'Silva',
-        avatarUrl: null,
-        photoVisible: true,
-      });
-
-      const dto = await service.askQuestion('lux-cafe', 'member-1', question);
-
-      expect(dto.askerName).toBe('Ana Silva');
-      expect(dto.answer).toBeNull();
-      expect(dto.answeredByRole).toBeNull();
-      expect(notifications.create).toHaveBeenCalledWith(
-        'owner-1',
-        NotificationType.ListingPublicQuestion,
-        expect.objectContaining({
-          actorId: 'member-1',
-          source: 'listing',
-          listingSlug: 'lux-cafe',
-        }),
-        'member-1',
-      );
-    });
-
-    it('still posts the question when there is no owner to notify', async () => {
-      // `Listing.ownerId` is typed non-nullable on the entity while the column
-      // is nullable in the database: a platform-held suggestion, or any
-      // listing whose owner is null, has no owner; `friendly` is a business
-      // attribute and carries no ownership meaning. The fixture states the
-      // real row shape directly.
-      listings.findOne.mockResolvedValue({
-        ...LIVE_LISTING,
-        ownerId: null as unknown as string,
-      });
-
-      const dto = await service.askQuestion('lux-cafe', 'member-1', question);
-
-      // Unowned listings are exactly the case the moderator answer path exists
-      // for, so the question must still be accepted here.
-      expect(dto.body).toBe('Is the entrance step-free?');
-      expect(notifications.create).not.toHaveBeenCalled();
-    });
-
-    it('never blocks the question on a failed notification', async () => {
-      notifications.create.mockRejectedValue(new Error('bell is down'));
-
-      await expect(
-        service.askQuestion('lux-cafe', 'member-1', question),
-      ).resolves.toEqual(
-        expect.objectContaining({ body: 'Is the entrance step-free?' }),
       );
     });
   });

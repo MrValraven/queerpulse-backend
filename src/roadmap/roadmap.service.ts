@@ -18,6 +18,7 @@ import {
   toNotBuildingDTO,
 } from './roadmap-response';
 import { CastVoteDto } from './dto/cast-vote.dto';
+import { RemoveVoteDto } from './dto/remove-vote.dto';
 import { SubmitIdeaDto } from './dto/submit-idea.dto';
 
 /**
@@ -136,21 +137,44 @@ export class RoadmapService {
     return rows.map((row) => row.targetId);
   }
 
-  async castVote(
-    memberId: string,
-    dto: CastVoteDto,
-  ): Promise<{ targetId: string; votes: number; voted: true }> {
+  private async assertVoteTargetExists(
+    targetType: RoadmapVoteTarget,
+    targetId: string,
+  ): Promise<void> {
     const targetExists =
-      dto.targetType === RoadmapVoteTarget.Item
-        ? await this.items.exists({ where: { id: dto.targetId } })
-        : await this.ideas.exists({ where: { id: dto.targetId } });
+      targetType === RoadmapVoteTarget.Item
+        ? await this.items.exists({ where: { id: targetId } })
+        : await this.ideas.exists({ where: { id: targetId } });
     if (!targetExists) {
       throw new NotFoundException(
-        dto.targetType === RoadmapVoteTarget.Item
+        targetType === RoadmapVoteTarget.Item
           ? 'Roadmap item not found'
           : 'Roadmap idea not found',
       );
     }
+  }
+
+  // The displayed total = seed + live, same formula the public read uses, so
+  // the response a vote or an unvote returns matches what a fresh
+  // `GET /roadmap` would show.
+  private async computeVoteTotal(
+    targetType: RoadmapVoteTarget,
+    targetId: string,
+  ): Promise<number> {
+    const seed =
+      targetType === RoadmapVoteTarget.Item
+        ? ((await this.items.findOne({ where: { id: targetId } }))?.votes ?? 0)
+        : ((await this.ideas.findOne({ where: { id: targetId } }))?.votes ?? 0);
+    const live =
+      (await this.liveVoteCounts(targetType, [targetId])).get(targetId) ?? 0;
+    return seed + live;
+  }
+
+  async castVote(
+    memberId: string,
+    dto: CastVoteDto,
+  ): Promise<{ targetId: string; votes: number; voted: true }> {
+    await this.assertVoteTargetExists(dto.targetType, dto.targetId);
 
     try {
       await this.votes.save(
@@ -170,20 +194,32 @@ export class RoadmapService {
       }
     }
 
-    // Recompute the displayed total = seed + live, same formula the public
-    // read uses, so the response the caller gets back matches what a
-    // fresh `GET /roadmap` would show.
-    const seed =
-      dto.targetType === RoadmapVoteTarget.Item
-        ? ((await this.items.findOne({ where: { id: dto.targetId } }))?.votes ??
-          0)
-        : ((await this.ideas.findOne({ where: { id: dto.targetId } }))?.votes ??
-          0);
-    const live =
-      (await this.liveVoteCounts(dto.targetType, [dto.targetId])).get(
-        dto.targetId,
-      ) ?? 0;
-    return { targetId: dto.targetId, votes: seed + live, voted: true };
+    return {
+      targetId: dto.targetId,
+      votes: await this.computeVoteTotal(dto.targetType, dto.targetId),
+      voted: true,
+    };
+  }
+
+  // Removes only the caller's own row. Idempotent: deleting a vote that does
+  // not exist affects zero rows and still converges on `voted: false`.
+  async removeVote(
+    memberId: string,
+    dto: RemoveVoteDto,
+  ): Promise<{ targetId: string; votes: number; voted: false }> {
+    await this.assertVoteTargetExists(dto.targetType, dto.targetId);
+
+    await this.votes.delete({
+      memberId,
+      targetType: dto.targetType,
+      targetId: dto.targetId,
+    });
+
+    return {
+      targetId: dto.targetId,
+      votes: await this.computeVoteTotal(dto.targetType, dto.targetId),
+      voted: false,
+    };
   }
 
   async submitIdea(

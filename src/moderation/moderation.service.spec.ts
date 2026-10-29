@@ -3926,11 +3926,11 @@ describe('ModerationService', () => {
   });
 
   /**
-   * A `listing_public_question` report covers the member's question AND the
-   * listing owner's answer under it, and nothing on the wire says which half
-   * was reported. The resolver names the ASKER as the author, so before this
-   * fix a moderator reading an offending ANSWER and clicking Ban banned the
-   * person who asked the question. Nothing 400d, nothing looked unusual, and
+   * A `review` report covers the reviewer's review AND the reviewed party's
+   * public reply under it, and nothing on the wire says which half was
+   * reported. The resolver names the REVIEWER as the author, so before this
+   * fix a moderator reading an offending REPLY and clicking Ban banned the
+   * person the reply was aimed at. Nothing 400d, nothing looked unusual, and
    * the audit row, the notification and the appeal would all have named the
    * wrong member, so the mistake was unlearnable.
    *
@@ -3942,19 +3942,19 @@ describe('ModerationService', () => {
     beforeEach(() => {
       reports.findOne.mockResolvedValue(
         baseReport({
-          subjectType: ReportSubjectType.ListingPublicQuestion,
+          subjectType: ReportSubjectType.Review,
           subjectId: '33333333-3333-3333-3333-333333333333',
         }),
       );
       subjectResolver.resolve.mockResolvedValue({
-        // The asker IS resolved. Taking that as the target is the defect.
-        authorUserId: 'asker-1',
-        excerpt: 'is the entrance step-free? / read the sign',
+        // The reviewer IS resolved. Taking that as the target is the defect.
+        authorUserId: 'reviewer-1',
+        excerpt: 'the step-free entrance was blocked / reply: read the sign',
         communityId: null,
         isAuthorAmbiguous: true,
       });
       users.findOne.mockResolvedValue({
-        id: 'asker-1',
+        id: 'reviewer-1',
         role: UserRole.Member,
         status: UserStatus.Active,
       });
@@ -3989,7 +3989,7 @@ describe('ModerationService', () => {
     refuses('restrict');
     refuses('warn');
 
-    it('never notifies the asker about an answer they did not write', async () => {
+    it('never notifies the reviewer about a reply they did not write', async () => {
       await expect(
         service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
           action: 'warn',
@@ -4011,7 +4011,7 @@ describe('ModerationService', () => {
       expect(applyContentAction).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
-          subjectType: ReportSubjectType.ListingPublicQuestion,
+          subjectType: ReportSubjectType.Review,
           action: 'remove_content',
         }),
       );

@@ -64,6 +64,11 @@ export const SHARED_UPLOAD_HANDLERS: ReadonlySet<string> = new Set([
   // A listing the platform holds: admins re-save the photos its suggester
   // uploaded. Paired with the same service-side unchanged-value check.
   'AdminListingsController.update',
+  // Listing photo positions: the owner, the co-managers and admins frame photos
+  // any of them uploaded. Paired with the service check that every named image
+  // is already in the listing's gallery (`ListingsService.savePhotoFraming`).
+  'ListingsController.updatePhotoFraming',
+  'AdminListingsController.updatePhotoFraming',
   // Housing listing gallery: co-listers edit the same listing.
   'HousingListingsController.update',
   // Company logo/work images: co-managed company pages.

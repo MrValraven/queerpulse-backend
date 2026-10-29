@@ -22,7 +22,6 @@ import {
   ListingModerationAction,
   ListingModerationEvent,
 } from './entities/listing-moderation-event.entity';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
@@ -373,10 +372,6 @@ describe('listing history write paths', () => {
           },
           {
             provide: getRepositoryToken(ListingQuestion),
-            useValue: { findOne: jest.fn(), find: jest.fn(), save: jest.fn() },
-          },
-          {
-            provide: getRepositoryToken(ListingPublicQuestion),
             useValue: { findOne: jest.fn(), find: jest.fn(), save: jest.fn() },
           },
           { provide: DataSource, useValue: dataSource },

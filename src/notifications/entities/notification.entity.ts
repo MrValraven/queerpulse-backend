@@ -277,37 +277,6 @@ export enum NotificationType {
   // carries `{ source: 'listing', listingSlug, field }` for the bell copy.
   // See migration `AddListingEditSuggestionAcceptedNotificationType1791900000000`.
   ListingEditSuggestionAccepted = 'listing_edit_suggestion_accepted',
-  // The public Q&A on a business listing (`listing_public_questions`).
-  // `ListingPublicQuestion` goes to the listing's OWNER when a member asks
-  // something on their page (carries `actorId`, the asker, so a blocked/muted
-  // asker is filtered by `NotificationsService.create` like any other
-  // member-driven type). `ListingPublicQuestionAnswered` goes to the ASKER when
-  // the question is answered. It carries an `actorId` ONLY where the OWNER
-  // answered AND the public listing page already links that owner's QueerPulse
-  // profile, which is the `isOwnerPubliclyNamed` predicate in
-  // `listings/listing-response.ts` that builds the page itself. Three cases
-  // therefore carry no actor at all: a MODERATOR answered, because staff are
-  // never named on a business page and the asker is owed the answer rather than
-  // the name of whoever wrote it; a CO-MANAGER answered, invisible on the
-  // public page by design (`listing-owner-personal-fields.ts`); or the owner is
-  // on `visibility: 'anon'`/`'role'` or withheld `linkToProfile`, having told
-  // this platform not to tie their name to this business. Naming any of them
-  // would put a face, a name and a profile link in the bell of somebody who
-  // asked their question on a page that attributes the answer to nobody, which
-  // on this platform outs a queer business owner.
-  //
-  // THE BLOCK/MUTE GATE STILL FIRES in every one of those cases: the emit site
-  // passes the answering member as `create`'s `actorId` argument even where the
-  // payload names nobody, the same split `SafeSpaceVouch` above uses for an
-  // anonymous vouch. Withholding a name must never withhold a safety control.
-  //
-  // Neither has a preference toggle, matching `ListingReview`/`ListingApproved`
-  // and every other listing type: these are the platform telling you about
-  // something that happened on your own listing, or the answer to a question
-  // you personally asked. See migration
-  // `AddListingPublicQuestionNotificationTypes1794300000000`.
-  ListingPublicQuestion = 'listing_public_question',
-  ListingPublicQuestionAnswered = 'listing_public_question_answered',
 
   // Co-manager seats on a business directory listing
   // (`ListingCoManagersService`). A listing has exactly one `owner_id`, so a
@@ -1151,13 +1120,14 @@ export enum NotificationType {
    * `SubmissionDecided` above. That is the deliberate difference between the
    * two: this is one MEMBER answering another member in public, so it is
    * member-driven and `NotificationsService.create`'s block/mute gate has to
-   * apply to it exactly as it applies to `ListingPublicQuestionAnswered`,
-   * `ListingReview` and every other member-to-member row. A reviewer who has
-   * blocked the owner must not be reached by them through the bell.
+   * apply to it exactly as it applies to `ListingReview` and every other
+   * member-to-member row. A reviewer who has blocked the owner must not be
+   * reached by them through the bell.
    *
    * Where a MODERATOR rather than the subject writes the reply, the emit site
-   * omits `actorId` entirely and the row reads as the platform speaking,
-   * exactly as `ListingPublicQuestionAnswered` already handles that case.
+   * omits `actorId` entirely and the row reads as the platform speaking: staff
+   * are never named on a public page, so the reviewer is owed the answer and
+   * not the name of whoever wrote it.
    *
    * No `NotificationPreferenceCategory`, matching every other listing type:
    * this is the answer to something the member personally wrote.
@@ -1165,9 +1135,9 @@ export enum NotificationType {
    * Payload carries `{ actorId, source, subjectLabel }` plus whichever slug the
    * deep link needs (`listingSlug` for the business directory). `subjectLabel`
    * is the reviewed thing's own PUBLIC name, so the row can say which review
-   * was answered. THE REPLY TEXT NEVER RIDES ALONG: it is owner-authored prose,
-   * it is already published on the page this row links to, and the same rule
-   * keeps `ListingPublicQuestionAnswered`'s answer body off the bell.
+   * was answered. THE REPLY TEXT NEVER RIDES ALONG: it is owner-authored prose
+   * and it is already published on the page this row links to, so it stays off
+   * the bell.
    *
    * IN-APP. QueerPulse sends no email and never will, so nothing about this
    * type may be described as one.

@@ -262,10 +262,6 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Invitations,
 
   // --- Listings you manage --------------------------------------------------
-  [NotificationType.ListingPublicQuestion]:
-    NotificationPreferenceCategory.Listings,
-  [NotificationType.ListingPublicQuestionAnswered]:
-    NotificationPreferenceCategory.Listings,
   [NotificationType.ListingEditSuggestionAccepted]:
     NotificationPreferenceCategory.Listings,
   [NotificationType.ListingCoManagerInvite]:

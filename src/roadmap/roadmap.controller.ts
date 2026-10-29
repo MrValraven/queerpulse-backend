@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -18,6 +26,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { RoadmapService } from './roadmap.service';
 import { CastVoteDto } from './dto/cast-vote.dto';
+import { RemoveVoteDto } from './dto/remove-vote.dto';
 import { SubmitIdeaDto } from './dto/submit-idea.dto';
 
 /**
@@ -62,6 +71,26 @@ export class RoadmapController {
   @Post('vote')
   vote(@CurrentUser() user: CurrentUserData, @Body() dto: CastVoteDto) {
     return this.roadmapService.castVote(user.userId, dto);
+  }
+
+  @ApiOperation({
+    summary: 'Remove the caller vote for a roadmap item or idea',
+  })
+  @ApiOkResponse({
+    description:
+      'The target id, its recomputed vote total, and `voted: false`. Idempotent: removing a vote that does not exist returns the same shape.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiNotFoundResponse({ description: 'No roadmap item or idea with that id.' })
+  // Same write throttle as `vote` above.
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @Delete('vote/:targetType/:targetId')
+  removeVote(
+    @CurrentUser() user: CurrentUserData,
+    @Param() params: RemoveVoteDto,
+  ) {
+    return this.roadmapService.removeVote(user.userId, params);
   }
 
   @ApiOperation({ summary: 'Submit a roadmap idea for moderation' })

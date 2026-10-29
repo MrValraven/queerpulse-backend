@@ -25,7 +25,6 @@ import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCreateListingDto } from './dto/admin-create-listing.dto';
 import { AdminUpdateListingDto } from './dto/admin-update-listing.dto';
-import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-question.dto';
 import { AskListingQuestionDto } from './dto/ask-listing-question.dto';
 import { BulkRemoveDto, BulkStatusDto } from './dto/bulk-listing.dto';
 import { CreateListingOwnerOfferDto } from './dto/create-listing-owner-offer.dto';
@@ -36,6 +35,7 @@ import { ListListingQueueQuery } from './dto/list-listing-queue.query';
 import { RemoveListingDto } from './dto/remove-listing.dto';
 import { ResolveEditSuggestionDto } from './dto/resolve-edit-suggestion.dto';
 import { ReviewListingClaimDto } from './dto/review-listing-claim.dto';
+import { UpdateListingPhotoFramingDto } from './dto/update-listing-photo-framing.dto';
 import { UpdateListingStatusDto } from './dto/update-listing-status.dto';
 import { UpdateQueerOwnedVerifiedDto } from './dto/update-queer-owned-verified.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
@@ -50,7 +50,7 @@ import {
   toDirectoryModerationListingDTO,
 } from './listing-owner-personal-fields';
 import { ListingDTO } from './listing-response';
-import { ListingsService } from './listings.service';
+import { ListingPhotoFramingResult, ListingsService } from './listings.service';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -353,48 +353,6 @@ export class AdminListingsController {
     );
   }
 
-  // Moderator answers a member's PUBLIC question on a listing.
-  //
-  // WHY THIS ROUTE EXISTS AT ALL, given the owner already has one. A large
-  // share of directory listings have no owner. A suggestion is held by the
-  // platform with a null `owner_id`; the suggester is `suggested_by_user_id`.
-  // Staff-authored entries also wait for their business to claim the page,
-  // and those unclaimed pages are often exactly the venues people have
-  // questions about. Owner-only would make the public question box on
-  // every one of them a form that accepts questions nobody can answer, which is
-  // worse than not offering it. Abandoned owned listings fail the same way,
-  // more slowly.
-  //
-  // It does NOT let staff speak as the business. The answer is stamped
-  // `is_answered_by_moderator` and surfaces as `answeredByRole: 'moderator'`,
-  // so the page labels where it came from — an accessibility or safety answer
-  // attributed to a venue is a commitment BY that venue, and staff must not be
-  // able to make one on its behalf. The individual moderator is never named in
-  // the response.
-  @Post(':ref/public-questions/:id/answer')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: "Moderator answers a member's public question on a listing",
-  })
-  @ApiOkResponse({
-    description: 'The answered question, labelled as a moderator answer.',
-  })
-  @ApiNotFoundResponse({ description: 'No listing or question found.' })
-  @ApiBadRequestResponse({ description: 'Answer cannot be empty.' })
-  answerPublicQuestion(
-    @CurrentUser() user: CurrentUserData,
-    @Param('ref') ref: string,
-    @Param('id') id: string,
-    @Body() dto: AnswerListingPublicQuestionDto,
-  ) {
-    return this.listingsService.answerPublicQuestionAsModerator(
-      ref,
-      id,
-      user.userId,
-      dto.answer,
-    );
-  }
-
   // Only the moderation surface toggles a listing's safe-space badge.
   @Patch(':ref/safe-space')
   @ApiOperation({ summary: "Toggle a listing's safe-space badge" })
@@ -657,6 +615,42 @@ export class AdminListingsController {
     @Body() dto: AdminUpdateListingDto,
   ): Promise<ListingDTO> {
     return this.listingsService.adminUpdate(ref, user.userId, dto);
+  }
+
+  /** Staff reposition the photos of a live listing, owned or not. This is the
+   *  deliberate exception to `LISTING_HAS_OWNER`, scoped to photo framing: the
+   *  route touches only each photo's framing, so it leaves the owner's words
+   *  and every other field alone. Admin only, like `update`, and on
+   *  `SHARED_UPLOAD_HANDLERS` paired with the service check that every named
+   *  image is already in the listing's gallery. */
+  @Patch(':ref/photo-framing')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({
+    summary: 'Reposition the gallery photos of a live listing as staff',
+  })
+  @ApiOkResponse({
+    description:
+      'The whole updated gallery, each photo with its framing, so the client can patch its cached detail.',
+  })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({
+    description: 'No listing with that reference (`code: LISTING_NOT_FOUND`).',
+  })
+  @ApiConflictResponse({
+    description:
+      'The listing is not live, so its photos cannot be repositioned yet (`code: LISTING_NOT_LIVE`).',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'A named photo is not in the listing’s gallery (`code: PHOTO_NOT_IN_GALLERY`), or the body is malformed.',
+  })
+  updatePhotoFraming(
+    @Param('ref') ref: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: UpdateListingPhotoFramingDto,
+  ): Promise<ListingPhotoFramingResult> {
+    return this.listingsService.adminUpdatePhotoFraming(ref, user.userId, dto);
   }
 
   // Permanently delete any listing regardless of owner. The owner-only

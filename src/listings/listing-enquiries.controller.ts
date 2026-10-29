@@ -73,8 +73,8 @@ export class ListingEnquiriesController {
     return this.listingEnquiriesService.getContact(slug, user.userId);
   }
 
-  // Tight per-caller throttle on the WRITE, mirroring `POST /reports` and the
-  // public-question route: this puts a message in somebody's inbox. The counted
+  // Tight per-caller throttle on the WRITE, mirroring `POST /reports`: this puts a
+  // message in somebody's inbox. The counted
   // per-listing and per-day caps in the service are the layer this one cannot
   // express (see `ListingEnquiriesService`).
   @Post(':slug/enquiries')

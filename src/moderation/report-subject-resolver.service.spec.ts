@@ -128,70 +128,6 @@ describe('ReportSubjectResolverService', () => {
   });
 
   /**
-   * The `listing_public_question` subject is the ONE subject that can cover
-   * content by two different members: the asker's question and the listing
-   * owner's answer under it. The card carries a single "Report this" control
-   * below both halves, so a report about the ANSWER arrives indistinguishable
-   * from one about the question, and `author_user_id` is always the asker.
-   * Enforcement therefore has to be told not to trust it.
-   */
-  describe('a public question with an answer under it', () => {
-    const questionReport = () =>
-      baseReport({
-        subjectType: ReportSubjectType.ListingPublicQuestion,
-        subjectId: '33333333-3333-3333-3333-333333333333',
-      });
-
-    const answered = (isAuthorAmbiguous: boolean) =>
-      build((sql, keys) =>
-        sql.includes('listing_public_questions lpq')
-          ? [
-              {
-                key: keys[0]!,
-                author_user_id: 'asker-1',
-                excerpt: 'is the entrance step-free? / read the sign',
-                community_id: null,
-                is_author_ambiguous: isAuthorAmbiguous,
-              },
-            ]
-          : [],
-      );
-
-    it('flags the author as ambiguous, while still naming the asker', async () => {
-      const { service } = answered(true);
-
-      const resolution = await service.resolve(questionReport());
-
-      // The asker is still returned: the drawer has to name somebody, and they
-      // opened the exchange. `isAuthorAmbiguous` is what stops a sanction
-      // being aimed at them on the strength of it.
-      expect(resolution.authorUserId).toBe('asker-1');
-      expect(resolution.isAuthorAmbiguous).toBe(true);
-    });
-
-    it('is not ambiguous when the row says only one member wrote it', async () => {
-      const { service } = answered(false);
-
-      expect((await service.resolve(questionReport())).isAuthorAmbiguous).toBe(
-        false,
-      );
-    });
-
-    it('asks Postgres for the ambiguity rather than deciding it here', async () => {
-      const { service, query } = answered(true);
-
-      await service.resolve(questionReport());
-
-      const [sql] = (query.mock.calls as [string, unknown[]][])[0]!;
-      expect(sql).toContain('is_author_ambiguous');
-      // Blank and absent answers are not two authors, and neither is an owner
-      // answering their own question.
-      expect(sql).toContain("btrim(lpq.answer) <> ''");
-      expect(sql).toContain('lpq.answered_by_id IS DISTINCT FROM lpq.asker_id');
-    });
-  });
-
-  /**
    * A `review` report is a bare uuid that can name a row in any of THREE
    * tables: `listing_reviews` (a directory listing), `company_reviews` (an
    * employer) and `housing_reviews` (a home). All three file under the same
@@ -311,7 +247,7 @@ describe('ReportSubjectResolverService', () => {
     /**
      * One subject covers the review AND the single public reply under it, on
      * all three surfaces, so the author of the reported half is unknowable in
-     * exactly the way an answered public question's is. The reviewer is still
+     * exactly the way any two-author exchange's is. The reviewer is still
      * named (the drawer has to name somebody), and the flag is what keeps a
      * sanction off them for the employer's or the lister's words.
      */

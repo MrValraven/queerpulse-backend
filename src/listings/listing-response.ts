@@ -1,6 +1,5 @@
 import { toImageUrl } from '../common/image-url';
 import { listingCityOrDefault } from './listing-city';
-import { ListingPublicQuestionDTO } from './dto/listing-public-question.dto';
 import { MemberRef } from '../common/member-ref';
 import { Event, EventVenueConfirmation } from '../events/entities/event.entity';
 import type { CropRect } from '../media-crops/crop-rect';
@@ -66,6 +65,7 @@ import {
   coverImageReferences,
   galleryImageReferences,
   legacySlotsFromGallery,
+  type ListingPhotoFraming,
 } from './listing-photo-gallery';
 // Pure date arithmetic over the published safe-space promises. A constants +
 // functions module with no Nest provider and no entity of its own, so importing
@@ -86,13 +86,16 @@ import type { ListingTeamMemberPublic } from './listing-team-response';
  * everyone. Rendering one in place of the other is a bug in either direction.
  *
  * `crop` is absent (never a bare `undefined` key on the wire) when this photo
- * has no saved crop rect.
+ * has no saved crop rect. `framing` follows the same rule: it is absent when
+ * the photo has none. The frontend renders `framing` first, then falls back to
+ * `crop` read as a focal region, then to the centre at 1x (contract section 2).
  */
 export interface ListingGalleryPhotoView {
   image: string | null;
   alt: string;
   caption: string;
   crop?: CropRect;
+  framing?: ListingPhotoFraming;
 }
 
 /**
@@ -113,6 +116,7 @@ export function toGalleryView(
       alt: photo.alt ?? '',
       caption: photo.caption ?? '',
       ...(crop ? { crop } : {}),
+      ...(photo.framing ? { framing: photo.framing } : {}),
     };
   });
 }
@@ -138,7 +142,12 @@ export function toCoverPhoto(
       ...(crop ? { crop } : {}),
     };
   }
-  return toGalleryView(listing, crops)[0] ?? null;
+  const firstGalleryPhoto = toGalleryView(listing, crops)[0];
+  if (!firstGalleryPhoto) return null;
+  // The gallery framing belongs to the detail gallery, and the card frames its
+  // cover through the media crop.
+  const { framing: _galleryFraming, ...coverFromGallery } = firstGalleryPhoto;
+  return coverFromGallery;
 }
 
 /** The owner's own cover on the owner/editor wire. `null` when they have not
@@ -1421,17 +1430,6 @@ export function toReviewDTO(
 }
 
 /**
- * How many public questions the DETAIL read embeds. Small on purpose: the Q&A
- * block is one section of a long page, the answer to the question a reader
- * actually has is usually recent, and the full list is one request away at
- * `GET /directory/:slug/questions`. Deliberately far below `DEFAULT_LIST_LIMIT`
- * (200), which the review array uses because the page derives its star rating
- * from that array and a truncated one would skew it. Nothing is derived from
- * the questions, so nothing breaks by capping them tightly.
- */
-export const DIRECTORY_DETAIL_QUESTION_LIMIT = 10;
-
-/**
  * What a helpful-vote write answers with: the review it was cast on, the
  * refreshed count, and whether THIS caller's vote now stands.
  *
@@ -1586,17 +1584,6 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   address: string;
   rating: { score: string; count: number };
   reviews: ReviewDTO[];
-  /**
-   * The listing's public Q&A, newest first and capped at
-   * `DIRECTORY_DETAIL_QUESTION_LIMIT`, each with its answer inline.
-   *
-   * Capped rather than paginated here because this is the detail read, which
-   * already assembles reviews, events, vouches, crops, a saved count and a
-   * moved-to lookup. The full history is served separately by
-   * `GET /directory/:slug/questions`, exactly as `GET /directory/:slug/reviews`
-   * serves the full review list.
-   */
-  questions: ListingPublicQuestionDTO[];
   upcoming: UpcomingEventDTO[];
   /** Count of `saved_item` rows bookmarking this listing (`SavedKind.Listing`,
    * keyed by slug) — the public "N members saved this" trust signal. */
@@ -1659,10 +1646,6 @@ export function toDirectoryDetail(
   /** The successor listing of a `moved` business, already resolved (and
    * visibility-checked) by `DirectoryService`. `null` for every other case. */
   movedToListing: MovedToListingView | null = null,
-  /** The public Q&A block, already loaded, moderation-filtered, capped and
-   * mapped by `DirectoryService`. Defaulted to `[]` so the existing callers and
-   * specs that do not pass it keep compiling and rendering an empty block. */
-  questions: ListingPublicQuestionDTO[] = [],
   /** Whether an open badge suspension stands against this listing. Flows
    * straight into the inherited card fields, so the detail page and the grid
    * card can never disagree about whether the badge currently speaks. */
@@ -1761,7 +1744,6 @@ export function toDirectoryDetail(
           : null,
       ),
     ),
-    questions,
     upcoming: upcomingEvents.map((event) =>
       toListingUpcomingEvent(event, listing.id),
     ),

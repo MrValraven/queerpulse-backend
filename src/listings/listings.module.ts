@@ -21,7 +21,6 @@ import { ListingEditSuggestion } from './entities/listing-edit-suggestion.entity
 import { ListingEnquiry } from './entities/listing-enquiry.entity';
 import { ListingModerationEvent } from './entities/listing-moderation-event.entity';
 import { ListingOwnerOffer } from './entities/listing-owner-offer.entity';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
@@ -70,10 +69,6 @@ import { ListingsService } from './listings.service';
       // Real "was this helpful" votes on a review — the rows
       // `listing_reviews.helpful` now counts.
       ListingReviewHelpfulVote,
-      // The PUBLIC "ask the owner" Q&A on a listing detail page. NOT
-      // `ListingQuestion` below, which is the moderator-to-submitter channel
-      // used during review; see both entities' doc comments.
-      ListingPublicQuestion,
       ListingEditSuggestion,
       // Moderation audit trail (#16) + Q&A thread (#17) — the admin
       // console overhaul's `ListingModerationEvent`/`ListingQuestion`.
@@ -120,10 +115,8 @@ import { ListingsService } from './listings.service';
     // moderator `hide_content`/`remove_content` takedown on a business listing.
     ContentModerationModule,
     // `NotificationsService` — listing approved (submitter, in `ListingsService`),
-    // a new review (owner, in `DirectoryService`), a new public question
-    // (owner, in `DirectoryService`), an answered public question (asker, in
-    // `ListingsService`), and a reviewed claim (claimant, in
-    // `ListingClaimsService`).
+    // a new review (owner, in `DirectoryService`), and a reviewed claim
+    // (claimant, in `ListingClaimsService`).
     NotificationsModule,
     // `StorageService` — delete a listing's photo objects when they are replaced
     // on edit or when the listing itself is removed, so superseded/orphaned

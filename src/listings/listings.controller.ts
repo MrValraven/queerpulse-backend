@@ -20,7 +20,6 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
-import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-question.dto';
 import { AnswerListingQuestionDto } from './dto/answer-listing-question.dto';
 import { CreateListingClaimDto } from './dto/create-listing-claim.dto';
 import { CreateListingDto } from './dto/create-listing.dto';
@@ -30,13 +29,14 @@ import { SimilarListingsQuery } from './dto/similar-listings.query';
 import { ListMyListingsQuery } from './dto/list-my-listings.query';
 import { ReplyToReviewDto } from './dto/reply-to-review.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
+import { UpdateListingPhotoFramingDto } from './dto/update-listing-photo-framing.dto';
 import { UpdateListingVisibilityDto } from './dto/update-listing-visibility.dto';
 import { UpdateOperatingStateDto } from './dto/update-operating-state.dto';
 import { toListingClaimPolicyDTO } from './listing-claim-policy';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
-import { ListingsService } from './listings.service';
+import { ListingPhotoFramingResult, ListingsService } from './listings.service';
 import { MySuggestedListingsService } from './my-suggested-listings.service';
 import {
   ApiBadRequestResponse,
@@ -511,6 +511,55 @@ export class ListingsController {
     return this.listingsService.setDirectoryVisibility(ref, user.userId, dto);
   }
 
+  // OWNER OR CO-MANAGER (same `loadOwnedOrCoManagedOr404` check as `update`
+  // above): reposition the photos of a LIVE listing. A narrow write that
+  // touches only each photo's framing, so it leaves review state and every
+  // other field alone, which is why a live listing can be reframed without
+  // going back to the queue the way a full `PATCH /:ref` edit would.
+  //
+  // The body names images by key, and the owner and the co-managers upload
+  // into the same gallery, so this handler is on `SHARED_UPLOAD_HANDLERS`
+  // (`storage/shared-upload-handlers.ts`). That allowance is paired with the
+  // service check that every named image is already in the listing's gallery
+  // (`ListingsService.savePhotoFraming`), which is what keeps a caller from
+  // attaching a file nobody put there.
+  @Patch(':ref/photo-framing')
+  @UseGuards(NotRestrictedGuard)
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @ApiOperation({
+    summary:
+      'Reposition the gallery photos of a live listing the caller owns or co-manages',
+  })
+  @ApiOkResponse({
+    description:
+      'The whole updated gallery, each photo with its framing, so the client can patch its cached detail.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No listing with that reference (`code: LISTING_NOT_FOUND`).',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The caller neither owns nor co-manages the listing (`code: LISTING_NOT_MANAGER`).',
+  })
+  @ApiConflictResponse({
+    description:
+      'The listing is not live, so its photos cannot be repositioned yet (`code: LISTING_NOT_LIVE`).',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'A named photo is not in the listing’s gallery (`code: PHOTO_NOT_IN_GALLERY`), or the body is malformed.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  updatePhotoFraming(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Body() dto: UpdateListingPhotoFramingDto,
+  ): Promise<ListingPhotoFramingResult> {
+    return this.listingsService.updatePhotoFraming(ref, user.userId, dto);
+  }
+
   // OWNER OR CO-MANAGER: "still accurate". Stamps `detailsConfirmedAt` and changes
   // nothing else, so the directory can show when a listing was last vouched
   // for by the person who runs it. A POST rather than a PATCH because it
@@ -646,9 +695,6 @@ export class ListingsController {
   //
   // A co-manager still SEES that one is waiting: `GET /:ref/pending` is
   // co-manager-allowed and counts the unanswered ones.
-  //
-  // NOT the public Q&A. That is `public-questions` below, which IS
-  // co-manager-allowed.
   @Post(':ref/questions/:id/answer')
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
@@ -670,47 +716,6 @@ export class ListingsController {
     @Body() dto: AnswerListingQuestionDto,
   ) {
     return this.listingsService.answerQuestion(
-      ref,
-      id,
-      user.userId,
-      dto.answer,
-    );
-  }
-
-  // OWNER OR CO-MANAGER (`loadOwnedOrCoManagedOr404`): answers a MEMBER'S
-  // PUBLIC question, which then stays on the detail page underneath it for the
-  // next reader. Leaving it owner-only would mean the person actually running
-  // the page watches questions go unanswered.
-  //
-  // `public-questions`, not `questions`. The route directly above is the
-  // moderator's private review-time thread, and the two must not collide in
-  // this namespace or in anyone's head: different table, different author,
-  // different audience. Asking happens on the public directory
-  // (`POST /directory/:slug/questions`), because the asker is not the owner and
-  // has no `ref`; answering happens here, because the answerer is.
-  @Post(':ref/public-questions/:id/answer')
-  @UseGuards(NotRestrictedGuard)
-  @ApiOperation({
-    summary: "Owner answers a member's public question on their listing",
-  })
-  @ApiOkResponse({ description: 'The answered question.' })
-  @ApiNotFoundResponse({ description: 'No listing or question found.' })
-  @ApiForbiddenResponse({
-    description: 'The listing is not owned by the caller.',
-  })
-  @ApiBadRequestResponse({
-    description: 'Malformed question id, or the answer is empty.',
-  })
-  @ApiUnauthorizedResponse({
-    description: 'Not an authenticated active member.',
-  })
-  answerPublicQuestion(
-    @CurrentUser() user: CurrentUserData,
-    @Param('ref') ref: string,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: AnswerListingPublicQuestionDto,
-  ) {
-    return this.listingsService.answerPublicQuestion(
       ref,
       id,
       user.userId,

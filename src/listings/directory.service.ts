@@ -2,8 +2,6 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
-  HttpException,
-  HttpStatus,
   Injectable,
   Logger,
   NotFoundException,
@@ -57,7 +55,6 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
-import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
 import { CreateListingReviewDto } from './dto/create-review.dto';
 import {
   ListAdultDirectoryQuery,
@@ -72,13 +69,7 @@ import {
   ListingAttributeVocabularyDTO,
   toListingAttributeVocabularyDTO,
 } from './listing-attributes';
-import {
-  ListingPublicQuestionDTO,
-  ListingQuestionAsker,
-  toListingPublicQuestionDTO,
-} from './dto/listing-public-question.dto';
 import { UpdateReviewDto } from './dto/update-review.dto';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
@@ -90,7 +81,6 @@ import {
 } from './entities/listing.entity';
 import {
   AnySafeSpaceDetailDTO,
-  DIRECTORY_DETAIL_QUESTION_LIMIT,
   DirectoryCardDTO,
   DirectoryDetailDTO,
   MovedToListingView,
@@ -182,8 +172,6 @@ export class DirectoryService {
     private readonly reviews: Repository<ListingReview>,
     @InjectRepository(ListingReviewHelpfulVote)
     private readonly helpfulVotes: Repository<ListingReviewHelpfulVote>,
-    @InjectRepository(ListingPublicQuestion)
-    private readonly publicQuestions: Repository<ListingPublicQuestion>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(SavedItem)
@@ -212,14 +200,6 @@ export class DirectoryService {
   ) {}
 
   private readonly logger = new Logger(DirectoryService.name);
-
-  // Rate-limit constants for the public question box — see `askQuestion` for
-  // what each one is actually defending against.
-  private static readonly MAX_OPEN_QUESTIONS_PER_LISTING = 3;
-  private static readonly MAX_QUESTIONS_PER_DAY = 10;
-  private static readonly QUESTION_WINDOW_MS = 24 * 60 * 60 * 1000;
-  // Post-trim floor, so `@MinLength(8)` cannot be satisfied with whitespace.
-  private static readonly MIN_QUESTION_LENGTH = 8;
 
   // A directory business is reported (and taken down) under either the
   // `business` code (what the directory's own report control sends) or the
@@ -268,51 +248,6 @@ export class DirectoryService {
     );
     return reviews.filter((review) => {
       const state = states.get(review.id);
-      return !state || (!state.hidden && !state.removed);
-    });
-  }
-
-  // A public question (and the answer under it) is reported and taken down
-  // under the `listing_public_question` code, keyed by the question's uuid.
-  // Same posture as reviews above: the directory is a public marketing surface
-  // with no per-viewer staff role, so a hidden OR removed question simply stops
-  // rendering for everyone rather than leaving a tombstone. The question and its
-  // answer move together — see `ReportSubjectType.ListingPublicQuestion` for
-  // why one subject covers the pair.
-  private static readonly QUESTION_SUBJECT_TYPE = 'listing_public_question';
-
-  // In-query twin of `dropModeratedQuestions`, for the paginated question read.
-  // Same contract as `excludeModeratedReviews`: `questionIdColumn` is spliced
-  // verbatim into raw SQL, so pass a column reference and never user input, and
-  // it is cast to text because `content_moderation.subject_id` is varchar while
-  // a question id is uuid.
-  private excludeModeratedQuestions(
-    qb: SelectQueryBuilder<ListingPublicQuestion>,
-    questionIdColumn: string,
-  ): void {
-    qb.andWhere(
-      `NOT EXISTS (
-        SELECT 1 FROM "content_moderation" "cmq"
-        WHERE "cmq"."subject_type" = :questionSubjectType
-          AND "cmq"."subject_id" = ${questionIdColumn}::text
-          AND ("cmq"."hidden_at" IS NOT NULL OR "cmq"."removed_at" IS NOT NULL)
-      )`,
-      { questionSubjectType: DirectoryService.QUESTION_SUBJECT_TYPE },
-    );
-  }
-
-  // Post-query variant for the `find`-based question read on the detail page,
-  // mirroring `dropModeratedReviews` exactly.
-  private async dropModeratedQuestions(
-    questions: ListingPublicQuestion[],
-  ): Promise<ListingPublicQuestion[]> {
-    if (!questions.length) return questions;
-    const states = await this.contentModeration.statesFor(
-      DirectoryService.QUESTION_SUBJECT_TYPE,
-      questions.map((question) => question.id),
-    );
-    return questions.filter((question) => {
-      const state = states.get(question.id);
       return !state || (!state.hidden && !state.removed);
     });
   }
@@ -1129,15 +1064,6 @@ export class DirectoryService {
       listingPhotoKeys(listing),
     );
     const movedToListing = await this.resolveMovedToListing(listing);
-    // The public Q&A block. Two queries on top of what this read already does
-    // (the capped question fetch and its moderation-state lookup), plus a third
-    // only when there is at least one question with a member author to resolve.
-    // The cap is `DIRECTORY_DETAIL_QUESTION_LIMIT`, not `DEFAULT_LIST_LIMIT`:
-    // nothing on the page is DERIVED from the questions the way the star rating
-    // is derived from the review array, so there is no aggregate to skew by
-    // truncating, and the full list is one request away at
-    // `GET /directory/:slug/questions`.
-    const questions = await this.loadDetailQuestions(listing.id);
     // The detail inherits the card's badge fields, so it has to resolve the
     // same suspension the grid does. One row, one query, and only when the
     // listing actually carries a badge.
@@ -1156,74 +1082,9 @@ export class DirectoryService {
       memberVouches,
       crops,
       movedToListing,
-      questions,
       suspendedBadges.has(listing.id),
       hostedGatherings.has(listing.id),
       team,
-    );
-  }
-
-  /**
-   * The capped, moderation-filtered, newest-first Q&A block the detail page
-   * embeds.
-   *
-   * `take` is applied BEFORE the moderation filter, which means a taken-down
-   * question can shorten the block by one rather than being backfilled. That is
-   * the same trade `getDirectoryBySlug` already makes for its review array, and
-   * it is the right one here: backfilling would cost a second round trip on the
-   * hottest read in the module to recover a row nobody is missing, and the
-   * complete list is available from `listQuestions`, which filters in-query
-   * precisely because pagination there cannot tolerate the gap.
-   */
-  private async loadDetailQuestions(
-    listingId: string,
-  ): Promise<ListingPublicQuestionDTO[]> {
-    const rows = await this.publicQuestions.find({
-      where: { listingId },
-      order: { createdAt: 'DESC' },
-      take: DIRECTORY_DETAIL_QUESTION_LIMIT,
-    });
-    const visible = await this.dropModeratedQuestions(rows);
-    const askers = await this.resolveQuestionAskers(visible);
-    return visible.map((question) =>
-      toListingPublicQuestionDTO(
-        question,
-        question.askerId ? (askers.get(question.askerId) ?? null) : null,
-      ),
-    );
-  }
-
-  /**
-   * Batch-resolve each asker's live profile identity (slug + avatar), keyed by
-   * `askerId`. One `IN (...)` query, never N+1 — the same shape as
-   * `resolveReviewAuthors`, and it exposes the same two fields and no others.
-   *
-   * The avatar goes through `DirectoryService.publicAvatarUrl`, like every
-   * other member reference this service resolves.
-   */
-  private async resolveQuestionAskers(
-    questions: ListingPublicQuestion[],
-  ): Promise<Map<string, ListingQuestionAsker>> {
-    const askerIds = [
-      ...new Set(
-        questions
-          .map((question) => question.askerId)
-          .filter((id): id is string => id !== null),
-      ),
-    ];
-    if (askerIds.length === 0) return new Map();
-    const profiles = await this.profiles.find({
-      where: { userId: In(askerIds) },
-      select: { userId: true, slug: true, avatarUrl: true, photoVisible: true },
-    });
-    return new Map(
-      profiles.map((profile) => [
-        profile.userId,
-        {
-          slug: profile.slug,
-          avatarUrl: DirectoryService.publicAvatarUrl(profile),
-        },
-      ]),
     );
   }
 
@@ -1270,7 +1131,7 @@ export class DirectoryService {
 
   /**
    * The publicly renderable avatar for any member reference on a directory
-   * surface (listing owner, review author, question asker).
+   * surface (listing owner, review author).
    *
    * A raw `profiles.avatarUrl` column value is a bare STORAGE KEY for every
    * member who UPLOADED their photo (only a Google sign-in leaves an absolute
@@ -1816,181 +1677,6 @@ export class DirectoryService {
     });
     await manager.update(ListingReview, { id: reviewId }, { helpful });
     return helpful;
-  }
-
-  /**
-   * Ask the business a question, in public, as the current member.
-   *
-   * RATE LIMITING, because an unmoderated public question box on a queer
-   * venue's page is an abuse surface before it is a feature. Someone can use it
-   * to plant an insinuation the business then has to answer in public, and to
-   * do it over and over. Three layers, each covering what the others cannot:
-   *
-   *  1. The HTTP throttle on the route (`@Throttle` in `DirectoryController`)
-   *     stops a burst. On its own it is close to useless here: the global
-   *     throttler tracks by IP over a 60-second window, and the shape that
-   *     actually hurts is one question an hour for a week from one account.
-   *  2. `MAX_OPEN_QUESTIONS_PER_LISTING`, counted out of this table: a member
-   *     may have at most this many UNANSWERED questions outstanding on any one
-   *     listing. Answered ones do not count, so an engaged member asking real
-   *     questions of a responsive business is never blocked, while someone
-   *     stacking questions on a business that has not replied is. This is the
-   *     layer aimed at the campaign against a single venue.
-   *  3. `MAX_QUESTIONS_PER_DAY`, across all listings, so the same behaviour
-   *     spread thin over the whole directory is bounded too.
-   *
-   * Both counted caps are per MEMBER, and only active members can reach this
-   * route at all (`ActiveMemberGuard`), so there is no anonymous path in. Both
-   * answer with 429 rather than a silent drop: a member who has hit a limit is
-   * told, because the alternative teaches people their questions vanish.
-   *
-   * The listing's OWNER cannot ask a question on their own listing. Mirrors
-   * `addReview`'s self-review block and `ListingEditSuggestionsService.submit`.
-   * An owner who wants a question-and-answer on their page can write both
-   * halves of it, and passing that off as a member asking would be inventing a
-   * member. The FAQ they actually want is `services`/`whatItIs`.
-   */
-  async askQuestion(
-    slug: string,
-    userId: string,
-    dto: AskListingPublicQuestionDto,
-  ): Promise<ListingPublicQuestionDTO> {
-    const listing = await this.loadLiveOr404(slug);
-    if (listing.ownerId === userId) {
-      throw new BadRequestException(
-        'You cannot ask a question on your own listing',
-      );
-    }
-
-    const body = dto.body.trim();
-    if (body.length < DirectoryService.MIN_QUESTION_LENGTH) {
-      throw new BadRequestException('Please write a fuller question');
-    }
-
-    await this.assertQuestionQuota(listing.id, userId);
-
-    const profile = await this.profiles.findOne({ where: { userId } });
-    const askerName = profile
-      ? `${profile.firstName} ${profile.lastName}`.trim()
-      : 'A QueerPulse member';
-
-    const saved = await this.publicQuestions.save(
-      this.publicQuestions.create({
-        listingId: listing.id,
-        askerId: userId,
-        askerName,
-        body,
-      }),
-    );
-
-    // Tell the owner someone asked, so the question does not sit unanswered
-    // because nobody knew it was there. Best-effort and never rethrown; the
-    // question has already committed, and the same ordering every other
-    // notification in this module uses. Skipped for a listing with no owner,
-    // since ownership is `ownerId` alone: a `suggest` listing the platform
-    // still holds (the suggester recorded separately in `suggestedByUserId`
-    // with no ownership rights), or any other ownerless listing. A
-    // `friendly` badge describes the business and an owned friendly listing
-    // notifies its owner like any other. That is
-    // also the case a moderator answer exists for. The asker is the actor,
-    // so a blocked or muted asker is filtered by
-    // `NotificationsService.create` rather than here.
-    if (listing.ownerId) {
-      try {
-        await this.notifications.create(
-          listing.ownerId,
-          NotificationType.ListingPublicQuestion,
-          {
-            actorId: userId,
-            source: 'listing',
-            listingSlug: listing.slug,
-            listingName: listing.name,
-          },
-          userId,
-        );
-      } catch {
-        // Intentionally ignored — the question already committed.
-      }
-    }
-
-    return toListingPublicQuestionDTO(
-      saved,
-      profile
-        ? {
-            slug: profile.slug,
-            avatarUrl: DirectoryService.publicAvatarUrl(profile),
-          }
-        : null,
-    );
-  }
-
-  /** The two counted rate limits described on `askQuestion`. Two indexed
-   * COUNTs, both bounded, run before anything is written. */
-  private async assertQuestionQuota(
-    listingId: string,
-    userId: string,
-  ): Promise<void> {
-    const openOnThisListing = await this.publicQuestions.count({
-      where: { listingId, askerId: userId, answer: IsNull() },
-    });
-    if (openOnThisListing >= DirectoryService.MAX_OPEN_QUESTIONS_PER_LISTING) {
-      throw new HttpException(
-        'You already have unanswered questions on this listing. Give them a chance to reply first.',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
-
-    const since = new Date(Date.now() - DirectoryService.QUESTION_WINDOW_MS);
-    const askedRecently = await this.publicQuestions.count({
-      where: { askerId: userId, createdAt: MoreThanOrEqual(since) },
-    });
-    if (askedRecently >= DirectoryService.MAX_QUESTIONS_PER_DAY) {
-      throw new HttpException(
-        "You've asked a lot of questions today. Try again tomorrow.",
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
-  }
-
-  /**
-   * Paginated public questions for one live listing, newest first, answers
-   * inline — the "see all" behind the detail page's capped block, and the exact
-   * counterpart of `listReviews`.
-   *
-   * Filtered IN-QUERY rather than after the fetch, for the reason
-   * `listReviews`'s own comment gives: filtering a fixed-size page afterwards
-   * under-fills it, and under OFFSET pagination it permanently skips the row
-   * just past a taken-down one.
-   *
-   * No join, so `paginate`'s `skip`/`take` is safe here. The documented
-   * `distinctAlias` failure applies to `skip`/`take` combined with a join and
-   * an ORDER BY on the joined alias; this query orders by its own column and
-   * resolves asker identities in a separate batched lookup precisely so it
-   * never has to join.
-   *
-   * An 18+ listing 404s for an anonymous caller, as its detail page does.
-   */
-  async listQuestions(
-    slug: string,
-    page?: number,
-    isActiveMemberViewer = false,
-  ): Promise<Paginated<ListingPublicQuestionDTO>> {
-    const listing = await this.loadLiveOr404(slug);
-    this.assertAdultListingReadable(listing, isActiveMemberViewer);
-    const qb = this.publicQuestions
-      .createQueryBuilder('question')
-      .where('question.listing_id = :listingId', { listingId: listing.id })
-      .orderBy('question.created_at', 'DESC');
-    this.excludeModeratedQuestions(qb, 'question.id');
-    return paginate(qb, normalizePage(page), async (rows) => {
-      const askers = await this.resolveQuestionAskers(rows);
-      return rows.map((question) =>
-        toListingPublicQuestionDTO(
-          question,
-          question.askerId ? (askers.get(question.askerId) ?? null) : null,
-        ),
-      );
-    });
   }
 
   /**

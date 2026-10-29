@@ -4,19 +4,25 @@ import { AdminQueueNotificationsService } from '../admin-queue-notifications/adm
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { RoadmapIdea } from './entities/roadmap-idea.entity';
 import { RoadmapItem } from './entities/roadmap-item.entity';
-import { RoadmapVote } from './entities/roadmap-vote.entity';
+import { RoadmapVote, RoadmapVoteTarget } from './entities/roadmap-vote.entity';
 import { RoadmapService } from './roadmap.service';
 
 // A chainable query-builder stub whose terminal method resolves to an empty
 // max by default (mirrors `roadmap-admin.service.spec.ts`'s `qbStub`).
 const queryBuilderStub = () => {
   const queryBuilder: Record<string, jest.Mock> = {};
-  for (const method of ['select', 'addSelect', 'where', 'andWhere']) {
+  for (const method of [
+    'select',
+    'addSelect',
+    'where',
+    'andWhere',
+    'groupBy',
+  ]) {
     queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
   }
   queryBuilder.getRawOne = jest.fn().mockResolvedValue({ max: null });
   queryBuilder.getRawMany = jest.fn().mockResolvedValue([]);
-  return queryBuilder;
+  return queryBuilder as Record<string, jest.Mock> & { getRawMany: jest.Mock };
 };
 
 describe('RoadmapService', () => {
@@ -26,6 +32,8 @@ describe('RoadmapService', () => {
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  let items: { exists: jest.Mock; findOne: jest.Mock };
+  let votes: { delete: jest.Mock; createQueryBuilder: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
@@ -40,6 +48,14 @@ describe('RoadmapService', () => {
       ),
       createQueryBuilder: jest.fn(() => queryBuilderStub()),
     };
+    items = {
+      exists: jest.fn().mockResolvedValue(true),
+      findOne: jest.fn().mockResolvedValue({ id: 'item-1', votes: 10 }),
+    };
+    votes = {
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      createQueryBuilder: jest.fn(() => queryBuilderStub()),
+    };
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
@@ -47,9 +63,9 @@ describe('RoadmapService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         RoadmapService,
-        { provide: getRepositoryToken(RoadmapItem), useValue: {} },
+        { provide: getRepositoryToken(RoadmapItem), useValue: items },
         { provide: getRepositoryToken(RoadmapIdea), useValue: ideas },
-        { provide: getRepositoryToken(RoadmapVote), useValue: {} },
+        { provide: getRepositoryToken(RoadmapVote), useValue: votes },
         {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
@@ -83,6 +99,52 @@ describe('RoadmapService', () => {
       ).rejects.toThrow('write failed');
 
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('removeVote', () => {
+    const targetId = '3f0a6c1e-6a52-4a52-9f0e-2d3a1d7f5b10';
+
+    it('deletes only the caller row and returns the recomputed total with voted false', async () => {
+      const queryBuilder = queryBuilderStub();
+      queryBuilder.getRawMany.mockResolvedValue([{ targetId, count: '3' }]);
+      votes.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      const result = await service.removeVote('member-1', {
+        targetType: RoadmapVoteTarget.Item,
+        targetId,
+      });
+
+      expect(votes.delete).toHaveBeenCalledWith({
+        memberId: 'member-1',
+        targetType: RoadmapVoteTarget.Item,
+        targetId,
+      });
+      expect(result).toEqual({ targetId, votes: 13, voted: false });
+    });
+
+    it('still answers voted false when the caller never voted', async () => {
+      votes.delete.mockResolvedValueOnce({ affected: 0 });
+
+      const result = await service.removeVote('member-1', {
+        targetType: RoadmapVoteTarget.Item,
+        targetId,
+      });
+
+      expect(result).toEqual({ targetId, votes: 10, voted: false });
+    });
+
+    it('names the missing roadmap item when the id is unknown', async () => {
+      items.exists.mockResolvedValueOnce(false);
+
+      await expect(
+        service.removeVote('member-1', {
+          targetType: RoadmapVoteTarget.Item,
+          targetId,
+        }),
+      ).rejects.toThrow('Roadmap item not found');
+
+      expect(votes.delete).not.toHaveBeenCalled();
     });
   });
 });

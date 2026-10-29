@@ -21,12 +21,41 @@ import type { ListingPhotoSet } from './entities/listing.entity';
  * - `caption` is copy shown to EVERYONE under the photo. It is genuinely
  *   optional, and it is not a substitute for `alt`: a caption saying "opening
  *   night!" tells a screen-reader user nothing about what the photo shows.
+ *
+ * A fourth field, `framing`, holds the focal point and zoom the owner chose for
+ * how the photo sits in its frame. It is written only through the photo-framing
+ * routes, so the gallery save and the legacy slot patch carry it forward by
+ * image and never accept it from a request body. It is absent when the photo
+ * shows centred at 1x, which is also how every photo saved before this field
+ * existed reads.
  */
 export interface ListingGalleryPhoto {
   image: string;
   alt: string;
   caption: string;
+  framing?: ListingPhotoFraming;
 }
+
+/**
+ * Where a photo is centred inside its frame and how far it is zoomed in.
+ *
+ * `focusX` and `focusY` are fractions of the photo's width and height, 0 being
+ * the left or top edge and 1 the right or bottom edge. `zoom` is a multiplier
+ * where 1 shows the whole photo. Values are stored clamped and rounded by
+ * `normalizePhotoFraming`.
+ */
+export interface ListingPhotoFraming {
+  focusX: number;
+  focusY: number;
+  zoom: number;
+}
+
+/**
+ * The largest zoom a photo may be framed at. Past three times the photo's size
+ * a typical upload shows visible pixels, so the ceiling keeps every framing
+ * sharp on the detail page.
+ */
+export const LISTING_PHOTO_ZOOM_MAX = 3;
 
 /**
  * How many photos one listing may carry.
@@ -68,18 +97,85 @@ interface GalleryPhotoInput {
  * an empty frame on the page. Alt text alone is not a photo either: the old
  * model could store an `alt` string for an empty slot, and the directory detail
  * page rendered those as caption-only cells.
+ *
+ * Framing comes only from the stored gallery, matched by image. A submitted
+ * entry has no say in it: the framing routes are the single writer, so a client
+ * that resends the gallery without framing cannot wipe it, and one that sends a
+ * framing value cannot set it. A photo that left the gallery takes its framing
+ * with it, and a photo that moved to a new position keeps its own.
  */
 export function normalizeGallery(
   input?: readonly GalleryPhotoInput[],
+  currentGallery: readonly ListingGalleryPhoto[] = [],
 ): ListingGalleryPhoto[] {
+  const storedFramingByImage = framingByImage(currentGallery);
   return (input ?? [])
     .filter((photo) => Boolean(photo?.image))
     .slice(0, MAX_LISTING_GALLERY_PHOTOS)
-    .map((photo) => ({
-      image: photo.image,
-      alt: photo.alt ?? '',
-      caption: photo.caption ?? '',
-    }));
+    .map((photo) => {
+      const storedFraming = storedFramingByImage.get(photo.image);
+      return {
+        image: photo.image,
+        alt: photo.alt ?? '',
+        caption: photo.caption ?? '',
+        ...(storedFraming ? { framing: storedFraming } : {}),
+      };
+    });
+}
+
+/**
+ * The framing each image carries in a gallery, keyed by image reference.
+ *
+ * When a gallery holds the same image twice, the first occurrence wins, so the
+ * lookup is deterministic and matches the entry a reader meets first.
+ */
+function framingByImage(
+  gallery: readonly ListingGalleryPhoto[],
+): Map<string, ListingPhotoFraming> {
+  const framingLookup = new Map<string, ListingPhotoFraming>();
+  for (const photo of gallery) {
+    if (photo?.image && photo.framing && !framingLookup.has(photo.image)) {
+      framingLookup.set(photo.image, photo.framing);
+    }
+  }
+  return framingLookup;
+}
+
+/**
+ * Reduces a submitted framing to the stored form, or `null` when the photo
+ * shows centred at 1x and therefore needs no `framing` key at all.
+ *
+ * A component that is not a finite number takes its centre value (0.5, 0.5 and
+ * 1), so a malformed value frames the photo neutrally. Focus is clamped to 0..1
+ * and zoom to 1..`LISTING_PHOTO_ZOOM_MAX`, then every value is rounded to four
+ * decimals so near-identical drags do not write distinct rows into the history.
+ * The unframed check runs after rounding, so a framing within rounding distance
+ * of the centre at 1x also reads as unframed.
+ */
+export function normalizePhotoFraming(
+  input: ListingPhotoFraming,
+): ListingPhotoFraming | null {
+  const focusX = roundFramingValue(clampFramingValue(input.focusX, 0.5, 0, 1));
+  const focusY = roundFramingValue(clampFramingValue(input.focusY, 0.5, 0, 1));
+  const zoom = roundFramingValue(
+    clampFramingValue(input.zoom, 1, 1, LISTING_PHOTO_ZOOM_MAX),
+  );
+  if (focusX === 0.5 && focusY === 0.5 && zoom === 1) return null;
+  return { focusX, focusY, zoom };
+}
+
+function clampFramingValue(
+  value: number,
+  centreValue: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const finiteValue = Number.isFinite(value) ? value : centreValue;
+  return Math.min(maximum, Math.max(minimum, finiteValue));
+}
+
+function roundFramingValue(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
 }
 
 /**
@@ -147,7 +243,8 @@ export function legacySlotsFromGallery(
  * So the patch rewrites only the first four positions and re-attaches the tail
  * untouched. A caption survives as long as its photo does; a slot repointed at
  * a different image loses the caption written for the previous one, which is
- * the honest outcome.
+ * the honest outcome. Framing follows its image wherever the slot moves it, so
+ * two slots that swap images swap their framing too.
  */
 export function galleryWithLegacySlotPatch(
   current: readonly ListingGalleryPhoto[],
@@ -157,12 +254,14 @@ export function galleryWithLegacySlotPatch(
   const currentSlots = legacySlotsFromGallery(current);
   const mergedImages = { ...currentSlots.photos, ...photosPatch };
   const mergedAlts = { ...currentSlots.alt, ...altPatch };
+  const storedFramingByImage = framingByImage(current);
 
   const leadingPhotos: ListingGalleryPhoto[] = [];
   LEGACY_PHOTO_SLOTS.forEach((slot, slotIndex) => {
     const image = mergedImages[slot] ?? '';
     if (!image) return;
     const existingPhoto = current[slotIndex];
+    const storedFraming = storedFramingByImage.get(image);
     leadingPhotos.push({
       image,
       alt: mergedAlts[slot] ?? '',
@@ -170,6 +269,7 @@ export function galleryWithLegacySlotPatch(
         existingPhoto && existingPhoto.image === image
           ? existingPhoto.caption
           : '',
+      ...(storedFraming ? { framing: storedFraming } : {}),
     });
   });
 
@@ -186,6 +286,60 @@ export function galleryImageReferences(
   return (gallery ?? [])
     .map((photo) => photo?.image)
     .filter((image): image is string => Boolean(image));
+}
+
+/** One photo's new framing, addressed by the image reference it applies to. */
+export interface ListingPhotoFramingPatch {
+  image: string;
+  framing: ListingPhotoFraming;
+}
+
+/**
+ * Applies a photo-framing save to an ordered gallery and reports the images the
+ * gallery does not hold.
+ *
+ * Photos are addressed by image reference, so a save made
+ * against a stale ordering still frames the photo the owner was looking at. An
+ * image the gallery holds more than once frames every entry that carries it,
+ * because framing belongs to the image. Each framing runs through
+ * `normalizePhotoFraming`, so a patch that resets a photo to the centre at 1x
+ * removes the `framing` key and a photo is never stored with an inert one. When
+ * the patch names one image twice the last entry wins.
+ *
+ * Photos the patch leaves out are copied unchanged, with whatever framing they
+ * already hold. `unmatchedImages` lists each named image the gallery lacks
+ * once, in the order the body named them, so the caller can refuse the save
+ * with the exact images at fault. The gallery passed in is not mutated.
+ */
+export function galleryWithFramingPatch(
+  gallery: readonly ListingGalleryPhoto[],
+  patches: readonly ListingPhotoFramingPatch[],
+): { gallery: ListingGalleryPhoto[]; unmatchedImages: string[] } {
+  const galleryImages = new Set(galleryImageReferences(gallery));
+  const framingByPatchedImage = new Map<string, ListingPhotoFraming | null>();
+  const unmatchedImages: string[] = [];
+  for (const patch of patches) {
+    framingByPatchedImage.set(
+      patch.image,
+      normalizePhotoFraming(patch.framing),
+    );
+    if (
+      !galleryImages.has(patch.image) &&
+      !unmatchedImages.includes(patch.image)
+    ) {
+      unmatchedImages.push(patch.image);
+    }
+  }
+
+  const framedGallery = gallery.map((photo) => {
+    if (!framingByPatchedImage.has(photo.image)) return { ...photo };
+    const { framing: _previousFraming, ...photoWithoutFraming } = photo;
+    const patchedFraming = framingByPatchedImage.get(photo.image);
+    return patchedFraming
+      ? { ...photoWithoutFraming, framing: patchedFraming }
+      : photoWithoutFraming;
+  });
+  return { gallery: framedGallery, unmatchedImages };
 }
 
 /**

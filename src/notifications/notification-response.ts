@@ -83,19 +83,6 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.JobApplication]: 'actorId',
   [NotificationType.InviteAccepted]: 'actorId',
   [NotificationType.ListingReview]: 'actorId',
-  // The member who asked the public question, resolved for the owner's bell.
-  [NotificationType.ListingPublicQuestion]: 'actorId',
-  // The listing OWNER who answered, resolved for the asker's bell, and ONLY
-  // where the public listing page already links that owner's QueerPulse
-  // profile. The emit site spreads `actorId` on exactly that condition
-  // (`isOwnerPubliclyNamed`, the predicate the public page is built from), so a
-  // MODERATOR-written answer, a CO-MANAGER's answer, and an owner on
-  // `visibility: 'anon'`/`'role'` or with `linkToProfile` off all omit the key
-  // entirely and yield `null` here: the row reads as the platform speaking,
-  // exactly as the page attributes the answer to nobody. The block/mute gate is
-  // unaffected, because the emit site passes the answering member as `create`'s
-  // `actorId` argument regardless, the same split `SafeSpaceVouch` uses.
-  [NotificationType.ListingPublicQuestionAnswered]: 'actorId',
   // The listing OWNER who sent the co-manager invitation, resolved for the
   // invited member's bell so the ask has a face on it.
   [NotificationType.ListingCoManagerInvite]: 'actorId',
@@ -152,9 +139,9 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // owner, the employer, the housing lister. Listed here (and `SubmissionDecided`
   // deliberately is not) because this is one member answering another member in
   // public, so it is member-driven and has to sit behind the same block/mute
-  // gate `ListingPublicQuestionAnswered` sits behind. The actor is CONDITIONAL,
-  // on exactly the same rule and for exactly the same reason: a MODERATOR-written
-  // reply omits `actorId` from the payload entirely, and on the business
+  // gate `ListingReview` sits behind. The actor is CONDITIONAL: a
+  // MODERATOR-written reply omits `actorId` from the payload entirely, because
+  // staff are never named on a public page, and on the business
   // directory so does a CO-MANAGER's reply and an owner whose public page does
   // not link their profile. Those rows yield `null` here and read as the
   // platform speaking. The block/mute gate is unaffected in every case: the
@@ -681,8 +668,8 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     //
     // The requester's MESSAGE is deliberately absent from all three: it is
     // member-authored prose written TO the recipient, the same class of value
-    // kept off the bell for `ListingPublicQuestionAnswered` and `ReviewReplied`,
-    // and it is already on the page this row opens.
+    // kept off the bell for `ReviewReplied` too, and it is already on the page
+    // this row opens.
     [NotificationType.HousingViewingRequested]: ['title', 'slug', 'viewingId'],
     // `decision` is the discriminator the frontend copy branches on:
     // `accepted` | `declined` | `proposed`.
@@ -780,14 +767,6 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // under their own authentication, the same boundary `StorySubmissionDecided`
     // draws around its own decision note.
     [NotificationType.MagazinePitchPassed]: ['pitchId', 'title'],
-    // The business's own public name, for copy like "someone asked a question
-    // about Lux Cafe". The question BODY and the ANSWER text are deliberately
-    // absent: they are member- and owner-authored prose, this allowlist is the
-    // guarantee they can never reach the bell, and the deep link built from
-    // `source` + `listingSlug` (both in `COMMON_PAYLOAD_KEYS`) lands the
-    // recipient on the page where the words actually live.
-    [NotificationType.ListingPublicQuestion]: ['listingName'],
-    [NotificationType.ListingPublicQuestionAnswered]: ['listingName'],
     // The business's own public name, for copy like "Ana asked you to help
     // manage Lux Cafe". `listingSlug` and `inviteId` already ride along in
     // `COMMON_PAYLOAD_KEYS`, which is what the accept/decline deep link is
@@ -1163,10 +1142,8 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     //
     // THE REPLY TEXT IS DELIBERATELY ABSENT, and no future writer may add it.
     // It is subject-authored prose, and it is already published on the page one
-    // click away — the identical rule that keeps
-    // `ListingPublicQuestionAnswered`'s answer body off the bell. The member's
-    // own review text is absent for the stronger reason that this allowlist
-    // carries no member-authored content at all.
+    // click away. The member's own review text is absent for the stronger reason
+    // that this allowlist carries no member-authored content at all.
     [NotificationType.ReviewReplied]: ['subjectLabel'],
     // Go together (design spec 2026-09-28). Ids and the gathering's own public
     // title only: no member-authored text, no questionnaire answers, no match

@@ -319,7 +319,6 @@ export class ModerationService {
       ReportSubjectType.LandlordRecommendation,
       ReportSubjectType.Listing,
       ReportSubjectType.Business,
-      ReportSubjectType.ListingPublicQuestion,
       ReportSubjectType.Review,
       ReportSubjectType.Company,
       ReportSubjectType.Job,
@@ -1319,8 +1318,9 @@ export class ModerationService {
    * side that is indistinguishable from a warning that landed. It is the same
    * failure `enforceAgainstUser` refuses for `restrict`/`suspend`/`ban`, minus
    * the 400, so it gets the 400 too, including the ambiguous case, where a
-   * `warn` on an answered public question would otherwise tell the member who
-   * asked a question that their conduct was a problem.
+   * `warn` on a review that carries the reviewed party's reply would otherwise
+   * tell the reviewer that their conduct was a problem for words the reviewed
+   * party wrote.
    *
    * ORDERING NOTE: `warn` always resolves a report (`statusForAction`), so
    * `applyResolution` is the FIRST caller and it runs inside the action's

@@ -29,14 +29,13 @@ import { Listing } from './listing.entity';
  *  2. The counted rate limits in `ListingEnquiriesService`, which the HTTP
  *     throttle cannot express: the shape that hurts a queer venue is not a
  *     burst inside one 60-second window, it is a steady trickle from one
- *     account over days (the same reasoning `listing_public_questions`
- *     documents for its own caps).
+ *     account over days.
  *  3. An honest record that contact happened at all, which is what makes an
  *     abuse report about an enquiry investigable.
  *
  * COLUMNS.
- *  - `sender_id` carries a real FK with `ON DELETE CASCADE`. Unlike a review or
- *    a public question, this row is not content anybody else reads: it is one
+ *  - `sender_id` carries a real FK with `ON DELETE CASCADE`. Unlike a review,
+ *    this row is not content anybody else reads: it is one
  *    member's private outreach record, so an account erasure should take it
  *    with them rather than leave an orphan pointing at a conversation that has
  *    also gone.

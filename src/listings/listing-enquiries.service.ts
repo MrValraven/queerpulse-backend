@@ -154,9 +154,7 @@ export class ListingEnquiriesService {
    * by IP over 60 seconds and is the wrong tool for the shape that actually
    * hurts here: a handful of private messages a day to the same venue, from one
    * account, for a week. That is indistinguishable from harassment and invisible
-   * to any short window, so it is counted out of `listing_enquiries` instead
-   * (the same three-layer argument `DirectoryService.askQuestion` documents for
-   * public questions).
+   * to any short window, so it is counted out of `listing_enquiries` instead.
    *
    * Three a day to one business leaves room for a genuine follow-up and a
    * correction without leaving room for a campaign. Twenty a day is far above

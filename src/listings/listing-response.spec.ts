@@ -22,6 +22,7 @@ import {
   toCoverPhoto,
   toDirectoryCard,
   toDirectoryDetail,
+  toGalleryView,
   toListingDTO,
   toManagedListingItem,
   toRemovedSpaceCard,
@@ -36,6 +37,8 @@ const coverKey =
   'listing-covers/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.webp';
 const galleryKey =
   'listing-photos/11111111-1111-4111-8111-111111111111/33333333-3333-4333-8333-333333333333.webp';
+// A saved photo framing, shared by the framing tests below.
+const framing = { focusX: 0.25, focusY: 0.75, zoom: 2 };
 
 function makeListing(): Listing {
   return {
@@ -236,6 +239,15 @@ describe('toDirectoryDetail', () => {
       intervals: [{ from: '18:00', to: '02:00' }],
     });
     expect(detail.langs).toEqual(['pt', 'en']);
+  });
+
+  it('carries framing on the public photoGallery', () => {
+    const listing = makeDirectoryListing({
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
+    });
+    expect(
+      toDirectoryDetail(listing, [], [], 0).photoGallery[0]?.framing,
+    ).toEqual(framing);
   });
 
   it('passes the saved-item count straight through as savedCount', () => {
@@ -828,6 +840,16 @@ describe('toListingDTO (the owner/managed response)', () => {
     });
   });
 
+  it('carries framing on the owner wire photoGallery', () => {
+    const dto = toListingDTO(
+      makeManagedListing({
+        photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
+      }),
+      null,
+    );
+    expect(dto.photoGallery[0]?.framing).toEqual(framing);
+  });
+
   it('carries every attribute field to the owner and serves tags and goodFor empty', () => {
     const dto = toListingDTO(
       makeManagedListing({
@@ -1192,6 +1214,44 @@ describe('toManagedListingItem', () => {
   });
 });
 
+describe('toGalleryView framing', () => {
+  beforeAll(() => {
+    setImageUrlBase('https://api.test');
+  });
+
+  afterAll(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  it('emits the stored framing beside the crop', () => {
+    const crop: CropRect = {
+      x: 0,
+      y: 0.1,
+      width: 1,
+      height: 0.4,
+      aspect: '7:3',
+    };
+    const listing = makeDirectoryListing({
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
+    });
+    const view = toGalleryView(listing, new Map([[galleryKey, crop]]));
+    expect(view[0]).toEqual({
+      image: toImageUrl(galleryKey),
+      alt: 'Bar',
+      caption: '',
+      crop,
+      framing,
+    });
+  });
+
+  it('leaves the framing key off an unframed photo', () => {
+    const listing = makeDirectoryListing({
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+    });
+    expect(toGalleryView(listing)[0]).not.toHaveProperty('framing');
+  });
+});
+
 describe('toCoverPhoto', () => {
   beforeAll(() => {
     setImageUrlBase('https://api.test');
@@ -1199,6 +1259,15 @@ describe('toCoverPhoto', () => {
 
   afterAll(() => {
     resetImageUrlBaseForTesting();
+  });
+
+  it('leaves framing off the gallery photo it falls back to', () => {
+    const listing = makeDirectoryListing({
+      coverPhoto: null,
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
+    });
+    expect(toCoverPhoto(listing)).not.toHaveProperty('framing');
+    expect(toDirectoryCard(listing).coverPhoto).not.toHaveProperty('framing');
   });
 
   it('prefers the cover photo over the first gallery photo', () => {
@@ -1401,7 +1470,6 @@ describe('listing attributes on the public directory responses', () => {
       [],
       new Map(),
       null,
-      [],
       false,
       true,
     );

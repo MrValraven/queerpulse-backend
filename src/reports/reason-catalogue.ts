@@ -337,22 +337,6 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'off_topic',
     'other',
   ],
-  // A public question (or its answer) on a business listing. Shaped like
-  // `MagazineComment` rather than `Review`: a question box on a venue's page is
-  // where someone gets asked, in public, whether they were at a place or who
-  // they went with, so `outing` and `doxxing` belong here in a way they do not
-  // on a star review. `off_topic` covers the question that is really an
-  // advertisement for somewhere else.
-  [ReportSubjectType.ListingPublicQuestion]: [
-    'outing',
-    'doxxing',
-    'harassment',
-    'hate_speech',
-    'discrimination',
-    'spam',
-    'off_topic',
-    'other',
-  ],
   // One photograph in a gathering's album. `outing` and `doxxing` lead
   // deliberately: a photograph of a face at a queer event outs somebody in a
   // way a paragraph of text cannot, and it is the single most likely reason

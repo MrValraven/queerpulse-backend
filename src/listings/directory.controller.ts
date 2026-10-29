@@ -32,7 +32,6 @@ import {
 import { AnonymousNoStaleCacheInterceptor } from '../subprofiles/anonymous-public-cache.interceptor';
 import { UserStatus } from '../users/entities/user.entity';
 import { DirectoryService } from './directory.service';
-import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
 import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { CreateListingReviewDto } from './dto/create-review.dto';
 import {
@@ -50,7 +49,6 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiTags,
-  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
@@ -75,8 +73,8 @@ import {
  * So every read that carries either fact keeps the 60-second freshness window
  * and drops the stale window: the badge-bearing grids (`GET /directory`,
  * `safe-spaces`, `safe-spaces/:slug`, `by-member/:slug`), the partner spaces
- * (`GET /directory/spaces`), and the listing detail with its reviews and
- * questions (`:slug`, `:slug/reviews`, `:slug/questions`). Those three set
+ * (`GET /directory/spaces`), and the listing detail with its reviews
+ * (`:slug`, `:slug/reviews`). Those two set
  * their headers through `AnonymousNoStaleCacheInterceptor`, which is
  * `AnonymousPublicCacheInterceptor` with this one value changed, so the
  * subprofile surfaces on the original keep theirs. The cost is
@@ -120,11 +118,11 @@ const MEMBER_ONLY_READ_CACHE = 'private, no-store';
  * were theirs. The helpful-vote WRITE routes return that answer instead, which
  * is the only place it is genuinely caller-specific.
  *
- * THREE reads are exceptions and state why at their own declarations: the
- * listing detail (`GET /directory/:slug`) and its two child reads
- * (`GET /directory/:slug/reviews`, `GET /directory/:slug/questions`). The
+ * TWO reads are exceptions and state why at their own declarations: the
+ * listing detail (`GET /directory/:slug`) and its child read
+ * (`GET /directory/:slug/reviews`). The
  * detail widens its "upcoming gatherings" block for a signed-in active member,
- * and all three answer an 18+ listing to a member while an anonymous caller
+ * and both answer an 18+ listing to a member while an anonymous caller
  * gets the 404 a missing slug gets. They carry `OptionalJwtAuthGuard` +
  * `AnonymousNoStaleCacheInterceptor` in place of the static `@Header` pair.
  * Only their anonymous variant is shared-cacheable; the member variant is
@@ -266,7 +264,7 @@ export class DirectoryController {
   // Directory detail — declared AFTER the static `spaces`/`safe-spaces` routes
   // so route matching resolves those literally rather than as `:slug`.
   //
-  // The first of the three caller-aware reads named in the class doc, and the
+  // The first of the two caller-aware reads named in the class doc, and the
   // reason they carry `OptionalJwtAuthGuard` + `AnonymousNoStaleCacheInterceptor`
   // in place of the static `@Header` pair the public grids use.
   //
@@ -436,65 +434,6 @@ export class DirectoryController {
       reviewId,
       user.userId,
     );
-  }
-
-  // Public: the full Q&A history for a listing, newest first, answers inline.
-  // The detail read embeds only the most recent handful; this is the "see all".
-  // Caller-aware for the reason the reviews read is: an 18+ listing's
-  // questions 404 for an anonymous caller.
-  @Public()
-  @UseGuards(OptionalJwtAuthGuard)
-  @UseInterceptors(AnonymousNoStaleCacheInterceptor)
-  @Get(':slug/questions')
-  @ApiOperation({ summary: 'List public questions and answers for a listing' })
-  @ApiOkResponse({ description: 'A page of questions with answers inline.' })
-  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
-  listQuestions(
-    @CurrentUser() user: CurrentUserData | undefined,
-    @Param('slug') slug: string,
-    @Query('page') page?: string,
-  ) {
-    return this.directoryService.listQuestions(
-      slug,
-      page ? Number(page) : undefined,
-      user?.status === UserStatus.Active,
-    );
-  }
-
-  // Member-gated: ask the business a question, in public.
-  //
-  // Throttled HARD compared with the review and helpful routes, and that gap is
-  // intentional. This is the one endpoint here that publishes unreviewed member
-  // prose onto a business's page, where the business then has to answer it or
-  // wear it, so a burst is worth stopping outright.
-  //
-  // The HTTP throttle is only the first of three layers, and on its own it is
-  // the weakest: it tracks by IP over a 60-second window, while the shape that
-  // actually hurts a queer venue is a slow drip from one account over days.
-  // `DirectoryService.askQuestion` carries the two counted per-member caps that
-  // cover that, and documents what each is defending against.
-  @Post(':slug/questions')
-  @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
-  @Throttle({ default: { limit: 5, ttl: seconds(300) } })
-  @ApiOperation({ summary: 'Ask a public question about a live listing' })
-  @ApiCreatedResponse({ description: 'The posted question, not yet answered.' })
-  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
-  @ApiBadRequestResponse({
-    description: 'You own the listing, or the question is too short.',
-  })
-  @ApiTooManyRequestsResponse({
-    description:
-      'Too many questions: either unanswered ones already outstanding on this listing, or too many asked today.',
-  })
-  @ApiUnauthorizedResponse({
-    description: 'Not an authenticated active member.',
-  })
-  askQuestion(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-    @Body() dto: AskListingPublicQuestionDto,
-  ) {
-    return this.directoryService.askQuestion(slug, user.userId, dto);
   }
 
   // Member-gated: propose a correction to this listing ("suggest an edit"),

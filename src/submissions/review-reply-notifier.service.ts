@@ -80,8 +80,7 @@ export interface ReviewReplyNotice {
  *
  * IT CARRIES AN ACTOR, unlike `SubmissionDecisionNotifier`. This is one member
  * answering another member in public, so `NotificationsService.create`'s
- * block/mute gate has to apply to it the way it applies to
- * `ListingPublicQuestionAnswered` and `ListingReview`.
+ * block/mute gate has to apply to it the way it applies to `ListingReview`.
  *
  * NAMING AND REACHABILITY ARE TWO FIELDS, `replyingSubjectId` and
  * `blockGateActorId`. `replyingSubjectId` decides whether the row NAMES the

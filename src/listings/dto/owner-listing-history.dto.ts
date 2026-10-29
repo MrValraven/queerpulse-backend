@@ -91,7 +91,8 @@ export interface OwnerListingModerationEventDTO {
   actor: OwnerHistoryActorDTO;
   /**
    * The `Listing` property names this event changed, on `owner_edited` and
-   * `suggestion_applied` rows. `null` on every other action and on rows
+   * `suggestion_applied` rows, plus `photoFraming` for a photo-position save,
+   * which names no column. `null` on every other action and on rows
    * written before the column existed.
    */
   changedFields: string[] | null;

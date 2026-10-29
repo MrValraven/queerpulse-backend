@@ -21,7 +21,6 @@ import {
   ListingModerationAction,
   ListingModerationEvent,
 } from './entities/listing-moderation-event.entity';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import { Listing, ListingStatus } from './entities/listing.entity';
@@ -150,16 +149,6 @@ describe('ListingsService.adminCreate', () => {
         {
           provide: getRepositoryToken(ListingModerationEvent),
           useValue: moderationEvents,
-        },
-        {
-          provide: getRepositoryToken(ListingPublicQuestion),
-          useValue: {
-            findOne: jest.fn(),
-            find: jest.fn().mockResolvedValue([]),
-            create: jest.fn((value: object) => value),
-            save: jest.fn((value: object) => Promise.resolve(value)),
-            count: jest.fn().mockResolvedValue(0),
-          },
         },
         {
           provide: getRepositoryToken(ListingQuestion),

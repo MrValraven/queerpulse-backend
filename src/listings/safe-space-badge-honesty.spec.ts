@@ -11,7 +11,6 @@ import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { DirectoryService } from './directory.service';
-import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
@@ -230,10 +229,6 @@ describe('DirectoryService safe-space badge suspension', () => {
         { provide: getRepositoryToken(Listing), useValue: listings },
         { provide: getRepositoryToken(ListingReview), useValue: reviews },
         { provide: getRepositoryToken(ListingReviewHelpfulVote), useValue: {} },
-        {
-          provide: getRepositoryToken(ListingPublicQuestion),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
-        },
         {
           provide: getRepositoryToken(Profile),
           useValue: {

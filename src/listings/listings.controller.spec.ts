@@ -33,8 +33,6 @@ describe('ListingsController', () => {
     getListingHistory: jest.Mock;
     getOwnerListingHistory: jest.Mock;
     answerQuestion: jest.Mock;
-    answerPublicQuestion: jest.Mock;
-    answerPublicQuestionAsModerator: jest.Mock;
   };
   let ownerPendingService: { getPendingForOwner: jest.Mock };
   let mySuggestedListingsService: { listMine: jest.Mock };
@@ -61,8 +59,6 @@ describe('ListingsController', () => {
       getListingHistory: jest.fn(),
       getOwnerListingHistory: jest.fn(),
       answerQuestion: jest.fn(),
-      answerPublicQuestion: jest.fn(),
-      answerPublicQuestionAsModerator: jest.fn(),
     };
     ownerPendingService = { getPendingForOwner: jest.fn() };
     mySuggestedListingsService = { listMine: jest.fn() };
@@ -344,46 +340,5 @@ describe('ListingsController', () => {
       { text: 'Thanks!' },
     );
     expect(result).toBe(updated);
-  });
-
-  // The public Q&A answer routes. The point of these two is the SPLIT: the
-  // owner route and the moderator route must reach different service methods,
-  // because only one of them is allowed to speak as the business.
-  it('POST /:ref/public-questions/:id/answer routes the OWNER answer', async () => {
-    service.answerPublicQuestion.mockResolvedValue({ id: 'question-1' });
-
-    await controller.answerPublicQuestion(user, 'QPL-2026-0001', 'question-1', {
-      answer: 'Yes, the entrance is step-free.',
-    });
-
-    expect(service.answerPublicQuestion).toHaveBeenCalledWith(
-      'QPL-2026-0001',
-      'question-1',
-      'owner-1',
-      'Yes, the entrance is step-free.',
-    );
-    // Never the moderator path — that one stamps the answer as staff-written.
-    expect(service.answerPublicQuestionAsModerator).not.toHaveBeenCalled();
-  });
-
-  it('POST /admin/listings/:ref/public-questions/:id/answer routes the MODERATOR answer', async () => {
-    service.answerPublicQuestionAsModerator.mockResolvedValue({
-      id: 'question-1',
-    });
-
-    await adminController.answerPublicQuestion(
-      user,
-      'QPL-2026-0001',
-      'question-1',
-      { answer: 'We have asked the venue and will update this.' },
-    );
-
-    expect(service.answerPublicQuestionAsModerator).toHaveBeenCalledWith(
-      'QPL-2026-0001',
-      'question-1',
-      'owner-1',
-      'We have asked the venue and will update this.',
-    );
-    expect(service.answerPublicQuestion).not.toHaveBeenCalled();
   });
 });

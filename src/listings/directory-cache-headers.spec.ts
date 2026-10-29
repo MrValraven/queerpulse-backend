@@ -77,7 +77,7 @@ describe('DirectoryController cache headers', () => {
     );
   });
 
-  it.each(['getDirectoryListing', 'listReviews', 'listQuestions'] as const)(
+  it.each(['getDirectoryListing', 'listReviews'] as const)(
     '%s uses the no-stale anonymous cache interceptor',
     (handlerName) => {
       const interceptors = Reflect.getMetadata(
