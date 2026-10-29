@@ -187,6 +187,16 @@ describe('AdminStudioCurationService', () => {
       expect(parameters).toEqual(['%São\\_50\\%%', 20]);
       expect(result.items).toEqual([{ id: RELEASE_ID, status: 'published' }]);
     });
+
+    it('lists the newest published releases for a blank or missing query', async () => {
+      await service.searchReleases('   ');
+      await service.searchReleases(undefined);
+
+      const [, blankParameters] = query.mock.calls[0] as [string, unknown[]];
+      const [, missingParameters] = query.mock.calls[1] as [string, unknown[]];
+      expect(blankParameters).toEqual(['%%', 20]);
+      expect(missingParameters).toEqual(['%%', 20]);
+    });
   });
 
   describe('addPick', () => {

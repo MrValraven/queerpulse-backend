@@ -44,6 +44,17 @@ describe('staff roles registry: music_manager_producer', () => {
     expect(joinedGrants).toContain('NOT co-host');
   });
 
+  it('opens Studio home curation and keeps the Studio page closed', () => {
+    const joinedGrants = STAFF_ROLES.music_manager_producer.grants.join('\n');
+    expect(joinedGrants).toContain('admin/studio/curation');
+    expect(joinedGrants).toContain('admin/studio/scenes');
+    expect(joinedGrants).toContain('admin/studio/spotlight');
+    expect(joinedGrants).toContain('Artist of the month');
+    expect(joinedGrants).toContain('New stars');
+    expect(joinedGrants).toContain('NOT the Studio page');
+    expect(joinedGrants).toContain('Waiting for Studio');
+  });
+
   it('accepts the new id through isStaffRoleId and isBadgedStaffRoleId', () => {
     expect(isStaffRoleId('music_manager_producer')).toBe(true);
     expect(isBadgedStaffRoleId('music_manager_producer')).toBe(true);

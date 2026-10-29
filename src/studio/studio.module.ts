@@ -19,6 +19,8 @@ import { AdminStudioAccessController } from './admin-studio-access.controller';
 import { AdminStudioCopyrightClaimsController } from './admin-studio-copyright-claims.controller';
 import { AdminStudioCurationController } from './admin-studio-curation.controller';
 import { AdminStudioCurationService } from './admin-studio-curation.service';
+import { AdminStudioSpotlightController } from './admin-studio-spotlight.controller';
+import { AdminStudioSpotlightService } from './admin-studio-spotlight.service';
 import { AdminStudioAccessRequestsController } from './admin-studio-access-requests.controller';
 import { AdminStudioLandingContentService } from './admin-studio-landing-content.service';
 import { AdminStudioLandingController } from './admin-studio-landing.controller';
@@ -37,6 +39,7 @@ import { StudioPurchaseKeptTrack } from './entities/studio-purchase-kept-track.e
 import { StudioPurchase } from './entities/studio-purchase.entity';
 import { StudioAccessGrant } from './entities/studio-access-grant.entity';
 import { StudioCuratedPick } from './entities/studio-curated-pick.entity';
+import { StudioSpotlightArtist } from './entities/studio-spotlight-artist.entity';
 import { StudioListen } from './entities/studio-listen.entity';
 import { StudioSupporter } from './entities/studio-supporter.entity';
 import { StudioAccessRequest } from './entities/studio-access-request.entity';
@@ -227,6 +230,7 @@ import { StudioLandingReadService } from './studio-landing-read.service';
       StudioScene,
       StudioSceneEvent,
       StudioCuratedPick,
+      StudioSpotlightArtist,
       StudioPersonaCredit,
       StudioReleaseDispute,
       StudioCopyrightClaim,
@@ -309,6 +313,7 @@ import { StudioLandingReadService } from './studio-landing-read.service';
     AdminStudioReleasesController,
     AdminStudioDisputesController,
     AdminStudioCurationController,
+    AdminStudioSpotlightController,
     AdminStudioScenesController,
     AdminStudioCopyrightClaimsController,
     AdminStudioTracksController,
@@ -342,6 +347,7 @@ import { StudioLandingReadService } from './studio-landing-read.service';
     StudioReleaseNoticesListener,
     StudioCurationService,
     AdminStudioCurationService,
+    AdminStudioSpotlightService,
     StudioScenesService,
     AdminStudioScenesService,
     StudioPersonaCreditsService,

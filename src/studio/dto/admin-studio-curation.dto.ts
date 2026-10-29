@@ -54,11 +54,21 @@ export class AdminStudioShelfParams {
   shelf!: StudioCurationShelf;
 }
 
-/** `q` for the admin release search and the admin event search. */
+/** `q` for the admin event, track and persona searches. */
 export class AdminStudioSearchQuery {
   @Transform(trimStringValue)
   @IsString()
   @MinLength(1)
   @MaxLength(STUDIO_DISCOVERY_LIMITS.adminSearchQueryMaxLength)
   q!: string;
+}
+
+/** `GET /admin/studio/curation/release-search?q=`. An empty or missing `q`
+ *  lists the newest published releases. */
+export class AdminStudioReleaseSearchQuery {
+  @IsOptional()
+  @Transform(trimStringValue)
+  @IsString()
+  @MaxLength(STUDIO_DISCOVERY_LIMITS.adminSearchQueryMaxLength)
+  q?: string;
 }

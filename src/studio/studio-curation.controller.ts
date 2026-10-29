@@ -30,7 +30,10 @@ export class StudioCurationController {
   constructor(private readonly curation: StudioCurationService) {}
 
   @Get('curation')
-  @ApiOperation({ summary: 'The featured release and the two staff shelves.' })
+  @ApiOperation({
+    summary:
+      'The featured release, the two staff shelves, Artist of the month and New stars.',
+  })
   @ApiOkResponse({ description: '`StudioCuration`.' })
   getCuration(@CurrentUser() user: CurrentUserData): Promise<StudioCuration> {
     return this.curation.getCuration(user.userId);

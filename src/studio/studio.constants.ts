@@ -231,6 +231,13 @@ export const STUDIO_CURATION_SHELVES = [
 ] as const;
 export type StudioCurationShelf = (typeof STUDIO_CURATION_SHELVES)[number];
 
+/** Studio spotlight curation: the two persona slots of Studio home. */
+export const STUDIO_SPOTLIGHT_SLOTS = [
+  'artist_of_the_month',
+  'new_stars',
+] as const;
+export type StudioSpotlightSlot = (typeof STUDIO_SPOTLIGHT_SLOTS)[number];
+
 export const STUDIO_SCENE_STATUSES = ['active', 'archived'] as const;
 export type StudioSceneStatus = (typeof STUDIO_SCENE_STATUSES)[number];
 
@@ -267,6 +274,8 @@ export const STUDIO_DISCOVERY_LIMITS = {
   radioMaxItems: 300,
   adminSearchResults: 20,
   adminSearchQueryMaxLength: 80,
+  spotlightArtistOfTheMonthMax: 1,
+  spotlightNewStarsMax: 12,
 } as const;
 
 export function isStudioMood(value: string): value is StudioMood {
@@ -533,6 +542,13 @@ export type StudioErrorCode =
   | 'studio_scene_not_available'
   | 'studio_curation_release_not_published'
   | 'studio_scene_event_not_pinnable'
+  // Studio spotlight curation (QUEERPULSE-STUDIO-SPOTLIGHT-CURATION-CONTRACT-2026-10-29.md section 4).
+  | 'studio_spotlight_not_an_artist'
+  | 'studio_spotlight_no_release'
+  | 'studio_spotlight_slot_full'
+  | 'studio_spotlight_already_in_slot'
+  | 'studio_spotlight_order_mismatch'
+  | 'studio_spotlight_not_found'
   | 'studio_credit_persona_not_creditable'
   | 'studio_credit_self_persona'
   | 'studio_release_not_schedulable'
@@ -816,6 +832,30 @@ const STUDIO_ERRORS: Readonly<
   studio_scene_event_not_pinnable: {
     status: HttpStatus.UNPROCESSABLE_ENTITY,
     message: 'Pin an upcoming published event open to members.',
+  },
+  studio_spotlight_not_an_artist: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'Only a public Studio artist persona can be placed here.',
+  },
+  studio_spotlight_no_release: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'This artist has no published release yet.',
+  },
+  studio_spotlight_slot_full: {
+    status: HttpStatus.CONFLICT,
+    message: 'New stars holds up to 12 artists.',
+  },
+  studio_spotlight_already_in_slot: {
+    status: HttpStatus.CONFLICT,
+    message: 'This artist is already in New stars.',
+  },
+  studio_spotlight_order_mismatch: {
+    status: HttpStatus.CONFLICT,
+    message: 'The new order must list every artist in New stars once.',
+  },
+  studio_spotlight_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'Spotlight artist not found.',
   },
   studio_credit_persona_not_creditable: {
     status: HttpStatus.UNPROCESSABLE_ENTITY,

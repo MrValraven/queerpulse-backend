@@ -3,10 +3,12 @@ import { EntityManager } from 'typeorm';
 /**
  * Studio discovery: what a persona unlink ends. Every persona credit the
  * persona gave (on its own tracks) or received (on anyone's tracks) is
- * deleted, and so is every staff pick of its releases, the way followers
- * and endorsements are deleted (`cutTiesToNamedPersona`). Kept, a credit
- * would point the named persona's collaborators at the pseudonymous one,
- * and a pick would keep the named persona's shelf spot and note.
+ * deleted, and so is every staff pick of its releases and every Artist of
+ * the month and New stars place it holds, the way followers and endorsements
+ * are deleted (`cutTiesToNamedPersona`). Kept, a credit would point the named
+ * persona's collaborators at the pseudonymous one, a pick would keep the
+ * named persona's shelf spot and note, and a spotlight would keep its place
+ * and note.
  *
  * Runs inside the unlink transaction, after the persona row has moved to
  * its fresh id (the subprofile foreign keys carried the credits along) and
@@ -34,6 +36,10 @@ export async function forgetDiscoveryTiesOfPersona(
       WHERE "release_id" IN (
         SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
       )`,
+    [subprofileId],
+  );
+  await manager.query(
+    'DELETE FROM "studio_spotlight_artists" WHERE "subprofile_id" = $1',
     [subprofileId],
   );
 }

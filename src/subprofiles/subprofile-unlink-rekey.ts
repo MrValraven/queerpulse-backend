@@ -57,10 +57,10 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * a null track (`FK_studio_playlist_tracks_track` sets null on update), so
  * neither ties the pseudonymous persona to its named past.
  *
- * Studio discovery persona credits the persona gave or received, and staff
- * picks of its releases, are deleted before the releases move
- * (`forgetDiscoveryTiesOfPersona`), so no credit or shelf spot carries the
- * named persona over.
+ * Studio discovery persona credits the persona gave or received, staff
+ * picks of its releases, and its Artist of the month and New stars places are
+ * deleted before the releases move (`forgetDiscoveryTiesOfPersona`), so no
+ * credit, shelf spot or spotlight carries the named persona over.
  *
  * Studio v3: preview links and the track change stamp are cleared on the
  * releases, the reminders set on them are deleted, a scheduled release goes
@@ -132,8 +132,8 @@ export async function issueFreshPersonaId(
   // the fresh id with the persona row move above. Runs after the items, which
   // stay the statement right behind the row move.
   await releasePlaylistCreditsOfPersona(manager, freshSubprofileId);
-  // Studio discovery: credits and staff picks go before the releases and
-  // tracks get fresh ids, so none follows them.
+  // Studio discovery: credits, staff picks and spotlight places go before the
+  // releases and tracks get fresh ids, so none follows them.
   await forgetDiscoveryTiesOfPersona(manager, freshSubprofileId);
   // Studio listening: daily totals, listens and supporter opt-ins go before the releases and tracks get fresh ids.
   await forgetListeningOfPersona(manager, freshSubprofileId);

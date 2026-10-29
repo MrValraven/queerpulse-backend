@@ -30,6 +30,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { Feature } from '../common/feature.decorator';
@@ -41,7 +42,7 @@ import {
   AdminStudioReleaseCard,
 } from './admin-studio-response';
 import {
-  AdminStudioSearchQuery,
+  AdminStudioReleaseSearchQuery,
   AdminStudioShelfParams,
   CreateAdminStudioPickDto,
   ReorderAdminStudioPicksDto,
@@ -50,12 +51,14 @@ import {
 
 /**
  * Studio discovery: the staff shelves, in the `AdminTopicsController`
- * convention. Moderator and Admin only; the staff-role registry holds no
- * grant that covers Studio, so no `@StaffRoles` widens it. No Studio grant
- * needed: staff curate whether or not they listen.
+ * convention. Moderator and Admin, plus the `music_manager_producer` grant,
+ * which curates Studio home. Every route here is curation, so none is
+ * re-closed with an empty `@StaffRoles()`. No Studio grant needed: staff
+ * curate whether or not they listen.
  *
  *   GET    /admin/studio/curation                         -> AdminStudioCuration
  *   GET    /admin/studio/curation/release-search?q=       -> { items }
+ *          (a blank or missing q lists the newest published releases)
  *   POST   /admin/studio/curation/picks                   -> AdminStudioPick (201)
  *   PATCH  /admin/studio/curation/picks/:id               -> AdminStudioPick
  *   DELETE /admin/studio/curation/picks/:id               -> 204
@@ -65,10 +68,14 @@ import {
 @ApiTags('Admin: Studio')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the music_manager_producer grant.',
+})
 @Controller('admin/studio/curation')
 @UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('music_manager_producer')
 export class AdminStudioCurationController {
   constructor(private readonly curation: AdminStudioCurationService) {}
 
@@ -80,10 +87,13 @@ export class AdminStudioCurationController {
   }
 
   @Get('release-search')
-  @ApiOperation({ summary: 'Published releases by title or artist name.' })
+  @ApiOperation({
+    summary:
+      'Published releases by title or artist name, newest first. A blank query lists the newest published releases.',
+  })
   @ApiOkResponse({ description: '`{ items: AdminStudioReleaseCard[] }`.' })
   searchReleases(
-    @Query() query: AdminStudioSearchQuery,
+    @Query() query: AdminStudioReleaseSearchQuery,
   ): Promise<{ items: AdminStudioReleaseCard[] }> {
     return this.curation.searchReleases(query.q);
   }

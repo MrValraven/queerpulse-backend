@@ -30,6 +30,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { Feature } from '../common/feature.decorator';
@@ -53,8 +54,10 @@ import { StudioPage } from './studio-response';
 
 /**
  * Studio discovery: the staff scenes, in the `AdminTopicsController`
- * convention, Moderator and Admin only with no `@StaffRoles`. `reorder` and
- * `event-search` are declared ahead of the `:id` routes and `:id` uses
+ * convention, for Moderator and Admin and the `music_manager_producer` grant.
+ * Every route is curation (scenes, their pinned events, the event search and
+ * the scene releases), so none is re-closed with an empty `@StaffRoles()`.
+ * `reorder` and `event-search` are declared ahead of the `:id` routes and `:id` uses
  * `ParseUUIDPipe`. `create` and `update` are listed in
  * `SHARED_UPLOAD_HANDLERS` (staff re-save each other's covers), paired with
  * `assertNoForeignUploadIntroduced` in the service.
@@ -63,10 +66,14 @@ import { StudioPage } from './studio-response';
 @ApiTags('Admin: Studio')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the music_manager_producer grant.',
+})
 @Controller('admin/studio/scenes')
 @UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('music_manager_producer')
 export class AdminStudioScenesController {
   constructor(private readonly scenes: AdminStudioScenesService) {}
 

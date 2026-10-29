@@ -122,12 +122,15 @@ export class AdminStudioCurationService {
     return groupAdminPicks(await this.loadPicks({}));
   }
 
+  /** A blank or missing query matches every published release, so the
+   *  newest ones come back first. */
   async searchReleases(
-    query: string,
+    query: string | undefined,
   ): Promise<{ items: AdminStudioReleaseCard[] }> {
+    const searchTerm = (query ?? '').trim();
     const rows: { id: string; status: StudioReleaseStatus }[] =
       await this.dataSource.query(ADMIN_RELEASE_SEARCH_SQL, [
-        `%${escapeLikeTerm(query.trim())}%`,
+        `%${escapeLikeTerm(searchTerm)}%`,
         STUDIO_DISCOVERY_LIMITS.adminSearchResults,
       ]);
     const cardsByReleaseId = await this.catalog.cardsByReleaseId(

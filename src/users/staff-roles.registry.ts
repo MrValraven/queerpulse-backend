@@ -221,6 +221,8 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       "NOT a member's own event: every route resolves the event by slug AND checks that its host is the house account AND its family is Music, or it answers 404",
       'NOT delete an event',
       'NOT co-host: the grant never seats its holder, another holder, or a moderator or admin as a co-host',
+      'Curate Studio home (admin/studio/curation, admin/studio/scenes, admin/studio/spotlight): the featured release, Staff picks, New this week, Local scenes, Artist of the month, New stars',
+      'NOT the Studio page, founding artists, Waiting for Studio, or any Studio moderation queue',
     ],
   },
 };

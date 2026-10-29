@@ -183,13 +183,19 @@ const adminControllers = [
   AdminStudioDisputesController,
   AdminStudioAccessRequestsController,
 ];
-// Studio discovery: the admin pages follow `AdminTopicsController`, so
-// `RolesOrStaffGuard` with zero staff roles.
+// Studio discovery: the admin pages follow `AdminTopicsController`
+// (`RolesOrStaffGuard`). Curation and scenes add the `music_manager_producer`
+// grant; the Studio page stays tier only.
 const discoveryAdminControllers = [
   AdminStudioCurationController,
   AdminStudioScenesController,
   AdminStudioLandingController,
 ];
+const curationAdminControllers = [
+  AdminStudioCurationController,
+  AdminStudioScenesController,
+];
+const tierOnlyAdminControllers = [AdminStudioLandingController];
 const everyController = [
   StudioMeController,
   StudioPurchaseLibraryController,
@@ -533,12 +539,9 @@ describe('Studio controllers', () => {
   });
 
   it.each(
-    discoveryAdminControllers.map((controller) => [
-      controller.name,
-      controller,
-    ]),
+    curationAdminControllers.map((controller) => [controller.name, controller]),
   )(
-    'opens %s to moderators and admins through the tier, with no staff grant',
+    'opens %s to moderators, admins and the music_manager_producer grant',
     (_name, controller) => {
       expect(guardsOf(controller)).toEqual([
         ActiveMemberGuard,
@@ -548,7 +551,50 @@ describe('Studio controllers', () => {
         UserRole.Moderator,
         UserRole.Admin,
       ]);
-      expect(Reflect.getMetadata(STAFF_ROLES_KEY, controller)).toBeUndefined();
+      expect(Reflect.getMetadata(STAFF_ROLES_KEY, controller)).toEqual([
+        'music_manager_producer',
+      ]);
+    },
+  );
+
+  it.each(
+    tierOnlyAdminControllers.map((controller) => [controller.name, controller]),
+  )('keeps %s closed to every staff grant', (_name, controller) => {
+    expect(guardsOf(controller)).toEqual([
+      ActiveMemberGuard,
+      RolesOrStaffGuard,
+    ]);
+    expect(Reflect.getMetadata(ROLES_KEY, controller)).toEqual([
+      UserRole.Moderator,
+      UserRole.Admin,
+    ]);
+    expect(Reflect.getMetadata(STAFF_ROLES_KEY, controller)).toBeUndefined();
+  });
+
+  it.each(
+    curationAdminControllers.map((controller) => [controller.name, controller]),
+  )(
+    'leaves every curation and scene route on the class decorators',
+    (_name, controller) => {
+      const handlerNames = Object.getOwnPropertyNames(
+        controller.prototype,
+      ).filter((handlerName) => handlerName !== 'constructor');
+      expect(handlerNames.length).toBeGreaterThan(0);
+      const handlerMetadata = handlerNames.map((handlerName) => {
+        const handler = Reflect.get(
+          controller.prototype,
+          handlerName,
+        ) as object;
+        const handlerRoles: unknown = Reflect.getMetadata(ROLES_KEY, handler);
+        const handlerStaffRoles: unknown = Reflect.getMetadata(
+          STAFF_ROLES_KEY,
+          handler,
+        );
+        return [handlerName, handlerRoles, handlerStaffRoles];
+      });
+      expect(handlerMetadata).toEqual(
+        handlerNames.map((handlerName) => [handlerName, undefined, undefined]),
+      );
     },
   );
 

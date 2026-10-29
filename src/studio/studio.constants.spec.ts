@@ -10,6 +10,7 @@ import {
 import { StudioPlaylistVisibility } from './entities/studio-playlist.entity';
 import { StudioReleaseDisputeStatus } from './entities/studio-release-dispute.entity';
 import { StudioCuratedPickShelf } from './entities/studio-curated-pick.entity';
+import { StudioSpotlightArtistSlot } from './entities/studio-spotlight-artist.entity';
 import { StudioPersonaCreditState } from './entities/studio-persona-credit.entity';
 import { StudioSceneState } from './entities/studio-scene.entity';
 import { StudioArtistMilestoneKind } from './entities/studio-artist-milestone.entity';
@@ -38,6 +39,7 @@ import {
   STUDIO_PLAYLIST_VISIBILITIES,
   STUDIO_PLAYLIST_ROLES,
   STUDIO_PRESS,
+  STUDIO_SPOTLIGHT_SLOTS,
   STUDIO_RELEASE_STATUSES,
   STUDIO_RELEASE_TYPES,
   STUDIO_RELEASE_TYPES_BY_FORMAT,
@@ -319,6 +321,13 @@ describe('Studio vocabulary', () => {
       'staff_picks',
       'new_this_week',
     ]);
+    expect(Object.values(StudioSpotlightArtistSlot)).toEqual([
+      ...STUDIO_SPOTLIGHT_SLOTS,
+    ]);
+    expect(STUDIO_SPOTLIGHT_SLOTS).toEqual([
+      'artist_of_the_month',
+      'new_stars',
+    ]);
     expect(Object.values(StudioSceneState)).toEqual([...STUDIO_SCENE_STATUSES]);
     expect(STUDIO_SCENE_STATUSES).toEqual(['active', 'archived']);
     expect(Object.values(StudioPersonaCreditState)).toEqual([
@@ -368,6 +377,8 @@ describe('Studio vocabulary', () => {
       radioMaxItems: 300,
       adminSearchResults: 20,
       adminSearchQueryMaxLength: 80,
+      spotlightArtistOfTheMonthMax: 1,
+      spotlightNewStarsMax: 12,
     });
   });
 
@@ -556,6 +567,12 @@ describe('studioError', () => {
     ['studio_scene_not_available', HttpStatus.UNPROCESSABLE_ENTITY],
     ['studio_curation_release_not_published', HttpStatus.UNPROCESSABLE_ENTITY],
     ['studio_scene_event_not_pinnable', HttpStatus.UNPROCESSABLE_ENTITY],
+    ['studio_spotlight_not_an_artist', HttpStatus.UNPROCESSABLE_ENTITY],
+    ['studio_spotlight_no_release', HttpStatus.UNPROCESSABLE_ENTITY],
+    ['studio_spotlight_slot_full', HttpStatus.CONFLICT],
+    ['studio_spotlight_already_in_slot', HttpStatus.CONFLICT],
+    ['studio_spotlight_order_mismatch', HttpStatus.CONFLICT],
+    ['studio_spotlight_not_found', HttpStatus.NOT_FOUND],
     ['studio_credit_persona_not_creditable', HttpStatus.UNPROCESSABLE_ENTITY],
     ['studio_credit_self_persona', HttpStatus.UNPROCESSABLE_ENTITY],
     ['studio_release_not_schedulable', HttpStatus.CONFLICT],
@@ -593,7 +610,15 @@ describe('studioError', () => {
   );
 
   it('lists every contract code exactly once', () => {
-    expect(new Set(STUDIO_ERROR_CODES).size).toBe(145);
+    expect(new Set(STUDIO_ERROR_CODES).size).toBe(151);
+  });
+
+  it('answers a missing spotlight artist as a NotFoundException with its code', () => {
+    const exception = studioError('studio_spotlight_not_found');
+    expect(exception).toBeInstanceOf(NotFoundException);
+    expect(exception.getResponse()).toEqual(
+      expect.objectContaining({ code: 'studio_spotlight_not_found' }),
+    );
   });
 
   it('says nothing about the release in the withdrawn body', () => {
