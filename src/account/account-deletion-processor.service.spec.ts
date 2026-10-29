@@ -13,6 +13,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import { RESTORE_TRACKS_OF_ERASED_CLAIMANT_SQL } from '../studio/studio-claim-store';
+import { BUYER_PURCHASES_ERASURE_SQL } from '../studio/studio-purchases-erasure';
+import { KEPT_SOURCE_KEYS_HELD_SQL } from '../studio/studio-kept-tracks';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -410,6 +412,42 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       expect(deletedKeys()).not.toContain(UNCONFIRMED_AUDIO_KEY);
     });
 
+    it('keeps the Studio audio a pending kept copy still reads', async () => {
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes(STUDIO_AUDIO_SQL_MARKER)
+            ? [
+                { storage_key: SOLE_PERSONA_AUDIO_KEY },
+                { storage_key: UNCONFIRMED_AUDIO_KEY },
+              ]
+            : [],
+        ),
+      );
+      dataSource.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql === KEPT_SOURCE_KEYS_HELD_SQL
+            ? [{ source_audio_key: SOLE_PERSONA_AUDIO_KEY }]
+            : [],
+        ),
+      );
+
+      await service.processDueDeletions();
+
+      expect(
+        dataSource.query.mock.calls.filter(
+          ([sql]) => sql === KEPT_SOURCE_KEYS_HELD_SQL,
+        ),
+      ).toEqual([
+        [
+          KEPT_SOURCE_KEYS_HELD_SQL,
+          [[SOLE_PERSONA_AUDIO_KEY, UNCONFIRMED_AUDIO_KEY]],
+        ],
+      ]);
+      expect(studioAudioUploads.deleteObjectsAndForget.mock.calls).toEqual([
+        [[UNCONFIRMED_AUDIO_KEY]],
+      ]);
+    });
+
     it('deletes no Studio audio when the member has none', async () => {
       await service.processDueDeletions();
 
@@ -514,6 +552,22 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       expect(restoreIndex).toBeGreaterThanOrEqual(0);
       expect(queryCalls[restoreIndex]![1]).toEqual([USER_ID]);
       expect(manager.query.mock.invocationCallOrder[restoreIndex]).toBeLessThan(
+        firstCallOrder(manager.delete),
+      );
+    });
+
+    // Studio purchases (contract 4.6): the payer name and the wall choice go
+    // and a pending claim is cancelled before the key nulls the buyer.
+    it('forgets the purchase details inside the erasure transaction, before the user row goes', async () => {
+      await service.processDueDeletions();
+
+      const queryCalls = manager.query.mock.calls as Array<[string, unknown[]]>;
+      const erasureIndex = queryCalls.findIndex(
+        ([sql]) => sql === BUYER_PURCHASES_ERASURE_SQL,
+      );
+      expect(erasureIndex).toBeGreaterThanOrEqual(0);
+      expect(queryCalls[erasureIndex]![1]).toEqual([USER_ID]);
+      expect(manager.query.mock.invocationCallOrder[erasureIndex]).toBeLessThan(
         firstCallOrder(manager.delete),
       );
     });

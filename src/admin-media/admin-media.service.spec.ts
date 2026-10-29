@@ -502,7 +502,35 @@ describe('AdminMediaService.delete', () => {
       expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
     });
 
-    it('looks the key up in the scenes and releases tables', async () => {
+    it('names a landing photo as a live cover by its slot', async () => {
+      const { service, storage } = await makeService({}, {}, [
+        {
+          kind: 'studio-landing-photo',
+          id: 'hero',
+          label: 'Studio page hero photo',
+        },
+      ]);
+      const error = await service
+        .delete(personaKey, actorId, false)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        code: 'media_live_cover',
+        message:
+          'This image is the cover of a live scene, release or Studio page photo. Re-send with force=true to delete anyway.',
+        coverHolders: [
+          {
+            kind: 'studio-landing-photo',
+            entityId: 'hero',
+            label: 'Studio page hero photo',
+          },
+        ],
+      });
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+    });
+
+    it('looks the key up in the scenes, releases and landing photos tables', async () => {
       const { service, dataSource } = await makeService();
       await service.delete(avatarKey, actorId, false);
       const [sql, parameters] = dataSource.query.mock.calls[0] as [
@@ -511,6 +539,7 @@ describe('AdminMediaService.delete', () => {
       ];
       expect(sql).toContain('"studio_scenes"');
       expect(sql).toContain('"studio_releases"');
+      expect(sql).toContain('"studio_landing_photos"');
       expect(parameters).toEqual([avatarKey]);
     });
 

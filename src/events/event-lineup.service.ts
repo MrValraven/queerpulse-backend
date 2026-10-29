@@ -10,7 +10,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { STUDIO_ARTIST_BOOKABLE_SQL } from '../music-events/studio-artist-sql';
 import { BlockFilterService } from '../social/block-filter.service';
+import { STUDIO_ARTIST_PERSONA_KINDS } from '../studio/studio.constants';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -38,6 +40,9 @@ import {
   type GuestPreviewRole,
 } from './event-preview';
 import { EventsService } from './events.service';
+import { GatheringFamily } from './gathering-family';
+import { houseMusicEventError } from './house-music-event-errors';
+import { isHouseAccountId } from './house-music-events';
 import { LineupInviteView, toLineupInviteView } from './lineup-invite-response';
 
 /** Pending plus accepted rows one lineup may hold. */
@@ -53,8 +58,23 @@ const OPEN_STATUSES = [
 // as its own constant here because that one is private to `EventsService`.
 const EVENT_MODERATION_SUBJECT_TYPE = 'event';
 
+/**
+ * The rule that decides whether one member may be invited to one lineup.
+ * Resolves when the invite may proceed and throws the refusal otherwise.
+ */
+export type LineupEligibilityCheck = (
+  eventId: string,
+  inviteeUserId: string,
+) => Promise<void>;
+
 interface InsertedLineupRow {
   id: string;
+}
+
+/** One row of `STUDIO_ARTIST_BOOKABLE_SQL`. */
+interface StudioArtistBookableRow {
+  is_studio_artist: boolean | null;
+  is_blocked: boolean;
 }
 
 /**
@@ -108,6 +128,29 @@ export class EventLineupService {
     actorId: string,
     dto: CreateLineupInviteDto,
   ): Promise<EventLineupDTO> {
+    return this.inviteWithEligibilityCheck(
+      slug,
+      actorId,
+      dto,
+      async (eventId, inviteeUserId) => {
+        if (await this.isHouseMusicEvent(eventId)) {
+          await this.assertStudioArtistFor(actorId, inviteeUserId);
+          return;
+        }
+        await this.assertInvitable(eventId, actorId, inviteeUserId);
+      },
+    );
+  }
+
+  // The invite body with the eligibility rule handed in. The member path
+  // passes the connection-or-going check; the house path (a manager booking a
+  // Studio artist) passes its own. Every other step is shared.
+  async inviteWithEligibilityCheck(
+    slug: string,
+    actorId: string,
+    dto: CreateLineupInviteDto,
+    assertEligible: LineupEligibilityCheck,
+  ): Promise<EventLineupDTO> {
     const event = await this.loadEventOr404(slug);
     await this.assertOrganizer(event.id, actorId);
     const inviteeProfile = await this.findProfileOr404(dto.memberSlug);
@@ -120,7 +163,7 @@ export class EventLineupService {
     if (!inviteeUser || inviteeUser.status !== UserStatus.Active) {
       throw new NotFoundException('Member not found');
     }
-    await this.assertInvitable(event.id, actorId, inviteeProfile.userId);
+    await assertEligible(event.id, inviteeProfile.userId);
 
     const existing = await this.lineupEntries.findOne({
       where: { eventId: event.id, userId: inviteeProfile.userId },
@@ -447,6 +490,37 @@ export class EventLineupService {
       throw new ForbiddenException(
         'You can invite your connections or people going to this event',
       );
+    }
+  }
+
+  /** Whether the house account hosts this event in Music. The house is only
+   *  asked about once the family matches. */
+  private async isHouseMusicEvent(eventId: string): Promise<boolean> {
+    const event = await this.events.findOne({
+      where: { id: eventId },
+      select: { id: true, hostId: true, gatheringFamily: true },
+    });
+    if (event?.gatheringFamily !== GatheringFamily.Music) return false;
+    return isHouseAccountId(this.events.manager, event.hostId);
+  }
+
+  /**
+   * The Studio artist rule of the house lineup, applied to a member who
+   * co-hosts a house Music event, with that member as the block-check party.
+   * A block either way answers the same code, so the refusal never reveals a
+   * block.
+   */
+  private async assertStudioArtistFor(
+    actorId: string,
+    inviteeId: string,
+  ): Promise<void> {
+    const rows: StudioArtistBookableRow[] = await this.events.manager.query(
+      STUDIO_ARTIST_BOOKABLE_SQL,
+      [inviteeId, actorId, [...STUDIO_ARTIST_PERSONA_KINDS]],
+    );
+    const bookableRow = rows[0];
+    if (!bookableRow?.is_studio_artist || bookableRow.is_blocked) {
+      throw houseMusicEventError('music_event_performer_not_studio_artist');
     }
   }
 

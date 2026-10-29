@@ -4,9 +4,16 @@ import {
   InternalServerErrorException,
   PayloadTooLargeException,
 } from '@nestjs/common';
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  CopyObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { StorageService, studioStreamExpirySeconds } from './storage.service';
-import { STUDIO_AUDIO_KEY_PATTERN } from './storage-key';
+import {
+  STUDIO_AUDIO_KEY_PATTERN,
+  isStudioLandingScopedKey,
+} from './storage-key';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 
 const CONFIG_VALUES: Record<string, string> = {
@@ -578,6 +585,103 @@ describe('StorageService', () => {
       expect(expiresAtMilliseconds).toBeLessThanOrEqual(Date.now() + 4_200_000);
     });
 
+    it('signs a 900-second attachment download named after the artist and the track, with the stored extension', async () => {
+      const download = await buildService().createPresignedAudioDownload(
+        STUDIO_KEY,
+        'audio/mpeg',
+        'Night Shift - Opening',
+      );
+      const signedUrl = new URL(download.url);
+      expect(signedUrl.searchParams.get('X-Amz-Expires')).toBe('900');
+      expect(signedUrl.searchParams.get('response-content-type')).toBe(
+        'audio/mpeg',
+      );
+      expect(signedUrl.searchParams.get('response-cache-control')).toBe(
+        'private, no-store',
+      );
+      expect(signedUrl.searchParams.get('response-content-disposition')).toBe(
+        `attachment; filename="Night Shift - Opening.mp3"; filename*=UTF-8''Night%20Shift%20-%20Opening.mp3`,
+      );
+      expect(download.fileName).toBe('Night Shift - Opening.mp3');
+    });
+
+    it('strips slashes, quotes and control characters from the name', async () => {
+      const download = await buildService().createPresignedAudioDownload(
+        STUDIO_KEY,
+        'audio/mpeg',
+        'A/B "C"\n - D',
+      );
+      expect(download.fileName).toBe('A_B _C_ - D.mp3');
+    });
+
+    it('refuses a key outside Studio audio', async () => {
+      await expect(
+        buildService().createPresignedAudioDownload(
+          'avatars/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.jpg',
+          'audio/mpeg',
+          'Night Shift - Opening',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('signs a kept copy for download', async () => {
+      const download = await buildService().createPresignedAudioDownload(
+        'studio-kept-audio/66666666-7777-4888-9999-000000000000.mp3',
+        'audio/mpeg',
+        'A - B',
+      );
+      expect(download.fileName).toBe('A - B.mp3');
+      expect(new URL(download.url).pathname).toContain('studio-kept-audio');
+    });
+
+    describe('copyStudioAudioForKeeping', () => {
+      let send: jest.SpiedFunction<S3Client['send']>;
+
+      beforeEach(() => {
+        send = jest
+          .spyOn(S3Client.prototype, 'send')
+          .mockResolvedValue({} as never);
+      });
+
+      afterEach(() => {
+        send.mockRestore();
+      });
+
+      it('copies a Studio audio object to a fresh kept key with the content type extension', async () => {
+        const keptKey = await buildService().copyStudioAudioForKeeping(
+          STUDIO_KEY,
+          'audio/mp4',
+        );
+        expect(keptKey).toMatch(/^studio-kept-audio\/[0-9a-f-]{36}\.m4a$/);
+        const [command] = send.mock.calls[0] as unknown as [CopyObjectCommand];
+        expect(command).toBeInstanceOf(CopyObjectCommand);
+        expect(command.input).toEqual({
+          Bucket: 'queerpulse-prod',
+          CopySource: `queerpulse-prod/${STUDIO_KEY}`,
+          Key: keptKey,
+        });
+      });
+
+      it('refuses to copy a key outside Studio audio or an unknown content type', async () => {
+        await expect(
+          buildService().copyStudioAudioForKeeping(
+            'avatars/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.jpg',
+            'audio/mpeg',
+          ),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        await expect(
+          buildService().copyStudioAudioForKeeping(STUDIO_KEY, 'audio/wav'),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        await expect(
+          buildService().copyStudioAudioForKeeping(
+            'studio-kept-audio/66666666-7777-4888-9999-000000000000.mp3',
+            'audio/mpeg',
+          ),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(send).not.toHaveBeenCalled();
+      });
+    });
+
     it('refuses to sign a stream for a key outside the Studio shape', async () => {
       await expect(
         buildService().createPresignedAudioStream(
@@ -586,6 +690,45 @@ describe('StorageService', () => {
           200,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('copyObjectToStudioLandingScope', () => {
+    const STAFF_UPLOAD_KEY =
+      'work-image/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.jpg';
+    let send: jest.SpiedFunction<S3Client['send']>;
+
+    beforeEach(() => {
+      send = jest
+        .spyOn(S3Client.prototype, 'send')
+        .mockResolvedValue({} as never);
+    });
+
+    afterEach(() => {
+      send.mockRestore();
+    });
+
+    it('copies a staff upload under a fresh landing-scoped key', async () => {
+      const key =
+        await buildService().copyObjectToStudioLandingScope(STAFF_UPLOAD_KEY);
+      expect(isStudioLandingScopedKey(key)).toBe(true);
+      expect(key.endsWith('.jpg')).toBe(true);
+      const [command] = send.mock.calls[0] as unknown as [CopyObjectCommand];
+      expect(command).toBeInstanceOf(CopyObjectCommand);
+      expect(command.input).toEqual({
+        Bucket: 'queerpulse-prod',
+        CopySource: `queerpulse-prod/${STAFF_UPLOAD_KEY}`,
+        Key: key,
+      });
+    });
+
+    it('refuses to copy a key that names nobody', async () => {
+      await expect(
+        buildService().copyObjectToStudioLandingScope(
+          'persona/66666666-7777-4888-9999-000000000000/66666666-7777-4888-9999-000000000001.jpg',
+        ),
+      ).rejects.toThrow(new BadRequestException('Invalid storage key'));
+      expect(send).not.toHaveBeenCalled();
     });
   });
 

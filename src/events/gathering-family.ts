@@ -20,6 +20,7 @@ export enum GatheringFamily {
   Meet = 'meet',
   Eat = 'eat',
   Party = 'party',
+  Music = 'music',
   Make = 'make',
   Learn = 'learn',
   Watch = 'watch',
@@ -33,6 +34,7 @@ export const GATHERING_FAMILY_VALUES: readonly GatheringFamily[] = [
   GatheringFamily.Meet,
   GatheringFamily.Eat,
   GatheringFamily.Party,
+  GatheringFamily.Music,
   GatheringFamily.Make,
   GatheringFamily.Learn,
   GatheringFamily.Watch,
@@ -61,15 +63,15 @@ export interface FormatDetails {
   /** What to bring, one line, already trimmed and never blank. Eat and make
    *  families. See `stripDisallowedDetails`, which drops a blank one. */
   bring?: string;
-  /** The door checks age. Party family, and the quiz format of the meet family (Pulse Live adults rounds need it). */
+  /** The door checks age. Party and music families, and the quiz format of the meet family (Pulse Live adults rounds need it). */
   isAdultsOnly?: boolean;
-  /** There is something good to drink that is not alcohol. Party family. */
+  /** There is something good to drink that is not alcohol. Party and music families. */
   isSoberFriendly?: boolean;
   /** How hard the ground is underfoot. Move family. */
   terrain?: Terrain;
   /** Nobody needs to have done this before. Move family. */
   isBeginnerFriendly?: boolean;
-  /** How long the film, set or performance runs. Watch family. */
+  /** How long the film, set or performance runs. Watch and music families. */
   runtimeMinutes?: number;
 }
 
@@ -85,6 +87,11 @@ export const FORMAT_DETAIL_KEYS_BY_FAMILY: Readonly<
   [GatheringFamily.Meet]: [],
   [GatheringFamily.Eat]: ['bring'],
   [GatheringFamily.Party]: ['isAdultsOnly', 'isSoberFriendly'],
+  [GatheringFamily.Music]: [
+    'isAdultsOnly',
+    'isSoberFriendly',
+    'runtimeMinutes',
+  ],
   [GatheringFamily.Make]: ['bring'],
   [GatheringFamily.Learn]: [],
   [GatheringFamily.Watch]: ['runtimeMinutes'],
@@ -95,6 +102,9 @@ export const FORMAT_DETAIL_KEYS_BY_FAMILY: Readonly<
 
 /** The format key of the quiz format in the meet family. */
 export const QUIZ_FORMAT_KEY = 'quiz';
+
+/** The format key of the jam session format in the music family. */
+export const JAM_SESSION_FORMAT_KEY = 'jam-session';
 
 /**
  * Detail keys a single format may store on top of its family's keys. The quiz
@@ -110,6 +120,23 @@ export const FORMAT_DETAIL_KEY_EXCEPTIONS: Readonly<
   >
 > = {
   [GatheringFamily.Meet]: { [QUIZ_FORMAT_KEY]: ['isAdultsOnly'] },
+  [GatheringFamily.Music]: { [JAM_SESSION_FORMAT_KEY]: ['bring'] },
+};
+
+/**
+ * The family each of the five formats that moved into Music held before the
+ * move. For specs and readers: it lets a test prove that a moved event's stored
+ * details bag survives the move. The migration keeps its own frozen copy of
+ * this table and never imports it.
+ */
+export const MUSIC_FORMAT_PREVIOUS_FAMILY: Readonly<
+  Record<string, GatheringFamily>
+> = {
+  'club-night': GatheringFamily.Party,
+  'listening-party': GatheringFamily.Party,
+  karaoke: GatheringFamily.Party,
+  'jam-session': GatheringFamily.Make,
+  'live-performance': GatheringFamily.Watch,
 };
 
 /** The detail keys this family may store, plus the exception keys of the

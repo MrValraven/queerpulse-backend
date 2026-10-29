@@ -10,6 +10,7 @@ import { StudioReleaseStatus } from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioAudioConfirmService } from './studio-audio-confirm.service';
 import { readStudioAudioFactsWithin } from './studio-audio-metadata';
+import { KEPT_SOURCE_KEYS_HELD_SQL } from './studio-kept-tracks';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { STAMP_TRACKS_CHANGED_SQL } from './studio-release-edit-rule';
@@ -59,6 +60,7 @@ describe('StudioAudioConfirmService', () => {
   let storage: { headObject: jest.Mock; openObjectStream: jest.Mock };
   let stream: { destroy: jest.Mock };
   let catalog: { getTrack: jest.Mock };
+  let dataSourceQuery: jest.Mock;
   let service: StudioAudioConfirmService;
 
   const writable = (status = StudioReleaseStatus.Draft) => ({
@@ -105,7 +107,9 @@ describe('StudioAudioConfirmService', () => {
       sampleRate: 44100,
       hasVideoTrack: false,
     });
+    dataSourceQuery = jest.fn().mockResolvedValue([]);
     const dataSource = {
+      query: dataSourceQuery,
       transaction: jest.fn((work: (inner: EntityManager) => unknown) =>
         Promise.resolve(work(manager as unknown as EntityManager)),
       ),
@@ -143,6 +147,17 @@ describe('StudioAudioConfirmService', () => {
     expect(manager.save.mock.invocationCallOrder[0]).toBeLessThan(
       studioAudioUploads.deleteObjectsAndForget.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it('keeps the replaced audio a pending kept copy still reads', async () => {
+    lockedTrack = { ...lockedTrack, audioKey: OLD_KEY };
+    dataSourceQuery.mockResolvedValue([{ source_audio_key: OLD_KEY }]);
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(dataSourceQuery.mock.calls).toEqual([
+      [KEPT_SOURCE_KEYS_HELD_SQL, [[OLD_KEY]]],
+    ]);
+    expect(manager.save).toHaveBeenCalled();
+    expect(studioAudioUploads.deleteObjectsAndForget).not.toHaveBeenCalled();
   });
 
   it("clears the old file's measurements and keeps chapters that start inside the new audio", async () => {

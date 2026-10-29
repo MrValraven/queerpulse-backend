@@ -10,7 +10,7 @@ import {
   Unique,
   UpdateDateColumn,
 } from 'typeorm';
-import { StudioRelease } from './studio-release.entity';
+import { StudioPriceMode, StudioRelease } from './studio-release.entity';
 
 export interface StudioCredit {
   name: string;
@@ -117,6 +117,10 @@ export const numericColumnToNumber = {
 @Check(
   'CHK_studio_tracks_explicit_locked',
   `"explicit_locked_at" IS NULL OR "is_explicit"`,
+)
+@Check(
+  'CHK_studio_tracks_price',
+  `("price_mode" = 'not_for_sale' AND "price_cents" IS NULL) OR ("price_mode" = 'fixed' AND "price_cents" BETWEEN 100 AND 50000) OR ("price_mode" = 'name_your_price' AND "price_cents" BETWEEN 0 AND 50000)`,
 )
 export class StudioTrack {
   @PrimaryGeneratedColumn('uuid', {
@@ -236,6 +240,24 @@ export class StudioTrack {
    *  holds the track offline for listeners. */
   @Column({ type: 'timestamptz', precision: 3, nullable: true })
   withheldAt!: Date | null;
+
+  /**
+   * Studio purchases: how this track is sold. `not_for_sale` carries no price,
+   * `fixed` a price from 100 to 50000 cents, `name_your_price` a minimum from
+   * 0 to 50000 cents. A track is sold on its own with this price; buying opens once its release is published. Migration `1838000000000-AddStudioPurchases`.
+   */
+  @Column({
+    type: 'enum',
+    enum: StudioPriceMode,
+    enumName: 'studio_price_mode',
+    default: StudioPriceMode.NotForSale,
+  })
+  priceMode!: StudioPriceMode;
+
+  /** Studio purchases: the price (or the minimum) in euro cents; null while
+   *  the track is not for sale. */
+  @Column({ type: 'integer', nullable: true })
+  priceCents!: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

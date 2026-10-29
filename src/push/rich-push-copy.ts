@@ -82,6 +82,15 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
   'push:studioCreditAccepted.title': 'Crédito aceite',
   'push:studioCreditAccepted.body':
     '{persona} aceitou o teu crédito em {track}',
+  'push:studioAccessGranted.title': 'Tens acesso ao Studio',
+  'push:studioAccessGranted.body':
+    'O Studio está aberto para ti. Toca para começar a ouvir.',
+  'push:studioLandingPreviewRequested.title': 'Pedido da página do Studio',
+  'push:studioLandingPreviewRequested.body':
+    '{persona}: a nossa equipa gostava de tocar {track} na página do Studio',
+  'push:studioLandingPreviewLive.title': 'Aprovação para a página do Studio',
+  'push:studioLandingPreviewLive.body':
+    '{track} de {persona} está aprovada para a página do Studio',
   // Studio collaborative playlists
   'push:studioPlaylistEditorInvite.title': 'Convite para playlist',
   'push:studioPlaylistEditorInvite.body':

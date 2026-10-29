@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -146,6 +147,17 @@ import {
   releasePlaylistCreditsIfPersonaUnlistenable,
   releasePlaylistCreditsOfPersona,
 } from '../studio/studio-playlist-credit-release';
+import {
+  STUDIO_KEPT_AUDIO_PENDING,
+  STUDIO_PURCHASE_EXPIRED,
+  StudioPurchaseEvent,
+} from '../studio/studio-purchase.events';
+import {
+  StudioSalesUnlinkOutcome,
+  expirePendingSalesOfPersona,
+} from '../studio/studio-purchases-unlink';
+import { invalidateStudioLandingMemo } from '../studio/studio-landing-memo';
+import { describePlayErrorWithoutIds } from '../studio/studio-play-log';
 import {
   SUBPROFILE_PUBLISHED,
   SubprofilePublishedEvent,
@@ -475,6 +487,8 @@ function missingCreatorProfileException(): UnprocessableEntityException {
 
 @Injectable()
 export class SubprofilesService {
+  private readonly salesUnlinkLogger = new Logger(SubprofilesService.name);
+
   constructor(
     @InjectRepository(Subprofile)
     private readonly subprofiles: Repository<Subprofile>,
@@ -1347,6 +1361,12 @@ export class SubprofilesService {
     // The id the request addressed. An unlink gives the row a fresh one in
     // the transaction below (ENG-447), so each run starts from this one.
     const loadedSubprofileId = sp.id;
+    // What an unlink did to the persona's sales, announced once the
+    // transaction commits. A holder object keeps the type TypeScript would
+    // narrow away from a `let` assigned inside the transaction callback.
+    const salesUnlink: { outcome: StudioSalesUnlinkOutcome | null } = {
+      outcome: null,
+    };
     if (
       saveOptions.hasEditedLinkVisibility ||
       shouldDeriveLinkedDraftHandle ||
@@ -1356,6 +1376,7 @@ export class SubprofilesService {
         await this.retryLostDerivedHandleRace(() =>
           this.dataSource.transaction(async (m) => {
             sp.id = loadedSubprofileId;
+            salesUnlink.outcome = null;
             // The persona row lock comes FIRST, before any handle row is
             // touched: every transaction here takes the persona row and then
             // the handle row, in that order, so two of them can never wait on
@@ -1402,7 +1423,13 @@ export class SubprofilesService {
               // ENG-447: the pseudonymous persona answers under a new id,
               // so no id the named persona exposed leads to it. The save
               // below and the response both use the new one.
-              sp.id = await issueFreshPersonaId(m, loadedSubprofileId);
+              sp.id = await issueFreshPersonaId(
+                m,
+                loadedSubprofileId,
+                (outcome) => {
+                  salesUnlink.outcome = outcome;
+                },
+              );
               // T17: every image the named persona showed moves to a fresh
               // persona-scoped key, so no image URL carries the owner's id
               // or matches an image the persona showed while linked.
@@ -1460,6 +1487,13 @@ export class SubprofilesService {
             });
           }),
         );
+        this.announceSalesUnlink(salesUnlink.outcome);
+        if (isUnlinkingSwitch) {
+          // The unlink transaction bumped the landing memo before its
+          // commit; this second bump after the commit drops a Studio page
+          // rebuilt in between from the old rows.
+          invalidateStudioLandingMemo();
+        }
       } catch (err) {
         this.throwConflictOnUniqueViolation(err);
       }
@@ -2548,9 +2582,26 @@ export class SubprofilesService {
       // playlists credited to this persona turn private here, inside the
       // delete, and never read as their owner's own.
       await releasePlaylistCreditsOfPersona(manager, current.id);
+      // Studio purchases: the persona's pending claims expire with it, read
+      // before the delete lets go of the persona. Buyers hear after commit.
+      const expiredPurchaseIds = await expirePendingSalesOfPersona(
+        manager,
+        current.id,
+      );
       // `subprofile_items` cascade via their FK on `subprofile_id`.
       await manager.remove(current);
-      return { coOwnerIds, displayName, personaStorageKeys };
+      return {
+        coOwnerIds,
+        displayName,
+        personaStorageKeys,
+        expiredPurchaseIds,
+      };
+    });
+    // Each buyer whose pending claim expired hears it once the delete has
+    // committed; the announcer catches a throwing listener itself.
+    this.announceSalesUnlink({
+      expiredPurchaseIds: deleted.expiredPurchaseIds,
+      keptTrackCount: 0,
     });
     // T17: only once the delete has committed, since a bucket delete cannot
     // roll back. No other persona shows these keys: a persona copied from
@@ -3442,6 +3493,33 @@ export class SubprofilesService {
     );
     if (linkedItemIndex !== -1) {
       throw flashDayEventUnlinkedPersona(linkedItemIndex);
+    }
+  }
+
+  /**
+   * Studio purchases (contract 4.7): once an unlink transaction commits, each
+   * buyer whose pending claim expired hears about it, and the kept files
+   * start their private copies. Runs once per successful run; a run that
+   * unlinked nothing hands over null.
+   */
+  private announceSalesUnlink(outcome: StudioSalesUnlinkOutcome | null): void {
+    if (!outcome) {
+      return;
+    }
+    // The unlink has committed: a listener that throws synchronously is
+    // logged here so the edit still answers with the saved persona.
+    try {
+      for (const purchaseId of outcome.expiredPurchaseIds) {
+        const expiredEvent: StudioPurchaseEvent = { purchaseId };
+        this.eventEmitter.emit(STUDIO_PURCHASE_EXPIRED, expiredEvent);
+      }
+      if (outcome.keptTrackCount > 0) {
+        this.eventEmitter.emit(STUDIO_KEPT_AUDIO_PENDING);
+      }
+    } catch (error) {
+      this.salesUnlinkLogger.error(
+        `Announcing a sales unlink failed: ${describePlayErrorWithoutIds(error)}`,
+      );
     }
   }
 

@@ -119,6 +119,20 @@ describe('StudioRelatedArtistsService', () => {
     expect(RELATED_ARTISTS_SQL).toContain('LEAST(COUNT(*), 2)');
   });
 
+  // A release lists up to 5 genres: every one of them counts for the match.
+  it('counts shared genres over every genre of every published release', () => {
+    expect(RELATED_ARTISTS_SQL).toContain(
+      'unnest("other_release"."genres") AS "other_item"("genre_value")',
+    );
+    expect(RELATED_ARTISTS_SQL).toContain(
+      'unnest("artist_release"."genres") AS "artist_item"("genre_value")',
+    );
+    expect(RELATED_ARTISTS_SQL).toContain(
+      'ON "artist_genre"."genre_value" = "other_genre"."genre_value"',
+    );
+    expect(RELATED_ARTISTS_SQL).not.toContain('"genre" IS NOT NULL');
+  });
+
   it('keeps listenable artist candidates clear of blocks, the artist itself excluded, zero scores dropped', () => {
     expect(RELATED_ARTISTS_SQL).toContain('"persona"."id" <> $2');
     expect(RELATED_ARTISTS_SQL).toContain(

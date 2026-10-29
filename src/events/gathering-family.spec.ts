@@ -4,6 +4,7 @@ import {
   GATHERING_FAMILY_VALUES,
   GatheringFamily,
   LEGACY_TYPE_BACKFILL,
+  MUSIC_FORMAT_PREVIOUS_FAMILY,
   stripDisallowedDetails,
 } from './gathering-family';
 
@@ -15,11 +16,12 @@ import {
  * a host switching family is dropped rather than stored or rejected.
  */
 describe('gathering family', () => {
-  it('declares exactly the nine families', () => {
+  it('declares exactly the ten families, Music after Party', () => {
     expect(GATHERING_FAMILY_VALUES).toEqual([
       GatheringFamily.Meet,
       GatheringFamily.Eat,
       GatheringFamily.Party,
+      GatheringFamily.Music,
       GatheringFamily.Make,
       GatheringFamily.Learn,
       GatheringFamily.Watch,
@@ -46,6 +48,11 @@ describe('gathering family', () => {
     expect(FORMAT_DETAIL_KEYS_BY_FAMILY[GatheringFamily.Party]).toEqual([
       'isAdultsOnly',
       'isSoberFriendly',
+    ]);
+    expect(FORMAT_DETAIL_KEYS_BY_FAMILY[GatheringFamily.Music]).toEqual([
+      'isAdultsOnly',
+      'isSoberFriendly',
+      'runtimeMinutes',
     ]);
     expect(FORMAT_DETAIL_KEYS_BY_FAMILY[GatheringFamily.Move]).toEqual([
       'terrain',
@@ -167,6 +174,63 @@ describe('gathering family', () => {
     it('lists the exception key after the family keys', () => {
       expect(allowedDetailKeys(GatheringFamily.Meet, 'quiz')).toEqual([
         'isAdultsOnly',
+      ]);
+    });
+
+    it('keeps every detail key a moved format could hold', () => {
+      for (const [formatKey, previousFamily] of Object.entries(
+        MUSIC_FORMAT_PREVIOUS_FAMILY,
+      )) {
+        expect(allowedDetailKeys(GatheringFamily.Music, formatKey)).toEqual(
+          expect.arrayContaining([
+            ...allowedDetailKeys(previousFamily, formatKey),
+          ]),
+        );
+      }
+    });
+
+    it("re-strips a moved event's stored bag to the same bag under Music", () => {
+      const fullBag = {
+        bring: 'snacks',
+        isAdultsOnly: true,
+        isSoberFriendly: true,
+        terrain: 'flat' as const,
+        isBeginnerFriendly: true,
+        runtimeMinutes: 90,
+      };
+      for (const [formatKey, previousFamily] of Object.entries(
+        MUSIC_FORMAT_PREVIOUS_FAMILY,
+      )) {
+        const stored = stripDisallowedDetails(
+          previousFamily,
+          fullBag,
+          formatKey,
+        );
+        expect(
+          stripDisallowedDetails(GatheringFamily.Music, stored, formatKey),
+        ).toEqual(stored);
+      }
+    });
+
+    it('keeps bring for a jam session alone', () => {
+      expect(allowedDetailKeys(GatheringFamily.Music, 'jam-session')).toEqual([
+        'isAdultsOnly',
+        'isSoberFriendly',
+        'runtimeMinutes',
+        'bring',
+      ]);
+      expect(
+        allowedDetailKeys(GatheringFamily.Music, 'club-night'),
+      ).not.toContain('bring');
+    });
+
+    it('moves exactly five formats', () => {
+      expect(Object.keys(MUSIC_FORMAT_PREVIOUS_FAMILY).sort()).toEqual([
+        'club-night',
+        'jam-session',
+        'karaoke',
+        'listening-party',
+        'live-performance',
       ]);
     });
   });

@@ -8,12 +8,15 @@ function contextFor(
   contextType = 'http',
   controllerClass: new () => unknown = class {},
   url = '/v1/events',
+  method = 'GET',
 ) {
   return {
     getType: () => contextType,
     getHandler: () => () => undefined,
     getClass: () => controllerClass,
-    switchToHttp: () => ({ getRequest: () => ({ originalUrl: url, url }) }),
+    switchToHttp: () => ({
+      getRequest: () => ({ originalUrl: url, url, method }),
+    }),
   } as unknown as ExecutionContext;
 }
 
@@ -114,5 +117,42 @@ describe('FeatureUsageInterceptor', () => {
 
     interceptor.intercept(contextFor('http', class {}, '/v1/events'), next);
     expect(tally.drain().get('events')).toBe(1);
+  });
+
+  // The `studio` key is untracked, so a tracked key stands in here: the route
+  // check alone must keep both public Studio page routes out of the tally.
+  it('records nothing for the public Studio page and its preview stream', () => {
+    class StudioLandingController {}
+    class StudioDashboardController {}
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue('housing');
+
+    interceptor.intercept(
+      contextFor('http', StudioLandingController, '/v1/studio/landing'),
+      next,
+    );
+    interceptor.intercept(
+      contextFor(
+        'http',
+        StudioLandingController,
+        '/v1/studio/landing/previews/e7000000-0000-4000-8000-000000000001/stream',
+      ),
+      next,
+    );
+    interceptor.intercept(
+      contextFor(
+        'http',
+        StudioLandingController,
+        '/v1/studio/landing',
+        'OPTIONS',
+      ),
+      next,
+    );
+    expect(tally.drain().size).toBe(0);
+
+    interceptor.intercept(
+      contextFor('http', StudioDashboardController, '/v1/studio/dashboard'),
+      next,
+    );
+    expect(tally.drain().get('housing')).toBe(1);
   });
 });

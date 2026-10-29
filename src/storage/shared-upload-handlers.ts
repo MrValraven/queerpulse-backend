@@ -174,6 +174,31 @@ export function allowsStudioSceneScopedKeys(
   );
 }
 
+/**
+ * Studio landing v2: the handlers that may carry a LANDING-SCOPED key
+ * (`studio-landing/<uuid>/<uuid><ext>`) in their body. Such a key names no
+ * uploader. A photo save re-sends the slot's stored photo, and
+ * `AdminStudioLandingPhotosService` keeps it only when it is that slot's
+ * stored value (`assertNoForeignUploadIntroduced`).
+ */
+export const STUDIO_LANDING_SCOPED_KEY_HANDLERS: ReadonlySet<string> = new Set([
+  'AdminStudioLandingController.putPhoto',
+]);
+
+/** Whether this controller+handler pair may carry a landing-scoped key.
+ *  Unknown pairs may not. */
+export function allowsStudioLandingScopedKeys(
+  controllerName: string | undefined,
+  handlerName: string | undefined,
+): boolean {
+  if (!controllerName || !handlerName) {
+    return false;
+  }
+  return STUDIO_LANDING_SCOPED_KEY_HANDLERS.has(
+    `${controllerName}.${handlerName}`,
+  );
+}
+
 /** Whether this controller+handler pair may carry a persona-scoped key.
  *  Unknown pairs may not. */
 export function allowsPersonaScopedKeys(

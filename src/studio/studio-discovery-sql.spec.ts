@@ -6,6 +6,7 @@ import {
   artistRefFromColumns,
   listenableReleaseSql,
   notBlockedEitherWaySql,
+  openBrowsableEventSql,
   openUpcomingEventSql,
   personaColumnsFromRow,
   personaColumnsSql,
@@ -121,6 +122,25 @@ describe('Studio discovery SQL', () => {
       '("event"."community_id" IS NULL OR NOT EXISTS (SELECT 1 FROM "communities" "event_space" WHERE "event_space"."id" = "event"."community_id" AND "event_space"."parent_id" IS NOT NULL))',
     );
     expect(predicate).not.toContain('blocks');
+  });
+
+  it('builds the upcoming rule on the browsable rule plus a start after now', () => {
+    const browsablePredicate = openBrowsableEventSql('event');
+    expect(openUpcomingEventSql('event')).toContain(browsablePredicate);
+    expect(openUpcomingEventSql('event')).toContain(
+      `"event"."start_at" > now()`,
+    );
+    expect(browsablePredicate).not.toContain('start_at');
+    expect(browsablePredicate).toContain(`"event"."status" = 'published'`);
+    expect(browsablePredicate).toContain(
+      `"event"."visibility" IN ('public', 'members')`,
+    );
+    expect(browsablePredicate).toContain(
+      'FROM "content_moderation" "event_moderation"',
+    );
+    expect(browsablePredicate).toContain(
+      '"event_space"."parent_id" IS NOT NULL',
+    );
   });
 
   it('joins each pick to its release and persona and orders shelf by shelf', () => {

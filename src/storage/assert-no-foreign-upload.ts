@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import {
   isPersonaScopedKey,
+  isStudioLandingScopedKey,
   isStudioSceneScopedKey,
   storageKeyOwnerId,
 } from './storage-key';
@@ -34,8 +35,12 @@ export function assertNoForeignUploadIntroduced(
   }
   // T17: a persona-scoped key names no uploader (`storageKeyOwnerId` is null
   // for it), so it is allowed only where it is already stored. Studio
-  // discovery: so is a scene-scoped key.
-  if (isPersonaScopedKey(incoming) || isStudioSceneScopedKey(incoming)) {
+  // discovery: so is a scene-scoped key, and so is a landing-scoped key.
+  if (
+    isPersonaScopedKey(incoming) ||
+    isStudioSceneScopedKey(incoming) ||
+    isStudioLandingScopedKey(incoming)
+  ) {
     if (alreadyStored.includes(incoming)) {
       return;
     }

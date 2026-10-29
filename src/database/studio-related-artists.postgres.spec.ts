@@ -22,7 +22,8 @@ import { User, UserStatus } from '../users/entities/user.entity';
  * - PLAYLIST_MATE: two public playlists from two curators (4), newest release.
  * - CREDITED_FRIEND: one accepted credit on ARTIST's track (4).
  * - SCENE_MATE: the same active scene (2) and the same genre (1).
- * - GENRE_ONLY: the same genre (1).
+ * - GENRE_ONLY: carries jazz first and electronic second, so it shares
+ *   electronic with ARTIST through its second genre (1).
  * - SOLO_CURATOR_MATE: two public playlists from one curator (0).
  * - PENDING_ONLY: a pending credit (0).
  * - BLOCKED_MATE: an accepted credit (4), creator blocked by the viewer.
@@ -130,24 +131,29 @@ describeWithDatabase('RELATED_ARTISTS_SQL on real Postgres', () => {
        VALUES ($1, 'lisbon-ballroom', 'Lisbon ballroom', 'Lisbon', 1)`,
       [SCENE_ID],
     );
-    const genreOf = (personaId: string): string =>
-      [ARTIST, SCENE_MATE, GENRE_ONLY].includes(personaId)
-        ? 'electronic'
-        : 'jazz';
+    const genresOf = (personaId: string): string[] => {
+      if (personaId === GENRE_ONLY) {
+        return ['jazz', 'electronic'];
+      }
+      return [ARTIST, SCENE_MATE].includes(personaId)
+        ? ['electronic']
+        : ['jazz'];
+    };
     const publishedAtOf = (personaId: string): string =>
       personaId === PLAYLIST_MATE
         ? '2026-10-12T09:00:00.000Z'
         : '2026-10-10T09:00:00.000Z';
     for (const [personaId, handle] of EVERY_PERSONA) {
       await dataSource.query(
-        `INSERT INTO "studio_releases" ("id", "subprofile_id", "title", "type", "status", "published_at", "genre", "scene_id")
-         VALUES ($1, $2, $3, 'mix', 'published', $4, $5, $6)`,
+        `INSERT INTO "studio_releases" ("id", "subprofile_id", "title", "type", "status", "published_at", "genre", "genres", "scene_id")
+         VALUES ($1, $2, $3, 'mix', 'published', $4, $5, $6::varchar[], $7)`,
         [
           releaseOf(personaId),
           personaId,
           `Release of ${handle}`,
           publishedAtOf(personaId),
-          genreOf(personaId),
+          genresOf(personaId)[0],
+          genresOf(personaId),
           [ARTIST, SCENE_MATE].includes(personaId) ? SCENE_ID : null,
         ],
       );
@@ -208,6 +214,27 @@ describeWithDatabase('RELATED_ARTISTS_SQL on real Postgres', () => {
       SCENE_MATE,
       GENRE_ONLY,
     ]);
+  });
+
+  it('caps the shared genres at 2 however many genres the releases carry', async () => {
+    await dataSource.query(
+      `UPDATE "studio_releases" SET "genres" = ARRAY['electronic', 'folk', 'house']::varchar[]
+        WHERE "id" = ANY($1::uuid[])`,
+      [[releaseOf(ARTIST), releaseOf(GENRE_ONLY)]],
+    );
+    const rows: { artist_id: string; score: number }[] = await dataSource.query(
+      RELATED_ARTISTS_SQL,
+      [VIEWER, ARTIST, 8],
+    );
+    expect(rows.find((row) => row.artist_id === GENRE_ONLY)?.score).toBe(2);
+    await dataSource.query(
+      `UPDATE "studio_releases" SET "genres" = ARRAY['electronic']::varchar[] WHERE "id" = $1`,
+      [releaseOf(ARTIST)],
+    );
+    await dataSource.query(
+      `UPDATE "studio_releases" SET "genres" = ARRAY['jazz', 'electronic']::varchar[] WHERE "id" = $1`,
+      [releaseOf(GENRE_ONLY)],
+    );
   });
 
   it('counts a playlist pair only when two distinct curators made the lists', async () => {

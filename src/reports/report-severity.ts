@@ -37,6 +37,8 @@ const MEDIUM_REASONS: ReadonlySet<ReasonCode> = new Set([
   'venue_accessibility',
   'housing_scam',
   'funding_scam',
+  // Studio purchases: an artist took a member's payment and did not confirm it.
+  'payment_never_confirmed',
   'copyright',
   'not_affirming',
   'off_platform',

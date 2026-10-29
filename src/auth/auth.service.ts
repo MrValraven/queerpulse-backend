@@ -57,6 +57,7 @@ import {
   MemberPreferences,
 } from '../preferences/entities/member-preferences.entity';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { fileStudioAccessRequestForInvite } from '../studio/studio-access-request-filing';
 import {
   Notification,
   NotificationType,
@@ -710,6 +711,9 @@ export class AuthService {
           throw err;
         }
         await this.invitesService.claimInvite(manager, inviteId, created.id);
+        // Studio landing v2: a member who asked to join from the Studio page lands on the Studio list.
+        // Part of this transaction, so a failed signup files nothing.
+        await fileStudioAccessRequestForInvite(manager, inviteId, created.id);
         // The inviter vouches for the member they personally brought in — the
         // real endorsement edge behind the "X vouched for you" card the new
         // member sees during onboarding, carrying over the invite's vouch note.

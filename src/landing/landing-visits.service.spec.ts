@@ -63,12 +63,17 @@ describe('LandingVisitsService', () => {
 
   describe('record', () => {
     it('writes nothing for a bot user agent', async () => {
-      await service.record('instagram', 'Twitterbot/1.0', JSON_CONTENT_TYPE);
+      await service.record(
+        'instagram',
+        'home',
+        'Twitterbot/1.0',
+        JSON_CONTENT_TYPE,
+      );
       expect(query).not.toHaveBeenCalled();
     });
 
     it('writes nothing when the user agent is missing', async () => {
-      await service.record('instagram', undefined, JSON_CONTENT_TYPE);
+      await service.record('instagram', 'home', undefined, JSON_CONTENT_TYPE);
       expect(query).not.toHaveBeenCalled();
     });
 
@@ -81,7 +86,12 @@ describe('LandingVisitsService', () => {
     ])(
       'writes nothing for a non-JSON content type (%s)',
       async (contentType) => {
-        await service.record('instagram', BROWSER_USER_AGENT, contentType);
+        await service.record(
+          'instagram',
+          'home',
+          BROWSER_USER_AGENT,
+          contentType,
+        );
         expect(query).not.toHaveBeenCalled();
       },
     );
@@ -89,6 +99,7 @@ describe('LandingVisitsService', () => {
     it('counts a JSON content type in any case, charset included', async () => {
       await service.record(
         'instagram',
+        'home',
         BROWSER_USER_AGENT,
         'Application/JSON; charset=utf-8',
       );
@@ -97,20 +108,44 @@ describe('LandingVisitsService', () => {
 
     it('upserts the UTC day and the normalized source', async () => {
       jest.useFakeTimers().setSystemTime(new Date('2026-10-26T23:30:00Z'));
-      await service.record('Instagram', BROWSER_USER_AGENT, JSON_CONTENT_TYPE);
+      await service.record(
+        'Instagram',
+        'home',
+        BROWSER_USER_AGENT,
+        JSON_CONTENT_TYPE,
+      );
       expect(query).toHaveBeenCalledTimes(1);
       const [sql, parameters] = query.mock.calls[0] as [string, unknown[]];
       expect(sql).toContain('INSERT INTO "landing_visit_daily"');
-      expect(sql).toContain('ON CONFLICT ("day", "source")');
+      expect(sql).toContain('ON CONFLICT ("day", "page", "source")');
       expect(sql).toContain('"landing_visit_daily"."visits" + 1');
-      expect(parameters).toEqual(['2026-10-26', 'instagram']);
+      expect(parameters).toEqual(['2026-10-26', 'home', 'instagram']);
+    });
+
+    it('counts a studio visit in its own row', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-26T10:00:00Z'));
+      await service.record(
+        'instagram',
+        'studio',
+        BROWSER_USER_AGENT,
+        JSON_CONTENT_TYPE,
+      );
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('ON CONFLICT ("day", "page", "source")'),
+        ['2026-10-26', 'studio', 'instagram'],
+      );
     });
 
     it('never passes the user agent to the database', async () => {
-      await service.record(undefined, BROWSER_USER_AGENT, JSON_CONTENT_TYPE);
+      await service.record(
+        undefined,
+        'home',
+        BROWSER_USER_AGENT,
+        JSON_CONTENT_TYPE,
+      );
       const [, parameters] = query.mock.calls[0] as [string, unknown[]];
       expect(parameters).not.toContain(BROWSER_USER_AGENT);
-      expect(parameters[1]).toBe('direct');
+      expect(parameters[2]).toBe('direct');
     });
   });
 
@@ -119,7 +154,7 @@ describe('LandingVisitsService', () => {
       'returns exactly %i zero-filled days, oldest first, ending today',
       async (rangeDays) => {
         jest.useFakeTimers().setSystemTime(new Date('2026-10-26T12:00:00Z'));
-        const stats = await service.getStats(rangeDays);
+        const stats = await service.getStats(rangeDays, 'home');
         expect(stats.days).toHaveLength(rangeDays);
         expect(stats.days.at(-1)?.day).toBe('2026-10-26');
         const sortedDays = [...stats.days.map((entry) => entry.day)].sort();
@@ -127,6 +162,7 @@ describe('LandingVisitsService', () => {
         expect(stats.days.every((entry) => entry.visits === 0)).toBe(true);
         expect(stats.total).toBe(0);
         expect(stats.rangeDays).toBe(rangeDays);
+        expect(stats.page).toBe('home');
       },
     );
 
@@ -141,19 +177,32 @@ describe('LandingVisitsService', () => {
           { source: 'instagram', visits: '5' },
           { source: 'direct', visits: '2' },
         ]);
-      const stats = await service.getStats(30);
+      const stats = await service.getStats(30, 'studio');
       expect(stats.days[0]?.day).toBe('2026-09-27');
       expect(stats.days[28]).toEqual({ day: '2026-10-25', visits: 4 });
       expect(stats.days[29]).toEqual({ day: '2026-10-26', visits: 3 });
+      expect(stats.page).toBe('studio');
       expect(stats.total).toBe(7);
       expect(stats.topSources).toEqual([
         { source: 'instagram', visits: 5 },
         { source: 'direct', visits: 2 },
       ]);
       const [, dailyParameters] = query.mock.calls[0] as [string, unknown[]];
-      expect(dailyParameters).toEqual(['2026-09-27']);
+      expect(dailyParameters).toEqual(['2026-09-27', 'studio']);
       const [, sourceParameters] = query.mock.calls[1] as [string, unknown[]];
-      expect(sourceParameters).toEqual(['2026-09-27', 10]);
+      expect(sourceParameters).toEqual(['2026-09-27', 'studio', 10]);
+    });
+
+    it('reads the stats of one page only', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-26T12:00:00Z'));
+      const stats = await service.getStats(30, 'studio');
+      const readSqls = query.mock.calls.map((call) => (call as [string])[0]);
+      expect(readSqls).toHaveLength(2);
+      expect(readSqls.every((sql) => sql.includes('AND "page" = $2'))).toBe(
+        true,
+      );
+      expect(readSqls[1]).toContain('LIMIT $3');
+      expect(stats.page).toBe('studio');
     });
   });
 });

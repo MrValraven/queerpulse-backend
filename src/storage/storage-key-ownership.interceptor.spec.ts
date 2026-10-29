@@ -8,6 +8,7 @@ import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
+import { assertNoForeignUploadIntroduced } from './assert-no-foreign-upload';
 import { StorageKeyOwnershipInterceptor } from './storage-key-ownership.interceptor';
 
 const OWN_USER_ID = '11111111-2222-3333-4444-555555555555';
@@ -421,6 +422,65 @@ describe('StorageKeyOwnershipInterceptor', () => {
       expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
         ForbiddenException,
       );
+    });
+  });
+
+  // Studio landing v2: a landing-scoped key names no uploader, so it is
+  // refused everywhere but the landing photo save.
+  describe('landing-scoped keys', () => {
+    const LANDING_KEY = `studio-landing/${FILE_SEGMENT}/${FILE_SEGMENT}.jpg`;
+
+    it('lets the landing photo save carry a landing-scoped key and refuses it everywhere else', () => {
+      const photoSave = {
+        controller: 'AdminStudioLandingController',
+        method: 'putPhoto',
+      };
+      const passedBody = { imageUrl: LANDING_KEY };
+      interceptor.intercept(
+        httpContext('PUT', passedBody, { userId: OWN_USER_ID }, photoSave),
+        nextHandler(),
+      );
+      expect(passedBody.imageUrl).toBe(LANDING_KEY);
+
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'PUT',
+            { imageUrl: LANDING_KEY },
+            { userId: OWN_USER_ID },
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'PUT',
+            { imageUrl: LANDING_KEY },
+            { userId: OWN_USER_ID },
+            { controller: 'AdminStudioScenesController', method: 'update' },
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+      expect(() =>
+        interceptor.intercept(
+          httpContext('PUT', { imageUrl: LANDING_KEY }, undefined, photoSave),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+    });
+
+    // assert-no-foreign-upload.ts has no spec of its own.
+    it('accepts a landing-scoped key only when it is already stored', () => {
+      expect(() =>
+        assertNoForeignUploadIntroduced(OWN_USER_ID, LANDING_KEY, [
+          LANDING_KEY,
+        ]),
+      ).not.toThrow();
+      expect(() =>
+        assertNoForeignUploadIntroduced(OWN_USER_ID, LANDING_KEY, []),
+      ).toThrow(ForbiddenException);
     });
   });
 });

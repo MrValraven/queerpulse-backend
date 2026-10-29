@@ -26,6 +26,8 @@ import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import { restoreTracksHeldByClaimantWithin } from '../studio/studio-claim-store';
+import { forgetBuyerPurchaseDetails } from '../studio/studio-purchases-erasure';
+import { withoutKeysHeldByKeptCopies } from '../studio/studio-kept-tracks';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { releaseHandleWithin } from '../handles/handles.service';
@@ -468,6 +470,14 @@ export class AccountDeletionProcessorService {
       //     still names them.
       await restoreTracksHeldByClaimantWithin(manager, userId);
 
+      // 2h. Studio purchases (contract 4.6): the artist keeps the sale as
+      //     "Deleted account" with amount and date; the payer name and the
+      //     wall choice go, and a pending claim is cancelled so the artist
+      //     never sees an unanswerable one; the key then sets
+      //     `buyer_user_id` null. Runs while `buyer_user_id` still names
+      //     the member.
+      await forgetBuyerPurchaseDetails(manager, userId);
+
       // 3. Hard-delete the user. Every other member-owned table carries an
       //    `ON DELETE CASCADE` FK to `users("id")` and goes with it — 70+ FKs
       //    across the schema, verified against `src/migrations`.
@@ -623,8 +633,14 @@ export class AccountDeletionProcessorService {
     //     `MediaReferenceResolver` has no Studio audio source, and 2f already
     //     left out every key a surviving track holds. `deleteObjectsAndForget`
     //     logs each failure itself, so the committed erasure stays committed.
+    //     A key a pending kept copy still reads (contract 4.7) stays: the
+    //     orphan sweep reclaims it once the copy lands.
     if (studioAudioKeys.length > 0) {
-      await this.studioAudioUploads.deleteObjectsAndForget(studioAudioKeys);
+      const deletableKeys = await withoutKeysHeldByKeptCopies(
+        this.dataSource,
+        studioAudioKeys,
+      );
+      await this.studioAudioUploads.deleteObjectsAndForget(deletableKeys);
     }
   }
 

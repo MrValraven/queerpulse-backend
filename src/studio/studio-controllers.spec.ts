@@ -1,10 +1,14 @@
+import { ParseUUIDPipe } from '@nestjs/common';
 import {
   GUARDS_METADATA,
+  HEADERS_METADATA,
   HTTP_CODE_METADATA,
   MODULE_METADATA,
   PATH_METADATA,
+  ROUTE_ARGS_METADATA,
 } from '@nestjs/common/constants';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
 import { ROLES_KEY } from '../auth/decorators/roles.decorator';
 import { STAFF_ROLES_KEY } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
@@ -12,12 +16,22 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { FEATURE_KEY } from '../common/feature.decorator';
+import {
+  NO_STALE_READ_CDN_CACHE,
+  PUBLIC_READ_CACHE,
+} from '../common/public-read-cache';
 import { ModAuditService } from '../moderation/mod-audit.service';
 import { SavedModule } from '../saved/saved.module';
+import { STUDIO_LANDING_SCOPED_KEY_HANDLERS } from '../storage/shared-upload-handlers';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminStudioAccessController } from './admin-studio-access.controller';
 import { AdminStudioCurationController } from './admin-studio-curation.controller';
 import { AdminStudioCurationService } from './admin-studio-curation.service';
+import { AdminStudioAccessRequestsController } from './admin-studio-access-requests.controller';
+import { AdminStudioLandingContentService } from './admin-studio-landing-content.service';
+import { AdminStudioLandingController } from './admin-studio-landing.controller';
+import { AdminStudioLandingPhotosService } from './admin-studio-landing-photos.service';
+import { AdminStudioLandingPreviewsService } from './admin-studio-landing-previews.service';
 import { AdminStudioDisputesController } from './admin-studio-disputes.controller';
 import { AdminStudioReleasesController } from './admin-studio-releases.controller';
 import { AdminStudioScenesController } from './admin-studio-scenes.controller';
@@ -40,6 +54,7 @@ import { StudioPersonaCreditsService } from './studio-persona-credits.service';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioModerationService } from './studio-moderation.service';
 import { StudioPlaybackPreferencesController } from './studio-playback-preferences.controller';
+import { StudioWelcomeController } from './studio-welcome.controller';
 import { StudioStaffReadsService } from './studio-staff-reads.service';
 import { StudioPlaylistListingsController } from './studio-playlist-listings.controller';
 import { StudioPlaylistEditorBlockListener } from './studio-playlist-editor-block.listener';
@@ -80,6 +95,29 @@ import { StudioMilestoneSweepService } from './studio-milestone-sweep.service';
 import { StudioMilestonesController } from './studio-milestones.controller';
 import { StudioStatsController } from './studio-stats.controller';
 import { StudioTracksController } from './studio-tracks.controller';
+import { StudioBuyerPurchasesService } from './studio-buyer-purchases.service';
+import { StudioKeptAudioService } from './studio-kept-audio.service';
+import { StudioPaymentMethodsController } from './studio-payment-methods.controller';
+import { StudioPaymentMethodsService } from './studio-payment-methods.service';
+import { StudioPurchaseAlertsListener } from './studio-purchase-alerts.listener';
+import { StudioPurchaseExpiryService } from './studio-purchase-expiry.service';
+import { StudioPurchaseLibraryController } from './studio-purchase-library.controller';
+import { StudioPurchaseLibraryService } from './studio-purchase-library.service';
+import { StudioPurchaseWallService } from './studio-purchase-wall.service';
+import { StudioPurchasesController } from './studio-purchases.controller';
+import { StudioPurchasesService } from './studio-purchases.service';
+import { StudioSalesController } from './studio-sales.controller';
+import { StudioSalesService } from './studio-sales.service';
+import { StudioAccessAlertsListener } from './studio-access-alerts.listener';
+import { StudioAccessRequestsController } from './studio-access-requests.controller';
+import { StudioAccessRequestsService } from './studio-access-requests.service';
+import { StudioFoundingArtistsController } from './studio-founding-artists.controller';
+import { StudioFoundingArtistsService } from './studio-founding-artists.service';
+import { StudioLandingAlertsListener } from './studio-landing-alerts.listener';
+import { StudioLandingController } from './studio-landing.controller';
+import { StudioLandingPreviewsController } from './studio-landing-previews.controller';
+import { StudioLandingPreviewsService } from './studio-landing-previews.service';
+import { StudioLandingReadService } from './studio-landing-read.service';
 import { StudioModule } from './studio.module';
 
 const guardsOf = (controller: object): unknown[] =>
@@ -124,6 +162,7 @@ const memberControllers = [
   StudioPreviewsController,
   StudioPressKitController,
   StudioPlaybackPreferencesController,
+  StudioWelcomeController,
   StudioCurationController,
   StudioScenesController,
   StudioPersonaCreditsController,
@@ -132,20 +171,30 @@ const memberControllers = [
   StudioRelatedArtistsController,
   StudioRadioController,
   StudioEpisodesController,
+  StudioPaymentMethodsController,
+  StudioPurchasesController,
+  StudioSalesController,
+  StudioLandingPreviewsController,
+  StudioFoundingArtistsController,
 ];
 const adminControllers = [
   AdminStudioAccessController,
   AdminStudioReleasesController,
   AdminStudioDisputesController,
+  AdminStudioAccessRequestsController,
 ];
 // Studio discovery: the admin pages follow `AdminTopicsController`, so
 // `RolesOrStaffGuard` with zero staff roles.
 const discoveryAdminControllers = [
   AdminStudioCurationController,
   AdminStudioScenesController,
+  AdminStudioLandingController,
 ];
 const everyController = [
   StudioMeController,
+  StudioPurchaseLibraryController,
+  StudioLandingController,
+  StudioAccessRequestsController,
   ...memberControllers,
   ...adminControllers,
   ...discoveryAdminControllers,
@@ -221,6 +270,10 @@ describe('Studio controllers', () => {
         'StudioReleaseToolsController.mintPreviewLink',
         'StudioPressKitController.updatePressKit',
         'StudioEpisodesController.publishEpisode',
+        'StudioPaymentMethodsController.replaceMethods',
+        'StudioPurchasesController.createPurchase',
+        'StudioPurchasesController.updateWall',
+        'StudioSalesController.confirm',
       ].sort(),
     );
   });
@@ -378,6 +431,18 @@ describe('Studio controllers', () => {
     expect(
       routePathOf(StudioPlaybackPreferencesController, 'updateStudioPlayback'),
     ).toBe('studio-playback');
+  });
+
+  it('serves the Studio welcome at /me/studio-welcome behind the Studio grant', () => {
+    expect(Reflect.getMetadata(PATH_METADATA, StudioWelcomeController)).toBe(
+      'me',
+    );
+    expect(routePathOf(StudioWelcomeController, 'getStudioWelcome')).toBe(
+      'studio-welcome',
+    );
+    expect(routePathOf(StudioWelcomeController, 'updateStudioWelcome')).toBe(
+      'studio-welcome',
+    );
   });
 
   it('forwards the report a takedown answers', async () => {
@@ -858,6 +923,410 @@ describe('Studio controllers', () => {
           StudioSupportersService,
           StudioArtistPlaysService,
           StudioListeningPruneService,
+        ]),
+      );
+    });
+  });
+
+  describe('Studio purchases', () => {
+    const VIEWER_ID = 'viewer-1';
+    const PERSONA_ID = '22222222-2222-4222-8222-222222222222';
+    const PURCHASE_ID = '33333333-3333-4333-8333-333333333333';
+    const RELEASE_ID = '44444444-4444-4444-8444-444444444444';
+    const viewer = { userId: VIEWER_ID } as CurrentUserData;
+
+    // `@Param(name, ParseUUIDPipe)` records each route param with its pipes
+    // under ROUTE_ARGS_METADATA on the controller class, keyed by handler.
+    const uuidParamsOf = (
+      controller: { prototype: unknown },
+      methodName: string,
+    ): string[] => {
+      const routeArguments =
+        (Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, methodName) as
+          Record<string, { data?: unknown; pipes?: unknown[] }> | undefined) ??
+        {};
+      return Object.values(routeArguments)
+        .filter(
+          (routeArgument) =>
+            typeof routeArgument.data === 'string' &&
+            (routeArgument.pipes ?? []).includes(ParseUUIDPipe),
+        )
+        .map((routeArgument) => routeArgument.data as string)
+        .sort();
+    };
+
+    it('mounts the purchase routes at the contract paths', () => {
+      expect(
+        [
+          'releaseOffer',
+          'trackOffer',
+          'issueReference',
+          'createPurchase',
+          'cancelPurchase',
+          'getWall',
+          'updateWall',
+          'listReleaseWall',
+        ].map((handler) => routePathOf(StudioPurchasesController, handler)),
+      ).toEqual([
+        'releases/:releaseId/offer',
+        'tracks/:trackId/offer',
+        'purchases/reference-code',
+        'purchases',
+        'purchases/:purchaseId/cancel',
+        'purchases/:purchaseId/wall',
+        'purchases/:purchaseId/wall',
+        'releases/:releaseId/wall',
+      ]);
+      expect(
+        [
+          'listToConfirm',
+          'confirm',
+          'decline',
+          'listSales',
+          'salesTotals',
+          'pendingCount',
+        ].map((handler) => routePathOf(StudioSalesController, handler)),
+      ).toEqual([
+        'artists/:subprofileId/purchases',
+        'artists/:subprofileId/purchases/:purchaseId/confirm',
+        'artists/:subprofileId/purchases/:purchaseId/decline',
+        'artists/:subprofileId/sales',
+        'artists/:subprofileId/sales/totals',
+        'sales/pending-count',
+      ]);
+      expect(
+        ['listMine', 'download'].map((handler) =>
+          routePathOf(StudioPurchaseLibraryController, handler),
+        ),
+      ).toEqual([
+        'me/studio-purchases',
+        'studio/purchases/:purchaseId/tracks/:trackId/download',
+      ]);
+      expect(
+        ['getMethods', 'replaceMethods'].map((handler) =>
+          routePathOf(StudioPaymentMethodsController, handler),
+        ),
+      ).toEqual([
+        ':subprofileId/payment-methods',
+        ':subprofileId/payment-methods',
+      ]);
+      expect(
+        [
+          StudioPaymentMethodsController,
+          StudioPurchasesController,
+          StudioPurchaseLibraryController,
+          StudioSalesController,
+        ].map((controller) => Reflect.getMetadata(PATH_METADATA, controller)),
+      ).toEqual(['studio/artists', 'studio', '/', 'studio']);
+    });
+
+    it('opens the buyer list and the download to signed-in active members without the Studio grant', () => {
+      expect(guardsOf(StudioPurchaseLibraryController)).toEqual([
+        ActiveMemberGuard,
+      ]);
+      expect(
+        Reflect.getMetadata(FEATURE_KEY, StudioPurchaseLibraryController),
+      ).toBe('studio');
+    });
+
+    it('throttles purchase creation to ten an hour and reference codes to thirty an hour', () => {
+      const createHandler = handlerOf(
+        StudioPurchasesController,
+        'createPurchase',
+      );
+      const referenceHandler = handlerOf(
+        StudioPurchasesController,
+        'issueReference',
+      );
+      expect([
+        Reflect.getMetadata(THROTTLE_LIMIT_KEY, createHandler),
+        Reflect.getMetadata(THROTTLE_TTL_KEY, createHandler),
+        Reflect.getMetadata(THROTTLE_LIMIT_KEY, referenceHandler),
+        Reflect.getMetadata(THROTTLE_TTL_KEY, referenceHandler),
+      ]).toEqual([10, 3_600_000, 30, 3_600_000]);
+    });
+
+    it('answers 204 to cancel, confirm and decline', () => {
+      expect(
+        [
+          handlerOf(StudioPurchasesController, 'cancelPurchase'),
+          handlerOf(StudioSalesController, 'confirm'),
+          handlerOf(StudioSalesController, 'decline'),
+        ].map((handler) => Reflect.getMetadata(HTTP_CODE_METADATA, handler)),
+      ).toEqual([204, 204, 204]);
+    });
+
+    it('validates every id in a purchase route as a UUID', () => {
+      expect([
+        uuidParamsOf(StudioPaymentMethodsController, 'getMethods'),
+        uuidParamsOf(StudioPaymentMethodsController, 'replaceMethods'),
+        uuidParamsOf(StudioPurchasesController, 'releaseOffer'),
+        uuidParamsOf(StudioPurchasesController, 'trackOffer'),
+        uuidParamsOf(StudioPurchasesController, 'cancelPurchase'),
+        uuidParamsOf(StudioPurchasesController, 'getWall'),
+        uuidParamsOf(StudioPurchasesController, 'updateWall'),
+        uuidParamsOf(StudioPurchasesController, 'listReleaseWall'),
+        uuidParamsOf(StudioPurchaseLibraryController, 'download'),
+        uuidParamsOf(StudioSalesController, 'listToConfirm'),
+        uuidParamsOf(StudioSalesController, 'confirm'),
+        uuidParamsOf(StudioSalesController, 'decline'),
+        uuidParamsOf(StudioSalesController, 'listSales'),
+        uuidParamsOf(StudioSalesController, 'salesTotals'),
+      ]).toEqual([
+        ['subprofileId'],
+        ['subprofileId'],
+        ['releaseId'],
+        ['trackId'],
+        ['purchaseId'],
+        ['purchaseId'],
+        ['purchaseId'],
+        ['releaseId'],
+        ['purchaseId', 'trackId'],
+        ['subprofileId'],
+        ['purchaseId', 'subprofileId'],
+        ['purchaseId', 'subprofileId'],
+        ['subprofileId'],
+        ['subprofileId'],
+      ]);
+    });
+
+    it('passes the decline body and the cursor through', async () => {
+      const sales = {
+        decline: jest.fn().mockResolvedValue(undefined),
+        listToConfirm: jest.fn().mockResolvedValue({ items: [] }),
+        listSales: jest.fn().mockResolvedValue({ items: [] }),
+      };
+      const purchases = {
+        create: jest.fn().mockResolvedValue({}),
+      };
+      const wall = { listWall: jest.fn().mockResolvedValue({ items: [] }) };
+      const library = { listMine: jest.fn().mockResolvedValue({ items: [] }) };
+      const salesController = new StudioSalesController(
+        sales as unknown as StudioSalesService,
+      );
+      await expect(
+        salesController.decline(viewer, PERSONA_ID, PURCHASE_ID, {
+          reason: 'other',
+          note: 'x',
+        }),
+      ).resolves.toBeUndefined();
+      await salesController.listToConfirm(viewer, PERSONA_ID, {
+        cursor: 'abc',
+      });
+      await salesController.listSales(viewer, PERSONA_ID, {});
+      const purchasesController = new StudioPurchasesController(
+        purchases as unknown as StudioPurchasesService,
+        wall as unknown as StudioPurchaseWallService,
+      );
+      await purchasesController.listReleaseWall(viewer, RELEASE_ID, {
+        cursor: 'def',
+      });
+      const createBody = {
+        releaseId: RELEASE_ID,
+        amountCents: 700,
+        payerName: null,
+        isOnWall: false,
+        shownAsSubprofileId: null,
+        referenceCode: 'ABC234',
+        referenceToken: 'token',
+      };
+      await purchasesController.createPurchase(viewer, createBody);
+      await new StudioPurchaseLibraryController(
+        library as unknown as StudioPurchaseLibraryService,
+      ).listMine(viewer, { status: 'confirmed', cursor: 'ghi' });
+      expect(sales.decline).toHaveBeenCalledWith(
+        VIEWER_ID,
+        PERSONA_ID,
+        PURCHASE_ID,
+        { reason: 'other', note: 'x' },
+      );
+      expect(sales.listToConfirm).toHaveBeenCalledWith(
+        VIEWER_ID,
+        PERSONA_ID,
+        'abc',
+      );
+      expect(sales.listSales).toHaveBeenCalledWith(
+        VIEWER_ID,
+        PERSONA_ID,
+        undefined,
+      );
+      expect(wall.listWall).toHaveBeenCalledWith(VIEWER_ID, RELEASE_ID, 'def');
+      expect(purchases.create).toHaveBeenCalledWith(VIEWER_ID, createBody);
+      expect(library.listMine).toHaveBeenCalledWith(VIEWER_ID, {
+        status: 'confirmed',
+        cursor: 'ghi',
+      });
+    });
+
+    it('registers the purchase entities, services, listener and cron', () => {
+      expect(
+        Reflect.getMetadata(MODULE_METADATA.PROVIDERS, StudioModule),
+      ).toEqual(
+        expect.arrayContaining([
+          StudioPaymentMethodsService,
+          StudioBuyerPurchasesService,
+          StudioPurchasesService,
+          StudioPurchaseWallService,
+          StudioPurchaseLibraryService,
+          StudioSalesService,
+          StudioKeptAudioService,
+          StudioPurchaseExpiryService,
+          StudioPurchaseAlertsListener,
+        ]),
+      );
+    });
+  });
+
+  describe('Studio landing v2', () => {
+    const headersOf = (
+      controller: { prototype: unknown },
+      methodName: string,
+    ): Record<string, unknown> => {
+      const declared =
+        (Reflect.getMetadata(
+          HEADERS_METADATA,
+          handlerOf(controller, methodName),
+        ) as { name: string; value: unknown }[] | undefined) ?? [];
+      return Object.fromEntries(
+        declared.map((header) => [header.name, header.value]),
+      );
+    };
+
+    it('serves the landing reads to everyone with no guard', () => {
+      expect(guardsOf(StudioLandingController)).toEqual([]);
+      for (const handler of ['getLanding', 'getPreviewStream']) {
+        expect(
+          Reflect.getMetadata(
+            IS_PUBLIC_KEY,
+            handlerOf(StudioLandingController, handler),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('throttles the preview stream at 30 a minute and stores nothing in caches', () => {
+      const handler = handlerOf(StudioLandingController, 'getPreviewStream');
+      expect([
+        Reflect.getMetadata(THROTTLE_LIMIT_KEY, handler),
+        Reflect.getMetadata(THROTTLE_TTL_KEY, handler),
+      ]).toEqual([30, 60_000]);
+      expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toEqual([
+        { name: 'Cache-Control', value: 'no-store' },
+      ]);
+    });
+
+    it('caches the landing read for the CDN with no stale window', () => {
+      expect(headersOf(StudioLandingController, 'getLanding')).toEqual({
+        'Cache-Control': PUBLIC_READ_CACHE,
+        'CDN-Cache-Control': NO_STALE_READ_CDN_CACHE,
+      });
+    });
+
+    it('answers the access request routes without the Studio grant', () => {
+      expect(guardsOf(StudioAccessRequestsController)).toEqual([
+        ActiveMemberGuard,
+      ]);
+    });
+
+    it('mounts the landing routes at the contract paths', () => {
+      expect(
+        ['getLanding', 'getPreviewStream'].map((handler) =>
+          routePathOf(StudioLandingController, handler),
+        ),
+      ).toEqual(['/', 'previews/:previewId/stream']);
+      expect(
+        ['listPreviews', 'approve', 'decline', 'withdraw'].map((handler) =>
+          routePathOf(StudioLandingPreviewsController, handler),
+        ),
+      ).toEqual([
+        ':subprofileId/landing-previews',
+        ':subprofileId/landing-previews/:previewId/approve',
+        ':subprofileId/landing-previews/:previewId/decline',
+        ':subprofileId/landing-previews/:previewId/withdraw',
+      ]);
+      expect(
+        [
+          'getLanding',
+          'searchTracks',
+          'searchPersonas',
+          'requestPreview',
+          'removePreview',
+          'reorderPreviews',
+          'createArtistCard',
+          'updateArtistCard',
+          'deleteArtistCard',
+          'reorderArtistCards',
+          'putPhoto',
+          'deletePhoto',
+          'addFoundingArtist',
+          'removeFoundingArtist',
+          'reorderFoundingArtists',
+          'updateSettings',
+        ].map((handler) => routePathOf(AdminStudioLandingController, handler)),
+      ).toEqual([
+        '/',
+        'track-search',
+        'persona-search',
+        'previews',
+        'previews/:previewId',
+        'previews/reorder',
+        'artist-cards',
+        'artist-cards/:cardId',
+        'artist-cards/:cardId',
+        'artist-cards/reorder',
+        'photos/:slot',
+        'photos/:slot',
+        'founding-artists',
+        'founding-artists/:foundingArtistId',
+        'founding-artists/reorder',
+        'settings',
+      ]);
+      expect(
+        ['listWaiting', 'grantRequest', 'dismissRequest'].map((handler) =>
+          routePathOf(AdminStudioAccessRequestsController, handler),
+        ),
+      ).toEqual(['/', ':requestId/grant', ':requestId']);
+    });
+
+    it('declares each reorder route before the id route of its list', () => {
+      const handlerNames = Object.getOwnPropertyNames(
+        AdminStudioLandingController.prototype,
+      );
+      for (const [reorderHandler, idHandler] of [
+        ['reorderPreviews', 'removePreview'],
+        ['reorderArtistCards', 'updateArtistCard'],
+        ['reorderArtistCards', 'deleteArtistCard'],
+        ['reorderFoundingArtists', 'removeFoundingArtist'],
+      ] as const) {
+        expect(handlerNames.indexOf(reorderHandler)).toBeGreaterThan(-1);
+        expect(handlerNames.indexOf(reorderHandler)).toBeLessThan(
+          handlerNames.indexOf(idHandler),
+        );
+      }
+    });
+
+    it('names the photo handler putPhoto for the landing key allowlist', () => {
+      expect(
+        STUDIO_LANDING_SCOPED_KEY_HANDLERS.has(
+          `${AdminStudioLandingController.name}.putPhoto`,
+        ),
+      ).toBe(true);
+    });
+
+    it('registers the landing entities, services and listeners', () => {
+      expect(
+        Reflect.getMetadata(MODULE_METADATA.PROVIDERS, StudioModule),
+      ).toEqual(
+        expect.arrayContaining([
+          StudioLandingReadService,
+          AdminStudioLandingPreviewsService,
+          AdminStudioLandingContentService,
+          AdminStudioLandingPhotosService,
+          StudioLandingPreviewsService,
+          StudioAccessRequestsService,
+          StudioFoundingArtistsService,
+          StudioLandingAlertsListener,
+          StudioAccessAlertsListener,
         ]),
       );
     });

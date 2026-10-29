@@ -23,7 +23,11 @@ import {
 // Also import-free, for the same reason.
 import { dropLandingVisitRequest } from './landing/landing-visit-request-log';
 // Also import-free, for the same reason.
+import { dropStudioLandingPublicRequest } from './studio/studio-landing-request-log';
+// Also import-free, for the same reason.
 import { dropCommunityGivingRequestBody } from './communities/community-giving-request-log';
+// Also import-free, for the same reason.
+import { dropStudioMoneyRequestBody } from './studio/studio-purchase-request-log';
 // Also import-free, for the same reason.
 import { dropQuizshowRequestBody } from './quizshow/quizshow-request-log';
 // Also import-free, for the same reason.
@@ -90,6 +94,8 @@ export function scrubSensitiveQueryParameters(
   // Sentry attaches the incoming body by default, and a giving save carries
   // IBANs and MB WAY numbers. Checked first, while `request.url` is intact.
   dropCommunityGivingRequestBody(request);
+  // Payment-method, purchase, wall and decline bodies hold IBANs, MB WAY numbers and payer names.
+  dropStudioMoneyRequestBody(request);
   // Pulse Live bodies hold join codes and quiz text, and its socket frames
   // never reach Sentry.
   dropQuizshowRequestBody(request);
@@ -110,7 +116,9 @@ export function scrubSensitiveQueryParameters(
     !dropStudioListeningUrl(request) &&
     !dropCreatorDraftUrl(request) &&
     // The landing visit beacon is an anonymous counter: no URL, body, headers or cookies.
-    !dropLandingVisitRequest(request)
+    !dropLandingVisitRequest(request) &&
+    // The Studio page reads are served to strangers and record nothing.
+    !dropStudioLandingPublicRequest(request)
   ) {
     if (typeof request.url === 'string') {
       request.url = redactSensitiveQueryParameters(request.url);

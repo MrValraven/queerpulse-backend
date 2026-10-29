@@ -15,7 +15,7 @@ const completeRelease: StudioReleaseHealthRelease = {
   type: StudioReleaseType.Album,
   coverKey: 'covers/a.jpg',
   description: 'A record about the sea',
-  genre: 'house',
+  genres: ['house'],
   mood: 'warm',
   buyUrl: 'https://example.com/buy',
   tracksChangedAt: null,
@@ -77,7 +77,7 @@ describe('toReleaseHealth', () => {
     expect(isDoneOf(health, 'description')).toBe(false);
   });
 
-  it('needs both genre and mood', () => {
+  it('needs at least one genre and a mood', () => {
     expect(
       isDoneOf(
         toReleaseHealth(
@@ -91,6 +91,26 @@ describe('toReleaseHealth', () => {
     expect(
       isDoneOf(
         toReleaseHealth(completeRelease, [completeTrack], null),
+        'genreAndMood',
+      ),
+    ).toBe(true);
+    expect(
+      isDoneOf(
+        toReleaseHealth(
+          { ...completeRelease, genres: [] },
+          [completeTrack],
+          null,
+        ),
+        'genreAndMood',
+      ),
+    ).toBe(false);
+    expect(
+      isDoneOf(
+        toReleaseHealth(
+          { ...completeRelease, genres: ['house', 'folk'] },
+          [completeTrack],
+          null,
+        ),
         'genreAndMood',
       ),
     ).toBe(true);

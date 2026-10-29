@@ -27,7 +27,7 @@ export type StudioReleaseHealthRelease = Pick<
   | 'type'
   | 'coverKey'
   | 'description'
-  | 'genre'
+  | 'genres'
   | 'mood'
   | 'buyUrl'
   | 'tracksChangedAt'
@@ -80,7 +80,7 @@ export function toReleaseHealth(
   items.push(
     {
       key: 'genreAndMood',
-      isDone: hasText(release.genre) && hasText(release.mood),
+      isDone: release.genres.length > 0 && hasText(release.mood),
       isOptional: false,
     },
     {

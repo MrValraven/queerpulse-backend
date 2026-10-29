@@ -1,3 +1,5 @@
+import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from '../subprofiles/subprofile-takedown';
+
 /**
  * "Persona member" in every Studio dashboard block check means the creator and
  * every co-owner. The persona creator is read from `subprofiles.user_id` as
@@ -63,4 +65,29 @@ export function personaIdentityBlockedBySql(
         )
       )
   )`;
+}
+
+/**
+ * Owner side only: a chosen persona that is removed or under a moderator
+ * takedown (the `listenablePersonaSql` moderation rule) drops the supporter
+ * until they pick a new identity; a private or draft one still shows. Shared by
+ * the listen supporters and the supporter wall.
+ */
+export function chosenPersonaShowableSql(
+  chosenPersonaIdExpression: string,
+): string {
+  return `EXISTS (
+     SELECT 1 FROM "subprofiles" "chosen_persona"
+      WHERE "chosen_persona"."id" = ${chosenPersonaIdExpression}
+        AND "chosen_persona"."removed_at" IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "chosen_persona_moderation"
+           WHERE "chosen_persona_moderation"."subject_type" = '${SUBPROFILE_MODERATION_SUBJECT_TYPE}'
+             AND "chosen_persona_moderation"."subject_id" = "chosen_persona"."id"::text
+             AND (
+               "chosen_persona_moderation"."hidden_at" IS NOT NULL
+               OR "chosen_persona_moderation"."removed_at" IS NOT NULL
+             )
+        )
+   )`;
 }

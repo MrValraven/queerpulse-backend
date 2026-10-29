@@ -169,8 +169,8 @@ describeWithDatabase('FIRST_PLACEMENT_SWEEP_SQL on real Postgres', () => {
         [personaId, CREATOR],
       );
       await dataSource.query(
-        `INSERT INTO "studio_releases" ("id", "subprofile_id", "title", "type", "status", "published_at", "genre")
-         VALUES ($1, $2, $3, 'mix', 'published', '2026-10-10T09:00:00.000Z', 'electronic')`,
+        `INSERT INTO "studio_releases" ("id", "subprofile_id", "title", "type", "status", "published_at", "genre", "genres")
+         VALUES ($1, $2, $3, 'mix', 'published', '2026-10-10T09:00:00.000Z', 'electronic', ARRAY['electronic'])`,
         [releaseOf(personaId), personaId, `Release of ${handle}`],
       );
       await dataSource.query(

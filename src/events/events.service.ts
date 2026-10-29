@@ -184,9 +184,24 @@ import { quizshowError } from '../quizshow/quizshow-errors';
 import { RsvpService } from './rsvp.service';
 import { seatHostAsGoing } from './host-seat';
 import { occurrenceStartAt } from './series-occurrences';
+import { houseMusicEventError } from './house-music-event-errors';
+import {
+  cohostSeatRefusalFor,
+  isHouseAccountId,
+  lockCohostSeatsForMember,
+} from './house-music-events';
 
 /** Edit/cancel scope for a recurring occurrence — see `SeriesScopeQuery`'s doc. */
 export type SeriesScope = 'this' | 'future';
+
+/** Extra inputs for `EventsService.update` that only the admin path sets. */
+export interface EventUpdateOptions {
+  /** Whose uploads a new cover is checked against. Defaults to the acting user. */
+  uploaderUserId?: string;
+}
+
+/** The three lists `listHostedInFamily` splits a host's events into. */
+export type HostedEventBucket = 'upcoming' | 'past' | 'cancelled';
 
 /**
  * What one occurrence's patch changed, handed back by `applyUpdate` so its
@@ -786,9 +801,33 @@ export class EventsService {
     userId: string,
     dto: UpdateEventInput,
     scope: SeriesScope = 'this',
+    options: EventUpdateOptions = {},
   ): Promise<UpdatedEventDetail> {
     const event = await this.loadEventOr404(slug);
     await this.assertOrganizer(event.id, userId);
+    // An event QueerPulse hosts keeps the family it was filed in. Siblings
+    // under `scope: 'future'` share the host, so one check covers the series.
+    if (
+      dto.gatheringFamily !== undefined &&
+      dto.gatheringFamily !== event.gatheringFamily &&
+      (await this.isHostedByHouse(event))
+    ) {
+      throw houseMusicEventError('house_event_family_locked');
+    }
+    // A Music event QueerPulse hosts is open to every member, so a patch can
+    // neither attach it to a community nor move it to another one. Clearing
+    // the community, or resending the one it already has, saves as before.
+    if (
+      dto.communitySlug &&
+      event.gatheringFamily === GatheringFamily.Music &&
+      (await this.isHostedByHouse(event)) &&
+      (event.communityId === null ||
+        (await this.membership.slugById(event.communityId)) !==
+          dto.communitySlug)
+    ) {
+      throw houseMusicEventError('music_event_community_unavailable');
+    }
+    const uploaderUserId = options.uploaderUserId ?? userId;
 
     // `seriesId`/`seriesIndex` are never patchable, so the sibling set can be
     // resolved from the unpatched row and the whole series written in ONE
@@ -810,10 +849,18 @@ export class EventsService {
 
     const applied: AppliedEventUpdate[] = [];
     await this.events.manager.transaction(async (manager) => {
-      applied.push(await this.applyUpdate(event, userId, dto, manager));
+      applied.push(
+        await this.applyUpdate(event, userId, dto, manager, uploaderUserId),
+      );
       for (const sibling of futureSiblings) {
         applied.push(
-          await this.applyUpdate(sibling, userId, seriesPatch, manager),
+          await this.applyUpdate(
+            sibling,
+            userId,
+            seriesPatch,
+            manager,
+            uploaderUserId,
+          ),
         );
       }
     });
@@ -898,7 +945,10 @@ export class EventsService {
     // side effects this method used to perform inline (waitlist reconciliation,
     // the attendee notification) are REPORTED back instead of run here, so the
     // caller can run them once the transaction has actually committed.
-    manager?: EntityManager,
+    manager: EntityManager | undefined,
+    // Whose uploads a new cover is checked against: the acting user, or the
+    // staff member when the admin path edits an event the house hosts.
+    uploaderUserId: string,
   ): Promise<AppliedEventUpdate> {
     // A cancelled event is terminal: cancel() is the only way in and there is no
     // way back out. The update DTO only allows Draft | Published for status, so
@@ -914,7 +964,7 @@ export class EventsService {
     // for each sibling against ITS own stored cover): a foreign cover is allowed
     // only when it is already this occurrence's stored value, so a cohost cannot
     // point the field at a new foreign upload.
-    assertNoForeignUploadIntroduced(userId, dto.coverImageUrl, [
+    assertNoForeignUploadIntroduced(uploaderUserId, dto.coverImageUrl, [
       event.coverImageUrl,
     ]);
 
@@ -2191,6 +2241,49 @@ export class EventsService {
     return this.summarize(events, userId);
   }
 
+  /**
+   * One page of the events a host runs in one family, split into upcoming,
+   * past and cancelled. Upcoming runs soonest first; past and cancelled run
+   * newest first. One extra row is read to report `hasMore`.
+   */
+  async listHostedInFamily(
+    hostId: string,
+    family: GatheringFamily,
+    bucket: HostedEventBucket,
+    page: number,
+  ): Promise<{ items: EventSummary[]; hasMore: boolean }> {
+    const now = new Date();
+    const hostedQuery = this.events
+      .createQueryBuilder('e')
+      .where('e.host_id = :hostId', { hostId })
+      .andWhere('e.gathering_family::text = :family', { family });
+    if (bucket === 'upcoming') {
+      hostedQuery
+        .andWhere(`e.status <> 'cancelled'`)
+        .andWhere(UPCOMING_OR_UNDERWAY_SQL, { now })
+        .orderBy('e.startAt', 'ASC');
+    } else if (bucket === 'past') {
+      hostedQuery
+        .andWhere(`e.status <> 'cancelled'`)
+        .andWhere(ENDED_SQL, { now })
+        .orderBy('e.startAt', 'DESC');
+    } else {
+      hostedQuery
+        .andWhere(`e.status = 'cancelled'`)
+        .orderBy('e.startAt', 'DESC');
+    }
+    const rows = await hostedQuery
+      .addOrderBy('e.id', 'ASC')
+      .skip((page - 1) * PAGE_SIZE)
+      .take(PAGE_SIZE + 1)
+      .getMany();
+    const hasMore = rows.length > PAGE_SIZE;
+    return {
+      items: await this.summarize(rows.slice(0, PAGE_SIZE), hostId),
+      hasMore,
+    };
+  }
+
   async addCohost(
     slug: string,
     actorId: string,
@@ -2219,6 +2312,13 @@ export class EventsService {
    * itself; the acceptor need not be an organizer) share one place
    * that writes the roster row. Idempotent (`ON CONFLICT DO NOTHING`): a
    * no-op for the host, who is already an implicit organizer.
+   *
+   * House Music events: this is the single writer of `event_cohosts`, so it
+   * holds the seat rule for the direct add, the invite accept and the admin
+   * add alike. A member who holds the Music manager & producer grant, or a
+   * moderator or admin, cannot take a co-host seat on a Music event the house
+   * hosts. The seat lock is taken first and the grant hook takes the same
+   * lock, so a grant and a seat for one member never land together.
    */
   async addCohostByUserId(
     eventId: string,
@@ -2242,6 +2342,29 @@ export class EventsService {
     if (userId === event.hostId) {
       return;
     }
+    if (
+      event.gatheringFamily === GatheringFamily.Music &&
+      (await this.isHostedByHouse(event))
+    ) {
+      const insertSeat = async (transactionManager: EntityManager) => {
+        await lockCohostSeatsForMember(transactionManager, userId);
+        const refusal = await cohostSeatRefusalFor(transactionManager, userId);
+        if (refusal) throw houseMusicEventError(refusal);
+        await transactionManager
+          .createQueryBuilder()
+          .insert()
+          .into(EventCohost)
+          .values({ eventId, userId })
+          .orIgnore()
+          .execute();
+      };
+      if (manager) {
+        await insertSeat(manager);
+      } else {
+        await this.events.manager.transaction(insertSeat);
+      }
+      return;
+    }
     await cohostRepository
       .createQueryBuilder()
       .insert()
@@ -2249,6 +2372,20 @@ export class EventsService {
       .values({ eventId, userId })
       .orIgnore()
       .execute();
+  }
+
+  /**
+   * True when the house account hosts this event. A member-hosted event never
+   * reaches the house query: the host's user row is read first, and only a
+   * system account is checked against the house id.
+   */
+  private async isHostedByHouse(
+    event: Pick<Event, 'hostId'>,
+  ): Promise<boolean> {
+    if (!event.hostId) return false;
+    const host = await this.usersService.findById(event.hostId);
+    if (!host?.isSystem) return false;
+    return isHouseAccountId(this.events.manager, event.hostId);
   }
 
   async removeCohost(

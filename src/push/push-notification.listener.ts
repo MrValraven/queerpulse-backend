@@ -193,6 +193,30 @@ export class PushNotificationListener {
         case NotificationType.StudioCreditAccepted:
           await this.pushStudioCreditAccepted(userIds, notification);
           return;
+        // Studio landing page: the access grant answers a request, so it
+        // pushes unconditionally like the approval queues. The preview
+        // notices answer to the `Personas` switch like the credit ones.
+        case NotificationType.StudioAccessGranted:
+          await this.pushStudioAccessGranted(userIds, notification);
+          return;
+        case NotificationType.StudioLandingPreviewRequested:
+          await this.pushStudioLandingPreviewRequested(userIds, notification);
+          return;
+        case NotificationType.StudioLandingPreviewLive:
+          await this.pushStudioLandingPreviewLive(userIds, notification);
+          return;
+        // Studio purchases: a claim answers to the `Personas` switch, the
+        // buyer's confirmation and decline always arrive. An expired claim
+        // stays in the bell.
+        case NotificationType.StudioPurchaseClaimed:
+          await this.pushStudioPurchaseClaimed(userIds, notification);
+          return;
+        case NotificationType.StudioPurchaseConfirmed:
+          await this.pushStudioPurchaseConfirmed(userIds, notification);
+          return;
+        case NotificationType.StudioPurchaseDeclined:
+          await this.pushStudioPurchaseDeclined(userIds, notification);
+          return;
         // Collaborative playlists: an invitation to edit a member's
         // playlist answers to Invitations, a pick as editor of a persona's
         // playlist to Personas. The answers to an invitation stay in the
@@ -1106,6 +1130,200 @@ export class PushNotificationListener {
         titleKey: 'push:studioCreditAccepted.title',
         bodyKey: 'push:studioCreditAccepted.body',
         params: { persona, track },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "You have Studio access" (Studio landing page). Goes to the member
+   * granted access, from Waiting for Studio or the member drawer, with no
+   * category gate, since the grant is about their own account; quiet hours
+   * already ran for the batch. The payload is empty and no
+   * member is resolved. Opens Studio.
+   */
+  private async pushStudioAccessGranted(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
+      title: 'You have Studio access',
+      body: 'Studio is open for you. Tap to start listening.',
+      tag: `notification:${notification.id}`,
+      data: { url: '/studio' },
+      l10n: {
+        titleKey: 'push:studioAccessGranted.title',
+        bodyKey: 'push:studioAccessGranted.body',
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "Our team would like to play a track on the Studio page" (Studio
+   * landing page). Goes to the members of the release persona that hold a
+   * Studio grant, behind the `Personas` switch, and opens the dashboard
+   * previews. A payload missing the persona name or the track title is
+   * malformed and sends no push; the bell row is unaffected. No member is
+   * resolved.
+   */
+  private async pushStudioLandingPreviewRequested(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const persona = this.payloadString(notification, 'personaName');
+    const track = this.payloadString(notification, 'trackTitle');
+    if (!persona || !track) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Personas,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'A Studio page preview request',
+      body: `${persona}: our team would like to play ${track} on the Studio page`,
+      tag: `notification:${notification.id}`,
+      data: { url: this.studioLandingPreviewsUrl(notification) },
+      l10n: {
+        titleKey: 'push:studioLandingPreviewRequested.title',
+        bodyKey: 'push:studioLandingPreviewRequested.body',
+        params: { persona, track },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "Approved for the Studio page" (Studio landing page). Goes to the
+   * members of the release persona and of each credited persona that hold a
+   * Studio grant, behind the `Personas` switch, and opens the dashboard
+   * previews. The payload carries the main persona name; a payload missing
+   * it or the track title sends no push. No member is resolved.
+   */
+  private async pushStudioLandingPreviewLive(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const persona = this.payloadString(notification, 'mainPersonaName');
+    const track = this.payloadString(notification, 'trackTitle');
+    if (!persona || !track) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Personas,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Approved for the Studio page',
+      body: `${track} by ${persona} is approved for the Studio page`,
+      tag: `notification:${notification.id}`,
+      data: { url: this.studioLandingPreviewsUrl(notification) },
+      l10n: {
+        titleKey: 'push:studioLandingPreviewLive.title',
+        bodyKey: 'push:studioLandingPreviewLive.body',
+        params: { persona, track },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * The dashboard previews section of the persona the notice names, or of
+   * the dashboard itself when the payload carries no persona id.
+   */
+  private studioLandingPreviewsUrl(notification: Notification): string {
+    const subprofileId = this.payloadString(notification, 'subprofileId');
+    return subprofileId
+      ? `/studio/dashboard?persona=${encodeURIComponent(subprofileId)}#landing-previews`
+      : '/studio/dashboard#landing-previews';
+  }
+
+  /**
+   * "Someone says they paid Night Shift for Lisbon at four" (Studio
+   * purchases). Goes to the members of the persona that hold a Studio grant,
+   * behind the `Personas` switch, and opens the payments page on that
+   * persona. No member is resolved, so no face or name rides along; the
+   * amount stays in the app. A payload missing the persona id, the artist
+   * name or the item title is malformed and sends no push; the bell row is
+   * unaffected.
+   */
+  private async pushStudioPurchaseClaimed(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const subprofileId = this.payloadString(notification, 'subprofileId');
+    const artist = this.payloadString(notification, 'artistName');
+    const item = this.payloadString(notification, 'itemTitle');
+    if (!subprofileId || !artist || !item) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Personas,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Payment to confirm',
+      body: `Someone says they paid ${artist} for ${item}`,
+      tag: `notification:${notification.id}`,
+      data: {
+        url: `/studio/payments?persona=${encodeURIComponent(subprofileId)}`,
+      },
+      l10n: {
+        titleKey: 'push:studioPurchaseClaimed.title',
+        bodyKey: 'push:studioPurchaseClaimed.body',
+        params: { artist, item },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "Night Shift confirmed your payment for Lisbon at four" (Studio
+   * purchases). Goes to the buyer with no category gate, since the buyer
+   * asked for the purchase; quiet hours already ran for the batch. No member
+   * is resolved and the amount stays in the app. Opens the purchases page.
+   */
+  private async pushStudioPurchaseConfirmed(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const artist = this.payloadString(notification, 'artistName');
+    const item = this.payloadString(notification, 'itemTitle');
+    if (!artist || !item) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
+      title: 'Purchase confirmed',
+      body: `${artist} confirmed your payment for ${item}`,
+      tag: `notification:${notification.id}`,
+      data: { url: '/account/music-purchases' },
+      l10n: {
+        titleKey: 'push:studioPurchaseConfirmed.title',
+        bodyKey: 'push:studioPurchaseConfirmed.body',
+        params: { artist, item },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "Night Shift could not match your payment for Lisbon at four" (Studio
+   * purchases). Goes to the buyer with no category gate; quiet hours already
+   * ran for the batch. The decline reason and the amount stay in the app, and
+   * no member is resolved. Opens the purchases page.
+   */
+  private async pushStudioPurchaseDeclined(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const artist = this.payloadString(notification, 'artistName');
+    const item = this.payloadString(notification, 'itemTitle');
+    if (!artist || !item) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
+      title: 'Payment not confirmed',
+      body: `${artist} could not match your payment for ${item}`,
+      tag: `notification:${notification.id}`,
+      data: { url: '/account/music-purchases' },
+      l10n: {
+        titleKey: 'push:studioPurchaseDeclined.title',
+        bodyKey: 'push:studioPurchaseDeclined.body',
+        params: { artist, item },
       },
       timestamp: notification.createdAt.getTime(),
     });

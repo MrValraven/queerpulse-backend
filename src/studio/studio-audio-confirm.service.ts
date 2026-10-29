@@ -18,6 +18,7 @@ import {
   readStudioAudioFactsWithin,
 } from './studio-audio-metadata';
 import { StudioCatalogService } from './studio-catalog.service';
+import { withoutKeysHeldByKeptCopies } from './studio-kept-tracks';
 import { StudioOwnershipService } from './studio-ownership.service';
 import {
   assertTracksEditable,
@@ -160,7 +161,14 @@ export class StudioAudioConfirmService {
       throw error;
     }
     if (replacedKey && replacedKey !== key) {
-      await this.studioAudioUploads.deleteObjectsAndForget([replacedKey]);
+      // A kept copy still reading the replaced key keeps the object; the
+      // orphan sweep reclaims it once the copy lands.
+      const deletableKeys = await withoutKeysHeldByKeptCopies(this.dataSource, [
+        replacedKey,
+      ]);
+      if (deletableKeys.length > 0) {
+        await this.studioAudioUploads.deleteObjectsAndForget(deletableKeys);
+      }
     }
     return this.catalog.getTrack(userId, trackId);
   }

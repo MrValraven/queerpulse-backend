@@ -14,6 +14,7 @@ import { UpdateMessagingPrivacyDto } from './dto/update-messaging-privacy.dto';
 import { UpdateGroupAddPolicyDto } from './dto/update-group-add-policy.dto';
 import { UpdateLanguagePreferenceDto } from './dto/update-language-preference.dto';
 import { UpdateStudioPlaybackDto } from './dto/update-studio-playback.dto';
+import { UpdateStudioWelcomeDto } from './dto/update-studio-welcome.dto';
 import {
   DEFAULT_GROUP_ADD_POLICY,
   GroupAddPolicy,
@@ -50,6 +51,7 @@ import {
   PublicProfileDTO,
   PushPreviewsDTO,
   StudioPlaybackDTO,
+  StudioWelcomeDTO,
   WorkPreferencesDTO,
   SuggestionVisibilityDTO,
   toContentSensitivityDTO,
@@ -60,6 +62,7 @@ import {
   toPublicProfileDTO,
   toPushPreviewsDTO,
   toStudioPlaybackDTO,
+  toStudioWelcomeDTO,
   toSuggestionVisibilityDTO,
   toWorkPreferencesDTO,
 } from './preferences-response';
@@ -108,6 +111,9 @@ export class PreferencesService {
     row.studioAskBeforeWarnings = DEFAULT_STUDIO_ASK_BEFORE_WARNINGS;
     row.isListeningHistoryOn = DEFAULT_STUDIO_LISTENING_HISTORY_ON;
     row.listeningNoticeSeenAt = null;
+    row.studioWelcomeSeenAt = null;
+    row.studioTasteGenres = [];
+    row.studioTasteMoods = [];
     return row;
   }
 
@@ -324,6 +330,39 @@ export class PreferencesService {
       row.listeningNoticeSeenAt = new Date();
     }
     return toStudioPlaybackDTO(await this.preferences.save(row));
+  }
+
+  // --- Studio welcome (once per account) -------------------------------------
+
+  async getStudioWelcome(userId: string): Promise<StudioWelcomeDTO> {
+    return toStudioWelcomeDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Save the Studio welcome: a PARTIAL replace like `updateStudioPlayback`.
+   * `hasSeenWelcome: true` stamps `studioWelcomeSeenAt` once and a later call
+   * keeps the first date; `genres` and `moods` replace the stored lists
+   * (an empty list clears them); an absent field keeps its stored value.
+   * Served by `StudioWelcomeController` behind the Studio grant guard.
+   */
+  async updateStudioWelcome(
+    userId: string,
+    dto: UpdateStudioWelcomeDto,
+  ): Promise<StudioWelcomeDTO> {
+    const row = await this.loadOrDefault(userId);
+    if (dto.genres !== undefined) {
+      row.studioTasteGenres = [...dto.genres];
+    }
+    if (dto.moods !== undefined) {
+      row.studioTasteMoods = [...dto.moods];
+    }
+    if (
+      dto.hasSeenWelcome === true &&
+      (row.studioWelcomeSeenAt ?? null) === null
+    ) {
+      row.studioWelcomeSeenAt = new Date();
+    }
+    return toStudioWelcomeDTO(await this.preferences.save(row));
   }
 
   // --- Suggestion visibility ------------------------------------------------

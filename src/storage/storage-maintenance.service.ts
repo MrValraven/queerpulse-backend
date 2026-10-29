@@ -6,7 +6,12 @@ import { DataSource, Repository } from 'typeorm';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { Message } from '../messaging/entities/message.entity';
 import { toBareKey } from './bare-key';
-import { isStudioAudioKey, isStudioSceneScopedKey } from './storage-key';
+import {
+  isStudioAudioKey,
+  isStudioKeptAudioKey,
+  isStudioLandingScopedKey,
+  isStudioSceneScopedKey,
+} from './storage-key';
 import { StorageService, StoredObject } from './storage.service';
 
 // How many keys are checked for references per resolver call. The resolver's
@@ -37,7 +42,10 @@ const ORPHAN_SWEEP_CRON =
  *    (which answers "is this key referenced by any image column?") AND a
  *    `Message.attachment` lookup — message-image keys have NO resolver source,
  *    so without that second check a referenced DM image would be swept;
- *    and, for Studio audio, a `studio_tracks.audio_key` lookup (Studio v1).
+ *    and, for Studio audio, a `studio_tracks.audio_key` lookup (Studio v1)
+ *    joined with `studio_kept_tracks.source_audio_key` (a copy pending retry);
+ *    a kept copy (`studio-kept-audio/`) is checked against
+ *    `studio_kept_tracks.audio_key` the same way (contract 4.7).
  *  - DEGRADED GUARD: if the resolver reports `degraded` (a source query threw),
  *    the batch is skipped entirely — an incomplete reference set is never
  *    treated as a green light to delete.
@@ -186,6 +194,8 @@ export class StorageMaintenanceService {
       await this.keysReferencedByStudioTracks(bareKeys);
     const sceneCoverReferencedKeys =
       await this.keysReferencedByStudioScenes(bareKeys);
+    const landingPhotoReferencedKeys =
+      await this.keysReferencedByStudioLandingPhotos(bareKeys);
     const orphans: string[] = [];
     for (const object of batch) {
       const bareKey = toBareKey(object.key);
@@ -199,6 +209,9 @@ export class StorageMaintenanceService {
         continue;
       }
       if (sceneCoverReferencedKeys.has(bareKey)) {
+        continue;
+      }
+      if (landingPhotoReferencedKeys.has(bareKey)) {
         continue;
       }
       orphans.push(object.key);
@@ -243,21 +256,38 @@ export class StorageMaintenanceService {
 
   // Studio v1: a track's audio has no `MediaReferenceSource` (it is no
   // image), so without this check the sweep would delete a live track's
-  // audio. Only Studio audio keys are asked about.
+  // audio. Only Studio audio keys are asked about. A Studio audio key a kept
+  // track still holds as `source_audio_key` (its private copy waits for a
+  // retry) counts as referenced too, so the source stays until the copy
+  // lands. Once the copy has used its ten tries (`copy_attempts` 10, set at
+  // once when the source object is missing) the source key stops counting
+  // and the sweep reclaims it. A kept copy (contract 4.7) is checked against
+  // `studio_kept_tracks.audio_key` the same way, and the sets are united.
   private async keysReferencedByStudioTracks(
     bareKeys: string[],
   ): Promise<Set<string>> {
     const studioAudioKeys = bareKeys.filter((bareKey) =>
       isStudioAudioKey(bareKey),
     );
-    if (studioAudioKeys.length === 0) {
-      return new Set();
-    }
-    const rows: { audio_key: string }[] = await this.dataSource.query(
-      `SELECT "audio_key" FROM "studio_tracks" WHERE "audio_key" = ANY($1)`,
-      [studioAudioKeys],
+    const keptAudioKeys = bareKeys.filter((bareKey) =>
+      isStudioKeptAudioKey(bareKey),
     );
-    return new Set(rows.map((row) => row.audio_key));
+    const referenced = new Set<string>();
+    if (studioAudioKeys.length > 0) {
+      const rows: { audio_key: string }[] = await this.dataSource.query(
+        `SELECT "audio_key" FROM "studio_tracks" WHERE "audio_key" = ANY($1) UNION SELECT "source_audio_key" AS "audio_key" FROM "studio_kept_tracks" WHERE "source_audio_key" = ANY($1) AND "copy_attempts" < 10`,
+        [studioAudioKeys],
+      );
+      rows.forEach((row) => referenced.add(row.audio_key));
+    }
+    if (keptAudioKeys.length > 0) {
+      const rows: { audio_key: string }[] = await this.dataSource.query(
+        `SELECT "audio_key" FROM "studio_kept_tracks" WHERE "audio_key" = ANY($1)`,
+        [keptAudioKeys],
+      );
+      rows.forEach((row) => referenced.add(row.audio_key));
+    }
+    return referenced;
   }
 
   // Studio discovery: a scene cover is a scene-scoped copy with no
@@ -278,6 +308,27 @@ export class StorageMaintenanceService {
       [sceneScopedKeys],
     );
     return new Set(rows.map((row) => row.cover_key));
+  }
+
+  // Studio landing: a Studio page photo is a landing-scoped copy with no
+  // `MediaReferenceSource`, so without this check the sweep would delete a
+  // live photo. Only landing-scoped keys are asked about; the staff upload
+  // each one was copied from, and a photo a later save replaced, are left
+  // unreferenced and reclaimed.
+  private async keysReferencedByStudioLandingPhotos(
+    bareKeys: string[],
+  ): Promise<Set<string>> {
+    const landingScopedKeys = bareKeys.filter((bareKey) =>
+      isStudioLandingScopedKey(bareKey),
+    );
+    if (landingScopedKeys.length === 0) {
+      return new Set();
+    }
+    const rows: { image_key: string }[] = await this.dataSource.query(
+      `SELECT "image_key" FROM "studio_landing_photos" WHERE "image_key" = ANY($1)`,
+      [landingScopedKeys],
+    );
+    return new Set(rows.map((row) => row.image_key));
   }
 
   private logSummary(

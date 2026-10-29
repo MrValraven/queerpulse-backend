@@ -10,20 +10,33 @@ import { isPrivateMessageKey } from '../storage/upload-kinds';
 import { CreateStudioReleaseDto } from './dto/create-studio-release.dto';
 import { UpdateStudioReleaseDto } from './dto/update-studio-release.dto';
 import {
+  StudioPriceMode,
   StudioRelease,
   StudioReleaseStatus,
 } from './entities/studio-release.entity';
 import { StudioScene, StudioSceneState } from './entities/studio-scene.entity';
 import { StudioSource, StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
+import { withoutKeysHeldByKeptCopies } from './studio-kept-tracks';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { stampShowEpisodes } from './studio-episode-rule';
+import {
+  countPaymentMethods,
+  lockPaymentMethodsOf,
+  releaseHasPricedTracks,
+} from './studio-payment-method-lock';
 import { firstUnmetPublishRequirement } from './studio-publish-rule';
+import {
+  StudioPrice,
+  isSellableReleaseType,
+  studioPriceShapeRefusal,
+  studioTypeChangeRefusal,
+} from './studio-purchase-rules';
 import { StudioReleaseResponse } from './studio-response';
 import { scheduleDateInLisbon } from './studio-schedule-rule';
 import {
   isReleaseTypeAllowedForPersonaKind,
-  studioDefaultGenreForKind,
+  studioDefaultGenresForKind,
   studioError,
 } from './studio.constants';
 import {
@@ -38,6 +51,14 @@ function isUsableCoverKey(value: string): boolean {
     return false;
   }
   return isPersonaScopedExtension(value.slice(value.lastIndexOf('.')));
+}
+
+/** The `price_mode` a PATCH price writes; null takes the release off sale. */
+function storedPriceMode(price: StudioPrice | null): StudioPriceMode {
+  if (price === null) return StudioPriceMode.NotForSale;
+  return price.mode === 'fixed'
+    ? StudioPriceMode.Fixed
+    : StudioPriceMode.NameYourPrice;
 }
 
 /**
@@ -72,13 +93,15 @@ export class StudioReleasesService {
     if (!isReleaseTypeAllowedForPersonaKind(body.type, persona.kind)) {
       throw studioError('studio_release_type_mismatch');
     }
+    const presetGenres = studioDefaultGenresForKind(persona.kind);
     const saved = await this.releases.save(
       this.releases.create({
         subprofileId: persona.id,
         title: body.title,
         type: body.type,
         // Studio artist kinds: spoken word releases start in their genre.
-        genre: studioDefaultGenreForKind(persona.kind),
+        genres: presetGenres,
+        genre: presetGenres[0] ?? null,
         status: StudioReleaseStatus.Draft,
       }),
     );
@@ -142,8 +165,10 @@ export class StudioReleasesService {
       if (body.description !== undefined) {
         release.description = body.description?.trim() || null;
       }
-      if (body.genre !== undefined) {
-        release.genre = body.genre;
+      if (body.genres !== undefined) {
+        release.genres = body.genres;
+        // The `genre` column mirrors the lead genre; nothing else writes it.
+        release.genre = body.genres[0] ?? null;
       }
       if (body.mood !== undefined) {
         release.mood = body.mood;
@@ -175,6 +200,49 @@ export class StudioReleasesService {
       if (body.isGapless !== undefined) {
         release.isGapless = body.isGapless;
       }
+      // Studio purchases (contract 2.1): the release lock is held; the
+      // payment-methods lock comes second, so a price never lands on a
+      // persona whose last method is going.
+      const releaseTypeAfterWrite = release.type;
+      if (body.price) {
+        const priceRefusal = studioPriceShapeRefusal(
+          body.price,
+          releaseTypeAfterWrite,
+        );
+        if (priceRefusal) {
+          throw studioError(priceRefusal);
+        }
+        await lockPaymentMethodsOf(manager, release.subprofileId);
+        if ((await countPaymentMethods(manager, release.subprofileId)) === 0) {
+          throw studioError('studio_payment_methods_needed_for_sale');
+        }
+      }
+      const isPricedAfterWrite =
+        body.price === undefined
+          ? (release.priceMode ?? StudioPriceMode.NotForSale) !==
+            StudioPriceMode.NotForSale
+          : body.price !== null;
+      // A type change to a sellable type always passes, so only a change to
+      // an unsellable type reads the track prices.
+      if (
+        body.type !== undefined &&
+        !isSellableReleaseType(releaseTypeAfterWrite)
+      ) {
+        const typeChangeRefusal = studioTypeChangeRefusal({
+          isTypeChanging: true,
+          releaseTypeAfterWrite,
+          hasPricedItemsAfterWrite:
+            isPricedAfterWrite ||
+            (await releaseHasPricedTracks(manager, release.id, null)),
+        });
+        if (typeChangeRefusal) {
+          throw studioError(typeChangeRefusal);
+        }
+      }
+      if (body.price !== undefined) {
+        release.priceMode = storedPriceMode(body.price);
+        release.priceCents = body.price?.amountCents ?? null;
+      }
       await manager.save(release);
     });
     return this.catalog.getRelease(userId, releaseId);
@@ -201,7 +269,13 @@ export class StudioReleasesService {
         track.audioKey ? [track.audioKey] : [],
       );
     });
-    await this.studioAudioUploads.deleteObjectsAndForget(audioKeys);
+    // A kept copy still reading a key keeps that object; the orphan sweep
+    // reclaims it once the copy lands.
+    const deletableKeys = await withoutKeysHeldByKeptCopies(
+      this.dataSource,
+      audioKeys,
+    );
+    await this.studioAudioUploads.deleteObjectsAndForget(deletableKeys);
   }
 
   async publish(

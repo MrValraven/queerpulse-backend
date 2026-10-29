@@ -200,6 +200,17 @@ import { RsvpService } from './rsvp.service';
     // would create (`EventsService` already injects `RsvpService`).
     EventAudienceGateService,
   ],
-  exports: [EventsService, EventAudienceGateService],
+  // The music events admin calls the last seven as the house account.
+  exports: [
+    EventsService,
+    EventAudienceGateService,
+    EventLineupService,
+    RsvpService,
+    EventAnnouncementsService,
+    EventBansService,
+    EventCheckInService,
+    EventInvitesService,
+    MemberEventInvitesService,
+  ],
 })
 export class EventsModule {}

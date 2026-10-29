@@ -1,6 +1,7 @@
 import { toImageUrl } from '../common/image-url';
 import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
 import {
+  StudioPriceMode,
   StudioRelease,
   StudioReleaseStatus,
   StudioReleaseType,
@@ -25,6 +26,7 @@ import {
   toStudioArtistRef,
   toStudioFormatArtistRef,
   toStudioOwnerReleaseCard,
+  toStudioOwnerTrackSummary,
   toStudioReleaseCard,
   toStudioReleaseDisputeView,
   toStudioReleaseResponse,
@@ -74,6 +76,7 @@ const release = (overrides: Partial<StudioRelease> = {}): StudioRelease =>
     type: StudioReleaseType.Mix,
     description: null,
     genre: null,
+    genres: [],
     coverKey: null,
     releasedOn: '2026-10-01',
     status: StudioReleaseStatus.Published,
@@ -189,12 +192,27 @@ describe('Studio response mappers', () => {
   // Studio v2: Play all keeps the server's order, so every card carries the
   // publish time the feed sorts on, and the genre the browse page filters on.
   it('carries the publish time and the genre on every release card', () => {
-    const card = toStudioReleaseCard(release({ genre: 'fado' }), persona(), {
-      trackCount: 1,
-      totalDurationSeconds: 200,
-    });
+    const card = toStudioReleaseCard(
+      release({ genre: 'fado', genres: ['fado', 'folk'] }),
+      persona(),
+      {
+        trackCount: 1,
+        totalDurationSeconds: 200,
+      },
+    );
     expect(card.publishedAt).toBe('2026-10-01T09:00:00.000Z');
     expect(card.genre).toBe('fado');
+    expect(card.genres).toEqual(['fado', 'folk']);
+  });
+
+  it('sends every stored genre in order, an unlisted legacy value included', () => {
+    const card = toStudioReleaseCard(
+      release({ genre: 'polka', genres: ['polka', 'ambient', 'fado'] }),
+      persona(),
+      { trackCount: 1, totalDurationSeconds: 200 },
+    );
+    expect(card.genre).toBe('polka');
+    expect(card.genres).toEqual(['polka', 'ambient', 'fado']);
   });
 
   it('writes null for a draft that has no publish time and no genre', () => {
@@ -205,18 +223,20 @@ describe('Studio response mappers', () => {
     );
     expect(card.publishedAt).toBeNull();
     expect(card.genre).toBeNull();
+    expect(card.genres).toEqual([]);
     expect(card.status).toBe('draft');
   });
 
   it('keeps the publish time and genre on the full release response', () => {
     const response = toStudioReleaseResponse(
-      release({ genre: 'ambient' }),
+      release({ genre: 'ambient', genres: ['ambient', 'house'] }),
       persona(),
       [],
       { isOwner: false, isStaff: false },
     );
     expect(response.publishedAt).toBe('2026-10-01T09:00:00.000Z');
     expect(response.genre).toBe('ambient');
+    expect(response.genres).toEqual(['ambient', 'house']);
   });
 
   // Studio v3.
@@ -436,6 +456,40 @@ describe('Studio response mappers', () => {
       isStaff: false,
     });
     expect(bare.isGapless).toBe(false);
+  });
+
+  it('shows the release price to every viewer and null for a release off sale', () => {
+    const priced = toStudioReleaseResponse(
+      release({ priceMode: StudioPriceMode.Fixed, priceCents: 900 }),
+      persona(),
+      [],
+      { isOwner: false, isStaff: false },
+    );
+    expect(priced.price).toEqual({ mode: 'fixed', amountCents: 900 });
+    const offSale = toStudioReleaseResponse(release(), persona(), [], {
+      isOwner: false,
+      isStaff: false,
+    });
+    expect(offSale.price).toBeNull();
+  });
+
+  it('reads a row loaded before the price columns as off sale', () => {
+    const legacy = toStudioReleaseResponse(
+      release({ priceMode: undefined, priceCents: undefined }),
+      persona(),
+      [],
+      { isOwner: false, isStaff: false },
+    );
+    expect(legacy.price).toBeNull();
+  });
+
+  it('gives owner track rows their price and leaves it off listener rows', () => {
+    const ownerRow = toStudioOwnerTrackSummary(
+      track({ priceMode: StudioPriceMode.NameYourPrice, priceCents: 0 }),
+    );
+    expect(ownerRow.price).toEqual({ mode: 'name_your_price', amountCents: 0 });
+    expect(toStudioOwnerTrackSummary(track({})).price).toBeNull();
+    expect(toStudioTrackSummary(track({}))).not.toHaveProperty('price');
   });
 
   it('puts the publish time on an owner card for a scheduled release', () => {

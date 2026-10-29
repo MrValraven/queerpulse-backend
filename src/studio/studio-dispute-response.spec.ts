@@ -29,6 +29,7 @@ const release = (overrides: Partial<StudioRelease> = {}): StudioRelease =>
     type: StudioReleaseType.Mix,
     description: null,
     genre: 'electronic',
+    genres: ['electronic'],
     coverKey: null,
     releasedOn: '2026-10-01',
     status: StudioReleaseStatus.TakenDown,

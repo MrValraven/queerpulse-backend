@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type * as Sentry from '@sentry/node';
 import type * as InstrumentModule from './instrument';
 
@@ -150,6 +152,35 @@ describe('scrubSensitiveQueryParameters giving body', () => {
       },
     });
     expect(event.request?.data).toBeUndefined();
+  });
+});
+
+describe('scrubSensitiveQueryParameters purchase body', () => {
+  it('drops a purchase body', () => {
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      request: {
+        url: 'https://api.queerpulse.test/v1/studio/purchases',
+        method: 'POST',
+        data: '{"releaseId":"x","payerName":"Ana Silva"}',
+      },
+    });
+    expect(event.request?.data).toBeUndefined();
+  });
+
+  it('drops a purchase body even when the listening URL drop is off', () => {
+    const instrumentSource = readFileSync(
+      join(__dirname, 'instrument.ts'),
+      'utf8',
+    );
+    const moneyDropIndex = instrumentSource.indexOf(
+      'dropStudioMoneyRequestBody(request)',
+    );
+    const listeningDropIndex = instrumentSource.indexOf(
+      'dropStudioListeningUrl(request)',
+    );
+    expect(moneyDropIndex).toBeGreaterThan(0);
+    expect(moneyDropIndex).toBeLessThan(listeningDropIndex);
   });
 });
 

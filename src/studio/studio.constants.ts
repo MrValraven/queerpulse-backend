@@ -124,6 +124,27 @@ export type StudioPlaylistRole = (typeof STUDIO_PLAYLIST_ROLES)[number];
 /** Stats counts from 1 to `STUDIO_STATS_THRESHOLD - 1` are withheld. */
 export const STUDIO_STATS_THRESHOLD = 5;
 
+// Studio landing v2: the states of a track preview on the public Studio page.
+export const STUDIO_LANDING_PREVIEW_STATUSES = [
+  'pending',
+  'approved',
+  'declined',
+  'withdrawn',
+] as const;
+export type StudioLandingPreviewStatus =
+  (typeof STUDIO_LANDING_PREVIEW_STATUSES)[number];
+
+// Studio landing v2: the two photo slots staff fill on the Studio page.
+export const STUDIO_LANDING_PHOTO_SLOTS = ['hero', 'manifesto'] as const;
+export type StudioLandingPhotoSlot =
+  (typeof STUDIO_LANDING_PHOTO_SLOTS)[number];
+
+// Studio landing v2: the join-request source a signup from each Studio page carries.
+export const STUDIO_LANDING_JOIN_SOURCES = {
+  listener: 'studio_landing',
+  artist: 'studio_artist',
+} as const;
+
 // Studio v3 artist tools (QUEERPULSE-STUDIO-V3-ARTIST-TOOLS-CONTRACT-2026-10-13.md).
 
 /** The persona social link platforms a release and an artist page show as
@@ -187,9 +208,7 @@ export const STUDIO_MOODS = [
   'defiant',
   'dreamy',
   'slow-burn',
-  'sweaty',
   'calm',
-  'playful',
 ] as const;
 export type StudioMood = (typeof STUDIO_MOODS)[number];
 
@@ -261,6 +280,8 @@ export function isStudioCreditRole(value: string): value is StudioCreditRole {
 export const STUDIO_LIMITS = {
   releaseTitleMaxLength: 120,
   releaseDescriptionMaxLength: 2000,
+  // A release carries up to this many genres; the first one leads.
+  releaseGenresMax: 5,
   trackTitleMaxLength: 120,
   lyricsMaxLength: 10000,
   creditsMaxRows: 20,
@@ -334,6 +355,18 @@ export const STUDIO_LIMITS = {
   playlistEditorCandidatesMax: 50,
   playlistEditorSlugMaxLength: 120,
   playlistEditorSearchMaxLength: 80,
+  // Studio landing v2: previews shown, open requests, decided previews shown,
+  // artist cards, quote, photo alt and credit lengths, founding artists and
+  // the access request page size.
+  landingPreviewsShown: 5,
+  landingOpenPreviewsMax: 10,
+  landingDecidedPreviewsShown: 30,
+  landingArtistCardsMax: 6,
+  landingQuoteMaxLength: 240,
+  landingPhotoAltMaxLength: 200,
+  landingPhotoCreditMaxLength: 120,
+  foundingArtistsMax: 50,
+  accessRequestsPageSize: 30,
 } as const;
 
 /** The release types each format offers. */
@@ -431,6 +464,12 @@ export function studioDefaultGenreForKind(kind: string): StudioGenre | null {
   return studioFormatForKind(kind) === 'spoken_word' ? 'spoken-word' : null;
 }
 
+/** The genres a new release starts with: the preset genre alone, or none. */
+export function studioDefaultGenresForKind(kind: string): StudioGenre[] {
+  const defaultGenre = studioDefaultGenreForKind(kind);
+  return defaultGenre === null ? [] : [defaultGenre];
+}
+
 /** Release types whose tracks credit their sources before publishing. */
 export const STUDIO_SOURCE_RELEASE_TYPES: readonly StudioReleaseTypeValue[] = [
   'mix',
@@ -522,6 +561,65 @@ export type StudioErrorCode =
   | 'studio_playlist_invite_unavailable'
   | 'studio_playlist_credit_change_removes_editors'
   | 'studio_playlist_editor_ineligible'
+  // Studio landing v2: the 23 refusals of the public Studio page, its staff tools and access requests.
+  | 'studio_landing_preview_unavailable'
+  | 'studio_landing_preview_not_found'
+  | 'studio_landing_preview_track_not_eligible'
+  | 'studio_landing_preview_exists'
+  | 'studio_landing_previews_full'
+  | 'studio_landing_preview_no_reachable_owner'
+  | 'studio_landing_preview_not_pending'
+  | 'studio_landing_preview_not_approved'
+  | 'studio_landing_preview_main_persona_only'
+  | 'studio_landing_consent_required'
+  | 'studio_landing_persona_not_eligible'
+  | 'studio_landing_card_exists'
+  | 'studio_landing_cards_full'
+  | 'studio_landing_card_not_found'
+  | 'studio_landing_photo_not_yours'
+  | 'studio_landing_order_mismatch'
+  | 'studio_founding_persona_not_eligible'
+  | 'studio_founding_artist_exists'
+  | 'studio_founding_artists_full'
+  | 'studio_founding_artist_not_found'
+  | 'studio_access_request_exists'
+  | 'studio_access_already_granted'
+  | 'studio_access_request_not_found'
+  // Studio purchases (QUEERPULSE-STUDIO-PURCHASES-CONTRACT-2026-10-28.md section 7).
+  | 'studio_persona_not_found'
+  | 'studio_release_type_not_for_sale'
+  | 'studio_price_out_of_range'
+  | 'studio_payment_methods_needed_for_sale'
+  | 'studio_payment_methods_limit'
+  | 'studio_payment_link_invalid'
+  | 'studio_payment_mbway_invalid'
+  | 'studio_payment_iban_invalid'
+  | 'studio_purchase_item_required'
+  | 'studio_purchase_item_not_found'
+  | 'studio_purchase_own_persona'
+  | 'studio_purchase_not_for_sale'
+  | 'studio_purchase_release_not_published'
+  | 'studio_purchase_track_unavailable'
+  | 'studio_purchase_unavailable'
+  | 'studio_purchase_no_payment_methods'
+  | 'studio_purchase_pending_exists'
+  | 'studio_purchase_already_owned'
+  | 'studio_purchase_reference_invalid'
+  | 'studio_purchase_reference_taken'
+  | 'studio_purchase_amount_below_minimum'
+  | 'studio_purchase_amount_above_cap'
+  | 'studio_purchase_price_changed'
+  | 'studio_purchase_not_found'
+  | 'studio_purchase_not_pending'
+  | 'studio_purchase_wall_not_available'
+  | 'studio_purchase_not_confirmed'
+  | 'studio_download_item_deleted'
+  | 'studio_download_track_removed'
+  | 'studio_download_release_taken_down'
+  | 'studio_download_artist_unavailable'
+  | 'studio_download_track_withheld'
+  | 'studio_download_track_not_ready'
+  | 'studio_download_track_preparing'
   | StudioSafetyErrorCode;
 
 const STUDIO_ERRORS: Readonly<
@@ -837,6 +935,250 @@ const STUDIO_ERRORS: Readonly<
   studio_playlist_editor_ineligible: {
     status: HttpStatus.UNPROCESSABLE_ENTITY,
     message: 'Some of these members cannot edit this playlist.',
+  },
+  // Studio landing v2: the 23 refusals of the public Studio page, its staff tools and access requests.
+  studio_landing_preview_unavailable: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This preview is not available.',
+  },
+  studio_landing_preview_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'Preview not found.',
+  },
+  studio_landing_preview_track_not_eligible: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'This track does not meet the rules for the Studio page.',
+  },
+  studio_landing_preview_exists: {
+    status: HttpStatus.CONFLICT,
+    message: 'This track already has an open request or a live preview.',
+  },
+  studio_landing_previews_full: {
+    status: HttpStatus.CONFLICT,
+    message: 'The Studio page holds up to 10 open previews.',
+  },
+  studio_landing_preview_no_reachable_owner: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'Nobody who runs this artist has Studio access, so nobody can approve the preview.',
+  },
+  studio_landing_preview_not_pending: {
+    status: HttpStatus.CONFLICT,
+    message: 'This request was already answered.',
+  },
+  studio_landing_preview_not_approved: {
+    status: HttpStatus.CONFLICT,
+    message: 'This preview is no longer live.',
+  },
+  studio_landing_preview_main_persona_only: {
+    status: HttpStatus.FORBIDDEN,
+    message:
+      'Only the artist who released this track can approve or decline the request.',
+  },
+  studio_landing_consent_required: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'Saving needs the consent tick: confirm the people shown agreed.',
+  },
+  studio_landing_persona_not_eligible: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message:
+      'This artist cannot appear on the Studio page: their page must be published and public.',
+  },
+  studio_landing_card_exists: {
+    status: HttpStatus.CONFLICT,
+    message: 'This artist already has a card.',
+  },
+  studio_landing_cards_full: {
+    status: HttpStatus.CONFLICT,
+    message: 'The Studio page holds up to 6 artist cards.',
+  },
+  studio_landing_card_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'Artist card not found.',
+  },
+  studio_landing_photo_not_yours: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'Use a photo you uploaded, or keep the one this slot holds.',
+  },
+  studio_landing_order_mismatch: {
+    status: HttpStatus.CONFLICT,
+    message: 'The list changed while you reordered it. Reload and try again.',
+  },
+  studio_founding_persona_not_eligible: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message:
+      'This artist cannot be a founding artist: their page must be published and public.',
+  },
+  studio_founding_artist_exists: {
+    status: HttpStatus.CONFLICT,
+    message: 'This artist is already a founding artist.',
+  },
+  studio_founding_artists_full: {
+    status: HttpStatus.CONFLICT,
+    message: 'The founding list holds up to 50 artists.',
+  },
+  studio_founding_artist_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'Founding artist not found.',
+  },
+  studio_access_request_exists: {
+    status: HttpStatus.CONFLICT,
+    message: 'You already asked for Studio access.',
+  },
+  studio_access_already_granted: {
+    status: HttpStatus.CONFLICT,
+    message: 'You already have Studio access.',
+  },
+  studio_access_request_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This request is no longer waiting.',
+  },
+  // Studio purchases (QUEERPULSE-STUDIO-PURCHASES-CONTRACT-2026-10-28.md section 7).
+  studio_persona_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This artist page is not one you run.',
+  },
+  studio_release_type_not_for_sale: {
+    status: HttpStatus.CONFLICT,
+    message: 'Only albums, EPs and singles and their tracks can be sold.',
+  },
+  studio_price_out_of_range: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message:
+      'A fixed price runs from €1 to €500, and a minimum from €0 to €500.',
+  },
+  studio_payment_methods_needed_for_sale: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'Add a way to get paid before putting music up for sale, and keep one while anything is for sale.',
+  },
+  studio_payment_methods_limit: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'An artist can list up to 8 ways to get paid.',
+  },
+  studio_payment_link_invalid: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'A payment link must be a full https:// address.',
+  },
+  studio_payment_mbway_invalid: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'MB WAY needs a Portuguese mobile number.',
+  },
+  studio_payment_iban_invalid: {
+    status: HttpStatus.BAD_REQUEST,
+    message:
+      'Check the IBAN: the country code, length or check digits do not match.',
+  },
+  studio_purchase_item_required: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'Choose one release or one track to buy.',
+  },
+  studio_purchase_item_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This music is not available to you.',
+  },
+  studio_purchase_own_persona: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'You are a member of this artist, so you cannot buy its music.',
+  },
+  studio_purchase_not_for_sale: {
+    status: HttpStatus.CONFLICT,
+    message: 'This is not for sale.',
+  },
+  studio_purchase_release_not_published: {
+    status: HttpStatus.CONFLICT,
+    message: 'This release is not out yet, so it cannot be bought.',
+  },
+  studio_purchase_track_unavailable: {
+    status: HttpStatus.CONFLICT,
+    message: 'This track cannot be bought right now.',
+  },
+  // The one deliberately neutral message: a block in either direction never shows (block exception of the errors-name-the-reason rule).
+  studio_purchase_unavailable: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'You cannot buy music from this artist.',
+  },
+  studio_purchase_no_payment_methods: {
+    status: HttpStatus.CONFLICT,
+    message: 'This artist has not added a way to get paid.',
+  },
+  studio_purchase_pending_exists: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'You already told this artist you paid for this; it is waiting for them.',
+  },
+  studio_purchase_already_owned: {
+    status: HttpStatus.CONFLICT,
+    message: 'This is already in your collection.',
+  },
+  studio_purchase_reference_invalid: {
+    status: HttpStatus.BAD_REQUEST,
+    message:
+      'This payment code is too old. Get a new code, and if you already paid with the old one, put the old code in the name field so the artist can match it.',
+  },
+  studio_purchase_reference_taken: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'This payment code was just taken by another purchase. Get a new code.',
+  },
+  studio_purchase_amount_below_minimum: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: "The amount is below the artist's minimum.",
+  },
+  studio_purchase_amount_above_cap: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'A purchase can be up to €500.',
+  },
+  studio_purchase_price_changed: {
+    status: HttpStatus.CONFLICT,
+    message: 'The price changed. Check the new price and try again.',
+  },
+  studio_purchase_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This purchase is not available to you.',
+  },
+  studio_purchase_not_pending: {
+    status: HttpStatus.CONFLICT,
+    message: 'This purchase was already answered.',
+  },
+  studio_purchase_wall_not_available: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'The supporter wall is open to pending and confirmed purchases of an artist still on Studio.',
+  },
+  studio_purchase_not_confirmed: {
+    status: HttpStatus.CONFLICT,
+    message: 'Downloads open once the artist confirms your payment.',
+  },
+  studio_download_item_deleted: {
+    status: HttpStatus.GONE,
+    message:
+      'The artist deleted this music, so it can no longer be downloaded.',
+  },
+  studio_download_track_removed: {
+    status: HttpStatus.GONE,
+    message: 'This track is no longer on the release.',
+  },
+  studio_download_release_taken_down: {
+    status: HttpStatus.GONE,
+    message: 'Our team took this release down, so it cannot be downloaded.',
+  },
+  studio_download_artist_unavailable: {
+    status: HttpStatus.GONE,
+    message: 'This artist page was removed, so its music cannot be downloaded.',
+  },
+  studio_download_track_withheld: {
+    status: HttpStatus.GONE,
+    message:
+      'A copyright claim holds this track offline, so it cannot be downloaded.',
+  },
+  studio_download_track_not_ready: {
+    status: HttpStatus.CONFLICT,
+    message: 'This track has no audio yet.',
+  },
+  studio_download_track_preparing: {
+    status: HttpStatus.CONFLICT,
+    message: 'We are preparing this file for you. Try again in a few minutes.',
   },
   // Studio safety and moderation: the 14 refusals, one source of truth.
   ...STUDIO_SAFETY_ERRORS,

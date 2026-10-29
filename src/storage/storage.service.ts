@@ -28,15 +28,24 @@ import {
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import {
   PERSONA_SCOPED_PREFIX,
+  STUDIO_LANDING_SCOPED_PREFIX,
   STUDIO_SCENE_SCOPED_PREFIX,
   isPersonaScopedExtension,
   isPersonaScopedKey,
   isStorageKey,
+  STUDIO_KEPT_AUDIO_PREFIX,
   isStudioAudioKey,
+  isStudioDownloadableAudioKey,
+  isStudioLandingScopedKey,
   isStudioSceneScopedKey,
   parseStorageKey,
   storageKeyOwnerId,
 } from './storage-key';
+import { STUDIO_PURCHASE_LIMITS } from '../studio/studio-purchase-rules';
+import {
+  attachmentContentDisposition,
+  sanitizeDownloadFileName,
+} from './document-download-headers';
 import {
   MAGIC_BYTE_PREFIX_LENGTH,
   attachmentContentDispositionForStorageKey,
@@ -323,6 +332,71 @@ export class StorageService {
   }
 
   /**
+   * Studio purchases (contract 3.7): a presigned GET that saves one bought
+   * track as a file. `displayName` is "{artist} - {track}"; the signed
+   * disposition is an attachment named by `sanitizeDownloadFileName`, which
+   * strips slashes, quotes and control characters and appends the key's own
+   * `.mp3` or `.m4a`. The link lives
+   * `STUDIO_PURCHASE_LIMITS.downloadUrlExpirySeconds` and is never cached.
+   * `expiresAt` is read before signing. The URL is the buyer's own download
+   * and nothing counts it.
+   */
+  async createPresignedAudioDownload(
+    key: string,
+    contentType: string,
+    displayName: string,
+  ): Promise<{ url: string; expiresAt: string; fileName: string }> {
+    if (!isStudioDownloadableAudioKey(key)) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const fileName = sanitizeDownloadFileName(displayName, key);
+    const expirySeconds = STUDIO_PURCHASE_LIMITS.downloadUrlExpirySeconds;
+    const expiresAt = new Date(Date.now() + expirySeconds * 1000).toISOString();
+    const command = new GetObjectCommand({
+      Bucket: this.requireConfig('storage.bucket'),
+      Key: key,
+      ResponseContentType: contentType,
+      ResponseContentDisposition: attachmentContentDisposition(fileName),
+      ResponseCacheControl: 'private, no-store',
+    });
+    const url = await getSignedUrl(this.presigningClient(), command, {
+      expiresIn: expirySeconds,
+    });
+    return { url, expiresAt, fileName };
+  }
+
+  /**
+   * Studio purchases (contract 4.7 "The copy"): copies one Studio audio object
+   * inside the bucket to a fresh KEPT key (`studio-kept-audio/<uuid><ext>`)
+   * and returns it. The extension comes from the content type. The kept key
+   * is random and shares nothing with the source, so a buyer's download URL
+   * never matches the re-keyed track's stream URL. The source object stays in
+   * place. Throws when the source object is missing (`NoSuchKey`), which
+   * `isMissingObjectError` recognises.
+   */
+  async copyStudioAudioForKeeping(
+    sourceKey: string,
+    contentType: string,
+  ): Promise<string> {
+    const typeSpec = STUDIO_AUDIO_UPLOAD_TYPES[contentType];
+    if (!isStudioAudioKey(sourceKey) || !typeSpec) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const key = `${STUDIO_KEPT_AUDIO_PREFIX}/${randomUUID()}${typeSpec.extension}`;
+    const bucket = this.requireConfig('storage.bucket');
+    // A Studio audio key holds only lowercase prefixes, hex, dashes and a
+    // dot, so `CopySource` needs no URL encoding.
+    await this.storageClient().send(
+      new CopyObjectCommand({
+        Bucket: bucket,
+        CopySource: `${bucket}/${sourceKey}`,
+        Key: key,
+      }),
+    );
+    return key;
+  }
+
+  /**
    * Write bytes the SERVER produced (not a member's presigned PUT) under a
    * fresh key of `kind` owned by `ownerUserId`, and return the key. Persona
    * feed import uses it to keep its own copy of podcast art instead of
@@ -390,11 +464,13 @@ export class StorageService {
     // A persona-scoped key names no owner, and minting `persona/<userId>/…`
     // from it would put a member's id under the one prefix that must never
     // carry one.
-    // A scene-scoped key names no owner either (Studio discovery).
+    // A scene-scoped key names no owner either (Studio discovery), nor does a
+    // landing-scoped key (Studio page photos).
     if (
       !kindSpec ||
       isPersonaScopedKey(sourceKey) ||
-      isStudioSceneScopedKey(sourceKey)
+      isStudioSceneScopedKey(sourceKey) ||
+      isStudioLandingScopedKey(sourceKey)
     ) {
       throw new BadRequestException('Invalid storage key');
     }
@@ -473,6 +549,37 @@ export class StorageService {
       throw new BadRequestException('Invalid storage key');
     }
     const key = `${STUDIO_SCENE_SCOPED_PREFIX}/${randomUUID()}/${randomUUID()}${extension}`;
+    const bucket = this.requireConfig('storage.bucket');
+    // A parsed key holds only lowercase prefixes, hex, dashes and a dot, so
+    // `CopySource` needs no URL encoding.
+    await this.storageClient().send(
+      new CopyObjectCommand({
+        Bucket: bucket,
+        CopySource: `${bucket}/${sourceKey}`,
+        Key: key,
+      }),
+    );
+    return key;
+  }
+
+  /**
+   * Studio landing: copies a member-scoped image upload (a staff member's
+   * `work-image` photo for the Studio page) to a fresh LANDING-SCOPED key
+   * (`studio-landing/<uuid>/<uuid><ext>`, see `STUDIO_LANDING_SCOPED_PREFIX`)
+   * inside the bucket and returns the new key, so the public Studio page
+   * never publishes the uploader's user id. The source object is left in
+   * place for the orphan sweep. Throws when the source object is missing
+   * (`NoSuchKey`), which `isMissingObjectError` recognises.
+   */
+  async copyObjectToStudioLandingScope(sourceKey: string): Promise<string> {
+    const extension = sourceKey.slice(sourceKey.lastIndexOf('.'));
+    if (
+      storageKeyOwnerId(sourceKey) === null ||
+      !isPersonaScopedExtension(extension)
+    ) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const key = `${STUDIO_LANDING_SCOPED_PREFIX}/${randomUUID()}/${randomUUID()}${extension}`;
     const bucket = this.requireConfig('storage.bucket');
     // A parsed key holds only lowercase prefixes, hex, dashes and a dot, so
     // `CopySource` needs no URL encoding.

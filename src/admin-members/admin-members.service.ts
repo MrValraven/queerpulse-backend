@@ -7,12 +7,30 @@ import {
 } from '@nestjs/common';
 import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, MoreThan, Not, Or, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  IsNull,
+  MoreThan,
+  Not,
+  Or,
+  Repository,
+} from 'typeorm';
 import {
   AmbassadorsService,
   CIRCLE_STAFF_ROLE,
 } from '../ambassadors/ambassadors.service';
 import { isUniqueViolation } from '../common/db-errors';
+import {
+  MUSIC_MANAGER_PRODUCER_ROLE,
+  lockCohostSeatsForMember,
+  removeHouseMusicCohostSeats,
+} from '../events/house-music-events';
+import {
+  MUSIC_EVENT_AUDIT_ACTIONS,
+  writeMusicEventAudit,
+} from '../music-events/music-event-audit';
 import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
 import {
@@ -78,6 +96,18 @@ export const INVITE_ACCESS_CHANGED_ACTION = 'invite_access_changed';
 
 /** The `filter: 'new'` window on `list()` — "joined in the last week". */
 const NEW_MEMBER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The `note` detail on each `music_event_cohost_removed` row written when a
+ *  member's house Music co-host seats end because they became house staff:
+ *  through the `music_manager_producer` grant, or through a move into the
+ *  moderator or admin tier. */
+const HOUSE_MUSIC_SEAT_END_DETAILS = {
+  grant: 'seat ended by the music_manager_producer grant',
+  staffTier: 'seat ended by a staff tier',
+} as const;
+
+type HouseMusicSeatEndDetail =
+  (typeof HOUSE_MUSIC_SEAT_END_DETAILS)[keyof typeof HOUSE_MUSIC_SEAT_END_DETAILS];
 
 /** What the `q` name search on `list()` matches against: the same folded
  *  vocabulary as member search, so accents never hide anyone. */
@@ -886,6 +916,23 @@ export class AdminMembersService {
         }),
       );
 
+      // A moderator or admin can't sit as a co-host on a house Music event,
+      // so a move up into either tier ends every such seat the member holds.
+      const isPromotionIntoStaffTier =
+        STAFF_ROSTER_TIERS.includes(targetRole) &&
+        STAFF_ROSTER_TIER_RANK[targetRole] <
+          STAFF_ROSTER_TIER_RANK[previousRole];
+      if (isPromotionIntoStaffTier) {
+        await lockCohostSeatsForMember(manager, targetUserId);
+        await this.endHouseMusicCohostSeats(
+          manager,
+          actorUserId,
+          targetUserId,
+          `${profile.firstName} ${profile.lastName}`.trim(),
+          HOUSE_MUSIC_SEAT_END_DETAILS.staffTier,
+        );
+      }
+
       return targetRole;
     });
 
@@ -934,6 +981,38 @@ export class AdminMembersService {
       throw new NotFoundException('Member not found');
     }
     return profile;
+  }
+
+  /**
+   * Ends every co-host seat the member holds on a house Music event, inside
+   * the caller's transaction, and writes one `music_event_cohost_removed`
+   * row per ended seat (actor: the acting admin, target: the member). The
+   * caller takes `lockCohostSeatsForMember` first, so a concurrent co-host
+   * add for this member can't land a seat after the removal.
+   */
+  private async endHouseMusicCohostSeats(
+    manager: EntityManager,
+    actorUserId: string,
+    memberUserId: string,
+    memberName: string,
+    detail: HouseMusicSeatEndDetail,
+  ): Promise<void> {
+    const removedSeats = await removeHouseMusicCohostSeats(
+      manager,
+      memberUserId,
+    );
+    const auditLogs = manager.getRepository(ModAuditLog);
+    for (const removedSeat of removedSeats) {
+      await writeMusicEventAudit(auditLogs, {
+        actorId: actorUserId,
+        action: MUSIC_EVENT_AUDIT_ACTIONS.cohostRemoved,
+        eventSlug: removedSeat.eventSlug,
+        eventTitle: removedSeat.eventTitle,
+        targetUserId: memberUserId,
+        targetName: memberName,
+        detail,
+      });
+    }
   }
 
   /**
@@ -995,6 +1074,16 @@ export class AdminMembersService {
           );
         }
 
+        // A holder of the music_manager_producer grant runs house Music
+        // events as staff, so they can't also sit as a co-host on one. The
+        // seat lock is taken before the grant is read, so a co-host add for
+        // this member waits for this grant to commit and then sees it.
+        const isMusicManagerProducerGrant =
+          role === MUSIC_MANAGER_PRODUCER_ROLE;
+        if (isMusicManagerProducerGrant) {
+          await lockCohostSeatsForMember(manager, targetUserId);
+        }
+
         const grants = manager.getRepository(UserStaffRole);
         const alreadyHeld = await grants.findOne({
           where: { userId: targetUserId, role },
@@ -1021,6 +1110,16 @@ export class AdminMembersService {
               duration: null,
             }),
           );
+
+          if (isMusicManagerProducerGrant) {
+            await this.endHouseMusicCohostSeats(
+              manager,
+              actorUserId,
+              targetUserId,
+              `${profile.firstName} ${profile.lastName}`.trim(),
+              HOUSE_MUSIC_SEAT_END_DETAILS.grant,
+            );
+          }
         }
 
         const holdings = await grants.find({

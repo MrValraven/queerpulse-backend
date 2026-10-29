@@ -20,6 +20,23 @@ describe('Studio query bodies', () => {
     ).toEqual(['genre']);
   });
 
+  // A release carries up to 5 genres; the filter still names one of them.
+  it('keeps the genre filter a single value and refuses a list of genres', async () => {
+    expect(
+      await propertiesWithErrors(
+        plainToInstance(ListStudioReleasesQuery, { genre: ['fado', 'pop'] }),
+      ),
+    ).toEqual(['genre']);
+    expect(
+      await propertiesWithErrors(
+        plainToInstance(SearchStudioQuery, {
+          q: 'night',
+          genre: ['fado', 'pop'],
+        }),
+      ),
+    ).toEqual(['genre']);
+  });
+
   it('takes a mood from the contract list on the home feed, beside a genre', async () => {
     expect(
       await propertiesWithErrors(

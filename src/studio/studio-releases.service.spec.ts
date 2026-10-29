@@ -9,6 +9,7 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import {
+  StudioPriceMode,
   StudioRelease,
   StudioReleaseStatus,
   StudioReleaseType,
@@ -17,9 +18,15 @@ import { StudioSceneState } from './entities/studio-scene.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
+import { KEPT_SOURCE_KEYS_HELD_SQL } from './studio-kept-tracks';
 import { StudioReleasesService } from './studio-releases.service';
 import { scheduleDateInLisbon } from './studio-schedule-rule';
 import { STAMP_SHOW_EPISODES_SQL } from './studio-episode-rule';
+import {
+  PAYMENT_METHOD_COUNT_SQL,
+  PAYMENT_METHODS_LOCK_SQL,
+  RELEASE_TRACKS_PRICED_SQL,
+} from './studio-payment-method-lock';
 import { STUDIO_RELEASE_PUBLISHED } from './studio.events';
 
 const USER_ID = 'a2000000-0000-4000-8000-000000000001';
@@ -52,6 +59,7 @@ const draftRelease = (overrides: Partial<StudioRelease> = {}): StudioRelease =>
     type: StudioReleaseType.Mix,
     description: null,
     genre: null,
+    genres: [],
     coverKey: PERSONA_COVER,
     releasedOn: null,
     status: StudioReleaseStatus.Draft,
@@ -84,6 +92,7 @@ describe('StudioReleasesService', () => {
     isMemberOfKeyPersona: jest.Mock;
   };
   let studioAudioUploads: { deleteObjectsAndForget: jest.Mock };
+  let dataSourceQuery: jest.Mock;
   let releases: { create: jest.Mock; save: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let service: StudioReleasesService;
@@ -139,7 +148,9 @@ describe('StudioReleasesService', () => {
       ),
     };
     trackFind = jest.fn(() => Promise.resolve(tracks));
+    dataSourceQuery = jest.fn().mockResolvedValue([]);
     const dataSource = {
+      query: dataSourceQuery,
       getRepository: jest.fn(() => ({ find: trackFind })),
       transaction: jest.fn((work: (inner: EntityManager) => unknown) =>
         Promise.resolve(work(manager as unknown as EntityManager)),
@@ -206,7 +217,11 @@ describe('StudioReleasesService', () => {
         title: 'Salt Poems',
       });
       expect(releases.save).toHaveBeenLastCalledWith(
-        expect.objectContaining({ type: 'ep', genre: 'spoken-word' }),
+        expect.objectContaining({
+          type: 'ep',
+          genre: 'spoken-word',
+          genres: ['spoken-word'],
+        }),
       );
       personaKind = 'podcaster';
       await service.create(USER_ID, {
@@ -215,7 +230,7 @@ describe('StudioReleasesService', () => {
         title: 'Lisbon After Dark',
       });
       expect(releases.save).toHaveBeenLastCalledWith(
-        expect.objectContaining({ type: 'podcast', genre: null }),
+        expect.objectContaining({ type: 'podcast', genre: null, genres: [] }),
       );
     });
 
@@ -632,6 +647,30 @@ describe('StudioReleasesService', () => {
       expect((manager.save.mock.calls[1]![0] as StudioRelease).mood).toBeNull();
     });
 
+    it('stores the genres in order, mirrors the lead into genre and clears with an empty list', async () => {
+      await service.update(USER_ID, RELEASE_ID, {
+        genres: ['folk', 'pop', 'fado'],
+      });
+      expect(manager.save.mock.calls[0]![0] as StudioRelease).toEqual(
+        expect.objectContaining({
+          genre: 'folk',
+          genres: ['folk', 'pop', 'fado'],
+        }),
+      );
+      await service.update(USER_ID, RELEASE_ID, { genres: [] });
+      expect(manager.save.mock.calls[1]![0] as StudioRelease).toEqual(
+        expect.objectContaining({ genre: null, genres: [] }),
+      );
+    });
+
+    it('leaves genre and genres alone when the body carries no genres', async () => {
+      release = draftRelease({ genre: 'fado', genres: ['fado', 'folk'] });
+      await service.update(USER_ID, RELEASE_ID, { mood: 'tender' });
+      expect(manager.save.mock.calls[0]![0] as StudioRelease).toEqual(
+        expect.objectContaining({ genre: 'fado', genres: ['fado', 'folk'] }),
+      );
+    });
+
     it('opts the release into an active scene', async () => {
       manager.findOne.mockResolvedValue({ id: SCENE_ID });
 
@@ -688,6 +727,235 @@ describe('StudioReleasesService', () => {
     });
   });
 
+  // Studio purchases (contract 2.1).
+  describe('update prices', () => {
+    const querySqls = (): unknown[] =>
+      manager.query.mock.calls.map(([sql]) => sql as unknown);
+
+    beforeEach(() => {
+      personaKind = 'musician';
+      release = draftRelease({
+        type: StudioReleaseType.Album,
+        priceMode: StudioPriceMode.NotForSale,
+        priceCents: null,
+      });
+    });
+
+    it('prices a release after taking the payment-methods lock under the release lock', async () => {
+      manager.query
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([{ count: 1 }]);
+      await service.update(USER_ID, RELEASE_ID, {
+        price: { mode: 'fixed', amountCents: 900 },
+      });
+      expect(querySqls()).toEqual([
+        PAYMENT_METHODS_LOCK_SQL,
+        PAYMENT_METHOD_COUNT_SQL,
+      ]);
+      expect(manager.query.mock.calls.map(([, params]) => params)).toEqual([
+        [PERSONA_ID],
+        [PERSONA_ID],
+      ]);
+      expect(manager.query.mock.invocationCallOrder[0]).toBeGreaterThan(
+        ownership.lockReleaseForWrite.mock.invocationCallOrder[0] ?? Infinity,
+      );
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({ priceMode: 'fixed', priceCents: 900 }),
+      );
+    });
+
+    it('refuses a price on a mix with studio_release_type_not_for_sale before any lock', async () => {
+      personaKind = 'dj';
+      release = draftRelease();
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, {
+            price: { mode: 'name_your_price', amountCents: 0 },
+          }),
+        ),
+      ).toBe('studio_release_type_not_for_sale');
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('reads the type this PATCH sets before the price check', async () => {
+      personaKind = 'dj';
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, {
+            type: StudioReleaseType.Mix,
+            price: { mode: 'fixed', amountCents: 900 },
+          }),
+        ),
+      ).toBe('studio_release_type_not_for_sale');
+      expect(manager.query).not.toHaveBeenCalled();
+
+      personaKind = 'musician';
+      release = draftRelease({ type: StudioReleaseType.Mix });
+      manager.query
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([{ count: 2 }]);
+      await service.update(USER_ID, RELEASE_ID, {
+        type: StudioReleaseType.Single,
+        price: { mode: 'name_your_price', amountCents: 0 },
+      });
+      expect(querySqls()).toEqual([
+        PAYMENT_METHODS_LOCK_SQL,
+        PAYMENT_METHOD_COUNT_SQL,
+      ]);
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          type: 'single',
+          priceMode: 'name_your_price',
+          priceCents: 0,
+        }),
+      );
+    });
+
+    it('refuses a fixed price under one euro with studio_price_out_of_range', async () => {
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, {
+            price: { mode: 'fixed', amountCents: 99 },
+          }),
+        ),
+      ).toBe('studio_price_out_of_range');
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a price while the persona has no payment methods', async () => {
+      manager.query
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([{ count: 0 }]);
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, {
+            price: { mode: 'fixed', amountCents: 900 },
+          }),
+        ),
+      ).toBe('studio_payment_methods_needed_for_sale');
+      expect(querySqls()).toEqual([
+        PAYMENT_METHODS_LOCK_SQL,
+        PAYMENT_METHOD_COUNT_SQL,
+      ]);
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a type change to an unsellable type while a track on the release is priced', async () => {
+      personaKind = 'dj';
+      manager.query.mockResolvedValueOnce([{ has_priced_tracks: true }]);
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, { type: StudioReleaseType.Mix }),
+        ),
+      ).toBe('studio_release_type_not_for_sale');
+      expect(manager.query.mock.calls).toEqual([
+        [RELEASE_TRACKS_PRICED_SQL, [RELEASE_ID, null]],
+      ]);
+      expect(manager.save).not.toHaveBeenCalled();
+
+      manager.query.mockClear();
+      manager.query.mockResolvedValueOnce([{ has_priced_tracks: false }]);
+      await service.update(USER_ID, RELEASE_ID, {
+        type: StudioReleaseType.Mix,
+      });
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({ type: 'mix', priceMode: 'not_for_sale' }),
+      );
+    });
+
+    it('refuses a type change to an unsellable type while the release itself stays priced', async () => {
+      personaKind = 'dj';
+      release = draftRelease({
+        type: StudioReleaseType.Album,
+        priceMode: StudioPriceMode.Fixed,
+        priceCents: 900,
+      });
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, { type: StudioReleaseType.Mix }),
+        ),
+      ).toBe('studio_release_type_not_for_sale');
+      expect(manager.query).not.toHaveBeenCalled();
+
+      manager.query.mockResolvedValueOnce([{ has_priced_tracks: false }]);
+      await service.update(USER_ID, RELEASE_ID, {
+        type: StudioReleaseType.Mix,
+        price: null,
+      });
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          type: 'mix',
+          priceMode: 'not_for_sale',
+          priceCents: null,
+        }),
+      );
+    });
+
+    it('takes a release off sale with null and needs no payment method for it', async () => {
+      release = draftRelease({
+        type: StudioReleaseType.Album,
+        priceMode: StudioPriceMode.Fixed,
+        priceCents: 900,
+      });
+      await service.update(USER_ID, RELEASE_ID, { price: null });
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          priceMode: 'not_for_sale',
+          priceCents: null,
+        }),
+      );
+    });
+
+    it('leaves the price alone when the body has none and never stamps tracks_changed_at for a price', async () => {
+      release = draftRelease({
+        type: StudioReleaseType.Album,
+        status: StudioReleaseStatus.Published,
+        publishedAt: new Date('2026-10-01T00:00:00.000Z'),
+        priceMode: StudioPriceMode.NameYourPrice,
+        priceCents: 300,
+      });
+      await service.update(USER_ID, RELEASE_ID, { title: 'Lisbon at five' });
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          title: 'Lisbon at five',
+          priceMode: 'name_your_price',
+          priceCents: 300,
+        }),
+      );
+
+      manager.query
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([{ count: 1 }]);
+      await service.update(USER_ID, RELEASE_ID, {
+        price: { mode: 'fixed', amountCents: 1200 },
+      });
+      expect(
+        querySqls().some((sql) => String(sql).includes('tracks_changed_at')),
+      ).toBe(false);
+      expect(release.tracksChangedAt).toBeUndefined();
+    });
+
+    it('keeps a taken-down release frozen', async () => {
+      release = draftRelease({
+        type: StudioReleaseType.Album,
+        status: StudioReleaseStatus.TakenDown,
+      });
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, {
+            price: { mode: 'fixed', amountCents: 900 },
+          }),
+        ),
+      ).toBe('studio_release_not_draft');
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+  });
+
   describe('remove', () => {
     it('deletes a draft and then its audio objects', async () => {
       await service.remove(USER_ID, RELEASE_ID);
@@ -696,6 +964,17 @@ describe('StudioReleasesService', () => {
       });
       expect(studioAudioUploads.deleteObjectsAndForget).toHaveBeenCalledWith([
         AUDIO_KEY,
+      ]);
+    });
+
+    it('keeps the audio objects a pending kept copy still reads', async () => {
+      dataSourceQuery.mockResolvedValue([{ source_audio_key: AUDIO_KEY }]);
+      await service.remove(USER_ID, RELEASE_ID);
+      expect(dataSourceQuery.mock.calls).toEqual([
+        [KEPT_SOURCE_KEYS_HELD_SQL, [[AUDIO_KEY]]],
+      ]);
+      expect(studioAudioUploads.deleteObjectsAndForget.mock.calls).toEqual([
+        [[]],
       ]);
     });
 

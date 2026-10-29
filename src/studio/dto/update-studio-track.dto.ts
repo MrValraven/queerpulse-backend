@@ -22,6 +22,7 @@ import {
   StudioContentWarningId,
 } from '../studio-safety.constants';
 import { isPresentValue, trimStringValue } from './create-studio-release.dto';
+import { StudioPriceDto } from './studio-price.dto';
 import {
   HasChapterTimeline,
   HasNonDecreasingTimes,
@@ -192,4 +193,10 @@ export class UpdateStudioTrackDto {
   @Type(() => StudioChapterDto)
   @HasChapterTimeline()
   chapters?: StudioChapterDto[] | null;
+
+  /** Absent leaves the price; null takes the item off sale. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => StudioPriceDto)
+  price?: StudioPriceDto | null;
 }

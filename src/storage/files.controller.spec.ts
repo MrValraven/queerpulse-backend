@@ -1102,4 +1102,33 @@ describe('FilesController', () => {
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
   });
+
+  // Studio landing: a landing-scoped key names nobody, and is served only
+  // while a `studio_landing_photos` row stores it.
+  describe('landing-scoped keys', () => {
+    const LANDING_KEY = `studio-landing/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
+    let query: jest.Mock;
+
+    beforeEach(() => {
+      query = jest.fn();
+      (users as unknown as { query: jest.Mock }).query = query;
+    });
+
+    it('serves a landing photo while a row stores it and 404s it after', async () => {
+      query.mockResolvedValueOnce([{ found: 1 }]);
+      await serve(LANDING_KEY, null);
+      expect(query).toHaveBeenCalledWith(
+        'SELECT 1 AS "found" FROM "studio_landing_photos" WHERE "image_key" = $1 LIMIT 1',
+        [LANDING_KEY],
+      );
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+
+      response.redirect.mockClear();
+      query.mockResolvedValueOnce([]);
+      await expect(serve(LANDING_KEY, null)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(response.redirect).not.toHaveBeenCalled();
+    });
+  });
 });

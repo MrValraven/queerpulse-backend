@@ -1,9 +1,13 @@
 import {
   PERSONA_SCOPED_KIND_SPEC,
   STUDIO_AUDIO_KEY_PATTERN,
+  STUDIO_LANDING_SCOPED_KIND_SPEC,
   isPersonaScopedKey,
   isStorageKey,
   isStudioAudioKey,
+  isStudioDownloadableAudioKey,
+  isStudioKeptAudioKey,
+  isStudioLandingScopedKey,
   parseStorageKey,
   storageKeyOwnerId,
   studioAudioContentTypeForKey,
@@ -176,5 +180,77 @@ describe('Studio audio keys', () => {
   ])('refuses %s', (value) => {
     expect(isStudioAudioKey(value)).toBe(false);
     expect(studioAudioContentTypeForKey(value)).toBeNull();
+  });
+});
+
+describe('Studio kept audio keys', () => {
+  const KEPT_MP3_KEY =
+    'studio-kept-audio/66666666-7777-4888-9999-000000000000.mp3';
+  const KEPT_M4A_KEY =
+    'studio-kept-audio/66666666-7777-4888-9999-000000000000.m4a';
+
+  it('reads a kept copy key as kept audio and keeps the confirm pattern to studio-audio keys', () => {
+    expect([
+      isStudioKeptAudioKey(KEPT_MP3_KEY),
+      isStudioDownloadableAudioKey(KEPT_MP3_KEY),
+      isStudioAudioKey(KEPT_MP3_KEY),
+      STUDIO_AUDIO_KEY_PATTERN.test(KEPT_MP3_KEY),
+      studioAudioContentTypeForKey(KEPT_MP3_KEY),
+    ]).toEqual([true, true, false, false, null]);
+    expect(isStudioKeptAudioKey(KEPT_M4A_KEY)).toBe(true);
+  });
+
+  it('reads a Studio audio key as downloadable and outside kept audio', () => {
+    const studioKey =
+      'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3';
+    expect([
+      isStudioDownloadableAudioKey(studioKey),
+      isStudioKeptAudioKey(studioKey),
+    ]).toEqual([true, false]);
+  });
+
+  it.each([
+    'studio-kept-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3',
+    'studio-kept-audio/66666666-7777-4888-9999-000000000000.wav',
+    'studio-kept-audio/not-a-uuid.mp3',
+    'studio-kept-audio/../66666666-7777-4888-9999-000000000000.mp3',
+    'avatars/66666666-7777-4888-9999-000000000000.mp3',
+  ])(
+    'refuses a kept key with a path segment, another extension or no uuid: %s',
+    (value) => {
+      expect(isStudioKeptAudioKey(value)).toBe(false);
+      expect(isStudioDownloadableAudioKey(value)).toBe(false);
+    },
+  );
+
+  it('keeps a kept copy away from GET /files/* the way it keeps studio audio away', () => {
+    expect(parseStorageKey(KEPT_MP3_KEY)).toBeNull();
+    expect(isStorageKey(KEPT_M4A_KEY)).toBe(false);
+    expect(storageKeyOwnerId(KEPT_MP3_KEY)).toBeNull();
+  });
+});
+
+// Studio landing v2: a Studio page photo lives under
+// `studio-landing/<uuid>/<uuid><ext>`, where neither segment names anyone.
+describe('landing-scoped keys', () => {
+  const UUID = '0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b';
+  const LANDING_KEY = `studio-landing/${UUID}/${UUID}.jpg`;
+
+  it('parses a landing-scoped key as public and names no owner', () => {
+    expect(parseStorageKey(LANDING_KEY)).toBe(STUDIO_LANDING_SCOPED_KIND_SPEC);
+    expect(STUDIO_LANDING_SCOPED_KIND_SPEC.requiresSession).toBe(false);
+    expect(STUDIO_LANDING_SCOPED_KIND_SPEC.maxBytes).toBe(10 * 1024 * 1024);
+    expect([
+      isStudioLandingScopedKey(LANDING_KEY),
+      storageKeyOwnerId(LANDING_KEY),
+    ]).toEqual([true, null]);
+  });
+
+  it.each([
+    'studio-landing/not-a-uuid/x.jpg',
+    `studio-landing/${UUID}/${UUID}.pdf`,
+    `studio-landing/${UUID}/${UUID}.JPG`,
+  ])('refuses %s', (value) => {
+    expect(isStudioLandingScopedKey(value)).toBe(false);
   });
 });

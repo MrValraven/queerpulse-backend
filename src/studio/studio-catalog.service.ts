@@ -23,6 +23,7 @@ import { StudioReleaseDispute } from './entities/studio-release-dispute.entity';
 import { ownerClaimsForTracks } from './studio-claim-store';
 import { decodeStudioCursor, encodeStudioCursor } from './studio-cursor';
 import { episodeReleasedSql, isDraftEpisode } from './studio-episode-rule';
+import { findFoundingArtistIds } from './studio-founding-artists-read';
 import { findGaplessAfterTrackId } from './studio-gapless';
 import {
   STUDIO_SEARCH_FIRST_WINDOW,
@@ -293,10 +294,11 @@ export class StudioCatalogService {
   }
 
   /**
-   * Studio v2: the genres with at least one release this viewer can hear
-   * (blocks apply), in `STUDIO_GENRES` order. A genre stored before the list
-   * changed is dropped. No counts reach the wire. `covers` carries the
-   * browse tile art: the newest such release with a cover, per genre.
+   * Studio v2: the genres that at least one release this viewer can hear
+   * carries (blocks apply; a release lists up to 5), in `STUDIO_GENRES`
+   * order. A genre stored before the list changed is dropped. No counts reach
+   * the wire. `covers` carries the browse tile art: the newest release
+   * carrying the genre that has a cover, per genre.
    */
   async listGenres(viewerId: string): Promise<StudioGenres> {
     const { values, covers } = await this.presentVocabulary(
@@ -338,11 +340,13 @@ export class StudioCatalogService {
   }
 
   /**
-   * The values of one release column that at least one release this viewer
+   * The values of one release facet that at least one release this viewer
    * can hear carries, in the order of `vocabulary`, with the cover of the
    * newest such release that has one. A stored value outside the vocabulary
    * is dropped. `column` is a literal from this file; the output alias is the
-   * column name, so each raw row reads `row[column]`.
+   * column name, so each raw row reads `row[column]`. The genre facet reads
+   * every entry of the release's `genres` array (one row per entry through
+   * `unnest`); the mood facet reads the single `mood` column.
    *
    * One query per facet: `DISTINCT ON` keeps one row per value, and the
    * order puts releases with a cover first, then the feed order, so the kept
@@ -354,14 +358,21 @@ export class StudioCatalogService {
     column: 'genre' | 'mood',
     vocabulary: readonly Value[],
   ): Promise<{ values: Value[]; covers: Record<string, string> }> {
-    const rows = await this.listenableReleases(viewerId)
-      .select(
-        `DISTINCT ON ("release"."${column}") "release"."${column}"`,
-        column,
-      )
-      .addSelect('"release"."cover_key"', 'cover_key')
-      .andWhere(`"release"."${column}" IS NOT NULL`)
-      .orderBy(`"release"."${column}"`, 'ASC')
+    const isGenreFacet = column === 'genre';
+    // A bare name in `DISTINCT ON` and `ORDER BY` resolves to the output
+    // column first, so `"genre"` here is the unnested value.
+    const facetColumn = isGenreFacet ? `"${column}"` : `"release"."${column}"`;
+    const facetSelection = isGenreFacet
+      ? 'unnest("release"."genres")'
+      : `"release"."${column}"`;
+    const queryBuilder = this.listenableReleases(viewerId)
+      .select(`DISTINCT ON (${facetColumn}) ${facetSelection}`, column)
+      .addSelect('"release"."cover_key"', 'cover_key');
+    if (!isGenreFacet) {
+      queryBuilder.andWhere(`"release"."${column}" IS NOT NULL`);
+    }
+    const rows = await queryBuilder
+      .orderBy(facetColumn, 'ASC')
       .addOrderBy('"release"."cover_key" IS NULL', 'ASC')
       .addOrderBy('"release"."published_at"', 'DESC', 'NULLS LAST')
       .addOrderBy('"release"."id"', 'DESC')
@@ -705,16 +716,22 @@ export class StudioCatalogService {
     const statsOf = (release: StudioRelease): CatalogReleaseStats =>
       statsByReleaseId.get(release.id) ?? EMPTY_CATALOG_STATS;
     // Keyed by the stored id: a link may carry the id in any letter case.
-    const [followerCounts, followedPersonaIds, supportLinks, remindedIds] =
-      await Promise.all([
-        this.followers.loadFollowerCountsFor([persona.id]),
-        this.followers.viewerFollowingFor(viewerId, [persona.id]),
-        this.releaseExtras.supportLinksFor(persona.id),
-        this.releaseExtras.reminderStatesFor(
-          viewerId,
-          upcomingReleases.map((release) => release.id),
-        ),
-      ]);
+    const [
+      followerCounts,
+      followedPersonaIds,
+      supportLinks,
+      remindedIds,
+      foundingIds,
+    ] = await Promise.all([
+      this.followers.loadFollowerCountsFor([persona.id]),
+      this.followers.viewerFollowingFor(viewerId, [persona.id]),
+      this.releaseExtras.supportLinksFor(persona.id),
+      this.releaseExtras.reminderStatesFor(
+        viewerId,
+        upcomingReleases.map((release) => release.id),
+      ),
+      findFoundingArtistIds(this.releases.manager, [persona.id]),
+    ]);
     const upcoming: StudioUpcomingRelease[] = upcomingReleases.flatMap(
       (release) =>
         release.publishAt
@@ -737,6 +754,7 @@ export class StudioCatalogService {
         bio: persona.bio,
         city: null,
         ...toStudioArtistHeroFields(persona),
+        isFoundingArtist: foundingIds.has(persona.id),
       },
       releases: publishedReleases.map((release) =>
         toStudioReleaseCard(release, persona, listenerStats(statsOf(release))),
@@ -1246,9 +1264,12 @@ export class StudioCatalogService {
     filters: StudioReleaseFilters,
   ): void {
     if (filters.genre) {
-      queryBuilder.andWhere('"release"."genre" = :studioGenre', {
-        studioGenre: filters.genre,
-      });
+      // `genres` holds every genre of the release; `@>` keeps the partial
+      // GIN index on `genres` usable.
+      queryBuilder.andWhere(
+        '"release"."genres" @> ARRAY[:studioGenre]::varchar[]',
+        { studioGenre: filters.genre },
+      );
     }
     if (filters.mood) {
       queryBuilder.andWhere('"release"."mood" = :studioMood', {

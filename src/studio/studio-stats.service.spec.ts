@@ -3,6 +3,7 @@ import { DataSource, Repository } from 'typeorm';
 import { SubprofileFollowersService } from '../subprofiles/subprofile-followers.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import {
+  StudioPriceMode,
   StudioRelease,
   StudioReleaseStatus,
   StudioReleaseType,
@@ -29,6 +30,7 @@ const releaseRow = (id: string, status: StudioReleaseStatus): StudioRelease =>
     type: StudioReleaseType.Mix,
     description: null,
     genre: null,
+    genres: [] as string[],
     mood: null,
     buyUrl: null,
     coverKey: null,
@@ -45,6 +47,8 @@ const releaseRow = (id: string, status: StudioReleaseStatus): StudioRelease =>
     tracksChangedAt: null,
     updatedAt: new Date('2026-10-02T09:00:00.000Z'),
     takedownReason: null,
+    priceMode: StudioPriceMode.NotForSale,
+    priceCents: null,
   }) as StudioRelease;
 
 const trackRow = (id: string, position: number): StudioTrack => {

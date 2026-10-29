@@ -210,6 +210,11 @@ export class MemberPreferencesExportContributor implements DataExportContributio
       listeningNoticeSeenAt: preferences.listeningNoticeSeenAt
         ? preferences.listeningNoticeSeenAt.toISOString()
         : null,
+      studioWelcomeSeenAt: preferences.studioWelcomeSeenAt
+        ? preferences.studioWelcomeSeenAt.toISOString()
+        : null,
+      studioTasteGenres: preferences.studioTasteGenres ?? [],
+      studioTasteMoods: preferences.studioTasteMoods ?? [],
       updatedAt: preferences.updatedAt.toISOString(),
     };
   }

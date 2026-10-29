@@ -15,7 +15,8 @@ import { STUDIO_LIMITS } from './studio.constants';
  * cinema reconciliation (793640001), the identity mailbox reconciliation
  * (793_640_002_000), Go together's matching and retention runs
  * (793_640_003_000 / 793_640_003_001), the persona feed sweep
- * (793_640_004_000) and the migration lock (481_205_733_107_400).
+ * (793_640_004_000), the purchase expiry (793_640_008_000) and the migration
+ * lock (481_205_733_107_400).
  */
 export const SCHEDULED_RELEASES_LOCK_KEY = 793_640_005_000;
 

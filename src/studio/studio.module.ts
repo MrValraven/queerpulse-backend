@@ -19,6 +19,11 @@ import { AdminStudioAccessController } from './admin-studio-access.controller';
 import { AdminStudioCopyrightClaimsController } from './admin-studio-copyright-claims.controller';
 import { AdminStudioCurationController } from './admin-studio-curation.controller';
 import { AdminStudioCurationService } from './admin-studio-curation.service';
+import { AdminStudioAccessRequestsController } from './admin-studio-access-requests.controller';
+import { AdminStudioLandingContentService } from './admin-studio-landing-content.service';
+import { AdminStudioLandingController } from './admin-studio-landing.controller';
+import { AdminStudioLandingPhotosService } from './admin-studio-landing-photos.service';
+import { AdminStudioLandingPreviewsService } from './admin-studio-landing-previews.service';
 import { AdminStudioDisputesController } from './admin-studio-disputes.controller';
 import { AdminStudioReleasesController } from './admin-studio-releases.controller';
 import { AdminStudioScenesController } from './admin-studio-scenes.controller';
@@ -26,10 +31,20 @@ import { AdminStudioScenesService } from './admin-studio-scenes.service';
 import { AdminStudioTracksController } from './admin-studio-tracks.controller';
 import { StudioArtistMilestone } from './entities/studio-artist-milestone.entity';
 import { StudioCopyrightClaim } from './entities/studio-copyright-claim.entity';
+import { StudioKeptTrack } from './entities/studio-kept-track.entity';
+import { StudioPaymentMethod } from './entities/studio-payment-method.entity';
+import { StudioPurchaseKeptTrack } from './entities/studio-purchase-kept-track.entity';
+import { StudioPurchase } from './entities/studio-purchase.entity';
 import { StudioAccessGrant } from './entities/studio-access-grant.entity';
 import { StudioCuratedPick } from './entities/studio-curated-pick.entity';
 import { StudioListen } from './entities/studio-listen.entity';
 import { StudioSupporter } from './entities/studio-supporter.entity';
+import { StudioAccessRequest } from './entities/studio-access-request.entity';
+import { StudioFoundingArtist } from './entities/studio-founding-artist.entity';
+import { StudioLandingArtistCard } from './entities/studio-landing-artist-card.entity';
+import { StudioLandingPhoto } from './entities/studio-landing-photo.entity';
+import { StudioLandingPreview } from './entities/studio-landing-preview.entity';
+import { StudioLandingSettings } from './entities/studio-landing-settings.entity';
 import { StudioTrackPlayDaily } from './entities/studio-track-play-daily.entity';
 import { StudioPersonaCredit } from './entities/studio-persona-credit.entity';
 import { StudioSceneEvent } from './entities/studio-scene-event.entity';
@@ -87,6 +102,7 @@ import { StudioOwnershipService } from './studio-ownership.service';
 import { StudioPersonaCreditsController } from './studio-persona-credits.controller';
 import { StudioPersonaCreditsService } from './studio-persona-credits.service';
 import { StudioPlaybackPreferencesController } from './studio-playback-preferences.controller';
+import { StudioWelcomeController } from './studio-welcome.controller';
 import { StudioProfilePlaylistSetting } from './entities/studio-profile-playlist-setting.entity';
 import { StudioProfilePlaylistsController } from './studio-profile-playlists.controller';
 import { StudioProfilePlaylistsService } from './studio-profile-playlists.service';
@@ -125,6 +141,29 @@ import { StudioStatsController } from './studio-stats.controller';
 import { StudioStatsService } from './studio-stats.service';
 import { StudioTracksController } from './studio-tracks.controller';
 import { StudioTracksService } from './studio-tracks.service';
+import { StudioBuyerPurchasesService } from './studio-buyer-purchases.service';
+import { StudioKeptAudioService } from './studio-kept-audio.service';
+import { StudioPaymentMethodsController } from './studio-payment-methods.controller';
+import { StudioPaymentMethodsService } from './studio-payment-methods.service';
+import { StudioPurchaseAlertsListener } from './studio-purchase-alerts.listener';
+import { StudioPurchaseExpiryService } from './studio-purchase-expiry.service';
+import { StudioPurchaseLibraryController } from './studio-purchase-library.controller';
+import { StudioPurchaseLibraryService } from './studio-purchase-library.service';
+import { StudioPurchaseWallService } from './studio-purchase-wall.service';
+import { StudioPurchasesController } from './studio-purchases.controller';
+import { StudioPurchasesService } from './studio-purchases.service';
+import { StudioSalesController } from './studio-sales.controller';
+import { StudioSalesService } from './studio-sales.service';
+import { StudioAccessAlertsListener } from './studio-access-alerts.listener';
+import { StudioAccessRequestsController } from './studio-access-requests.controller';
+import { StudioAccessRequestsService } from './studio-access-requests.service';
+import { StudioFoundingArtistsController } from './studio-founding-artists.controller';
+import { StudioFoundingArtistsService } from './studio-founding-artists.service';
+import { StudioLandingAlertsListener } from './studio-landing-alerts.listener';
+import { StudioLandingController } from './studio-landing.controller';
+import { StudioLandingPreviewsController } from './studio-landing-previews.controller';
+import { StudioLandingPreviewsService } from './studio-landing-previews.service';
+import { StudioLandingReadService } from './studio-landing-read.service';
 
 /**
  * Studio (`QUEERPULSE-STUDIO-V1-DESIGN-2026-10-08.md`, v2
@@ -161,7 +200,14 @@ import { StudioTracksService } from './studio-tracks.service';
  * `StudioTakedownReportService`, `NotificationsModule` the notices,
  * `Profile` the claimant card). Studio listening (the Part 2 contract) adds
  * play counting, the member's history, supporters and the history prune on
- * the existing imports.
+ * the existing imports. Studio purchases
+ * (QUEERPULSE-STUDIO-PURCHASES-CONTRACT-2026-10-28.md) adds payment methods,
+ * offers, purchase claims, the supporter wall, the sales inbox, buyer
+ * downloads and kept copies, the expiry cron and the purchase alerts on the
+ * existing imports (`StorageModule` brings the download signing and the
+ * copies). Studio landing v2 (the 2026-10-28 contract) adds the public
+ * Studio page reads, its staff curation, owner preview approvals, founding
+ * artists and Studio access requests on the existing imports.
  */
 @Module({
   imports: [
@@ -188,6 +234,16 @@ import { StudioTracksService } from './studio-tracks.service';
       StudioTrackPlayDaily,
       StudioListen,
       StudioSupporter,
+      StudioLandingPreview,
+      StudioLandingArtistCard,
+      StudioLandingPhoto,
+      StudioLandingSettings,
+      StudioFoundingArtist,
+      StudioAccessRequest,
+      StudioPaymentMethod,
+      StudioPurchase,
+      StudioKeptTrack,
+      StudioPurchaseKeptTrack,
       Subprofile,
       SubprofileMember,
       SubprofileSocialLink,
@@ -227,10 +283,19 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioPlaysController,
     StudioListeningHistoryController,
     StudioArtistSupporterController,
+    StudioLandingController,
+    StudioLandingPreviewsController,
+    StudioFoundingArtistsController,
+    StudioAccessRequestsController,
+    StudioPaymentMethodsController,
+    StudioPurchasesController,
+    StudioPurchaseLibraryController,
+    StudioSalesController,
     StudioReleaseToolsController,
     StudioPreviewsController,
     StudioPressKitController,
     StudioPlaybackPreferencesController,
+    StudioWelcomeController,
     StudioCurationController,
     StudioScenesController,
     StudioPersonaCreditsController,
@@ -247,6 +312,8 @@ import { StudioTracksService } from './studio-tracks.service';
     AdminStudioScenesController,
     AdminStudioCopyrightClaimsController,
     AdminStudioTracksController,
+    AdminStudioLandingController,
+    AdminStudioAccessRequestsController,
   ],
   providers: [
     StudioAccessService,
@@ -309,6 +376,26 @@ import { StudioTracksService } from './studio-tracks.service';
     StudioSupportersService,
     StudioArtistPlaysService,
     StudioListeningPruneService,
+    // Studio landing v2.
+    StudioLandingReadService,
+    AdminStudioLandingPreviewsService,
+    AdminStudioLandingContentService,
+    AdminStudioLandingPhotosService,
+    StudioLandingPreviewsService,
+    StudioAccessRequestsService,
+    StudioFoundingArtistsService,
+    StudioLandingAlertsListener,
+    StudioAccessAlertsListener,
+    // Studio purchases.
+    StudioPaymentMethodsService,
+    StudioBuyerPurchasesService,
+    StudioPurchasesService,
+    StudioPurchaseWallService,
+    StudioPurchaseLibraryService,
+    StudioSalesService,
+    StudioKeptAudioService,
+    StudioPurchaseExpiryService,
+    StudioPurchaseAlertsListener,
   ],
   // The Admin creator drafts preview (`CreatorDraftsModule`) reads a release
   // as its preview link shows it. That module imports this one; nothing here

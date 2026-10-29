@@ -54,11 +54,15 @@ interface RadioRow extends Record<string, unknown> {
  * `$1` the viewer, `$2` the genre or mood, `$3` the cap. Playable tracks
  * (published release, audio and duration in place, persona listenable, and
  * not withheld (Studio safety, through `playableTrackSql`)) of
- * releases in that genre or mood, creators clear of blocks either way,
- * sampled at random. `filterColumn` is one of two literals.
+ * releases in that genre (any genre the release carries) or mood, creators
+ * clear of blocks either way, sampled at random. `filterColumn` is one of two literals.
  * Studio artist kinds: podcast shows stay out, so a radio never plays an episode.
  */
 export function radioSql(filterColumn: 'genre' | 'mood'): string {
+  const filterPredicate =
+    filterColumn === 'genre'
+      ? '"release"."genres" @> ARRAY[$2]::varchar[]'
+      : '"release"."mood" = $2';
   return `SELECT "track"."id" AS "track_id",
        "track"."title" AS "title",
        "track"."duration_seconds" AS "duration_seconds",
@@ -72,7 +76,7 @@ export function radioSql(filterColumn: 'genre' | 'mood'): string {
   FROM "studio_tracks" "track"
   INNER JOIN "studio_releases" "release" ON "release"."id" = "track"."release_id"
   INNER JOIN "subprofiles" "persona" ON "persona"."id" = "release"."subprofile_id"
- WHERE "release"."${filterColumn}" = $2
+ WHERE ${filterPredicate}
    AND "release"."type" <> '${StudioReleaseType.Podcast}'
    AND ${playableTrackSql('track', 'release', 'persona')}
    AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'radio_block')}

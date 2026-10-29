@@ -3,6 +3,14 @@ import {
   carryIdentityBlocksToPersona,
   issueFreshPersonaId,
 } from './subprofile-unlink-rekey';
+import {
+  UNLINK_KEEP_TRACKS_SQL,
+  UNLINK_PAYMENT_METHODS_DELETE_SQL,
+  UNLINK_PENDING_EXPIRE_SQL,
+  UNLINK_PRICES_CLEAR_SQL,
+  UNLINK_SALES_DETACH_SQL,
+  UNLINK_WALL_PERSONA_CLEAR_SQL,
+} from '../studio/studio-purchases-unlink';
 
 /**
  * ENG-447: the statements that retire a persona's old id on unlink. The
@@ -25,8 +33,22 @@ describe('issueFreshPersonaId', () => {
     manager = { query } as unknown as EntityManager;
   });
 
+  // The sales statements (`forgetSalesOfPersona`, specced on its own) also
+  // update the releases and tracks, to take them off sale; the re-key
+  // lookups below read the calls without them.
+  const SALES_STATEMENTS = new Set<string>([
+    UNLINK_PAYMENT_METHODS_DELETE_SQL,
+    ...UNLINK_PRICES_CLEAR_SQL,
+    UNLINK_PENDING_EXPIRE_SQL,
+    UNLINK_KEEP_TRACKS_SQL,
+    UNLINK_SALES_DETACH_SQL,
+    UNLINK_WALL_PERSONA_CLEAR_SQL,
+  ]);
+  const rekeyCalls = () =>
+    query.mock.calls.filter(([sql]) => !SALES_STATEMENTS.has(sql));
+
   const statementTouching = (table: string) =>
-    query.mock.calls.find(([sql]) => sql.includes(`UPDATE "${table}"`));
+    rekeyCalls().find(([sql]) => sql.includes(`UPDATE "${table}"`));
 
   it('resolves with a new uuid and moves the persona row to it first', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
@@ -42,7 +64,7 @@ describe('issueFreshPersonaId', () => {
   it('forgets the listening data before the releases get fresh ids', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const statements = query.mock.calls.map(([sql]) => sql);
+    const statements = rekeyCalls().map(([sql]) => sql);
     const listeningIndex = statements.findIndex((sql) =>
       sql.includes('DELETE FROM "studio_listens"'),
     );
@@ -51,7 +73,22 @@ describe('issueFreshPersonaId', () => {
     );
     expect(listeningIndex).toBeGreaterThan(-1);
     expect(listeningIndex).toBeLessThan(releaseIndex);
-    expect(query.mock.calls[listeningIndex]?.[1]).toEqual([freshId]);
+    expect(rekeyCalls()[listeningIndex]?.[1]).toEqual([freshId]);
+  });
+
+  it('forgets the landing ties before the releases get fresh ids', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const statements = rekeyCalls().map(([sql]) => sql);
+    const landingIndex = statements.findIndex((sql) =>
+      sql.includes('DELETE FROM "studio_landing_previews"'),
+    );
+    const releaseIndex = statements.findIndex((sql) =>
+      sql.includes('UPDATE "studio_releases"'),
+    );
+    expect(landingIndex).toBeGreaterThan(-1);
+    expect(landingIndex).toBeLessThan(releaseIndex);
+    expect(rekeyCalls()[landingIndex]?.[1]).toEqual([freshId]);
   });
 
   it('issues a different id on every call', async () => {
@@ -149,17 +186,14 @@ describe('issueFreshPersonaId', () => {
   it('gives every Studio track a fresh id once its release has moved', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const releaseIndex = query.mock.calls.findIndex(([sql]) =>
+    const releaseIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "studio_releases"'),
     );
-    const trackIndex = query.mock.calls.findIndex(([sql]) =>
+    const trackIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "studio_tracks"'),
     );
     expect(trackIndex).toBeGreaterThan(releaseIndex);
-    expect(query.mock.calls[trackIndex]?.[1]).toEqual([
-      freshId,
-      'studio_track',
-    ]);
+    expect(rekeyCalls()[trackIndex]?.[1]).toEqual([freshId, 'studio_track']);
   });
 
   // Studio safety and moderation: an open report on a track moves with it,
@@ -207,7 +241,7 @@ describe('issueFreshPersonaId', () => {
     expect(sql).toContain(`"visibility" = 'private'`);
     expect(sql).toContain(`"is_credited_to_persona" = false`);
     expect(parameters).toEqual([freshId]);
-    const releaseIndex = query.mock.calls.findIndex(([statement]) =>
+    const releaseIndex = rekeyCalls().findIndex(([statement]) =>
       statement.includes('UPDATE "studio_playlists"'),
     );
     expect(releaseIndex).toBeGreaterThan(0);
@@ -242,10 +276,10 @@ describe('issueFreshPersonaId', () => {
   it('deletes the reminders of a scheduled release once it is back in draft', async () => {
     await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const releaseIndex = query.mock.calls.findIndex(([sql]) =>
+    const releaseIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "studio_releases"'),
     );
-    const reminderIndex = query.mock.calls.findIndex(([sql]) =>
+    const reminderIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('DELETE FROM "studio_release_reminders"'),
     );
     expect(releaseIndex).toBeGreaterThan(-1);
@@ -255,7 +289,7 @@ describe('issueFreshPersonaId', () => {
   it('deletes the reminders members set on the named persona releases', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const reminderStatement = query.mock.calls.find(([sql]) =>
+    const reminderStatement = rekeyCalls().find(([sql]) =>
       sql.includes('DELETE FROM "studio_release_reminders"'),
     );
     expect(reminderStatement?.[1]).toEqual([freshId]);
@@ -276,7 +310,7 @@ describe('issueFreshPersonaId', () => {
   it('deletes the milestones the named persona reached', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const milestoneStatement = query.mock.calls.find(([sql]) =>
+    const milestoneStatement = rekeyCalls().find(([sql]) =>
       sql.includes('DELETE FROM "studio_artist_milestones"'),
     );
     const [milestoneSql, milestoneParameters] = milestoneStatement ?? [];
@@ -287,7 +321,7 @@ describe('issueFreshPersonaId', () => {
   it('gives every persona post a fresh id and clears its edit stamp', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const postStatement = query.mock.calls.find(([sql]) =>
+    const postStatement = rekeyCalls().find(([sql]) =>
       sql.includes('UPDATE "subprofile_posts"'),
     );
     const [sql, parameters] = postStatement ?? [];
@@ -299,7 +333,7 @@ describe('issueFreshPersonaId', () => {
   it('keeps the Updates order when it restarts the post dates', async () => {
     await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const postStatement = query.mock.calls.find(([sql]) =>
+    const postStatement = rekeyCalls().find(([sql]) =>
       sql.includes('UPDATE "subprofile_posts"'),
     );
     const [sql] = postStatement ?? [];
@@ -314,7 +348,7 @@ describe('issueFreshPersonaId', () => {
   it('moves open reports on a persona post with it', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const postStatement = query.mock.calls.find(([sql]) =>
+    const postStatement = rekeyCalls().find(([sql]) =>
       sql.includes('UPDATE "subprofile_posts"'),
     );
     const [sql, parameters] = postStatement ?? [];
@@ -330,14 +364,14 @@ describe('issueFreshPersonaId', () => {
   it("severs the copyright claims on the persona's releases once the tracks move", async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const trackIndex = query.mock.calls.findIndex(([sql]) =>
+    const trackIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "studio_tracks"'),
     );
-    const severIndex = query.mock.calls.findIndex(([sql]) =>
+    const severIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "studio_copyright_claims"'),
     );
     expect(severIndex).toBeGreaterThan(trackIndex);
-    const [sql, parameters] = query.mock.calls[severIndex] ?? [];
+    const [sql, parameters] = rekeyCalls()[severIndex] ?? [];
     expect(sql).toContain('SET "is_severed" = true');
     expect(sql).toContain(
       'SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1',
@@ -349,7 +383,7 @@ describe('issueFreshPersonaId', () => {
   it('drops the post quota ledger of the named persona', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const ledgerStatement = query.mock.calls.find(([sql]) =>
+    const ledgerStatement = rekeyCalls().find(([sql]) =>
       sql.includes('DELETE FROM "subprofile_post_quota_entries"'),
     );
     expect(ledgerStatement?.[1]).toEqual([freshId]);
@@ -358,10 +392,10 @@ describe('issueFreshPersonaId', () => {
   it('runs the artist tools statements after the tracks move', async () => {
     await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const trackIndex = query.mock.calls.findIndex(([sql]) =>
+    const trackIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "studio_tracks"'),
     );
-    const postIndex = query.mock.calls.findIndex(([sql]) =>
+    const postIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "subprofile_posts"'),
     );
     expect(postIndex).toBeGreaterThan(trackIndex);
@@ -372,34 +406,84 @@ describe('issueFreshPersonaId', () => {
   it("forgets the persona's credits and staff picks before its releases get fresh ids", async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const creditIndex = query.mock.calls.findIndex(([sql]) =>
+    const creditIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('DELETE FROM "studio_persona_credits"'),
     );
-    const pickIndex = query.mock.calls.findIndex(([sql]) =>
+    const pickIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('DELETE FROM "studio_curated_picks"'),
     );
-    const releaseIndex = query.mock.calls.findIndex(([sql]) =>
+    const releaseIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('UPDATE "studio_releases"'),
     );
     expect(creditIndex).toBeGreaterThan(0);
     expect(pickIndex).toBeGreaterThan(creditIndex);
     expect(releaseIndex).toBeGreaterThan(pickIndex);
-    expect(query.mock.calls[creditIndex]?.[1]).toEqual([freshId]);
-    expect(query.mock.calls[pickIndex]?.[1]).toEqual([freshId]);
+    expect(rekeyCalls()[creditIndex]?.[1]).toEqual([freshId]);
+    expect(rekeyCalls()[pickIndex]?.[1]).toEqual([freshId]);
   });
 
   it('deletes every team link of the persona once its row has moved', async () => {
     const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
 
-    const quotaIndex = query.mock.calls.findIndex(([sql]) =>
+    const quotaIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('DELETE FROM "subprofile_post_quota_entries"'),
     );
-    const teamIndex = query.mock.calls.findIndex(([sql]) =>
+    const teamIndex = rekeyCalls().findIndex(([sql]) =>
       sql.includes('DELETE FROM "listing_team_members"'),
     );
     expect(quotaIndex).toBeGreaterThan(-1);
     expect(teamIndex).toBeGreaterThan(quotaIndex);
-    expect(query.mock.calls[teamIndex]?.[1]).toEqual([freshId]);
+    expect(rekeyCalls()[teamIndex]?.[1]).toEqual([freshId]);
+  });
+
+  // Studio purchases (contract 4.7): the payment methods, prices and pending
+  // claims of the named persona go, and confirmed buyers keep their files.
+  it('forgets the sales of the persona after its listening data and before the releases get fresh ids', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const statements = query.mock.calls.map(([sql]) => sql);
+    const listeningIndex = statements.findIndex((sql) =>
+      sql.includes('DELETE FROM "studio_listens"'),
+    );
+    const salesIndex = statements.findIndex((sql) =>
+      sql.includes('DELETE FROM "studio_payment_methods"'),
+    );
+    const rekeyIndex = statements.findIndex((sql) =>
+      sql.includes('"remapped" AS MATERIALIZED'),
+    );
+    expect(listeningIndex).toBeGreaterThan(-1);
+    expect(salesIndex).toBeGreaterThan(listeningIndex);
+    expect(rekeyIndex).toBeGreaterThan(salesIndex);
+    expect(statementTouching('studio_releases')?.[0]).toBe(
+      statements[rekeyIndex],
+    );
+    expect(query.mock.calls[salesIndex]?.[1]).toEqual([freshId]);
+  });
+
+  // The kept files follow the live download rules, which read a moderator
+  // takedown under the persona's current id.
+  it('forgets the sales once the moderator takedown sits on the fresh id', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const statements = query.mock.calls.map(([sql]) => sql);
+    const takedownIndex = statements.findIndex((sql) =>
+      sql.includes('UPDATE "content_moderation"'),
+    );
+    const keepIndex = statements.indexOf(UNLINK_KEEP_TRACKS_SQL);
+    expect(takedownIndex).toBeGreaterThan(-1);
+    expect(keepIndex).toBeGreaterThan(takedownIndex);
+  });
+
+  it('hands the sales outcome to the caller', async () => {
+    const onSalesForgotten = jest.fn();
+
+    await issueFreshPersonaId(manager, PREVIOUS_ID, onSalesForgotten);
+
+    expect(onSalesForgotten).toHaveBeenCalledTimes(1);
+    expect(onSalesForgotten).toHaveBeenCalledWith({
+      expiredPurchaseIds: [],
+      keptTrackCount: 0,
+    });
   });
 });
 

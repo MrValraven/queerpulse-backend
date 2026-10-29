@@ -29,6 +29,9 @@ import {
   STUDIO_FORMATS,
   STUDIO_FORMAT_BY_KIND,
   STUDIO_GENRES,
+  STUDIO_LANDING_JOIN_SOURCES,
+  STUDIO_LANDING_PHOTO_SLOTS,
+  STUDIO_LANDING_PREVIEW_STATUSES,
   STUDIO_LIMITS,
   STUDIO_MOODS,
   STUDIO_PERSONA_CREDIT_STATUSES,
@@ -59,6 +62,7 @@ import {
   isStudioMood,
   studioAudioMaxBytesForKind,
   studioDefaultGenreForKind,
+  studioDefaultGenresForKind,
   studioError,
   studioErrorWithDetails,
   studioFormatForKind,
@@ -273,7 +277,7 @@ describe('Studio vocabulary', () => {
     );
   });
 
-  it('offers the ten contract moods in contract order', () => {
+  it('offers the eight contract moods in contract order', () => {
     expect(STUDIO_MOODS).toEqual([
       'late-night',
       'euphoric',
@@ -282,11 +286,11 @@ describe('Studio vocabulary', () => {
       'defiant',
       'dreamy',
       'slow-burn',
-      'sweaty',
       'calm',
-      'playful',
     ]);
     expect(isStudioMood('slow-burn')).toBe(true);
+    expect(isStudioMood('sweaty')).toBe(false);
+    expect(isStudioMood('playful')).toBe(false);
     expect(isStudioMood('Slow-Burn')).toBe(false);
     expect(isStudioMood('fado')).toBe(false);
   });
@@ -465,6 +469,19 @@ describe('Studio vocabulary', () => {
       expect(studioDefaultGenreForKind('musician')).toBeNull();
     });
 
+    it('presets the spoken word genre list for poets and spoken word artists only', () => {
+      expect(studioDefaultGenresForKind('poet')).toEqual(['spoken-word']);
+      expect(studioDefaultGenresForKind('spoken_word')).toEqual([
+        'spoken-word',
+      ]);
+      expect(studioDefaultGenresForKind('podcaster')).toEqual([]);
+      expect(studioDefaultGenresForKind('musician')).toEqual([]);
+    });
+
+    it('lets a release carry up to five genres', () => {
+      expect(STUDIO_LIMITS.releaseGenresMax).toBe(5);
+    });
+
     it('asks edits, lip-sync mixes and mixes for sources', () => {
       expect(STUDIO_SOURCE_RELEASE_TYPES).toEqual(['mix', 'edit', 'lip_sync']);
       expect(isSourceRequiredReleaseType('lip_sync')).toBe(true);
@@ -576,7 +593,7 @@ describe('studioError', () => {
   );
 
   it('lists every contract code exactly once', () => {
-    expect(new Set(STUDIO_ERROR_CODES).size).toBe(83);
+    expect(new Set(STUDIO_ERROR_CODES).size).toBe(145);
   });
 
   it('says nothing about the release in the withdrawn body', () => {
@@ -689,6 +706,194 @@ describe('Studio supporter errors', () => {
   });
 });
 
+describe('Studio purchase errors', () => {
+  it.each([
+    ['studio_persona_not_found', 404, 'This artist page is not one you run.'],
+    [
+      'studio_release_type_not_for_sale',
+      409,
+      'Only albums, EPs and singles and their tracks can be sold.',
+    ],
+    [
+      'studio_price_out_of_range',
+      422,
+      'A fixed price runs from €1 to €500, and a minimum from €0 to €500.',
+    ],
+    [
+      'studio_payment_methods_needed_for_sale',
+      409,
+      'Add a way to get paid before putting music up for sale, and keep one while anything is for sale.',
+    ],
+    [
+      'studio_payment_methods_limit',
+      400,
+      'An artist can list up to 8 ways to get paid.',
+    ],
+    [
+      'studio_payment_link_invalid',
+      400,
+      'A payment link must be a full https:// address.',
+    ],
+    [
+      'studio_payment_mbway_invalid',
+      400,
+      'MB WAY needs a Portuguese mobile number.',
+    ],
+    [
+      'studio_payment_iban_invalid',
+      400,
+      'Check the IBAN: the country code, length or check digits do not match.',
+    ],
+    [
+      'studio_purchase_item_required',
+      400,
+      'Choose one release or one track to buy.',
+    ],
+    [
+      'studio_purchase_item_not_found',
+      404,
+      'This music is not available to you.',
+    ],
+    [
+      'studio_purchase_own_persona',
+      403,
+      'You are a member of this artist, so you cannot buy its music.',
+    ],
+    ['studio_purchase_not_for_sale', 409, 'This is not for sale.'],
+    [
+      'studio_purchase_release_not_published',
+      409,
+      'This release is not out yet, so it cannot be bought.',
+    ],
+    [
+      'studio_purchase_track_unavailable',
+      409,
+      'This track cannot be bought right now.',
+    ],
+    [
+      'studio_purchase_unavailable',
+      403,
+      'You cannot buy music from this artist.',
+    ],
+    [
+      'studio_purchase_no_payment_methods',
+      409,
+      'This artist has not added a way to get paid.',
+    ],
+    [
+      'studio_purchase_pending_exists',
+      409,
+      'You already told this artist you paid for this; it is waiting for them.',
+    ],
+    [
+      'studio_purchase_already_owned',
+      409,
+      'This is already in your collection.',
+    ],
+    [
+      'studio_purchase_reference_invalid',
+      400,
+      'This payment code is too old. Get a new code, and if you already paid with the old one, put the old code in the name field so the artist can match it.',
+    ],
+    [
+      'studio_purchase_reference_taken',
+      409,
+      'This payment code was just taken by another purchase. Get a new code.',
+    ],
+    [
+      'studio_purchase_amount_below_minimum',
+      422,
+      "The amount is below the artist's minimum.",
+    ],
+    ['studio_purchase_amount_above_cap', 422, 'A purchase can be up to €500.'],
+    [
+      'studio_purchase_price_changed',
+      409,
+      'The price changed. Check the new price and try again.',
+    ],
+    [
+      'studio_purchase_not_found',
+      404,
+      'This purchase is not available to you.',
+    ],
+    ['studio_purchase_not_pending', 409, 'This purchase was already answered.'],
+    [
+      'studio_purchase_wall_not_available',
+      409,
+      'The supporter wall is open to pending and confirmed purchases of an artist still on Studio.',
+    ],
+    [
+      'studio_purchase_not_confirmed',
+      409,
+      'Downloads open once the artist confirms your payment.',
+    ],
+    [
+      'studio_download_item_deleted',
+      410,
+      'The artist deleted this music, so it can no longer be downloaded.',
+    ],
+    [
+      'studio_download_track_removed',
+      410,
+      'This track is no longer on the release.',
+    ],
+    [
+      'studio_download_release_taken_down',
+      410,
+      'Our team took this release down, so it cannot be downloaded.',
+    ],
+    [
+      'studio_download_artist_unavailable',
+      410,
+      'This artist page was removed, so its music cannot be downloaded.',
+    ],
+    [
+      'studio_download_track_withheld',
+      410,
+      'A copyright claim holds this track offline, so it cannot be downloaded.',
+    ],
+    ['studio_download_track_not_ready', 409, 'This track has no audio yet.'],
+    [
+      'studio_download_track_preparing',
+      409,
+      'We are preparing this file for you. Try again in a few minutes.',
+    ],
+  ] as const)('answers %s with %i and its reason', (code, status, message) => {
+    expect(studioError(code).getResponse()).toEqual({
+      statusCode: status,
+      code,
+      message,
+    });
+  });
+
+  it('keeps every purchase message free of amounts, codes and payment values', () => {
+    for (const code of STUDIO_ERROR_CODES.filter((value) =>
+      /studio_(?:purchase|payment|download|price|persona_not_found)/.test(
+        value,
+      ),
+    )) {
+      const { message } = studioError(code).getResponse() as {
+        message: string;
+      };
+      expect(message).not.toMatch(/\{|\$\{|[A-Z]{2}\d{2}[A-Z0-9]{4}/);
+    }
+  });
+
+  it('carries the row index of an invalid payment method in the body', () => {
+    expect(
+      studioErrorWithDetails('studio_payment_mbway_invalid', {
+        index: 2,
+      }).getResponse(),
+    ).toEqual(
+      expect.objectContaining({
+        index: 2,
+        code: 'studio_payment_mbway_invalid',
+        statusCode: 400,
+      }),
+    );
+  });
+});
+
 describe('Studio collaborative playlist vocabulary', () => {
   it('names the three roles a viewer can hold on a playlist', () => {
     expect(STUDIO_PLAYLIST_ROLES).toEqual(['owner', 'editor', 'invitee']);
@@ -703,5 +908,149 @@ describe('Studio collaborative playlist vocabulary', () => {
         playlistEditorSearchMaxLength: 80,
       }),
     );
+  });
+});
+
+describe('Studio landing errors', () => {
+  it.each([
+    [
+      'studio_landing_preview_unavailable',
+      404,
+      'This preview is not available.',
+    ],
+    ['studio_landing_preview_not_found', 404, 'Preview not found.'],
+    [
+      'studio_landing_preview_track_not_eligible',
+      422,
+      'This track does not meet the rules for the Studio page.',
+    ],
+    [
+      'studio_landing_preview_exists',
+      409,
+      'This track already has an open request or a live preview.',
+    ],
+    [
+      'studio_landing_previews_full',
+      409,
+      'The Studio page holds up to 10 open previews.',
+    ],
+    [
+      'studio_landing_preview_no_reachable_owner',
+      409,
+      'Nobody who runs this artist has Studio access, so nobody can approve the preview.',
+    ],
+    [
+      'studio_landing_preview_not_pending',
+      409,
+      'This request was already answered.',
+    ],
+    [
+      'studio_landing_preview_not_approved',
+      409,
+      'This preview is no longer live.',
+    ],
+    [
+      'studio_landing_preview_main_persona_only',
+      403,
+      'Only the artist who released this track can approve or decline the request.',
+    ],
+    [
+      'studio_landing_consent_required',
+      400,
+      'Saving needs the consent tick: confirm the people shown agreed.',
+    ],
+    [
+      'studio_landing_persona_not_eligible',
+      422,
+      'This artist cannot appear on the Studio page: their page must be published and public.',
+    ],
+    ['studio_landing_card_exists', 409, 'This artist already has a card.'],
+    [
+      'studio_landing_cards_full',
+      409,
+      'The Studio page holds up to 6 artist cards.',
+    ],
+    ['studio_landing_card_not_found', 404, 'Artist card not found.'],
+    [
+      'studio_landing_photo_not_yours',
+      403,
+      'Use a photo you uploaded, or keep the one this slot holds.',
+    ],
+    [
+      'studio_landing_order_mismatch',
+      409,
+      'The list changed while you reordered it. Reload and try again.',
+    ],
+    [
+      'studio_founding_persona_not_eligible',
+      422,
+      'This artist cannot be a founding artist: their page must be published and public.',
+    ],
+    [
+      'studio_founding_artist_exists',
+      409,
+      'This artist is already a founding artist.',
+    ],
+    [
+      'studio_founding_artists_full',
+      409,
+      'The founding list holds up to 50 artists.',
+    ],
+    ['studio_founding_artist_not_found', 404, 'Founding artist not found.'],
+    [
+      'studio_access_request_exists',
+      409,
+      'You already asked for Studio access.',
+    ],
+    ['studio_access_already_granted', 409, 'You already have Studio access.'],
+    [
+      'studio_access_request_not_found',
+      404,
+      'This request is no longer waiting.',
+    ],
+  ] as const)('answers %s with %i and its reason', (code, status, message) => {
+    const error = studioError(code);
+    expect(error.getStatus()).toBe(status);
+    expect(error.getResponse()).toEqual({ statusCode: status, code, message });
+  });
+});
+
+describe('Studio landing vocabulary', () => {
+  it('names the four preview states and the two photo slots', () => {
+    expect(STUDIO_LANDING_PREVIEW_STATUSES).toEqual([
+      'pending',
+      'approved',
+      'declined',
+      'withdrawn',
+    ]);
+    expect(STUDIO_LANDING_PHOTO_SLOTS).toEqual(['hero', 'manifesto']);
+  });
+
+  it('caps the landing at five previews, ten open requests, six cards and fifty founding artists', () => {
+    expect([
+      STUDIO_LIMITS.landingPreviewsShown,
+      STUDIO_LIMITS.landingOpenPreviewsMax,
+      STUDIO_LIMITS.landingArtistCardsMax,
+      STUDIO_LIMITS.foundingArtistsMax,
+      STUDIO_LIMITS.accessRequestsPageSize,
+    ]).toEqual([5, 10, 6, 50, 30]);
+  });
+
+  it('bounds the decided list, the quote, the photo alt and the photo credit', () => {
+    expect(STUDIO_LIMITS).toEqual(
+      expect.objectContaining({
+        landingDecidedPreviewsShown: 30,
+        landingQuoteMaxLength: 240,
+        landingPhotoAltMaxLength: 200,
+        landingPhotoCreditMaxLength: 120,
+      }),
+    );
+  });
+
+  it('names the two landing join sources', () => {
+    expect(STUDIO_LANDING_JOIN_SOURCES).toEqual({
+      listener: 'studio_landing',
+      artist: 'studio_artist',
+    });
   });
 });

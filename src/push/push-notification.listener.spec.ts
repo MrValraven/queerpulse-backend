@@ -1553,6 +1553,366 @@ describe('PushNotificationListener', () => {
     });
   });
 
+  // Studio landing page: the access grant and the two preview notices.
+  describe('Studio landing page', () => {
+    const requestedPayload = {
+      previewId: 'preview-1',
+      subprofileId: 'persona-1',
+      personaName: 'Night Shift',
+      trackTitle: 'Opening',
+    };
+    const livePayload = {
+      previewId: 'preview-1',
+      subprofileId: 'persona-1',
+      mainPersonaName: 'Night Shift',
+      trackTitle: 'Opening',
+    };
+
+    it('pushes the grant notice to every recipient with no category gate, opening Studio', async () => {
+      const { listener, push, notificationPreferences } = build({
+        pushDisabledCategories: ['personas'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(makeNotification(NotificationType.StudioAccessGranted, {}), [
+          'member-1',
+        ]),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).not.toHaveBeenCalled();
+      expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+        ['member-1'],
+        expect.objectContaining({
+          title: 'You have Studio access',
+          body: 'Studio is open for you. Tap to start listening.',
+          data: { url: '/studio' },
+          l10n: expect.objectContaining({
+            titleKey: 'push:studioAccessGranted.title',
+            bodyKey: 'push:studioAccessGranted.body',
+          }),
+        }),
+      );
+    });
+
+    it('pushes a preview request behind Personas, opening the dashboard previews', async () => {
+      const { listener, push, notificationPreferences, profilesRepo } = build(
+        {},
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioLandingPreviewRequested,
+            requestedPayload,
+          ),
+          ['member-1'],
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['member-1'], 'personas');
+      expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+        ['member-1'],
+        expect.objectContaining({
+          title: 'A Studio page preview request',
+          body: 'Night Shift: our team would like to play Opening on the Studio page',
+          data: { url: '/studio/dashboard?persona=persona-1#landing-previews' },
+          l10n: {
+            titleKey: 'push:studioLandingPreviewRequested.title',
+            bodyKey: 'push:studioLandingPreviewRequested.body',
+            params: { persona: 'Night Shift', track: 'Opening' },
+          },
+        }),
+      );
+      expect(profilesRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('pushes a live preview behind Personas with the main persona name', async () => {
+      const { listener, push, notificationPreferences } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioLandingPreviewLive,
+            livePayload,
+          ),
+          ['member-1'],
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['member-1'], 'personas');
+      expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+        ['member-1'],
+        expect.objectContaining({
+          title: 'Approved for the Studio page',
+          body: 'Opening by Night Shift is approved for the Studio page',
+          data: { url: '/studio/dashboard?persona=persona-1#landing-previews' },
+          l10n: {
+            titleKey: 'push:studioLandingPreviewLive.title',
+            bodyKey: 'push:studioLandingPreviewLive.body',
+            params: { persona: 'Night Shift', track: 'Opening' },
+          },
+        }),
+      );
+    });
+
+    it('sends no landing push when Personas is off', async () => {
+      const { listener, push } = build({
+        pushDisabledCategories: ['personas'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioLandingPreviewRequested,
+            requestedPayload,
+          ),
+        ),
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioLandingPreviewLive,
+            livePayload,
+          ),
+        ),
+      );
+      expect(push.sendSplitByPreviewPreference).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the dashboard previews without a persona id', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioLandingPreviewRequested, {
+            ...requestedPayload,
+            subprofileId: '',
+          }),
+        ),
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioLandingPreviewLive, {
+            ...livePayload,
+            subprofileId: '',
+          }),
+        ),
+      );
+      const sentCalls = push.sendSplitByPreviewPreference.mock.calls as [
+        string[],
+        PushPayload,
+      ][];
+      const urls = sentCalls.map(([, payload]) => payload.data.url);
+      expect(urls).toEqual([
+        '/studio/dashboard#landing-previews',
+        '/studio/dashboard#landing-previews',
+      ]);
+    });
+
+    it('sends nothing for a landing notice missing its persona name or track title', async () => {
+      const { listener, push } = build({});
+      for (const missingKey of ['personaName', 'trackTitle']) {
+        await listener.handleNotificationBatchCreated(
+          emit(
+            makeNotification(NotificationType.StudioLandingPreviewRequested, {
+              ...requestedPayload,
+              [missingKey]: '',
+            }),
+          ),
+        );
+      }
+      for (const missingKey of ['mainPersonaName', 'trackTitle']) {
+        await listener.handleNotificationBatchCreated(
+          emit(
+            makeNotification(NotificationType.StudioLandingPreviewLive, {
+              ...livePayload,
+              [missingKey]: '',
+            }),
+          ),
+        );
+      }
+      expect(push.sendSplitByPreviewPreference).not.toHaveBeenCalled();
+    });
+  });
+
+  // Studio purchases: a claim for the artist's members, the answer for the buyer.
+  describe('Studio purchases', () => {
+    const claimedPayload = {
+      purchaseId: 'purchase-1',
+      subprofileId: 'persona-1',
+      artistName: 'Night Shift',
+      itemKind: 'release',
+      itemTitle: 'Lisbon at four',
+      amountCents: 700,
+    };
+    const answeredPayload = {
+      purchaseId: 'purchase-1',
+      artistName: 'Night Shift',
+      itemKind: 'release',
+      itemTitle: 'Lisbon at four',
+      amountCents: 700,
+      declineReason: 'payment_not_found',
+      artistMemberUserId: 'member-2',
+    };
+
+    it('pushes a claim to Personas-enabled members, naming the artist and the item and opening the payments page', async () => {
+      const { listener, push, notificationPreferences, profilesRepo } = build(
+        {},
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPurchaseClaimed,
+            claimedPayload,
+          ),
+          ['member-1'],
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['member-1'], 'personas');
+      expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+        ['member-1'],
+        expect.objectContaining({
+          title: 'Payment to confirm',
+          body: 'Someone says they paid Night Shift for Lisbon at four',
+          data: { url: '/studio/payments?persona=persona-1' },
+          l10n: {
+            titleKey: 'push:studioPurchaseClaimed.title',
+            bodyKey: 'push:studioPurchaseClaimed.body',
+            params: { artist: 'Night Shift', item: 'Lisbon at four' },
+          },
+        }),
+      );
+      expect(profilesRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('sends no claim push when Personas is off', async () => {
+      const { listener, push } = build({
+        pushDisabledCategories: ['personas'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPurchaseClaimed,
+            claimedPayload,
+          ),
+        ),
+      );
+      expect(push.sendSplitByPreviewPreference).not.toHaveBeenCalled();
+    });
+
+    it.each(['subprofileId', 'artistName', 'itemTitle'])(
+      'skips a claim push whose payload misses %s',
+      async (missingKey) => {
+        const { listener, push } = build({});
+        await listener.handleNotificationBatchCreated(
+          emit(
+            makeNotification(NotificationType.StudioPurchaseClaimed, {
+              ...claimedPayload,
+              [missingKey]: '',
+            }),
+          ),
+        );
+        expect(push.sendSplitByPreviewPreference).not.toHaveBeenCalled();
+      },
+    );
+
+    it('pushes a confirmation and a decline to the buyer with no category gate, opening the purchases page', async () => {
+      const { listener, push, notificationPreferences } = build({
+        pushDisabledCategories: ['personas'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPurchaseConfirmed,
+            answeredPayload,
+          ),
+          ['buyer-1'],
+        ),
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPurchaseDeclined,
+            answeredPayload,
+          ),
+          ['buyer-1'],
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).not.toHaveBeenCalled();
+      expect(push.sendSplitByPreviewPreference).toHaveBeenNthCalledWith(
+        1,
+        ['buyer-1'],
+        expect.objectContaining({
+          title: 'Purchase confirmed',
+          body: 'Night Shift confirmed your payment for Lisbon at four',
+          data: { url: '/account/music-purchases' },
+          l10n: {
+            titleKey: 'push:studioPurchaseConfirmed.title',
+            bodyKey: 'push:studioPurchaseConfirmed.body',
+            params: { artist: 'Night Shift', item: 'Lisbon at four' },
+          },
+        }),
+      );
+      expect(push.sendSplitByPreviewPreference).toHaveBeenNthCalledWith(
+        2,
+        ['buyer-1'],
+        expect.objectContaining({
+          title: 'Payment not confirmed',
+          body: 'Night Shift could not match your payment for Lisbon at four',
+          data: { url: '/account/music-purchases' },
+          l10n: {
+            titleKey: 'push:studioPurchaseDeclined.title',
+            bodyKey: 'push:studioPurchaseDeclined.body',
+            params: { artist: 'Night Shift', item: 'Lisbon at four' },
+          },
+        }),
+      );
+    });
+
+    it('keeps the amount, the decline reason and every member out of the push', async () => {
+      const { listener, push } = build({});
+      for (const type of [
+        NotificationType.StudioPurchaseClaimed,
+        NotificationType.StudioPurchaseConfirmed,
+        NotificationType.StudioPurchaseDeclined,
+      ]) {
+        await listener.handleNotificationBatchCreated(
+          emit(
+            makeNotification(type, { ...claimedPayload, ...answeredPayload }),
+            ['recipient-1'],
+          ),
+        );
+      }
+
+      const sent = JSON.stringify(push.sendSplitByPreviewPreference.mock.calls);
+      expect(push.sendSplitByPreviewPreference).toHaveBeenCalledTimes(3);
+      expect(sent).not.toContain('700');
+      expect(sent).not.toContain('payment_not_found');
+      expect(sent).not.toContain('member-');
+    });
+
+    it('sends no push for an expired claim', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioPurchaseExpired,
+            answeredPayload,
+          ),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+      expect(push.sendSplitByPreviewPreference).not.toHaveBeenCalled();
+    });
+  });
+
   // Studio v3: an update from a persona the member follows.
   describe('PersonaPost', () => {
     const postPayload = {

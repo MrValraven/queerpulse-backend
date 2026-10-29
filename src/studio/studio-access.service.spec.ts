@@ -1,4 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
 import { ModAuditService } from '../moderation/mod-audit.service';
 import { User } from '../users/entities/user.entity';
@@ -8,10 +9,17 @@ import { StudioAccessService } from './studio-access.service';
 const STAFF_ID = '7c000000-0000-4000-8000-000000000001';
 const MEMBER_ID = '7c000000-0000-4000-8000-000000000002';
 const GRANTED_AT = new Date('2026-10-08T10:00:00.000Z');
+const GRANT_ID = 'grant-1';
 
 describe('StudioAccessService', () => {
   let insertExecute: jest.Mock;
-  let manager: { createQueryBuilder: jest.Mock; delete: jest.Mock };
+  let managerQuery: jest.Mock;
+  let emit: jest.Mock;
+  let manager: {
+    createQueryBuilder: jest.Mock;
+    delete: jest.Mock;
+    query: jest.Mock;
+  };
   let grants: {
     exists: jest.Mock;
     findOne: jest.Mock;
@@ -28,8 +36,14 @@ describe('StudioAccessService', () => {
     createdAt: GRANTED_AT,
   });
 
+  const insertReturns = (rawRows: { id: string }[]): void => {
+    insertExecute.mockResolvedValue({ raw: rawRows });
+  };
+
   beforeEach(() => {
-    insertExecute = jest.fn().mockResolvedValue({ raw: [{ id: 'grant-1' }] });
+    insertExecute = jest.fn().mockResolvedValue({ raw: [{ id: GRANT_ID }] });
+    managerQuery = jest.fn().mockResolvedValue([]);
+    emit = jest.fn();
     const insertBuilder = {
       insert: jest.fn().mockReturnThis(),
       into: jest.fn().mockReturnThis(),
@@ -41,6 +55,7 @@ describe('StudioAccessService', () => {
     manager = {
       createQueryBuilder: jest.fn().mockReturnValue(insertBuilder),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      query: managerQuery,
     };
     grants = {
       exists: jest.fn().mockResolvedValue(true),
@@ -60,6 +75,7 @@ describe('StudioAccessService', () => {
       grants as unknown as Repository<StudioAccessGrant>,
       users as unknown as Repository<User>,
       modAudit as unknown as ModAuditService,
+      { emit } as unknown as EventEmitter2,
     );
   });
 
@@ -104,6 +120,43 @@ describe('StudioAccessService', () => {
     const response = await service.grant(STAFF_ID, MEMBER_ID);
     expect(response.userId).toBe(MEMBER_ID);
     expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('deletes the waiting request in the grant transaction whether or not the grant is new', async () => {
+    for (const isNew of [true, false]) {
+      managerQuery.mockClear();
+      insertReturns(isNew ? [{ id: GRANT_ID }] : []);
+      await service.grant(STAFF_ID, MEMBER_ID);
+      expect(managerQuery).toHaveBeenCalledWith(
+        'DELETE FROM "studio_access_requests" WHERE "user_id" = $1',
+        [MEMBER_ID],
+      );
+    }
+    expect(grants.manager.transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('emits studio.access.granted after commit for a new grant only', async () => {
+    const callOrder: string[] = [];
+    grants.manager.transaction.mockImplementation(
+      async (work: (inner: typeof manager) => unknown) => {
+        const result = await work(manager);
+        callOrder.push('commit');
+        return result;
+      },
+    );
+    emit.mockImplementation(() => {
+      callOrder.push('emit');
+    });
+
+    insertReturns([{ id: GRANT_ID }]);
+    await service.grant(STAFF_ID, MEMBER_ID);
+    insertReturns([]);
+    await service.grant(STAFF_ID, MEMBER_ID);
+
+    expect(emit.mock.calls).toEqual([
+      ['studio.access.granted', { userId: MEMBER_ID }],
+    ]);
+    expect(callOrder).toEqual(['commit', 'emit', 'commit']);
   });
 
   it('revokes idempotently and audits only a removed row', async () => {

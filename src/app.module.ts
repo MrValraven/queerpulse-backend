@@ -51,6 +51,7 @@ import {
   redactCreatorDraftPath,
 } from './creator-drafts/creator-draft-request-log';
 import { isLandingVisitBeacon } from './landing/landing-visit-request-log';
+import { isStudioLandingPublicRequest } from './studio/studio-landing-request-log';
 import { CommunitiesModule } from './communities/communities.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
@@ -63,6 +64,7 @@ import { LandingModule } from './landing/landing.module';
 import { PressKitModule } from './press-kit/press-kit.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
+import { MusicEventsModule } from './music-events/music-events.module';
 import { AdminDsarModule } from './admin-dsar/admin-dsar.module';
 import { AdminStatusModule } from './admin-status/admin-status.module';
 import { StatusModule } from './status/status.module';
@@ -190,7 +192,9 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
               isStudioListeningRequest(req.url, req.method) ||
               isCreatorDraftRequest(req.url) ||
               // The landing visit beacon is an anonymous counter.
-              isLandingVisitBeacon(req.url, req.method),
+              isLandingVisitBeacon(req.url, req.method) ||
+              // The Studio page reads are served to strangers and record nothing.
+              isStudioLandingPublicRequest(req.url, req.method),
           },
           // Correlate every request with an id (honour an inbound one behind a proxy).
           genReqId: (req: IncomingMessage, res: ServerResponse) => {
@@ -391,6 +395,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     PressKitModule,
     AdminCommunitiesModule,
     AdminMembersModule,
+    MusicEventsModule,
     AdminInvitesModule,
     // A privacy-preserving signal that a new account may belong to someone
     // already removed (TS-05). Read-only: it raises a flag for a human

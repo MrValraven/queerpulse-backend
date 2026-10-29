@@ -67,6 +67,7 @@ import {
 } from './data-export-contributors-quizshow';
 import { PersonaPostsExportContributor } from './data-export-contributors-persona-posts';
 import {
+  StudioAccessRequestExportContributor,
   StudioCopyrightClaimsExportContributor,
   StudioListeningExportContributor,
   StudioPersonaCreditsExportContributor,
@@ -74,7 +75,9 @@ import {
   StudioPlaylistFoldersExportContributor,
   StudioPlaylistSeatsExportContributor,
   StudioPlaylistsExportContributor,
+  StudioPurchasesExportContributor,
   StudioReleaseRemindersExportContributor,
+  StudioSalesExportContributor,
 } from './data-export-contributors-studio';
 import {
   ExportMediaContribution,
@@ -1116,6 +1119,12 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   // Studio safety and moderation: the copyright claims the member filed.
   StudioCopyrightClaimsExportContributor,
   StudioListeningExportContributor,
+  // Studio purchases: the member's purchases as buyer, and the sales and
+  // payment methods of the personas they run.
+  StudioPurchasesExportContributor,
+  StudioSalesExportContributor,
+  // Studio access: the member's waiting request for Studio access.
+  StudioAccessRequestExportContributor,
   // Creator drafts: the member's own event, listing edit and community wizard drafts.
   CreatorDraftsExportContributor,
   // Pulse Live: the sessions the member played, with their own answers and votes.

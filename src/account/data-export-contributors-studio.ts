@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { MemberLookup } from '../common/member-ref';
+import { memberDisplayName } from '../studio/studio-playlist-response';
+import { Profile } from '../users/entities/profile.entity';
 import { DataExportContribution } from './data-export-contributor';
 
 interface PlaylistExportRow {
@@ -530,6 +533,253 @@ export class StudioListeningExportContributor implements DataExportContribution 
         shownAs: supporter.shown_as ?? 'account',
         createdAt: supporter.created_at.toISOString(),
         updatedAt: supporter.updated_at.toISOString(),
+      })),
+    ];
+  }
+}
+
+interface AccessRequestExportRow {
+  wants_to_release: boolean;
+  created_at: Date;
+}
+
+/**
+ * `profile` -> `studioAccessRequest` (Studio access request): the member's
+ * own waiting request for Studio access, as one row with whether they want
+ * to release music and when they asked. A member without a waiting request
+ * has no row. The grant itself is staff data, and the request row goes
+ * with the account.
+ */
+@Injectable()
+export class StudioAccessRequestExportContributor implements DataExportContribution {
+  readonly category = 'profile';
+  readonly archiveKey = 'studioAccessRequest';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const requests: AccessRequestExportRow[] = await this.dataSource.query(
+      `SELECT "request"."wants_to_release" AS "wants_to_release",
+              "request"."created_at" AS "created_at"
+         FROM "studio_access_requests" "request"
+        WHERE "request"."user_id" = $1`,
+      [userId],
+    );
+    return requests.map((request) => ({
+      wantsToRelease: request.wants_to_release,
+      requestedAt: request.created_at.toISOString(),
+    }));
+  }
+}
+
+interface PurchaseExportRow {
+  item_kind: string;
+  item_title: string;
+  artist_name: string;
+  amount_cents: number;
+  reference_code: string;
+  payer_name: string | null;
+  status: string;
+  decline_reason: string | null;
+  decline_note: string | null;
+  is_on_wall: boolean;
+  shown_as: string | null;
+  created_at: Date;
+  decided_at: Date | null;
+}
+
+/**
+ * `activityLog` -> `studioPurchases` (Studio purchases): the buyer's own
+ * records of the purchases they reported, oldest first, with the item
+ * title and artist name kept at purchase time, the amount, reference code
+ * and payer name they entered, the status and decline reason the artist
+ * set, and the wall choice. `shownAs` is "account" when the member shows
+ * on the wall as themselves, the chosen persona's display name when they
+ * show as a persona, and null while the wall is off.
+ *
+ * Amounts and payment details leave only to the member who already sees
+ * them. Raw SQL through the `DataSource`, like the contributors above.
+ */
+@Injectable()
+export class StudioPurchasesExportContributor implements DataExportContribution {
+  readonly category = 'activityLog';
+  readonly archiveKey = 'studioPurchases';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const rows: PurchaseExportRow[] = await this.dataSource.query(
+      `SELECT "purchase"."item_kind"::text AS "item_kind",
+              "purchase"."item_title" AS "item_title",
+              "purchase"."artist_name" AS "artist_name",
+              "purchase"."amount_cents" AS "amount_cents",
+              "purchase"."reference_code" AS "reference_code",
+              "purchase"."payer_name" AS "payer_name",
+              "purchase"."status"::text AS "status",
+              "purchase"."decline_reason"::text AS "decline_reason",
+              "purchase"."decline_note" AS "decline_note",
+              "purchase"."is_on_wall" AS "is_on_wall",
+              CASE WHEN NOT "purchase"."is_on_wall" THEN NULL
+                   WHEN "purchase"."is_shown_as_persona" THEN "chosen"."display_name"
+                   ELSE 'account' END AS "shown_as",
+              "purchase"."created_at" AS "created_at",
+              "purchase"."decided_at" AS "decided_at"
+         FROM "studio_purchases" "purchase"
+         LEFT JOIN "subprofiles" "chosen"
+           ON "chosen"."id" = "purchase"."shown_as_subprofile_id"
+        WHERE "purchase"."buyer_user_id" = $1
+        ORDER BY "purchase"."created_at" ASC, "purchase"."id" ASC`,
+      [userId],
+    );
+    return rows.map((row) => ({
+      itemKind: row.item_kind,
+      itemTitle: row.item_title,
+      artist: row.artist_name,
+      amountCents: row.amount_cents,
+      referenceCode: row.reference_code,
+      payerName: row.payer_name,
+      status: row.status,
+      declineReason: row.decline_reason,
+      declineNote: row.decline_note,
+      isOnWall: row.is_on_wall,
+      shownAs: row.shown_as,
+      createdAt: row.created_at.toISOString(),
+      decidedAt: isoOrNull(row.decided_at),
+    }));
+  }
+}
+
+interface SalePersonaExportRow {
+  id: string;
+  display_name: string;
+}
+
+interface PaymentMethodExportRow {
+  subprofile_id: string;
+  kind: string;
+  label: string | null;
+  value: string;
+  note: string | null;
+  position: number;
+}
+
+interface SaleExportRow {
+  subprofile_id: string;
+  buyer_user_id: string | null;
+  item_kind: string;
+  item_title: string;
+  amount_cents: number;
+  reference_code: string;
+  payer_name: string | null;
+  status: string;
+  decline_reason: string | null;
+  decline_note: string | null;
+  created_at: Date;
+  decided_at: Date | null;
+}
+
+/**
+ * `subprofiles` -> `studioSales` (Studio purchases): for every persona the
+ * member runs (read through `subprofile_members`), the payment methods the
+ * persona lists, in their order, then every sale reported to it, oldest
+ * first and in every status, as the persona's members see them in the
+ * inbox. `buyer` is the buyer's account display name, or "Deleted account"
+ * once the buyer's account is gone.
+ *
+ * Amounts and payment details leave only to the member who already sees
+ * them. Raw SQL through the `DataSource`; the buyer names come from one
+ * batched profile read.
+ */
+@Injectable()
+export class StudioSalesExportContributor implements DataExportContribution {
+  readonly category = 'subprofiles';
+  readonly archiveKey = 'studioSales';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const personas: SalePersonaExportRow[] = await this.dataSource.query(
+      `SELECT "persona"."id" AS "id", "persona"."display_name" AS "display_name"
+         FROM "subprofiles" "persona"
+        WHERE "persona"."id" IN (
+          SELECT "member"."subprofile_id" FROM "subprofile_members" "member" WHERE "member"."user_id" = $1
+        )
+        ORDER BY "persona"."display_name" ASC, "persona"."id" ASC`,
+      [userId],
+    );
+    if (!personas.length) {
+      return [];
+    }
+    const personaIds = personas.map((persona) => persona.id);
+    const personaNames = new Map(
+      personas.map((persona) => [persona.id, persona.display_name]),
+    );
+    const methods: PaymentMethodExportRow[] = await this.dataSource.query(
+      `SELECT "method"."subprofile_id" AS "subprofile_id",
+              "method"."kind"::text AS "kind",
+              "method"."label" AS "label",
+              "method"."value" AS "value",
+              "method"."note" AS "note",
+              "method"."position" AS "position"
+         FROM "studio_payment_methods" "method"
+        WHERE "method"."subprofile_id" = ANY($1::uuid[])
+        ORDER BY "method"."subprofile_id" ASC, "method"."position" ASC`,
+      [personaIds],
+    );
+    const sales: SaleExportRow[] = await this.dataSource.query(
+      `SELECT "sale"."subprofile_id" AS "subprofile_id",
+              "sale"."buyer_user_id" AS "buyer_user_id",
+              "sale"."item_kind"::text AS "item_kind",
+              "sale"."item_title" AS "item_title",
+              "sale"."amount_cents" AS "amount_cents",
+              "sale"."reference_code" AS "reference_code",
+              "sale"."payer_name" AS "payer_name",
+              "sale"."status"::text AS "status",
+              "sale"."decline_reason"::text AS "decline_reason",
+              "sale"."decline_note" AS "decline_note",
+              "sale"."created_at" AS "created_at",
+              "sale"."decided_at" AS "decided_at"
+         FROM "studio_purchases" "sale"
+        WHERE "sale"."subprofile_id" = ANY($1::uuid[])
+        ORDER BY "sale"."created_at" ASC, "sale"."id" ASC`,
+      [personaIds],
+    );
+    const buyerIds = [
+      ...new Set(
+        sales.flatMap((sale) =>
+          sale.buyer_user_id ? [sale.buyer_user_id] : [],
+        ),
+      ),
+    ];
+    const buyers = await new MemberLookup(
+      this.dataSource.getRepository(Profile),
+    ).byUserIds(buyerIds);
+    return [
+      ...methods.map((method) => ({
+        type: 'paymentMethod',
+        persona: personaNames.get(method.subprofile_id) ?? null,
+        kind: method.kind,
+        label: method.label,
+        value: method.value,
+        note: method.note,
+        position: method.position,
+      })),
+      ...sales.map((sale) => ({
+        type: 'sale',
+        persona: personaNames.get(sale.subprofile_id) ?? null,
+        itemKind: sale.item_kind,
+        itemTitle: sale.item_title,
+        amountCents: sale.amount_cents,
+        referenceCode: sale.reference_code,
+        payerName: sale.payer_name,
+        buyer: sale.buyer_user_id
+          ? memberDisplayName(buyers.get(sale.buyer_user_id))
+          : 'Deleted account',
+        status: sale.status,
+        declineReason: sale.decline_reason,
+        declineNote: sale.decline_note,
+        createdAt: sale.created_at.toISOString(),
+        decidedAt: isoOrNull(sale.decided_at),
       })),
     ];
   }

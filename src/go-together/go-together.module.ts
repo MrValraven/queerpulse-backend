@@ -101,6 +101,7 @@ import { GoTogetherMatchingService } from './go-together-matching.service';
     GoTogetherHouseService,
     GoTogetherEligibilityService,
     GoTogetherFormationService,
+    GoTogetherHostService,
   ],
 })
 export class GoTogetherModule {}

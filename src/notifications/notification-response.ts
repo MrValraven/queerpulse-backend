@@ -539,6 +539,51 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'releaseTitle',
       'role',
     ],
+    // Studio landing page: a track preview of a persona the recipient runs.
+    // The persona id is the dashboard link of a persona the recipient runs,
+    // the names are already public, and no member is stored. The preview id
+    // stays server-side. The access grant notice carries no payload.
+    [NotificationType.StudioLandingPreviewRequested]: [
+      'subprofileId',
+      'personaName',
+      'trackTitle',
+    ],
+    [NotificationType.StudioLandingPreviewLive]: [
+      'subprofileId',
+      'mainPersonaName',
+      'trackTitle',
+    ],
+    // Studio purchases: a payment claim on a persona the recipient runs. The
+    // persona id rides along for the Payments link; the purchase id stays
+    // server-side and the buyer is never stored.
+    [NotificationType.StudioPurchaseClaimed]: [
+      'subprofileId',
+      'artistName',
+      'itemKind',
+      'itemTitle',
+      'amountCents',
+    ],
+    // Studio purchases: the buyer's own payment record. The purchase id opens
+    // "Your purchases"; the decline note stays off the bell and the push.
+    [NotificationType.StudioPurchaseConfirmed]: [
+      'purchaseId',
+      'artistName',
+      'itemKind',
+      'itemTitle',
+    ],
+    [NotificationType.StudioPurchaseDeclined]: [
+      'purchaseId',
+      'artistName',
+      'itemKind',
+      'itemTitle',
+      'declineReason',
+    ],
+    [NotificationType.StudioPurchaseExpired]: [
+      'purchaseId',
+      'artistName',
+      'itemKind',
+      'itemTitle',
+    ],
     // Collaborative playlists: the playlist id (the deep link) and its name,
     // which the recipient can already open. A pick also names the persona
     // the playlist shows as, which the recipient co-owns.

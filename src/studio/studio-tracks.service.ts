@@ -8,6 +8,7 @@ import {
   UpdateStudioTrackDto,
 } from './dto/update-studio-track.dto';
 import {
+  StudioPriceMode,
   StudioRelease,
   StudioReleaseStatus,
 } from './entities/studio-release.entity';
@@ -21,6 +22,11 @@ import {
   StudioOwnershipService,
   StudioWritablePersona,
 } from './studio-ownership.service';
+import {
+  countPaymentMethods,
+  lockPaymentMethodsOf,
+} from './studio-payment-method-lock';
+import { StudioPrice, studioPriceShapeRefusal } from './studio-purchase-rules';
 import {
   assertKeepsPlayableTrack,
   assertTracksEditable,
@@ -37,6 +43,7 @@ import {
   notesForTrack,
   sourcesForTrack,
 } from './studio-track-content-rule';
+import { withoutKeysHeldByKeptCopies } from './studio-kept-tracks';
 import { areChaptersWithinDuration } from './studio-track-listening';
 import {
   STUDIO_LIMITS,
@@ -47,6 +54,14 @@ import {
   normalizeContentWarnings,
   studioSafetyError,
 } from './studio-safety.constants';
+
+/** The `price_mode` a PATCH price writes; null takes the track off sale. */
+function storedPriceMode(price: StudioPrice | null): StudioPriceMode {
+  if (price === null) return StudioPriceMode.NotForSale;
+  return price.mode === 'fixed'
+    ? StudioPriceMode.Fixed
+    : StudioPriceMode.NameYourPrice;
+}
 
 /** Whether a requested order names every current track exactly once. */
 export function isSameTrackSet(
@@ -216,6 +231,23 @@ export class StudioTracksService {
             ? null
             : chaptersForTrack(body.chapters, track);
       }
+      // Studio purchases (contract 2.1): the release lock is held; the
+      // payment-methods lock comes second, so a price never lands on a
+      // persona whose last method is going.
+      if (body.price) {
+        const priceRefusal = studioPriceShapeRefusal(body.price, release.type);
+        if (priceRefusal) {
+          throw studioError(priceRefusal);
+        }
+        await lockPaymentMethodsOf(manager, release.subprofileId);
+        if ((await countPaymentMethods(manager, release.subprofileId)) === 0) {
+          throw studioError('studio_payment_methods_needed_for_sale');
+        }
+      }
+      if (body.price !== undefined) {
+        track.priceMode = storedPriceMode(body.price);
+        track.priceCents = body.price?.amountCents ?? null;
+      }
       // Measurements and lyric timings describe the audio; they do not stamp
       // tracks_changed_at, which tells listeners the track list changed.
       await manager.save(track);
@@ -252,7 +284,14 @@ export class StudioTracksService {
       return track.audioKey;
     });
     if (audioKey) {
-      await this.studioAudioUploads.deleteObjectsAndForget([audioKey]);
+      // A kept copy still reading this key keeps the object; the orphan
+      // sweep reclaims it once the copy lands.
+      const deletableKeys = await withoutKeysHeldByKeptCopies(this.dataSource, [
+        audioKey,
+      ]);
+      if (deletableKeys.length > 0) {
+        await this.studioAudioUploads.deleteObjectsAndForget(deletableKeys);
+      }
     }
   }
 

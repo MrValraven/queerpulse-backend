@@ -120,12 +120,16 @@ const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = Object.fromEntries(
 
 /** `$1` a storage key. The scenes and the Studio releases that name it as
  *  their cover, whatever their status: an archived scene or a draft release
- *  shows the cover again on restore or publish. */
-const LIVE_COVER_HOLDERS_SQL = `SELECT 'studio-scene' AS "kind", "id", "name" AS "label"
+ *  shows the cover again on restore or publish. The Studio page photos that
+ *  store it come last, labelled by their slot. */
+const LIVE_COVER_HOLDERS_SQL = `SELECT 'studio-scene' AS "kind", "id"::text AS "id", "name" AS "label"
   FROM "studio_scenes" WHERE "cover_key" = $1
  UNION ALL
- SELECT 'studio-release' AS "kind", "id", "title" AS "label"
+ SELECT 'studio-release' AS "kind", "id"::text AS "id", "title" AS "label"
   FROM "studio_releases" WHERE "cover_key" = $1
+ UNION ALL
+ SELECT 'studio-landing-photo' AS "kind", "slot"::text AS "id", 'Studio page ' || "slot"::text || ' photo' AS "label"
+  FROM "studio_landing_photos" WHERE "image_key" = $1
  LIMIT 5`;
 
 @Injectable()
@@ -478,7 +482,7 @@ export class AdminMediaService {
     return new ConflictException({
       code: 'media_live_cover',
       message:
-        'This image is the cover of a live scene or release. Re-send with force=true to delete anyway.',
+        'This image is the cover of a live scene, release or Studio page photo. Re-send with force=true to delete anyway.',
       coverHolders: holders.map((holder) => ({
         kind: holder.kind,
         entityId: holder.id,

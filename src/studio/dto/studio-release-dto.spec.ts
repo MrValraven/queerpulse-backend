@@ -49,11 +49,11 @@ describe('Studio release bodies', () => {
     ]);
   });
 
-  it('accepts null to clear the description, genre, release date and cover', async () => {
+  it('accepts null to clear the description, release date and cover, and an empty list to clear the genres', async () => {
     expect(
       await errorsFor(UpdateStudioReleaseDto, {
         description: null,
-        genre: null,
+        genres: [],
         releasedOn: null,
         coverKey: null,
       }),
@@ -83,15 +83,58 @@ describe('Studio release bodies', () => {
     ).toEqual(['rightsConfirmed']);
   });
 
-  it('takes a genre from the list and a description of at most 2000 characters', async () => {
-    expect(await errorsFor(UpdateStudioReleaseDto, { genre: 'polka' })).toEqual(
-      ['genre'],
-    );
+  it('takes a description of at most 2000 characters', async () => {
     expect(
       await errorsFor(UpdateStudioReleaseDto, {
         description: 'x'.repeat(2001),
       }),
     ).toEqual(['description']);
+  });
+
+  it('takes up to five listed genres, each picked once', async () => {
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, {
+        genres: ['fado', 'folk', 'pop', 'house', 'ambient'],
+      }),
+    ).toEqual([]);
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, { genres: ['polka'] }),
+    ).toEqual(['genres']);
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, {
+        genres: ['fado', 'folk', 'pop', 'house', 'ambient', 'jazz'],
+      }),
+    ).toEqual(['genres']);
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, { genres: ['fado', 'fado'] }),
+    ).toEqual(['genres']);
+    expect(await errorsFor(UpdateStudioReleaseDto, { genres: null })).toEqual([
+      'genres',
+    ]);
+    expect(await errorsFor(UpdateStudioReleaseDto, { genres: 'fado' })).toEqual(
+      ['genres'],
+    );
+  });
+
+  it('refuses the removed single genre field', async () => {
+    const dto = plainToInstance(UpdateStudioReleaseDto, { genre: 'fado' });
+    expect(dto).not.toHaveProperty('genres');
+    expect(
+      await validate(dto, { whitelist: true, forbidNonWhitelisted: true }),
+    ).toHaveLength(1);
+  });
+
+  it('names the cause when the genres are too many or repeated', async () => {
+    const messagesOf = async (genres: string[]): Promise<string[]> =>
+      (await validate(plainToInstance(UpdateStudioReleaseDto, { genres })))
+        .flatMap((error) => Object.values(error.constraints ?? {}))
+        .sort();
+    expect(
+      await messagesOf(['fado', 'folk', 'pop', 'house', 'ambient', 'jazz']),
+    ).toEqual(['A release can carry up to 5 genres']);
+    expect(await messagesOf(['fado', 'fado'])).toEqual([
+      'Each genre can be picked once',
+    ]);
   });
 
   it('takes a mood from the list and null to clear it', async () => {

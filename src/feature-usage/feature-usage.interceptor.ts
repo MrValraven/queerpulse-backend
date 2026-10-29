@@ -9,6 +9,7 @@ import { Observable } from 'rxjs';
 import { FEATURE_KEY } from '../common/feature.decorator';
 import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-log';
 import { FeatureKey } from '../launchedFeatures';
+import { isStudioLandingPublicRequest } from '../studio/studio-landing-request-log';
 import { isTrackedFeature } from './feature-depth';
 import { FeatureUsageTallyService } from './feature-usage-tally.service';
 import { isProfileEventsRequest } from './profile-events-request';
@@ -35,6 +36,11 @@ import { isProfileEventsRequest } from './profile-events-request';
  * `GET /profiles/:slug/events` carries `@Feature('events')` and counts
  * nothing either: it answers every profile view, so counting it would turn
  * profile traffic into events reach (`isProfileEventsRequest`).
+ *
+ * The two public Studio page routes (`GET /studio/landing` and the preview
+ * stream) count nothing either: they serve strangers and record nothing
+ * about a visit (`isStudioLandingPublicRequest`). The `studio` key sits in
+ * `UNTRACKED_FEATURES` as well; this check keeps the routes out on its own.
  *
  * Keys in `UNTRACKED_FEATURES` (`feature-depth.ts`) are never counted: Go
  * together allows no analytics of any of its actions.
@@ -66,12 +72,16 @@ export class FeatureUsageInterceptor implements NestInterceptor {
 
     const request = context
       .switchToHttp()
-      .getRequest<{ originalUrl?: string; url?: string }>();
+      .getRequest<{ originalUrl?: string; url?: string; method?: string }>();
     const isCreatorDraftSurface = isCreatorDraftRequest(
       request.originalUrl ?? request.url,
     );
     const isProfileEventsSurface = isProfileEventsRequest(
       request.originalUrl ?? request.url,
+    );
+    const isStudioLandingPublicSurface = isStudioLandingPublicRequest(
+      request.originalUrl ?? request.url,
+      request.method,
     );
 
     if (
@@ -79,6 +89,7 @@ export class FeatureUsageInterceptor implements NestInterceptor {
       !isStaffSurface &&
       !isCreatorDraftSurface &&
       !isProfileEventsSurface &&
+      !isStudioLandingPublicSurface &&
       isTrackedFeature(featureKey)
     ) {
       this.tally.record(featureKey);

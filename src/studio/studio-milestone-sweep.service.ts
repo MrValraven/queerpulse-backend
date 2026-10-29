@@ -18,7 +18,8 @@ import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
  * (793_640_003_000 / 793_640_003_001), the persona feed sweep
  * (793_640_004_000), the scheduled drop (793_640_005_000), the milestone
  * sweep (793_640_006_000, this key), the listening history prune
- * (793_640_007_000) and the migration lock (481_205_733_107_400).
+ * (793_640_007_000), the purchase expiry (793_640_008_000) and the migration
+ * lock (481_205_733_107_400).
  */
 export const MILESTONE_SWEEP_LOCK_KEY = 793_640_006_000;
 

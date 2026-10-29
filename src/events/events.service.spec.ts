@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -9,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { In, LessThanOrEqual, Repository } from 'typeorm';
+import { EntityManager, In, LessThanOrEqual, Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { RosterRole } from '../communities/entities/community-member.entity';
 import { AccessTier } from '../communities/entities/community.entity';
@@ -107,6 +108,9 @@ describe('EventsService', () => {
     findOne: jest.Mock;
   };
   let rsvpService: { reconcileWaitlist: jest.Mock };
+  // `findById` answers undefined by default, which keeps every event on the
+  // member-hosted path. The house-hosted tests answer a system account.
+  let usersService: { findById: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
   let blockFilter: { excludeBlocked: jest.Mock };
   let profiles: { find: jest.Mock };
@@ -359,6 +363,7 @@ describe('EventsService', () => {
       findOne: jest.fn().mockResolvedValue(null),
     };
     rsvpService = { reconcileWaitlist: jest.fn().mockResolvedValue(undefined) };
+    usersService = { findById: jest.fn() };
     // Resolves to the ids that ended up holding a row, as the real service
     // does. Nobody, by default.
     notifications = {
@@ -446,7 +451,7 @@ describe('EventsService', () => {
           useValue: eventCommunities,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
-        { provide: UsersService, useValue: { findById: jest.fn() } },
+        { provide: UsersService, useValue: usersService },
         { provide: RsvpService, useValue: rsvpService },
         { provide: NotificationsService, useValue: notifications },
         { provide: BlockFilterService, useValue: blockFilter },
@@ -3052,6 +3057,288 @@ describe('EventsService', () => {
     });
   });
 
+  // Events the house account hosts (Music manager & producer). Each branch
+  // runs only for a house-hosted event. The family tests above leave
+  // `findById` answering undefined, which pins the member path.
+  describe('house-hosted events', () => {
+    const HOUSE_ID = 'house-1';
+    const STAFF_ID = '44444444-4444-4444-4444-444444444444';
+    const OTHER_STAFF_ID = '66666666-6666-6666-6666-666666666666';
+    const STAFF_COVER = `story-covers/${STAFF_ID}/55555555-5555-5555-5555-555555555555.jpg`;
+    // `PAGE_SIZE` in events.service.ts.
+    const HOSTED_PAGE_SIZE = 20;
+
+    interface SummarizeSpyTarget {
+      summarize(rows: Event[], userId: string): Promise<EventSummary[]>;
+    }
+
+    const houseEvent = () => ({
+      ...editableEvent(),
+      hostId: HOUSE_ID,
+      gatheringFamily: GatheringFamily.Music,
+      coverImageUrl: null,
+    });
+
+    // The `isHouseAccountId` reads among every `manager.query` call.
+    const houseQueryCalls = () =>
+      (events.manager.query.mock.calls as Array<[unknown, unknown?]>).filter(
+        ([sql]) => typeof sql === 'string' && sql.includes('"is_house"'),
+      );
+
+    const answerHouseQuery = (isHouse: boolean) => {
+      events.manager.query.mockImplementation((sql: unknown) =>
+        Promise.resolve(
+          typeof sql === 'string' && sql.includes('"is_house"')
+            ? [{ is_house: isHouse }]
+            : [],
+        ),
+      );
+    };
+
+    const caughtFrom = async (pending: Promise<unknown>) => {
+      const caught: unknown = await pending.catch((error: unknown) => error);
+      expect(caught).toBeInstanceOf(HttpException);
+      return caught as HttpException;
+    };
+
+    const recordingHostedQueryBuilder = (rows: Array<Partial<Event>>) => {
+      const queryBuilder: Record<string, jest.Mock> = {};
+      for (const method of [
+        'where',
+        'andWhere',
+        'orderBy',
+        'addOrderBy',
+        'skip',
+        'take',
+      ]) {
+        queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+      }
+      queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
+      return queryBuilder;
+    };
+
+    it('refuses a family change on a house-hosted event with house_event_family_locked', async () => {
+      events.findOne.mockImplementation(() => Promise.resolve(houseEvent()));
+      usersService.findById.mockResolvedValue({ isSystem: true });
+      answerHouseQuery(true);
+
+      const refusal = await caughtFrom(
+        service.update('x', HOUSE_ID, {
+          gatheringFamily: GatheringFamily.Party,
+        }),
+      );
+
+      expect(refusal.getStatus()).toBe(403);
+      expect(refusal.getResponse()).toMatchObject({
+        code: 'house_event_family_locked',
+      });
+      expect(usersService.findById).toHaveBeenCalledWith(HOUSE_ID);
+      expect(houseQueryCalls()).toHaveLength(1);
+      expect(events.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a member-hosted event change family without reading the house account', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        gatheringFamily: GatheringFamily.Eat,
+      });
+      usersService.findById.mockResolvedValue({ isSystem: false });
+
+      const detail = await service.update('x', 'u1', {
+        gatheringFamily: GatheringFamily.Watch,
+      });
+
+      expect(detail.gatheringFamily).toBe(GatheringFamily.Watch);
+      expect(usersService.findById).toHaveBeenCalledWith('u1');
+      expect(houseQueryCalls()).toEqual([]);
+    });
+
+    it('refuses attaching a community to a house-hosted Music event with music_event_community_unavailable', async () => {
+      events.findOne.mockImplementation(() => Promise.resolve(houseEvent()));
+      usersService.findById.mockResolvedValue({ isSystem: true });
+      answerHouseQuery(true);
+
+      const refusal = await caughtFrom(
+        service.update('x', HOUSE_ID, { communitySlug: 'queer-devs' }),
+      );
+
+      expect(refusal.getStatus()).toBe(400);
+      expect(refusal.getResponse()).toMatchObject({
+        code: 'music_event_community_unavailable',
+      });
+      expect(membership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
+      expect(events.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses moving a house-hosted Music event to another community with music_event_community_unavailable', async () => {
+      events.findOne.mockImplementation(() =>
+        Promise.resolve({ ...houseEvent(), communityId: 'community-1' }),
+      );
+      usersService.findById.mockResolvedValue({ isSystem: true });
+      answerHouseQuery(true);
+      membership.slugById.mockResolvedValue('queer-devs');
+
+      const refusal = await caughtFrom(
+        service.update('x', HOUSE_ID, { communitySlug: 'drag-club' }),
+      );
+
+      expect(refusal.getStatus()).toBe(400);
+      expect(refusal.getResponse()).toMatchObject({
+        code: 'music_event_community_unavailable',
+      });
+      expect(membership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
+      expect(events.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a member-hosted Music event attach a community as before', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        gatheringFamily: GatheringFamily.Music,
+      });
+      usersService.findById.mockResolvedValue({ isSystem: false });
+      membership.assertOwnerOrModBySlug.mockResolvedValue('community-9');
+
+      const detail = await service.update('x', 'u1', {
+        communitySlug: 'queer-devs',
+      });
+
+      expect(membership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
+        'queer-devs',
+        'u1',
+      );
+      expect(houseQueryCalls()).toEqual([]);
+      expect(detail.communityId).toBe('community-9');
+    });
+
+    it('lets a house-hosted event save with its own family resent', async () => {
+      events.findOne.mockImplementation(() => Promise.resolve(houseEvent()));
+      usersService.findById.mockResolvedValue({ isSystem: true });
+      answerHouseQuery(true);
+
+      const detail = await service.update('x', HOUSE_ID, {
+        gatheringFamily: GatheringFamily.Music,
+        title: 'Friday listening',
+      });
+
+      expect(detail.gatheringFamily).toBe(GatheringFamily.Music);
+      // The family did not move, so the house is never asked about.
+      expect(usersService.findById).not.toHaveBeenCalled();
+      expect(houseQueryCalls()).toEqual([]);
+    });
+
+    it('checks a new cover against uploaderUserId when one is given', async () => {
+      events.findOne.mockImplementation(() => Promise.resolve(houseEvent()));
+
+      await expect(
+        service.update('x', HOUSE_ID, { coverImageUrl: STAFF_COVER }, 'this', {
+          uploaderUserId: STAFF_ID,
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        service.update('x', HOUSE_ID, { coverImageUrl: STAFF_COVER }, 'this', {
+          uploaderUserId: OTHER_STAFF_ID,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('checks a new cover against the acting user when no uploader is given', async () => {
+      events.findOne.mockImplementation(() =>
+        Promise.resolve({ ...houseEvent(), hostId: STAFF_ID }),
+      );
+
+      await expect(
+        service.update('x', STAFF_ID, { coverImageUrl: STAFF_COVER }),
+      ).resolves.toBeDefined();
+
+      cohosts.exists.mockResolvedValue(true);
+      await expect(
+        service.update('x', OTHER_STAFF_ID, { coverImageUrl: STAFF_COVER }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('lists hosted events of one family upcoming by start and reports hasMore from one extra row', async () => {
+      const rows: Array<Partial<Event>> = Array.from(
+        { length: HOSTED_PAGE_SIZE + 1 },
+        (_unused, rowIndex) => ({ id: `event-${rowIndex}` }),
+      );
+      const queryBuilder = recordingHostedQueryBuilder(rows);
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+      const summaries: EventSummary[] = [];
+      const summarizeSpy = jest
+        .spyOn(service as unknown as SummarizeSpyTarget, 'summarize')
+        .mockResolvedValue(summaries);
+
+      const result = await service.listHostedInFamily(
+        HOUSE_ID,
+        GatheringFamily.Music,
+        'upcoming',
+        2,
+      );
+
+      expect(events.createQueryBuilder).toHaveBeenCalledWith('e');
+      expect(queryBuilder.where).toHaveBeenCalledWith('e.host_id = :hostId', {
+        hostId: HOUSE_ID,
+      });
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        'e.gathering_family::text = :family',
+        { family: GatheringFamily.Music },
+      );
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        "e.status <> 'cancelled'",
+      );
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        UPCOMING_OR_UNDERWAY_SQL,
+        { now: expect.any(Date) },
+      );
+      expect(queryBuilder.orderBy).toHaveBeenCalledWith('e.startAt', 'ASC');
+      expect(queryBuilder.addOrderBy).toHaveBeenCalledWith('e.id', 'ASC');
+      expect(queryBuilder.skip).toHaveBeenCalledWith(HOSTED_PAGE_SIZE);
+      expect(queryBuilder.take).toHaveBeenCalledWith(HOSTED_PAGE_SIZE + 1);
+      expect(summarizeSpy).toHaveBeenCalledWith(
+        rows.slice(0, HOSTED_PAGE_SIZE),
+        HOUSE_ID,
+      );
+      expect(result).toEqual({ items: summaries, hasMore: true });
+    });
+
+    it('lists cancelled hosted events newest first', async () => {
+      const rows: Array<Partial<Event>> = [
+        { id: 'event-late' },
+        { id: 'event-early' },
+      ];
+      const queryBuilder = recordingHostedQueryBuilder(rows);
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+      const summaries: EventSummary[] = [];
+      const summarizeSpy = jest
+        .spyOn(service as unknown as SummarizeSpyTarget, 'summarize')
+        .mockResolvedValue(summaries);
+
+      const result = await service.listHostedInFamily(
+        HOUSE_ID,
+        GatheringFamily.Music,
+        'cancelled',
+        1,
+      );
+
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        "e.status = 'cancelled'",
+      );
+      const scheduleClauses = (
+        queryBuilder.andWhere!.mock.calls as Array<[unknown]>
+      ).filter(
+        ([clause]) =>
+          clause === UPCOMING_OR_UNDERWAY_SQL || clause === ENDED_SQL,
+      );
+      expect(scheduleClauses).toEqual([]);
+      expect(queryBuilder.orderBy).toHaveBeenCalledWith('e.startAt', 'DESC');
+      expect(queryBuilder.addOrderBy).toHaveBeenCalledWith('e.id', 'ASC');
+      expect(queryBuilder.skip).toHaveBeenCalledWith(0);
+      expect(queryBuilder.take).toHaveBeenCalledWith(HOSTED_PAGE_SIZE + 1);
+      expect(summarizeSpy).toHaveBeenCalledWith(rows, HOUSE_ID);
+      expect(result).toEqual({ items: summaries, hasMore: false });
+    });
+  });
+
   // The care layer the v2 wizard adds (themes, content notes, house rules,
   // cost kind, RSVP cutoff and questions). Written onto every occurrence of a
   // series; on update the arrays replace wholesale and the questions merge
@@ -4944,32 +5231,92 @@ describe('EventsService', () => {
 
 describe('EventsService.addCohostByUserId', () => {
   let service: EventsService;
-  let events: { findOne: jest.Mock };
+  // `manager` answers the house account read (`isHouseAccountId`) and opens
+  // the seat transaction for a house Music event.
+  let events: {
+    findOne: jest.Mock;
+    manager: { query: jest.Mock; transaction: jest.Mock };
+  };
   let cohosts: { createQueryBuilder: jest.Mock };
-  let insertBuilder: {
+  let usersService: { findById: jest.Mock };
+  interface InsertBuilderStub {
     insert: jest.Mock;
     into: jest.Mock;
     values: jest.Mock;
     orIgnore: jest.Mock;
     execute: jest.Mock;
+  }
+  let insertBuilder: InsertBuilderStub;
+  // The house Music seat insert, written through the transaction's manager.
+  let seatInsertBuilder: InsertBuilderStub;
+  let transactionManager: {
+    query: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
 
-  beforeEach(() => {
-    insertBuilder = {
+  const chainableInsertBuilder = (): InsertBuilderStub => {
+    const builder: InsertBuilderStub = {
       insert: jest.fn(),
       into: jest.fn(),
       values: jest.fn(),
       orIgnore: jest.fn(),
       execute: jest.fn(),
     };
-    insertBuilder.insert.mockReturnValue(insertBuilder);
-    insertBuilder.into.mockReturnValue(insertBuilder);
-    insertBuilder.values.mockReturnValue(insertBuilder);
-    insertBuilder.orIgnore.mockReturnValue(insertBuilder);
-    insertBuilder.execute.mockResolvedValue({});
+    builder.insert.mockReturnValue(builder);
+    builder.into.mockReturnValue(builder);
+    builder.values.mockReturnValue(builder);
+    builder.orIgnore.mockReturnValue(builder);
+    builder.execute.mockResolvedValue({});
+    return builder;
+  };
 
-    events = { findOne: jest.fn() };
+  // The seat lock answers nothing; the refusal read answers `refusal`.
+  const answerSeatQueries = (refusal: string | null) =>
+    jest.fn((sql: unknown) =>
+      Promise.resolve(
+        typeof sql === 'string' && sql.includes('pg_advisory_xact_lock')
+          ? []
+          : [{ refusal }],
+      ),
+    );
+
+  const houseMusicEvent = () => ({
+    id: 'e1',
+    hostId: 'house-1',
+    gatheringFamily: GatheringFamily.Music,
+  });
+
+  const hostAsHouse = () => {
+    usersService.findById.mockResolvedValue({ isSystem: true });
+    events.manager.query.mockResolvedValue([{ is_house: true }]);
+  };
+
+  const caughtFrom = async (pending: Promise<unknown>) => {
+    const caught: unknown = await pending.catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(HttpException);
+    return caught as HttpException;
+  };
+
+  beforeEach(() => {
+    insertBuilder = chainableInsertBuilder();
+    seatInsertBuilder = chainableInsertBuilder();
+    transactionManager = {
+      query: answerSeatQueries(null),
+      createQueryBuilder: jest.fn(() => seatInsertBuilder),
+    };
+
+    events = {
+      findOne: jest.fn(),
+      manager: {
+        query: jest.fn().mockResolvedValue([]),
+        transaction: jest.fn(
+          async (runInTransaction: (manager: unknown) => Promise<unknown>) =>
+            runInTransaction(transactionManager),
+        ),
+      },
+    };
     cohosts = { createQueryBuilder: jest.fn(() => insertBuilder) };
+    usersService = { findById: jest.fn() };
 
     service = new EventsService(
       // `rosterCounts` reads `retention.eventAttendanceDays` through this to
@@ -4986,7 +5333,7 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as Repository<EventAnnouncement>,
       {} as unknown as Repository<EventCommunity>,
       {} as unknown as Repository<Profile>,
-      {} as unknown as UsersService,
+      usersService as unknown as UsersService,
       {} as unknown as RsvpService,
       {} as unknown as NotificationsService,
       {} as unknown as BlockFilterService,
@@ -5024,6 +5371,121 @@ describe('EventsService.addCohostByUserId', () => {
     expect(insertBuilder.values).toHaveBeenCalledWith({
       eventId: 'e1',
       userId: 'user-2',
+    });
+    expect(insertBuilder.orIgnore).toHaveBeenCalled();
+  });
+
+  it('refuses a grant holder seat on a house Music event with music_event_cohost_holds_grant', async () => {
+    events.findOne.mockResolvedValue(houseMusicEvent());
+    hostAsHouse();
+    transactionManager.query = answerSeatQueries(
+      'music_event_cohost_holds_grant',
+    );
+
+    const refusal = await caughtFrom(
+      service.addCohostByUserId('e1', 'holder-1'),
+    );
+
+    expect(refusal.getStatus()).toBe(403);
+    expect(refusal.getResponse()).toMatchObject({
+      code: 'music_event_cohost_holds_grant',
+    });
+    expect(seatInsertBuilder.execute).not.toHaveBeenCalled();
+    expect(cohosts.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('refuses a moderator seat on a house Music event with music_event_cohost_is_staff_tier', async () => {
+    events.findOne.mockResolvedValue(houseMusicEvent());
+    hostAsHouse();
+    transactionManager.query = answerSeatQueries(
+      'music_event_cohost_is_staff_tier',
+    );
+
+    const refusal = await caughtFrom(
+      service.addCohostByUserId('e1', 'moderator-1'),
+    );
+
+    expect(refusal.getStatus()).toBe(403);
+    expect(refusal.getResponse()).toMatchObject({
+      code: 'music_event_cohost_is_staff_tier',
+    });
+    expect(seatInsertBuilder.execute).not.toHaveBeenCalled();
+    expect(cohosts.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('seats a member on a house Music event inside one transaction after the lock', async () => {
+    events.findOne.mockResolvedValue(houseMusicEvent());
+    hostAsHouse();
+
+    await service.addCohostByUserId('e1', 'member-1');
+
+    expect(events.manager.transaction).toHaveBeenCalledTimes(1);
+    const seatQueries = (
+      transactionManager.query.mock.calls as Array<[string, unknown[]]>
+    ).map(([sql, parameters]) => ({
+      isLock: sql.includes('pg_advisory_xact_lock'),
+      parameters,
+    }));
+    expect(seatQueries).toEqual([
+      { isLock: true, parameters: ['music_event_cohost:member-1'] },
+      { isLock: false, parameters: ['member-1', 'music_manager_producer'] },
+    ]);
+    expect(seatInsertBuilder.values).toHaveBeenCalledWith({
+      eventId: 'e1',
+      userId: 'member-1',
+    });
+    expect(seatInsertBuilder.orIgnore).toHaveBeenCalled();
+    const [lockOrder] = transactionManager.query.mock.invocationCallOrder;
+    const [insertOrder] = seatInsertBuilder.execute.mock.invocationCallOrder;
+    expect(lockOrder).toBeLessThan(insertOrder!);
+    expect(cohosts.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('takes the cohost seat lock inside the caller transaction when a manager is given', async () => {
+    events.findOne.mockResolvedValue(houseMusicEvent());
+    hostAsHouse();
+    const callerManager = {
+      ...transactionManager,
+      getRepository: jest.fn((entity: unknown) =>
+        entity === Event ? events : cohosts,
+      ),
+    };
+
+    await service.addCohostByUserId(
+      'e1',
+      'member-1',
+      callerManager as unknown as EntityManager,
+    );
+
+    expect(events.manager.transaction).not.toHaveBeenCalled();
+    const [firstQuery] = callerManager.query.mock.calls as Array<
+      [string, unknown[]]
+    >;
+    expect(firstQuery?.[0]).toContain('pg_advisory_xact_lock');
+    expect(firstQuery?.[1]).toEqual(['music_event_cohost:member-1']);
+    expect(seatInsertBuilder.values).toHaveBeenCalledWith({
+      eventId: 'e1',
+      userId: 'member-1',
+    });
+    expect(cohosts.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('inserts a co-host on a member-hosted Music event without locking or reading staff grants', async () => {
+    events.findOne.mockResolvedValue({
+      ...houseMusicEvent(),
+      hostId: 'host-1',
+    });
+    usersService.findById.mockResolvedValue({ isSystem: false });
+
+    await service.addCohostByUserId('e1', 'member-1');
+
+    expect(usersService.findById).toHaveBeenCalledWith('host-1');
+    expect(events.manager.query).not.toHaveBeenCalled();
+    expect(events.manager.transaction).not.toHaveBeenCalled();
+    expect(transactionManager.query).not.toHaveBeenCalled();
+    expect(insertBuilder.values).toHaveBeenCalledWith({
+      eventId: 'e1',
+      userId: 'member-1',
     });
     expect(insertBuilder.orIgnore).toHaveBeenCalled();
   });

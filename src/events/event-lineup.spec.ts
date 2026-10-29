@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -22,6 +23,7 @@ import { Event, EventStatus } from './entities/event.entity';
 import { EventLineupService, MAX_LINEUP_ENTRIES } from './event-lineup.service';
 import { EVENT_LINEUP_ANSWERED, EVENT_LINEUP_INVITED } from './event.events';
 import { EventsService } from './events.service';
+import { GatheringFamily } from './gathering-family';
 
 // UNRUN: written and statically verified only; tests run on request.
 describe('EventLineupService (lineup invites)', () => {
@@ -36,7 +38,11 @@ describe('EventLineupService (lineup invites)', () => {
   };
   let insertExecute: jest.Mock;
   let insertValues: jest.Mock;
-  let events: { findOne: jest.Mock; count: jest.Mock };
+  let events: {
+    findOne: jest.Mock;
+    count: jest.Mock;
+    manager: { query: jest.Mock };
+  };
   let rsvps: { exists: jest.Mock };
   let profiles: { find: jest.Mock; findOne: jest.Mock };
   let usersService: { findById: jest.Mock };
@@ -104,6 +110,7 @@ describe('EventLineupService (lineup invites)', () => {
     events = {
       findOne: jest.fn().mockResolvedValue(hostedEvent),
       count: jest.fn().mockResolvedValue(3),
+      manager: { query: jest.fn().mockResolvedValue([]) },
     };
     rsvps = { exists: jest.fn().mockResolvedValue(false) };
     profiles = {
@@ -275,12 +282,160 @@ describe('EventLineupService (lineup invites)', () => {
       );
     });
 
+    describe('on a Music event QueerPulse hosts', () => {
+      const houseMusicEvent = {
+        ...hostedEvent,
+        hostId: 'house-user',
+        gatheringFamily: GatheringFamily.Music,
+      };
+
+      // `host-user` stands for a member who co-hosts the house event.
+      const answerQueries = (bookableRow: {
+        is_studio_artist: boolean;
+        is_blocked: boolean;
+      }) => {
+        events.manager.query.mockImplementation((sql: unknown) =>
+          Promise.resolve(
+            typeof sql === 'string' && sql.includes('"is_house"')
+              ? [{ is_house: true }]
+              : [bookableRow],
+          ),
+        );
+      };
+
+      beforeEach(() => {
+        events.findOne.mockResolvedValue(houseMusicEvent);
+      });
+
+      it('refuses a connection who is not a Studio artist with music_event_performer_not_studio_artist', async () => {
+        answerQueries({ is_studio_artist: false, is_blocked: false });
+
+        const caught: unknown = await service
+          .invite('drag-brunch', 'host-user', dto)
+          .catch((error: unknown) => error);
+
+        expect(caught).toBeInstanceOf(HttpException);
+        const refusal = caught as HttpException;
+        expect(refusal.getStatus()).toBe(403);
+        expect(refusal.getResponse()).toMatchObject({
+          code: 'music_event_performer_not_studio_artist',
+        });
+        const bookableCall = (
+          events.manager.query.mock.calls as Array<[string, unknown[]]>
+        ).find(([sql]) => sql.includes('"is_studio_artist"'));
+        expect(bookableCall?.[1].slice(0, 2)).toEqual(['dj-user', 'host-user']);
+        expect(connectionsService.areConnected).not.toHaveBeenCalled();
+        expect(insertExecute).not.toHaveBeenCalled();
+      });
+
+      it('refuses a Studio artist blocked either way with the same code', async () => {
+        answerQueries({ is_studio_artist: true, is_blocked: true });
+
+        const caught: unknown = await service
+          .invite('drag-brunch', 'host-user', dto)
+          .catch((error: unknown) => error);
+
+        expect((caught as HttpException).getResponse()).toMatchObject({
+          code: 'music_event_performer_not_studio_artist',
+        });
+        expect(insertExecute).not.toHaveBeenCalled();
+      });
+
+      it('invites a Studio artist', async () => {
+        answerQueries({ is_studio_artist: true, is_blocked: false });
+
+        await service.invite('drag-brunch', 'host-user', dto);
+
+        expect(insertExecute).toHaveBeenCalled();
+      });
+    });
+
+    it('lets a member-hosted Music event invite a connection as before', async () => {
+      events.findOne.mockResolvedValue({
+        ...hostedEvent,
+        gatheringFamily: GatheringFamily.Music,
+      });
+      events.manager.query.mockResolvedValue([{ is_house: false }]);
+
+      await service.invite('drag-brunch', 'host-user', dto);
+
+      expect(connectionsService.areConnected).toHaveBeenCalledWith(
+        'host-user',
+        'dj-user',
+      );
+      expect(events.manager.query).toHaveBeenCalledTimes(1);
+      expect(insertExecute).toHaveBeenCalled();
+    });
+
     it('400s once pending plus accepted rows reach the cap', async () => {
       lineupEntries.count.mockResolvedValue(MAX_LINEUP_ENTRIES);
       await expect(
         service.invite('drag-brunch', 'host-user', dto),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(lineupEntries.count).toHaveBeenCalled();
+      expect(insertExecute).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('inviteWithEligibilityCheck', () => {
+    const dto = { memberSlug: 'dj-ana', role: 'dj' };
+
+    it('runs the given check and never assertInvitable', async () => {
+      const assertEligible = jest.fn().mockResolvedValue(undefined);
+      await service.inviteWithEligibilityCheck(
+        'drag-brunch',
+        'host-user',
+        dto,
+        assertEligible,
+      );
+      expect(assertEligible).toHaveBeenCalledWith('event-1', 'dj-user');
+      expect(connectionsService.areConnected).not.toHaveBeenCalled();
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+      expect(insertExecute).toHaveBeenCalled();
+    });
+
+    it("refuses with the check's own error before any write", async () => {
+      const refusal = new ForbiddenException(
+        'This member cannot be invited to this lineup',
+      );
+      const assertEligible = jest.fn().mockRejectedValue(refusal);
+      await expect(
+        service.inviteWithEligibilityCheck(
+          'drag-brunch',
+          'host-user',
+          dto,
+          assertEligible,
+        ),
+      ).rejects.toBe(refusal);
+      expect(insertExecute).not.toHaveBeenCalled();
+      expect(lineupEntries.update).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('emits the invite with the actor as inviter', async () => {
+      await service.inviteWithEligibilityCheck(
+        'drag-brunch',
+        'host-user',
+        dto,
+        jest.fn().mockResolvedValue(undefined),
+      );
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        EVENT_LINEUP_INVITED,
+        expect.objectContaining({
+          entryId: 'entry-1',
+          inviterId: 'host-user',
+          inviteeId: 'dj-user',
+          role: 'dj',
+        }),
+      );
+    });
+
+    it('invite still refuses a member who is neither a connection nor going', async () => {
+      connectionsService.areConnected.mockResolvedValue(false);
+      rsvps.exists.mockResolvedValue(false);
+      await expect(
+        service.invite('drag-brunch', 'host-user', dto),
+      ).rejects.toBeInstanceOf(ForbiddenException);
       expect(insertExecute).not.toHaveBeenCalled();
     });
   });

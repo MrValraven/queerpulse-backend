@@ -80,6 +80,15 @@ describe('StudioRadioService', () => {
     expect(radioSql('mood')).toContain('"release"."mood" = $2');
   });
 
+  // A release carrying two genres is in the pool of each of them.
+  it('matches a genre against every genre of the release and a mood against its mood', () => {
+    expect(radioSql('genre')).toContain(
+      'WHERE "release"."genres" @> ARRAY[$2]::varchar[]',
+    );
+    expect(radioSql('mood')).toContain('WHERE "release"."mood" = $2');
+    expect(radioSql('mood')).not.toContain('"release"."genres"');
+  });
+
   it('refuses neither filter and both filters', async () => {
     expect(await codeOf(service.getRadio(VIEWER_ID, {}))).toBe(
       'studio_radio_filter_required',
@@ -94,7 +103,8 @@ describe('StudioRadioService', () => {
 
   it('samples playable tracks of listenable releases at random, blocks applied', () => {
     const sql = radioSql('genre');
-    expect(sql).toContain('"release"."genre" = $2');
+    expect(sql).toContain('"release"."genres" @> ARRAY[$2]::varchar[]');
+    expect(sql).not.toContain('"release"."genre" = $2');
     expect(sql).toContain(`"release"."status" = 'published'`);
     expect(sql).toContain('"track"."audio_key" IS NOT NULL');
     expect(sql).toContain('"track"."duration_seconds" IS NOT NULL');

@@ -11,10 +11,12 @@ import { storageKeyFromImageUrl } from '../common/image-url';
 import {
   allowsPersonaScopedKeys,
   allowsSharedUploads,
+  allowsStudioLandingScopedKeys,
   allowsStudioSceneScopedKeys,
 } from './shared-upload-handlers';
 import {
   isPersonaScopedKey,
+  isStudioLandingScopedKey,
   isStudioSceneScopedKey,
   storageKeyOwnerId,
 } from './storage-key';
@@ -81,6 +83,9 @@ interface UploadAllowances {
   /** Studio discovery: a scene-scoped key, see
    *  `STUDIO_SCENE_SCOPED_KEY_HANDLERS`. */
   studioSceneScopedKeys: boolean;
+  /** Studio landing v2: a landing-scoped key, see
+   *  `STUDIO_LANDING_SCOPED_KEY_HANDLERS`. */
+  studioLandingScopedKeys: boolean;
 }
 
 @Injectable()
@@ -119,6 +124,10 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       sharedUploads: allowsSharedUploads(controllerName, handlerName),
       personaScopedKeys: allowsPersonaScopedKeys(controllerName, handlerName),
       studioSceneScopedKeys: allowsStudioSceneScopedKeys(
+        controllerName,
+        handlerName,
+      ),
+      studioLandingScopedKeys: allowsStudioLandingScopedKeys(
         controllerName,
         handlerName,
       ),
@@ -171,6 +180,15 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
     // whose service keeps it only as the scene's stored cover.
     if (isStudioSceneScopedKey(normalized)) {
       if (requesterUserId && allowances.studioSceneScopedKeys) {
+        return normalized;
+      }
+      throw new ForbiddenException('Referenced upload does not belong to you');
+    }
+    // Studio landing v2: a landing-scoped key names no uploader either. It is
+    // refused on every route except `STUDIO_LANDING_SCOPED_KEY_HANDLERS`,
+    // whose service keeps it only as the slot's stored photo.
+    if (isStudioLandingScopedKey(normalized)) {
+      if (requesterUserId && allowances.studioLandingScopedKeys) {
         return normalized;
       }
       throw new ForbiddenException('Referenced upload does not belong to you');

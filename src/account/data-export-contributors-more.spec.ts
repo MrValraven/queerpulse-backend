@@ -1082,3 +1082,59 @@ describe('MemberPreferencesExportContributor, Studio player settings', () => {
     );
   });
 });
+
+describe('MemberPreferencesExportContributor, Studio welcome', () => {
+  it('exports the welcome stamp and the taste picks', async () => {
+    const findOne = jest.fn().mockResolvedValue({
+      userId: MEMBER_ID,
+      language: 'pt',
+      studioWelcomeSeenAt: new Date('2026-10-27T10:00:00.000Z'),
+      studioTasteGenres: ['fado', 'jazz'],
+      studioTasteMoods: ['tender'],
+      updatedAt: new Date('2026-10-27T10:00:00.000Z'),
+    });
+    const contributor = new MemberPreferencesExportContributor(
+      repositoryWith<MemberPreferences>({ findOne }),
+    );
+
+    const exported = (await contributor.buildContribution(MEMBER_ID)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(exported).toEqual(
+      expect.objectContaining({
+        studioWelcomeSeenAt: '2026-10-27T10:00:00.000Z',
+        studioTasteGenres: ['fado', 'jazz'],
+        studioTasteMoods: ['tender'],
+      }),
+    );
+  });
+
+  it('exports a null stamp and empty picks for a member who never saved', async () => {
+    const findOne = jest.fn().mockResolvedValue({
+      userId: MEMBER_ID,
+      language: 'pt',
+      studioWelcomeSeenAt: null,
+      studioTasteGenres: [],
+      studioTasteMoods: [],
+      updatedAt: new Date('2026-10-27T10:00:00.000Z'),
+    });
+    const contributor = new MemberPreferencesExportContributor(
+      repositoryWith<MemberPreferences>({ findOne }),
+    );
+
+    const exported = (await contributor.buildContribution(MEMBER_ID)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(exported).toEqual(
+      expect.objectContaining({
+        studioWelcomeSeenAt: null,
+        studioTasteGenres: [],
+        studioTasteMoods: [],
+      }),
+    );
+  });
+});

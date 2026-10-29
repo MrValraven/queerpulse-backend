@@ -5,6 +5,7 @@ import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { AddStudioPlaylists1831500000000 } from '../migrations/1831500000000-AddStudioPlaylists';
 import { AddStudioReleaseFollowersNotifiedAt1831500100000 } from '../migrations/1831500100000-AddStudioReleaseFollowersNotifiedAt';
 import { AddStudioV2EnumValues1831500200000 } from '../migrations/1831500200000-AddStudioV2EnumValues';
+import { AddStudioReleaseGenres1838000200000 } from '../migrations/1838000200000-AddStudioReleaseGenres';
 import {
   Subprofile,
   SubprofileKind,
@@ -35,6 +36,7 @@ const FIRST_ENTRY = '66000000-0000-4000-8000-000000000001';
 const SECOND_ENTRY = '66000000-0000-4000-8000-000000000002';
 const PUBLISHED_RELEASE = '63000000-0000-4000-8000-000000000011';
 const DRAFT_RELEASE = '63000000-0000-4000-8000-000000000012';
+const UNLISTED_GENRE_RELEASE = '63000000-0000-4000-8000-000000000013';
 
 function refuseUnlessTestDatabase(url: string): void {
   const databaseName = new URL(url).pathname.replace(/^\//, '');
@@ -388,6 +390,88 @@ describeWithDatabase(
       await expect(
         new AddStudioV2EnumValues1831500200000().down(),
       ).rejects.toThrow(/Irreversible/);
+    });
+  },
+);
+
+describeWithDatabase(
+  'AddStudioReleaseGenres1838000200000 on real Postgres',
+  () => {
+    let dataSource: DataSource;
+    let queryRunner: QueryRunner;
+
+    beforeAll(async () => {
+      refuseUnlessTestDatabase(DATABASE_URL!);
+      dataSource = await synchronizedDataSource();
+      // The schema as it stands before this migration: no `genres` column and
+      // the single-genre btree index.
+      await dataSource.query(
+        `DROP INDEX IF EXISTS "IDX_studio_releases_genres_published"`,
+      );
+      await dataSource.query(
+        `ALTER TABLE "studio_releases" DROP COLUMN "genres"`,
+      );
+      await dataSource.query(
+        `CREATE INDEX "IDX_studio_releases_genre_published_at" ON "studio_releases" ("genre", "published_at" DESC, "id" DESC) WHERE "status" = 'published'`,
+      );
+      await seedOwnerAndPersona(dataSource);
+      await dataSource.query(
+        `INSERT INTO "studio_releases" ("id", "subprofile_id", "title", "type", "status", "published_at", "genre")
+         VALUES ($1, $4, 'Out already', 'mix', 'published', '2026-10-01T09:00:00.000Z', 'fado'),
+                ($2, $4, 'Still drafting', 'mix', 'draft', NULL, NULL),
+                ($3, $4, 'Old genre', 'mix', 'published', '2026-10-02T09:00:00.000Z', 'polka')`,
+        [PUBLISHED_RELEASE, DRAFT_RELEASE, UNLISTED_GENRE_RELEASE, PERSONA_ID],
+      );
+      queryRunner = dataSource.createQueryRunner();
+      await new AddStudioReleaseGenres1838000200000().up(queryRunner);
+    }, 120000);
+
+    afterAll(async () => {
+      await queryRunner?.release();
+      await dataSource?.destroy();
+    });
+
+    it('backfills genres from genre, copying an unlisted value as stored', async () => {
+      const rows: { id: string; genre: string | null; genres: string[] }[] =
+        await dataSource.query(
+          `SELECT "id", "genre", "genres" FROM "studio_releases" ORDER BY "id"`,
+        );
+      expect(rows).toEqual([
+        { id: PUBLISHED_RELEASE, genre: 'fado', genres: ['fado'] },
+        { id: DRAFT_RELEASE, genre: null, genres: [] },
+        { id: UNLISTED_GENRE_RELEASE, genre: 'polka', genres: ['polka'] },
+      ]);
+    });
+
+    it('swaps the btree index for a GIN index over published releases only', async () => {
+      const rows: { indexname: string; indexdef: string }[] =
+        await dataSource.query(
+          `SELECT "indexname", "indexdef" FROM "pg_indexes"
+            WHERE "tablename" = 'studio_releases' AND "indexname" LIKE 'IDX_studio_releases_genre%'
+            ORDER BY "indexname"`,
+        );
+      expect(rows.map((row) => row.indexname)).toEqual([
+        'IDX_studio_releases_genres_published',
+      ]);
+      expect(rows[0]?.indexdef).toContain('USING gin (genres)');
+      expect(rows[0]?.indexdef).toContain("WHERE (status = 'published'");
+    });
+
+    it('runs down and up again', async () => {
+      await new AddStudioReleaseGenres1838000200000().down(queryRunner);
+      const columns: { column_name: string }[] = await dataSource.query(
+        `SELECT "column_name" FROM "information_schema"."columns"
+          WHERE "table_name" = 'studio_releases' AND "column_name" = 'genres'`,
+      );
+      expect(columns).toEqual([]);
+      const indexNames: { indexname: string }[] = await dataSource.query(
+        `SELECT "indexname" FROM "pg_indexes"
+          WHERE "tablename" = 'studio_releases' AND "indexname" LIKE 'IDX_studio_releases_genre%'`,
+      );
+      expect(indexNames).toEqual([
+        { indexname: 'IDX_studio_releases_genre_published_at' },
+      ]);
+      await new AddStudioReleaseGenres1838000200000().up(queryRunner);
     });
   },
 );

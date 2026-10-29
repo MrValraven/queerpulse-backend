@@ -134,6 +134,8 @@ const CATEGORY_BY_REASON_CODE: Partial<
   // unmarked explicit track has no public category.
   hateful_lyrics: 'harassment',
   untagged_explicit: 'other',
+  // Studio purchases: an artist took a member's payment and did not confirm it.
+  payment_never_confirmed: 'other',
   other: 'other',
 };
 

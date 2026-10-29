@@ -12,7 +12,8 @@ import { STUDIO_LISTENING_RETENTION_INTERVAL } from './studio-listening-history'
  * (793_640_003_000 / 793_640_003_001), the persona feed sweep
  * (793_640_004_000), the scheduled drop (793_640_005_000), the milestone
  * sweep (793_640_006_000), the listening history prune (793_640_007_000,
- * this key) and the migration lock (481_205_733_107_400).
+ * this key), the purchase expiry (793_640_008_000) and the migration lock
+ * (481_205_733_107_400).
  */
 export const LISTENING_PRUNE_LOCK_KEY = 793_640_007_000;
 

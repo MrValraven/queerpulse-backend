@@ -160,6 +160,15 @@ function subjectFor(
       return stringField(payload, 'creditedSubprofileId');
     case NotificationType.StudioCreditAccepted:
       return stringField(payload, 'trackId');
+    // Studio landing page: requests and live notices on one persona in an
+    // evening are one row. The access grant notice stays unbundled.
+    case NotificationType.StudioLandingPreviewRequested:
+    case NotificationType.StudioLandingPreviewLive:
+      return stringField(payload, 'subprofileId');
+    // Studio purchases: several claims on one persona in an evening are one
+    // row. The three buyer types stay unbundled.
+    case NotificationType.StudioPurchaseClaimed:
+      return stringField(payload, 'subprofileId');
     // New podcast episodes waiting for review collapse onto the PERSONA, so
     // several feeds on one persona syncing within the window stay one row.
     case NotificationType.PersonaImportReady:

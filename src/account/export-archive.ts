@@ -154,6 +154,12 @@ export const EXPORT_CSV_CATEGORIES = [
   // Studio safety and moderation: the copyright claims the member filed.
   'studioCopyrightClaims',
   'studioListening',
+  // Studio purchases: the member's purchases as buyer, then the sales and
+  // payment methods of their personas.
+  'studioPurchases',
+  'studioSales',
+  // Studio access: the member's waiting request for Studio access.
+  'studioAccessRequest',
   // Creator drafts: the member's own event, listing edit and community wizard drafts.
   'creatorDrafts',
   // Pulse Live: the sessions the member played, with their own answers and votes.

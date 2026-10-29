@@ -7,6 +7,7 @@ import {
 } from 'typeorm';
 import { DEFAULT_WHO_CAN_MESSAGE, WhoCanMessage } from '../who-can-message';
 import { MemberLanguage } from '../member-language';
+import type { StudioGenre, StudioMood } from '../../studio/studio.constants';
 
 // The out-at-work spectrum — a choice, never a binary toggle. Values mirror the
 // frontend's `OUT_AT_WORK` list (`features/economy/workProfile.data.ts`).
@@ -416,6 +417,26 @@ export class MemberPreferences {
    *  then. Stamped once and never moved. */
   @Column({ type: 'timestamptz', nullable: true })
   listeningNoticeSeenAt!: Date | null;
+
+  // --- Studio welcome (GET/PUT /me/studio-welcome) ---------------------------
+  // Once per ACCOUNT: the welcome flow's seen stamp and the taste picks live
+  // here so a second device does not show the welcome again. Migration
+  // `1838000300000-AddStudioWelcome`.
+
+  /** When the member first finished the Studio welcome; null until then.
+   *  Stamped once and never moved. */
+  @Column({ type: 'timestamptz', nullable: true })
+  studioWelcomeSeenAt!: Date | null;
+
+  /** Genres picked in the welcome's taste questions (`STUDIO_GENRES` ids).
+   *  `text[]` with a `{}` default. */
+  @Column({ type: 'text', array: true, default: '{}' })
+  studioTasteGenres!: StudioGenre[];
+
+  /** Moods picked in the welcome's taste questions (`STUDIO_MOODS` ids).
+   *  `text[]` with a `{}` default. */
+  @Column({ type: 'text', array: true, default: '{}' })
+  studioTasteMoods!: StudioMood[];
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

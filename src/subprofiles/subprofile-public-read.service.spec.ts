@@ -1097,6 +1097,53 @@ describe('SubprofilePublicReadService', () => {
       });
     });
 
+    describe('founding artist badge', () => {
+      function foundingSqlCalls(): [string, unknown[]][] {
+        return (
+          subprofiles.manager.query.mock.calls as [string, unknown[]][]
+        ).filter(([sql]) => sql.includes('studio_founding_artists'));
+      }
+
+      it('marks a founding artist on the public view and reads false for everyone else', async () => {
+        personaRows.push(
+          makeSubprofile({
+            id: 'sp-founding',
+            userId: 'creator-1',
+            kind: SubprofileKind.Musician,
+            handle: 'founding-one',
+            slug: 'founding-one',
+          }),
+          makeSubprofile({
+            id: 'sp-plain',
+            userId: 'creator-1',
+            kind: SubprofileKind.Musician,
+            handle: 'plain-one',
+            slug: 'plain-one',
+          }),
+        );
+        subprofiles.manager.query.mockImplementation((sql: string) =>
+          Promise.resolve(
+            sql.includes('studio_founding_artists')
+              ? [{ subprofile_id: 'sp-founding' }]
+              : [],
+          ),
+        );
+
+        const foundingView = await service.getByHandle(
+          'founding-one',
+          activeViewer,
+        );
+        const plainView = await service.getByHandle('plain-one', activeViewer);
+
+        expect(foundingView.isFoundingArtist).toBe(true);
+        expect(plainView.isFoundingArtist).toBe(false);
+        expect(foundingSqlCalls().map(([, params]) => params)).toEqual([
+          [['sp-founding']],
+          [['sp-plain']],
+        ]);
+      });
+    });
+
     describe('flash day events', () => {
       function tattooPersona(): Subprofile {
         return linkedPersona({ kind: SubprofileKind.TattooArtist });
@@ -1266,6 +1313,32 @@ describe('SubprofilePublicReadService', () => {
         ],
         [],
       );
+    });
+
+    it('marks a founding artist on the list in one read and reads false for everyone else', async () => {
+      rosterFor(false);
+      subprofiles.manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes('studio_founding_artists')
+            ? [{ subprofile_id: 'sp-network' }]
+            : [],
+        ),
+      );
+
+      const views = await service.listForProfile('ana', 'viewer-1');
+
+      expect(
+        views.map((view) => [view.id, view.isFoundingArtist] as const),
+      ).toEqual([
+        ['sp-open', false],
+        ['sp-network', true],
+      ]);
+      const foundingCalls = (
+        subprofiles.manager.query.mock.calls as [string, unknown[]][]
+      ).filter(([sql]) => sql.includes('studio_founding_artists'));
+      expect(foundingCalls.map(([, params]) => params)).toEqual([
+        [['sp-open', 'sp-network']],
+      ]);
     });
 
     it('lists the private persona for its co-owner', async () => {

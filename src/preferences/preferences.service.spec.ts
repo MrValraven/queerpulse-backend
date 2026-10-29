@@ -787,4 +787,129 @@ describe('PreferencesService', () => {
       );
     });
   });
+
+  describe('Studio welcome (once per account)', () => {
+    it('answers the defaults without writing a row', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      expect(await service.getStudioWelcome('u1')).toEqual({
+        hasSeenWelcome: false,
+        welcomeSeenAt: null,
+        genres: [],
+        moods: [],
+      });
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('reads the stored stamp and picks', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioWelcomeSeenAt: new Date('2026-10-27T10:00:00.000Z'),
+          studioTasteGenres: ['fado', 'jazz'],
+          studioTasteMoods: ['tender'],
+        }),
+      );
+
+      expect(await service.getStudioWelcome('u1')).toEqual({
+        hasSeenWelcome: true,
+        welcomeSeenAt: '2026-10-27T10:00:00.000Z',
+        genres: ['fado', 'jazz'],
+        moods: ['tender'],
+      });
+    });
+
+    it('replaces only the lists the body names and keeps the rest of the row', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioWelcomeSeenAt: null,
+          studioTasteGenres: ['fado'],
+          studioTasteMoods: ['calm'],
+        }),
+      );
+
+      const result = await service.updateStudioWelcome('u1', {
+        genres: ['pop', 'rock'],
+      });
+
+      expect(result).toEqual({
+        hasSeenWelcome: false,
+        welcomeSeenAt: null,
+        genres: ['pop', 'rock'],
+        moods: ['calm'],
+      });
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          studioTasteGenres: ['pop', 'rock'],
+          studioTasteMoods: ['calm'],
+          publicProfileEnabled: true,
+        }),
+      );
+    });
+
+    it('clears a list when the body sends an empty one', async () => {
+      repo.findOne.mockResolvedValue(
+        row({ studioTasteGenres: ['fado'], studioTasteMoods: ['calm'] }),
+      );
+
+      const result = await service.updateStudioWelcome('u1', { moods: [] });
+
+      expect(result.moods).toEqual([]);
+      expect(result.genres).toEqual(['fado']);
+    });
+
+    it('stamps the welcome once and keeps the first stamp', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-27T10:00:00.000Z'));
+      try {
+        repo.findOne.mockResolvedValue(row({ studioWelcomeSeenAt: null }));
+
+        const first = await service.updateStudioWelcome('u1', {
+          hasSeenWelcome: true,
+        });
+        expect(first.welcomeSeenAt).toBe('2026-10-27T10:00:00.000Z');
+        expect(first.hasSeenWelcome).toBe(true);
+
+        jest.setSystemTime(new Date('2026-10-27T11:00:00.000Z'));
+        const second = await service.updateStudioWelcome('u1', {
+          hasSeenWelcome: true,
+        });
+        expect(second.welcomeSeenAt).toBe('2026-10-27T10:00:00.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('starts a first save from the defaults', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await service.updateStudioWelcome('u1', { moods: ['calm'] });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          studioWelcomeSeenAt: null,
+          studioTasteGenres: [],
+          studioTasteMoods: ['calm'],
+          publicProfileEnabled: false,
+        }),
+      );
+    });
+
+    it('echoes the stored state for an empty body', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioWelcomeSeenAt: null,
+          studioTasteGenres: ['jazz'],
+          studioTasteMoods: [],
+        }),
+      );
+
+      expect(await service.updateStudioWelcome('u1', {})).toEqual({
+        hasSeenWelcome: false,
+        welcomeSeenAt: null,
+        genres: ['jazz'],
+        moods: [],
+      });
+    });
+  });
 });

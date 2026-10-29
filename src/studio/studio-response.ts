@@ -1,6 +1,7 @@
 import { toImageUrl } from '../common/image-url';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import {
+  StudioPriceMode,
   StudioRelease,
   StudioReleaseStatus,
   StudioReleaseType,
@@ -39,6 +40,7 @@ import type {
   StudioPersonaCreditPublic,
   StudioReleaseCreditSummary,
 } from './studio-persona-credit-response';
+import { StudioPrice, toStudioPrice } from './studio-purchase-rules';
 import { StudioSupportLink } from './studio-support-links';
 import {
   StudioTrackMeasurements,
@@ -115,6 +117,8 @@ export interface StudioOwnerTrackFields {
   staffContentWarnings: StudioContentWarningId[];
   /** Studio safety: our team marked the track explicit. */
   isExplicitLocked: boolean;
+  /** Studio purchases: null while off sale. */
+  price: StudioPrice | null;
 }
 
 export type StudioOwnerTrackSummary = StudioTrackSummary &
@@ -138,8 +142,11 @@ export interface StudioReleaseCard {
   /** Studio v2: the server's publish time. Play all keeps the server order
    *  (`published_at desc, id desc`), so the client never sorts. */
   publishedAt: string | null;
-  /** Studio v2: on every card, for the browse page. */
+  /** Studio v2: on every card, for the browse page. The lead genre. */
   genre: string | null;
+  /** Studio multi-genre: every genre in order, lead first. A stored value
+   *  outside `STUDIO_GENRES` is sent as stored. */
+  genres: string[];
   /** Studio discovery: a stored value outside `STUDIO_MOODS` reads as null. */
   mood: StudioMood | null;
   /** Studio discovery: null when unset or when the scene is archived. */
@@ -242,6 +249,8 @@ export interface StudioReleaseResponse extends StudioReleaseCard {
   buyUrl: string | null;
   /** Studio listening: "Play without gaps", the same for every viewer. */
   isGapless: boolean;
+  /** Studio purchases: null while off sale. */
+  price: StudioPrice | null;
   supportLinks: StudioSupportLink[];
   version: number;
   versions: StudioReleaseVersionResponse[];
@@ -286,6 +295,9 @@ export interface StudioArtistResponse {
     coverUrl: string | null;
     /** `skinData.studioHero`, null when the owner never chose a layout. */
     studioHero: 'banner' | 'portrait' | 'both' | null;
+    /** Studio landing v2 (contract 11.2): a `studio_founding_artists` row
+     *  names the persona. The shelf switch leaves it as it is. */
+    isFoundingArtist: boolean;
   };
   releases: StudioReleaseCard[];
   ownerReleases: StudioOwnerReleaseCard[] | null;
@@ -305,6 +317,12 @@ export interface StudioMe {
   /** DES-84: accepted claims on the member's releases they can still
    *  counter. 0 without a grant. */
   counterWindowsOpen: number;
+  /** Studio landing v2 (contract 12.1): the member has a waiting access
+   *  request. */
+  hasPendingRequest: boolean;
+  /** Studio landing v2 (contract 12.1): the waiting request says the member
+   *  wants to release music. False without a request. */
+  wantsToRelease: boolean;
 }
 
 export interface StudioPage<Item> {
@@ -527,6 +545,10 @@ export function toStudioOwnerTrackSummary(
     artistContentWarnings: normalizeContentWarnings(track.contentWarnings),
     staffContentWarnings: normalizeContentWarnings(track.staffContentWarnings),
     isExplicitLocked: Boolean(track.explicitLockedAt),
+    price: toStudioPrice(
+      track.priceMode ?? StudioPriceMode.NotForSale,
+      track.priceCents ?? null,
+    ),
   };
 }
 
@@ -573,6 +595,7 @@ export function toStudioReleaseCard(
     artist,
     publishedAt: release.publishedAt ? release.publishedAt.toISOString() : null,
     genre: release.genre,
+    genres: release.genres,
     mood: release.mood && isStudioMood(release.mood) ? release.mood : null,
     scene: toStudioSceneRef(release.scene),
     format: STUDIO_FORMAT_BY_KIND[artist.kind],
@@ -785,6 +808,10 @@ export function toStudioReleaseResponse(
     publishAt: release.publishAt ? release.publishAt.toISOString() : null,
     buyUrl: release.buyUrl ?? null,
     isGapless: release.isGapless ?? false,
+    price: toStudioPrice(
+      release.priceMode ?? StudioPriceMode.NotForSale,
+      release.priceCents ?? null,
+    ),
     supportLinks: extras.supportLinks,
     version: latestVersion?.version ?? 1,
     versions: extras.versions.map(toStudioReleaseVersionResponse),

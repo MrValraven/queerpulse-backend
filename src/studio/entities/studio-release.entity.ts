@@ -37,6 +37,16 @@ export enum StudioReleaseStatus {
 }
 
 /**
+ * Studio purchases: the price mode of a release or a track. Migration
+ * `1838000000000-AddStudioPurchases` creates the Postgres type.
+ */
+export enum StudioPriceMode {
+  NotForSale = 'not_for_sale',
+  Fixed = 'fixed',
+  NameYourPrice = 'name_your_price',
+}
+
+/**
  * A Studio release, owned by a persona of an artist kind (`STUDIO_FORMAT_BY_KIND`). `subprofile_id`
  * cascades on update so the row follows the persona to the fresh id an
  * unlink gives it, and on delete so a deleted persona takes its releases
@@ -51,16 +61,13 @@ export enum StudioReleaseStatus {
   'id',
 ])
 @Index('IDX_studio_releases_subprofile_status', ['subprofileId', 'status'])
-// Studio v2 browse by genre: the home feed filtered to one genre, in its own
-// order. Partial on published rows, the only ones the feed reads.
-// Migration `1831500100000-AddStudioReleaseFollowersNotifiedAt`.
-@Index(
-  'IDX_studio_releases_genre_published_at',
-  ['genre', 'publishedAt', 'id'],
-  {
-    where: `"status" = 'published'`,
-  },
-)
+// Studio browse, search and radio by genre: a release matches a genre when
+// its `genres` array contains it. The partial GIN index on published rows
+// (the only ones those reads touch) lives in the migration only, since
+// TypeORM cannot declare an index method. It replaced the single-genre btree
+// `IDX_studio_releases_genre_published_at`. Migration
+// `1838000200000-AddStudioReleaseGenres`.
+@Index('IDX_studio_releases_genres_published', { synchronize: false })
 // Studio discovery: browse by mood and the scene page, each in the feed's
 // own order, partial on published rows. Migration
 // `1831800000000-AddStudioDiscovery` builds both with `published_at DESC,
@@ -94,6 +101,10 @@ export enum StudioReleaseStatus {
   'CHK_studio_releases_publish_at',
   `("status" = 'scheduled') = ("publish_at" IS NOT NULL)`,
 )
+@Check(
+  'CHK_studio_releases_price',
+  `("price_mode" = 'not_for_sale' AND "price_cents" IS NULL) OR ("price_mode" = 'fixed' AND "price_cents" BETWEEN 100 AND 50000) OR ("price_mode" = 'name_your_price' AND "price_cents" BETWEEN 0 AND 50000)`,
+)
 export class StudioRelease {
   @PrimaryGeneratedColumn('uuid', {
     primaryKeyConstraintName: 'PK_studio_releases',
@@ -123,8 +134,15 @@ export class StudioRelease {
   @Column({ type: 'text', nullable: true })
   description!: string | null;
 
+  /** The lead genre: always `genres[0]`, null when `genres` is empty. The
+   *  service rewrites it on every write. */
   @Column({ type: 'varchar', length: 40, nullable: true })
   genre!: string | null;
+
+  /** Up to `STUDIO_LIMITS.releaseGenresMax` genres, lead first. A stored
+   *  value outside `STUDIO_GENRES` still reads as stored. */
+  @Column({ type: 'varchar', length: 40, array: true, default: '{}' })
+  genres!: string[];
 
   /** Studio discovery: one of `STUDIO_MOODS`; a stored value outside the
    *  list reads as null on the wire. */
@@ -225,6 +243,24 @@ export class StudioRelease {
    */
   @Column({ type: 'boolean', default: false })
   isGapless!: boolean;
+
+  /**
+   * Studio purchases: how this release is sold. `not_for_sale` carries no price,
+   * `fixed` a price from 100 to 50000 cents, `name_your_price` a minimum from
+   * 0 to 50000 cents. Draft, scheduled and published releases carry a price; buying opens once the release is published. Migration `1838000000000-AddStudioPurchases`.
+   */
+  @Column({
+    type: 'enum',
+    enum: StudioPriceMode,
+    enumName: 'studio_price_mode',
+    default: StudioPriceMode.NotForSale,
+  })
+  priceMode!: StudioPriceMode;
+
+  /** Studio purchases: the price (or the minimum) in euro cents; null while
+   *  the release is not for sale. */
+  @Column({ type: 'integer', nullable: true })
+  priceCents!: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

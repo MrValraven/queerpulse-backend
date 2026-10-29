@@ -2,7 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { LandingVisitDaily } from './entities/landing-visit-daily.entity';
-import { normalizeLandingSource } from './landing-visit-source';
+import {
+  LandingVisitPage,
+  normalizeLandingSource,
+} from './landing-visit-source';
 
 /** The admin panel ranges, in whole UTC days. */
 export const LANDING_VISIT_RANGE_DAYS = [30, 90] as const;
@@ -19,6 +22,7 @@ const BOT_USER_AGENT_PATTERN =
   /bot|crawl|spider|slurp|headless|lighthouse|preview|facebookexternalhit|curl|wget|python|httpclient/i;
 
 export interface AdminLandingVisitsDTO {
+  page: LandingVisitPage;
   rangeDays: LandingVisitRangeDays;
   total: number;
   /** Zero-filled, oldest first, UTC, exactly `rangeDays` entries ending today. */
@@ -53,7 +57,7 @@ export function isJsonContentType(contentType: string | undefined): boolean {
 /**
  * Anonymous landing page visit counts.
  *
- * `record` bumps one (day, source) counter. The user agent is read only to
+ * `record` bumps one (day, page, source) counter. The user agent is read only to
  * skip bots: it is never stored, logged or passed anywhere else. A request
  * without a JSON content type writes nothing (see `isJsonContentType`).
  */
@@ -66,6 +70,7 @@ export class LandingVisitsService {
 
   async record(
     rawSource: string | undefined,
+    page: LandingVisitPage,
     userAgent: string | undefined,
     contentType: string | undefined,
   ): Promise<void> {
@@ -75,11 +80,11 @@ export class LandingVisitsService {
     const day = toUtcDay(new Date());
     const source = normalizeLandingSource(rawSource);
     await this.landingVisits.query(
-      `INSERT INTO "landing_visit_daily" ("day", "source", "visits")
-       VALUES ($1, $2, 1)
-       ON CONFLICT ("day", "source")
+      `INSERT INTO "landing_visit_daily" ("day", "page", "source", "visits")
+       VALUES ($1, $2, $3, 1)
+       ON CONFLICT ("day", "page", "source")
        DO UPDATE SET "visits" = "landing_visit_daily"."visits" + 1`,
-      [day, source],
+      [day, page, source],
     );
   }
 
@@ -89,6 +94,7 @@ export class LandingVisitsService {
    */
   async getStats(
     rangeDays: LandingVisitRangeDays,
+    page: LandingVisitPage,
   ): Promise<AdminLandingVisitsDTO> {
     const now = new Date();
     const todayStart = Date.UTC(
@@ -108,19 +114,19 @@ export class LandingVisitsService {
       await this.landingVisits.query(
         `SELECT to_char("day", 'YYYY-MM-DD') AS "day", SUM("visits") AS "visits"
          FROM "landing_visit_daily"
-         WHERE "day" >= $1
+         WHERE "day" >= $1 AND "page" = $2
          GROUP BY "day"`,
-        [rangeStartDay],
+        [rangeStartDay, page],
       );
     const sourceRows: { source: string; visits: string | number }[] =
       await this.landingVisits.query(
         `SELECT "source", SUM("visits") AS "visits"
          FROM "landing_visit_daily"
-         WHERE "day" >= $1
+         WHERE "day" >= $1 AND "page" = $2
          GROUP BY "source"
          ORDER BY SUM("visits") DESC, "source" ASC
-         LIMIT $2`,
-        [rangeStartDay, TOP_SOURCE_LIMIT],
+         LIMIT $3`,
+        [rangeStartDay, page, TOP_SOURCE_LIMIT],
       );
 
     const visitsByDay = new Map<string, number>();
@@ -139,6 +145,6 @@ export class LandingVisitsService {
       visits: Number(row.visits),
     }));
 
-    return { rangeDays, total, days, topSources };
+    return { page, rangeDays, total, days, topSources };
   }
 }

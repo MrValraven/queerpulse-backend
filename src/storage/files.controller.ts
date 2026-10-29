@@ -30,6 +30,7 @@ import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import {
   PERSONA_SCOPED_KIND_SPEC,
+  STUDIO_LANDING_SCOPED_KIND_SPEC,
   STUDIO_SCENE_SCOPED_KIND_SPEC,
   parseStorageKey,
   storageKeyOwnerId,
@@ -296,6 +297,23 @@ export class FilesController {
   private async assertServableSceneCoverKey(storageKey: string): Promise<void> {
     const rows: unknown[] = await this.users.query(
       `SELECT 1 AS "found" FROM "studio_scenes" WHERE "cover_key" = $1 LIMIT 1`,
+      [storageKey],
+    );
+    if (!rows.length) {
+      throw new NotFoundException();
+    }
+  }
+
+  // Studio landing: a landing-scoped key (`studio-landing/<uuid>/<uuid><ext>`)
+  // is served only while a `studio_landing_photos` row stores it, so a copy
+  // whose write rolled back, or a replaced photo, 404s like an unknown key.
+  // The bytes are platform artwork, so no uploader status applies. Read
+  // through the `User` repository's connection, as the scene check does.
+  private async assertServableLandingPhotoKey(
+    storageKey: string,
+  ): Promise<void> {
+    const rows: unknown[] = await this.users.query(
+      `SELECT 1 AS "found" FROM "studio_landing_photos" WHERE "image_key" = $1 LIMIT 1`,
       [storageKey],
     );
     if (!rows.length) {
@@ -680,6 +698,11 @@ export class FilesController {
     // while a scene stores it as its cover.
     if (kindSpec === STUDIO_SCENE_SCOPED_KIND_SPEC) {
       await this.assertServableSceneCoverKey(storageKey);
+    }
+    // Studio landing: a landing-scoped key names nobody, and is served only
+    // while a landing photo row stores it.
+    if (kindSpec === STUDIO_LANDING_SCOPED_KIND_SPEC) {
+      await this.assertServableLandingPhotoKey(storageKey);
     }
     // Suspension media safety: a suspended/banned member's media must not keep
     // serving to ordinary viewers. Every key embeds its owner's userId

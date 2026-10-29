@@ -112,6 +112,41 @@ describe('localizeRichPayload (PRD-325)', () => {
     );
   });
 
+  it('titles the Studio page preview request like its bell row', () => {
+    const payload = makePayload({
+      title: 'A Studio page preview request',
+      body: 'Night shift: our team would like to play Lisbon lights on the Studio page',
+      l10n: {
+        titleKey: 'push:studioLandingPreviewRequested.title',
+        bodyKey: 'push:studioLandingPreviewRequested.body',
+        params: { persona: 'Night shift', track: 'Lisbon lights' },
+      },
+    });
+
+    const localized = localizeRichPayload(payload, RICH_PUSH_COPY_PT);
+
+    expect(localized.title).toBe('Pedido da página do Studio');
+  });
+
+  it('words the approved Studio page preview as approved', () => {
+    const payload = makePayload({
+      title: 'Approved for the Studio page',
+      body: 'Lisbon lights by Night shift is approved for the Studio page',
+      l10n: {
+        titleKey: 'push:studioLandingPreviewLive.title',
+        bodyKey: 'push:studioLandingPreviewLive.body',
+        params: { persona: 'Night shift', track: 'Lisbon lights' },
+      },
+    });
+
+    const localized = localizeRichPayload(payload, RICH_PUSH_COPY_PT);
+
+    expect(localized.title).toBe('Aprovação para a página do Studio');
+    expect(localized.body).toBe(
+      'Lisbon lights de Night shift está aprovada para a página do Studio',
+    );
+  });
+
   it('reports a translated payload as rendering differently', () => {
     const payload = makePayload();
 

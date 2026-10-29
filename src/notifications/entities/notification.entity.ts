@@ -1948,6 +1948,137 @@ export enum NotificationType {
    * Migration: `AddListingTeamNotificationTypes1835100000000`.
    */
   ListingTeamAccepted = 'listing_team_accepted',
+
+  /**
+   * Studio landing page. Our team granted this member Studio access, from
+   * Waiting for Studio or the member drawer.
+   *
+   * RECIPIENTS: the member granted access, from Waiting for Studio or the
+   * member drawer, once per new grant.
+   *
+   * NO ACTOR IN THE PAYLOAD: the staff member who granted it is never stored,
+   * and this type appears under no key in `ACTOR_PAYLOAD_KEY`.
+   *
+   * BUNDLES: never. One grant is one row.
+   *
+   * PAYLOAD: `{}`.
+   *
+   * See migration `AddStudioLandingNotificationTypes1838100100000`.
+   */
+  StudioAccessGranted = 'studio_access_granted',
+
+  /**
+   * Studio landing page. Our team asked to show one of a persona's tracks on
+   * the Studio page, and the request waits for an answer in the dashboard.
+   *
+   * RECIPIENTS: members of the release persona who hold a Studio grant.
+   *
+   * NO ACTOR IN THE PAYLOAD: the staff member who filed the request is never
+   * stored, and this type appears under no key in `ACTOR_PAYLOAD_KEY`.
+   *
+   * BUNDLES on `subprofileId` and answers to the `personas` category in both
+   * channels, beside `StudioCreditRequested`.
+   *
+   * PAYLOAD: `{ previewId, subprofileId, personaName, trackTitle }`. The
+   * preview id stays server-side.
+   *
+   * See migration `AddStudioLandingNotificationTypes1838100100000`.
+   */
+  StudioLandingPreviewRequested = 'studio_landing_preview_requested',
+
+  /**
+   * Studio landing page. An owner approved a track preview, and it plays on
+   * the Studio page while it stays eligible.
+   *
+   * RECIPIENTS: members who hold a Studio grant of the release persona and of
+   * each persona with an accepted credit on the track, the approver left out.
+   * One fan-out per persona, release persona first; a member reached twice
+   * keeps the first row only.
+   *
+   * NO ACTOR IN THE PAYLOAD: the approver's id reaches `createForRecipients`
+   * nowhere, and this type appears under no key in `ACTOR_PAYLOAD_KEY`.
+   *
+   * BUNDLES on `subprofileId` and answers to the `personas` category in both
+   * channels, beside `StudioCreditAccepted`.
+   *
+   * PAYLOAD: `{ previewId, subprofileId, mainPersonaName, trackTitle }`. The
+   * preview id stays server-side.
+   *
+   * See migration `AddStudioLandingNotificationTypes1838100100000`.
+   */
+  StudioLandingPreviewLive = 'studio_landing_preview_live',
+
+  /**
+   * Studio purchases. A buyer filed a payment claim on an item of a persona
+   * this member runs, and it waits for an answer in "Sales".
+   *
+   * RECIPIENTS: members of the persona who hold a Studio grant, no member
+   * left out.
+   *
+   * NO ACTOR IN THE PAYLOAD (no `actorId`), so neither a mute nor a later
+   * block silences a payment record. The buyer is never named.
+   *
+   * BUNDLES on `subprofileId` and answers to the `personas` category in both
+   * channels, beside `SubprofileInvite`.
+   *
+   * PAYLOAD: `{ purchaseId, subprofileId, artistName, itemKind, itemTitle,
+   * amountCents }`. The purchase id stays server-side.
+   *
+   * See migration `AddStudioPurchaseNotificationTypes1838000100000`.
+   */
+  StudioPurchaseClaimed = 'studio_purchase_claimed',
+
+  /**
+   * Studio purchases. The artist confirmed the payment, so the item is the
+   * buyer's.
+   *
+   * RECIPIENTS: the buyer.
+   *
+   * NO ACTOR IN THE PAYLOAD (no `actorId`), so neither a mute nor a later
+   * block silences a payment record.
+   *
+   * UNBUNDLED and always delivered.
+   *
+   * PAYLOAD: `{ purchaseId, artistName, itemKind, itemTitle }`.
+   *
+   * See migration `AddStudioPurchaseNotificationTypes1838000100000`.
+   */
+  StudioPurchaseConfirmed = 'studio_purchase_confirmed',
+
+  /**
+   * Studio purchases. The artist declined the payment claim.
+   *
+   * RECIPIENTS: the buyer.
+   *
+   * NO ACTOR IN THE PAYLOAD (no `actorId`), so neither a mute nor a later
+   * block silences a payment record.
+   *
+   * UNBUNDLED and always delivered.
+   *
+   * PAYLOAD: `{ purchaseId, artistName, itemKind, itemTitle, declineReason }`.
+   * The decline note stays off the bell and the push; the buyer reads it in
+   * "Your purchases".
+   *
+   * See migration `AddStudioPurchaseNotificationTypes1838000100000`.
+   */
+  StudioPurchaseDeclined = 'studio_purchase_declined',
+
+  /**
+   * Studio purchases. A payment claim lapsed unanswered (the expiry cron) or
+   * was closed when the persona unlinked.
+   *
+   * RECIPIENTS: the buyer.
+   *
+   * NO ACTOR IN THE PAYLOAD (no `actorId`), so neither a mute nor a later
+   * block silences a payment record.
+   *
+   * UNBUNDLED and always delivered; in-app only, with no push.
+   *
+   * PAYLOAD: `{ purchaseId, artistName, itemKind, itemTitle }`.
+   *
+   * See migration `AddStudioPurchaseNotificationTypes1838000100000`.
+   */
+  StudioPurchaseExpired = 'studio_purchase_expired',
 }
 
 @Entity('notifications')

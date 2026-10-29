@@ -5,6 +5,7 @@ import {
 } from './entities/member-preferences.entity';
 import { WhoCanMessage } from './who-can-message';
 import { MemberLanguage } from './member-language';
+import type { StudioGenre, StudioMood } from '../studio/studio.constants';
 
 // Response shapes are the frontend contract exactly — the two endpoints project
 // disjoint subsets of the one row, so neither leaks the other's settings.
@@ -180,5 +181,27 @@ export function toStudioPlaybackDTO(row: MemberPreferences): StudioPlaybackDTO {
     listeningNoticeSeenAt: row.listeningNoticeSeenAt
       ? row.listeningNoticeSeenAt.toISOString()
       : null,
+  };
+}
+
+/**
+ * `GET|PUT /me/studio-welcome`: the Studio welcome flow, once per account.
+ * `welcomeSeenAt` is set once; the taste picks replace the stored lists.
+ */
+export interface StudioWelcomeDTO {
+  hasSeenWelcome: boolean;
+  /** When the welcome was first completed (ISO); null until then. */
+  welcomeSeenAt: string | null;
+  genres: StudioGenre[];
+  moods: StudioMood[];
+}
+
+export function toStudioWelcomeDTO(row: MemberPreferences): StudioWelcomeDTO {
+  const welcomeSeenAt = row.studioWelcomeSeenAt ?? null;
+  return {
+    hasSeenWelcome: welcomeSeenAt !== null,
+    welcomeSeenAt: welcomeSeenAt ? welcomeSeenAt.toISOString() : null,
+    genres: [...(row.studioTasteGenres ?? [])],
+    moods: [...(row.studioTasteMoods ?? [])],
   };
 }

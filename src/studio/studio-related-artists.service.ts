@@ -26,7 +26,8 @@ import { STUDIO_DISCOVERY_LIMITS } from './studio.constants';
  *   holding a playable track by each, counted only when those playlists
  *   come from at least 2 distinct owners: 2 per playlist, capped at 8;
  * - a published release of each in the same active scene: 2;
- * - a shared genre across published releases: 1 per genre, capped at 2.
+ * - a shared genre, counted over every genre of every published release
+ *   (each release lists up to 5): 1 per genre, capped at 2.
  * Candidates are listenable personas of a Studio artist kind with a published
  * release, their creator clear of blocks with the viewer, the artist itself
  * excluded. A score of 0 is never returned.
@@ -107,13 +108,17 @@ export const RELATED_ARTISTS_SQL = `WITH "candidate" AS (
 "genre_score" AS (
   SELECT "other_genre"."subprofile_id" AS "other_id", LEAST(COUNT(*), 2) AS "score"
     FROM (
-      SELECT DISTINCT "subprofile_id", "genre" FROM "studio_releases"
-       WHERE "status" = 'published' AND "genre" IS NOT NULL AND "subprofile_id" <> $2
+      SELECT DISTINCT "other_release"."subprofile_id", "other_item"."genre_value"
+        FROM "studio_releases" "other_release"
+        CROSS JOIN LATERAL unnest("other_release"."genres") AS "other_item"("genre_value")
+       WHERE "other_release"."status" = 'published' AND "other_release"."subprofile_id" <> $2
     ) "other_genre"
     INNER JOIN (
-      SELECT DISTINCT "genre" FROM "studio_releases"
-       WHERE "status" = 'published' AND "genre" IS NOT NULL AND "subprofile_id" = $2
-    ) "artist_genre" ON "artist_genre"."genre" = "other_genre"."genre"
+      SELECT DISTINCT "artist_item"."genre_value"
+        FROM "studio_releases" "artist_release"
+        CROSS JOIN LATERAL unnest("artist_release"."genres") AS "artist_item"("genre_value")
+       WHERE "artist_release"."status" = 'published' AND "artist_release"."subprofile_id" = $2
+    ) "artist_genre" ON "artist_genre"."genre_value" = "other_genre"."genre_value"
    GROUP BY "other_genre"."subprofile_id"
 ),
 "scored" AS (

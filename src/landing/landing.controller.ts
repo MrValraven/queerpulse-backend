@@ -18,6 +18,7 @@ import { Throttle, seconds } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 import { SkipCsrf } from '../security/skip-csrf.decorator';
 import { RecordLandingVisitDto } from './dto/record-landing-visit.dto';
+import { DEFAULT_LANDING_VISIT_PAGE } from './landing-visit-source';
 import { LandingService } from './landing.service';
 import { LandingVisitsService } from './landing-visits.service';
 import {
@@ -82,6 +83,11 @@ export class LandingController {
     @Headers('user-agent') userAgent?: string,
     @Headers('content-type') contentType?: string,
   ): Promise<void> {
-    await this.landingVisits.record(dto.source, userAgent, contentType);
+    await this.landingVisits.record(
+      dto.source,
+      dto.page ?? DEFAULT_LANDING_VISIT_PAGE,
+      userAgent,
+      contentType,
+    );
   }
 }

@@ -23,6 +23,7 @@ import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { loadWorksAt } from '../listings/listing-team-works-at';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { findFoundingArtistIds } from '../studio/studio-founding-artists-read';
 import {
   foldedHaystack,
   foldedSearchTerm,
@@ -427,6 +428,11 @@ export class SubprofilePublicReadService {
         name: `${creatorProfile.firstName} ${creatorProfile.lastName}`.trim(),
       };
     };
+    // Studio landing v2: ONE batched read of the founding badge for the page.
+    const foundingArtistIds = await findFoundingArtistIds(
+      this.subprofiles.manager,
+      sps.map((sp) => sp.id),
+    );
     return sps.map((sp) =>
       toPublicDTO(
         sp,
@@ -443,6 +449,7 @@ export class SubprofilePublicReadService {
         crops,
         [],
         linkedEventsByItemId,
+        foundingArtistIds.has(sp.id),
       ),
     );
   }
@@ -1083,7 +1090,7 @@ export class SubprofilePublicReadService {
     isOwner: boolean,
   ): Promise<SubprofilePublicView> {
     const viewerId = viewer?.userId ?? ANONYMOUS_VIEWER_ID;
-    // These eight reads are mutually independent, so they fire together in
+    // These nine reads are mutually independent, so they fire together in
     // one round trip.
     const [
       items,
@@ -1094,6 +1101,7 @@ export class SubprofilePublicReadService {
       viewerFollowingIds,
       affiliationsById,
       worksAt,
+      foundingArtistIds,
     ] = await Promise.all([
       this.items.find({ where: { subprofileId: sp.id } }),
       this.socialLinks.find({
@@ -1113,6 +1121,7 @@ export class SubprofilePublicReadService {
         sp.id,
         viewer?.status === UserStatus.Active,
       ),
+      findFoundingArtistIds(this.subprofiles.manager, [sp.id]),
     ]);
     const endorsementCount = endorsementCountsById.get(sp.id) ?? 0;
     const viewerEndorsed = viewerEndorsedIds.has(sp.id);
@@ -1146,6 +1155,7 @@ export class SubprofilePublicReadService {
       crops,
       worksAt,
       linkedEventsByItemId,
+      foundingArtistIds.has(sp.id),
     );
   }
 

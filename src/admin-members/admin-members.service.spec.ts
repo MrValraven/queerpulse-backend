@@ -174,6 +174,9 @@ describe('AdminMembersService', () => {
     delete: jest.Mock;
   };
   let transactionAuditLogs: { create: jest.Mock; save: jest.Mock };
+  // Raw SQL on the transactional `EntityManager`: the house Music co-host
+  // seat lock and the seat removal (`house-music-events.ts`).
+  let transactionQuery: jest.Mock;
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(FIXED_NOW);
@@ -233,6 +236,7 @@ describe('AdminMembersService', () => {
       create: jest.fn((row: unknown) => row),
       save: jest.fn().mockResolvedValue(undefined),
     };
+    transactionQuery = jest.fn().mockResolvedValue([]);
 
     // `updateRole`/`grantStaffRole`/`revokeStaffRole` are the only methods
     // that open a transaction. This stub runs the callback for real against a
@@ -243,10 +247,12 @@ describe('AdminMembersService', () => {
       transaction: jest.fn(
         async (
           runInTransaction: (manager: {
+            query: jest.Mock;
             getRepository: (entity: EntityTarget<ObjectLiteral>) => unknown;
           }) => Promise<unknown>,
         ) =>
           runInTransaction({
+            query: transactionQuery,
             getRepository: (entity: EntityTarget<ObjectLiteral>) => {
               if (entity === User) return transactionUsers;
               if (entity === UserStaffRole) return transactionStaffRoles;
@@ -902,6 +908,138 @@ describe('AdminMembersService', () => {
       expect(transactionAuditLogs.save).not.toHaveBeenCalled();
       expect(result.staffRoles).toEqual(['magazine_editor']);
     });
+
+    describe('house Music co-host seats', () => {
+      const removedSeatRows = [
+        {
+          event_id: 'event-night-one',
+          event_slug: 'house-night-one',
+          event_title: 'House Night One',
+        },
+        {
+          event_id: 'event-night-two',
+          event_slug: 'house-night-two',
+          event_title: 'House Night Two',
+        },
+      ];
+
+      function isSeatLockQuery(sql: unknown): boolean {
+        return typeof sql === 'string' && sql.includes('pg_advisory_xact_lock');
+      }
+
+      function auditActionsSaved(): unknown[] {
+        return transactionAuditLogs.save.mock.calls.map(
+          ([savedRow]: [{ action?: string }]) => savedRow?.action,
+        );
+      }
+
+      beforeEach(() => {
+        profiles.findOne.mockResolvedValue(makeProfile());
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          isSystem: false,
+        });
+        transactionStaffRoles.find.mockResolvedValue([
+          { role: 'music_manager_producer' },
+        ]);
+        transactionQuery.mockImplementation((sql: unknown) =>
+          Promise.resolve(isSeatLockQuery(sql) ? [] : removedSeatRows),
+        );
+      });
+
+      it('removes house Music co-host seats and audits each one when granting music_manager_producer', async () => {
+        await service.grantStaffRole(
+          'user-admin',
+          'ines-martins',
+          'music_manager_producer',
+        );
+
+        const removalRows = transactionAuditLogs.save.mock.calls
+          .map(([savedRow]: [Partial<ModAuditLog>]) => savedRow)
+          .filter(
+            (savedRow) => savedRow?.action === 'music_event_cohost_removed',
+          )
+          .map((savedRow) => ({
+            actorId: savedRow.actorId,
+            targetUserId: savedRow.targetUserId,
+            targetName: savedRow.targetName,
+            note: savedRow.note,
+          }));
+        expect(removalRows).toEqual([
+          {
+            actorId: 'user-admin',
+            targetUserId: 'user-ines',
+            targetName: 'Inês Martins',
+            note: 'house-night-one: seat ended by the music_manager_producer grant',
+          },
+          {
+            actorId: 'user-admin',
+            targetUserId: 'user-ines',
+            targetName: 'Inês Martins',
+            note: 'house-night-two: seat ended by the music_manager_producer grant',
+          },
+        ]);
+        expect(auditActionsSaved()).toEqual([
+          'staff_role_granted',
+          'music_event_cohost_removed',
+          'music_event_cohost_removed',
+        ]);
+      });
+
+      it('takes the cohost seat lock before reading the grant', async () => {
+        await service.grantStaffRole(
+          'user-admin',
+          'ines-martins',
+          'music_manager_producer',
+        );
+
+        const lockCallIndex = transactionQuery.mock.calls.findIndex(
+          ([sql]: [unknown]) => isSeatLockQuery(sql),
+        );
+        expect(lockCallIndex).toBe(0);
+        expect(transactionQuery.mock.calls[0]?.[1]).toEqual([
+          'music_event_cohost:user-ines',
+        ]);
+        const lockCallOrder =
+          transactionQuery.mock.invocationCallOrder[lockCallIndex];
+        const grantReadCallOrder =
+          transactionStaffRoles.findOne.mock.invocationCallOrder[0] ?? 0;
+        expect(grantReadCallOrder).toBeGreaterThan(0);
+        expect(lockCallOrder).toBeLessThan(grantReadCallOrder);
+      });
+
+      it('leaves co-host seats alone when granting any other role', async () => {
+        await service.grantStaffRole(
+          'user-admin',
+          'ines-martins',
+          'magazine_editor',
+        );
+
+        expect(transactionQuery).not.toHaveBeenCalled();
+        expect(auditActionsSaved()).toEqual(['staff_role_granted']);
+      });
+
+      it('writes no removal when the member already holds the grant', async () => {
+        transactionStaffRoles.findOne.mockResolvedValue({
+          id: 'grant-1',
+          userId: 'user-ines',
+          role: 'music_manager_producer',
+        });
+
+        await service.grantStaffRole(
+          'user-admin',
+          'ines-martins',
+          'music_manager_producer',
+        );
+
+        expect(
+          transactionQuery.mock.calls.filter(
+            ([sql]: [unknown]) => !isSeatLockQuery(sql),
+          ),
+        ).toEqual([]);
+        expect(transactionAuditLogs.save).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('revokeStaffRole', () => {
@@ -1112,6 +1250,70 @@ describe('AdminMembersService', () => {
       await expect(
         service.updateRole('user-admin', 'ines-martins', UserRole.Member),
       ).resolves.toMatchObject({ role: UserRole.Member });
+    });
+
+    it('removes house Music co-host seats when promoting a member to moderator', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Member,
+        isSystem: false,
+      });
+      transactionQuery.mockImplementation((sql: unknown) =>
+        Promise.resolve(
+          typeof sql === 'string' && sql.includes('pg_advisory_xact_lock')
+            ? []
+            : [
+                {
+                  event_id: 'event-night-one',
+                  event_slug: 'house-night-one',
+                  event_title: 'House Night One',
+                },
+              ],
+        ),
+      );
+
+      await service.updateRole(
+        'user-admin',
+        'ines-martins',
+        UserRole.Moderator,
+      );
+
+      const savedRows = transactionAuditLogs.save.mock.calls.map(
+        ([savedRow]: [Partial<ModAuditLog>]) => ({
+          action: savedRow?.action,
+          actorId: savedRow?.actorId,
+          targetUserId: savedRow?.targetUserId,
+          note: savedRow?.note,
+        }),
+      );
+      expect(savedRows).toEqual([
+        {
+          action: 'role_changed',
+          actorId: 'user-admin',
+          targetUserId: 'user-ines',
+          note: 'member → moderator',
+        },
+        {
+          action: 'music_event_cohost_removed',
+          actorId: 'user-admin',
+          targetUserId: 'user-ines',
+          note: 'house-night-one: seat ended by a staff tier',
+        },
+      ]);
+    });
+
+    it('leaves seats alone when demoting to member', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Moderator,
+        isSystem: false,
+      });
+
+      await service.updateRole('user-admin', 'ines-martins', UserRole.Member);
+
+      expect(transactionQuery).not.toHaveBeenCalled();
     });
   });
 

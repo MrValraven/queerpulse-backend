@@ -1,6 +1,9 @@
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayUnique,
   Equals,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsIn,
@@ -11,6 +14,7 @@ import {
   MaxLength,
   MinLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { IsSafeUrl } from '../../common/validators/is-safe-url.decorator';
@@ -24,6 +28,7 @@ import {
   StudioMood,
 } from '../studio.constants';
 import { isPresentValue, trimStringValue } from './create-studio-release.dto';
+import { StudioPriceDto } from './studio-price.dto';
 
 // PATCH semantics: an absent field stays as it is. `title` and `type` refuse
 // null (`ValidateIf` keeps validating it); the nullable fields take null to
@@ -45,9 +50,20 @@ export class UpdateStudioReleaseDto {
   @MaxLength(STUDIO_LIMITS.releaseDescriptionMaxLength)
   description?: string | null;
 
-  @IsOptional()
-  @IsIn(STUDIO_GENRES)
-  genre?: StudioGenre | null;
+  /** Studio multi-genre: up to `releaseGenresMax`, each picked once, lead
+   *  first. An empty list clears; null is refused. The service keeps the
+   *  `genre` column equal to the first entry. */
+  @ValidateIf(isPresentValue)
+  @IsArray({ message: 'genres must be a list of genres' })
+  @ArrayMaxSize(STUDIO_LIMITS.releaseGenresMax, {
+    message: `A release can carry up to ${STUDIO_LIMITS.releaseGenresMax} genres`,
+  })
+  @ArrayUnique({ message: 'Each genre can be picked once' })
+  @IsIn(STUDIO_GENRES, {
+    each: true,
+    message: 'Each genre must be one of the genres Studio lists',
+  })
+  genres?: StudioGenre[];
 
   /** Studio discovery: one of `STUDIO_MOODS`; null clears. */
   @IsOptional()
@@ -90,4 +106,10 @@ export class UpdateStudioReleaseDto {
   @ValidateIf(isPresentValue)
   @IsBoolean()
   isGapless?: boolean;
+
+  /** Absent leaves the price; null takes the item off sale. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => StudioPriceDto)
+  price?: StudioPriceDto | null;
 }

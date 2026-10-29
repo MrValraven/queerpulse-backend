@@ -11,6 +11,9 @@ const entryId = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
 const previewToken = 'f'.repeat(64);
 const personaId = '5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d';
 const milestoneId = '6b7c8d9e-0f1a-4b2c-8d3e-4f5a6b7c8d9e';
+const purchaseId = '8c9d0e1f-2a3b-4c4d-8e5f-6a7b8c9d0e1f';
+const releaseId = '9d0e1f2a-3b4c-4d5e-8f6a-7b8c9d0e1f2a';
+const landingPreviewId = '4d5e6f7a-8b9c-4d0e-8f1a-2b3c4d5e6f7a';
 
 describe('isStudioListeningRequest', () => {
   it.each([
@@ -91,6 +94,21 @@ describe('isStudioListeningRequest', () => {
     `/studio/artists/${personaId}/supporters`,
     `/me/saved/lists/${playlistId}/items/studio_playlist:${entryId}`,
     `/Me/Saved/Lists/${playlistId}/Items/Studio_Track:${trackId}`,
+    '/studio/purchases',
+    `/studio/purchases/${purchaseId}/cancel`,
+    `/v1/studio/purchases/${purchaseId}/tracks/${trackId}/download`,
+    `/studio/purchases/${purchaseId}/wall`,
+    '/studio/sales/pending-count',
+    '/me/studio-purchases?status=confirmed',
+    '/studio/purchases/reference-code',
+    `/studio/releases/${releaseId}/offer`,
+    `/Studio/Releases/${releaseId}/wall?cursor=abc`,
+    `/studio/tracks/${trackId}/offer`,
+    `/studio/artists/${personaId}/payment-methods`,
+    `/studio/artists/${personaId}/purchases/${purchaseId}/confirm`,
+    `/studio/artists/${personaId}/sales/totals`,
+    `/studio/artists/${personaId}/landing-previews`,
+    `/studio/artists/${personaId}/landing-previews/${landingPreviewId}/approve`,
   ])('matches %s', (url) => {
     expect(isStudioListeningRequest(url)).toBe(true);
   });
@@ -159,6 +177,12 @@ describe('isStudioListeningRequest', () => {
     `/me/saved/lists/${playlistId}/share`,
     `/me/saved/lists/${playlistId}/items/article:${trackId}`,
     `/me/saved/lists/${playlistId}/items/event%3Alisbon-pride`,
+    '/studio/purchasesx',
+    '/me/studio-purchasesx',
+    `/studio/releases/${releaseId}/offers`,
+    `/studio/artists/${personaId}/payment-methodsx`,
+    `/studio/artists/${personaId}/landing-previewsx`,
+    `/admin/studio/artists/${personaId}/sales`,
   ])('ignores %s', (url) => {
     expect(isStudioListeningRequest(url)).toBe(false);
   });
@@ -177,6 +201,37 @@ describe('isStudioListeningRequest', () => {
       }
     },
   );
+
+  it.each(['GET', 'OPTIONS', 'HEAD', 'POST', 'PUT', 'DELETE', undefined])(
+    'skips the purchase routes for method %s',
+    (method) => {
+      for (const url of [
+        '/studio/purchases',
+        '/me/studio-purchases',
+        `/studio/artists/${personaId}/payment-methods`,
+        `/studio/releases/${releaseId}/wall`,
+        '/studio/sales/pending-count',
+      ]) {
+        expect(isStudioListeningRequest(url, method)).toBe(true);
+      }
+    },
+  );
+
+  it('drops a payments page and a music purchases page referer', () => {
+    const paymentsRequest = {
+      headers: {
+        referer: `https://queerpulse.test/studio/payments?persona=${personaId}`,
+      },
+    };
+    expect(dropStudioListeningReferer(paymentsRequest)).toBe(true);
+    expect(paymentsRequest.headers).toEqual({});
+
+    const accountRequest = {
+      headers: { referer: 'https://queerpulse.test/account/music-purchases' },
+    };
+    expect(dropStudioListeningReferer(accountRequest)).toBe(true);
+    expect(accountRequest.headers).toEqual({});
+  });
 
   it('drops a Your listening page referer', () => {
     const request = {

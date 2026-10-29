@@ -213,9 +213,20 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Personas,
   [NotificationType.StudioCreditAccepted]:
     NotificationPreferenceCategory.Personas,
+  // Studio purchases: a payment claim on a persona you run answers to the
+  // same toggle as the invites.
+  [NotificationType.StudioPurchaseClaimed]:
+    NotificationPreferenceCategory.Personas,
   // Collaborative playlists: a pick as editor of a playlist shown as a
   // persona you run, behind the same toggle.
   [NotificationType.StudioPlaylistEditorAdded]:
+    NotificationPreferenceCategory.Personas,
+  // Studio landing page: a track preview of a persona you run, behind the
+  // same toggle. The access grant notice is an answer to something the
+  // member asked for (reason 4 of the always-delivered list).
+  [NotificationType.StudioLandingPreviewRequested]:
+    NotificationPreferenceCategory.Personas,
+  [NotificationType.StudioLandingPreviewLive]:
     NotificationPreferenceCategory.Personas,
   // Meet the team: a listing invited a persona you run to join its team.
   [NotificationType.ListingTeamInvite]: NotificationPreferenceCategory.Personas,
@@ -412,6 +423,12 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // learn it, so no content-volume switch may swallow it.
     NotificationType.StudioReleaseTakenDown,
     NotificationType.StudioReleaseDisputeDecided,
+    // Studio purchases: group 4, a decision on something the member asked for
+    // (their own payment claim), and the only in-app record besides "Your
+    // purchases". No volume control may swallow it.
+    NotificationType.StudioPurchaseConfirmed,
+    NotificationType.StudioPurchaseDeclined,
+    NotificationType.StudioPurchaseExpired,
     // Studio safety and moderation: our team's word on a copyright claim or
     // a track the member runs or filed against, and the claimant's only
     // record of the counter-notice. Group 1 (safety and moderation) and
@@ -500,6 +517,7 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.JoinRequestReceived,
     NotificationType.JoinRequestApproved,
     NotificationType.JoinRequestDeclined,
+    NotificationType.StudioAccessGranted,
     NotificationType.ListingApproved,
     NotificationType.ListingReview,
     NotificationType.ListingClaimApproved,

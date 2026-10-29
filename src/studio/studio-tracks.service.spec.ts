@@ -6,6 +6,7 @@ import {
 import { DataSource, EntityManager, Not } from 'typeorm';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import {
+  StudioPriceMode,
   StudioRelease,
   StudioReleaseStatus,
   StudioReleaseType,
@@ -13,6 +14,11 @@ import {
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
+import {
+  PAYMENT_METHOD_COUNT_SQL,
+  PAYMENT_METHODS_LOCK_SQL,
+} from './studio-payment-method-lock';
+import { KEPT_SOURCE_KEYS_HELD_SQL } from './studio-kept-tracks';
 import { STAMP_TRACKS_CHANGED_SQL } from './studio-release-edit-rule';
 import { StudioTracksService, isSameTrackSet } from './studio-tracks.service';
 
@@ -75,6 +81,7 @@ describe('StudioTracksService', () => {
   let ownership: { lockReleaseForWrite: jest.Mock };
   let catalog: { getTrack: jest.Mock; getRelease: jest.Mock };
   let studioAudioUploads: { deleteObjectsAndForget: jest.Mock };
+  let dataSourceQuery: jest.Mock;
   let service: StudioTracksService;
 
   beforeEach(() => {
@@ -108,6 +115,7 @@ describe('StudioTracksService', () => {
         Promise.resolve({
           release: {
             id: RELEASE_ID,
+            subprofileId: 'persona-1',
             status: releaseStatus,
             type: releaseType,
           } as StudioRelease,
@@ -122,7 +130,9 @@ describe('StudioTracksService', () => {
     studioAudioUploads = {
       deleteObjectsAndForget: jest.fn().mockResolvedValue(undefined),
     };
+    dataSourceQuery = jest.fn().mockResolvedValue([]);
     const dataSource = {
+      query: dataSourceQuery,
       transaction: jest.fn((work: (inner: EntityManager) => unknown) =>
         Promise.resolve(work(manager as unknown as EntityManager)),
       ),
@@ -464,6 +474,99 @@ describe('StudioTracksService', () => {
     });
   });
 
+  // Studio purchases (contract 2.1).
+  describe('update prices', () => {
+    it('prices a track on an album after the release lock and the payment-methods lock', async () => {
+      manager.query
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([{ count: 1 }]);
+      await service.update(USER_ID, FIRST_TRACK, {
+        price: { mode: 'name_your_price', amountCents: 300 },
+      });
+      expect(manager.query.mock.calls).toEqual([
+        [PAYMENT_METHODS_LOCK_SQL, ['persona-1']],
+        [PAYMENT_METHOD_COUNT_SQL, ['persona-1']],
+      ]);
+      expect(manager.query.mock.invocationCallOrder[0]).toBeGreaterThan(
+        ownership.lockReleaseForWrite.mock.invocationCallOrder[0] ?? Infinity,
+      );
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          id: FIRST_TRACK,
+          priceMode: 'name_your_price',
+          priceCents: 300,
+        }),
+      );
+    });
+
+    it('refuses a price on a track of a podcast show with studio_release_type_not_for_sale', async () => {
+      releaseType = StudioReleaseType.Podcast;
+      personaKind = 'podcaster';
+      expect(
+        await codeOf(
+          service.update(USER_ID, FIRST_TRACK, {
+            price: { mode: 'fixed', amountCents: 200 },
+          }),
+        ),
+      ).toBe('studio_release_type_not_for_sale');
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a fixed track price under one euro and a price while the persona has no payment methods', async () => {
+      expect(
+        await codeOf(
+          service.update(USER_ID, FIRST_TRACK, {
+            price: { mode: 'fixed', amountCents: 50 },
+          }),
+        ),
+      ).toBe('studio_price_out_of_range');
+      expect(manager.query).not.toHaveBeenCalled();
+
+      manager.query
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([{ count: 0 }]);
+      expect(
+        await codeOf(
+          service.update(USER_ID, FIRST_TRACK, {
+            price: { mode: 'fixed', amountCents: 100 },
+          }),
+        ),
+      ).toBe('studio_payment_methods_needed_for_sale');
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('takes a track off sale with null', async () => {
+      releaseStatus = StudioReleaseStatus.Published;
+      storedTrack = {
+        ...storedTrack,
+        priceMode: StudioPriceMode.Fixed,
+        priceCents: 500,
+      };
+      await service.update(USER_ID, FIRST_TRACK, { price: null });
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          priceMode: 'not_for_sale',
+          priceCents: null,
+        }),
+      );
+    });
+
+    it('leaves the track price alone when the body has none', async () => {
+      storedTrack = {
+        ...storedTrack,
+        priceMode: StudioPriceMode.Fixed,
+        priceCents: 500,
+      };
+      await service.update(USER_ID, FIRST_TRACK, { title: 'Opening (edit)' });
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({ priceMode: 'fixed', priceCents: 500 }),
+      );
+    });
+  });
+
   describe('remove', () => {
     it('deletes the track, closes the gap in one statement, then deletes its audio', async () => {
       await service.remove(USER_ID, FIRST_TRACK);
@@ -512,6 +615,16 @@ describe('StudioTracksService', () => {
       expect(studioAudioUploads.deleteObjectsAndForget).toHaveBeenCalledWith([
         AUDIO_KEY,
       ]);
+    });
+
+    it('keeps the audio a pending kept copy still reads', async () => {
+      dataSourceQuery.mockResolvedValue([{ source_audio_key: AUDIO_KEY }]);
+      await service.remove(USER_ID, FIRST_TRACK);
+      expect(dataSourceQuery.mock.calls).toEqual([
+        [KEPT_SOURCE_KEYS_HELD_SQL, [[AUDIO_KEY]]],
+      ]);
+      expect(manager.delete).toHaveBeenCalled();
+      expect(studioAudioUploads.deleteObjectsAndForget).not.toHaveBeenCalled();
     });
 
     it('refuses to remove the last playable track of a published release and keeps its audio', async () => {

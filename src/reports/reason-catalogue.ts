@@ -32,6 +32,8 @@ export type ReasonCode =
   // are, and a track that is explicit without the flag.
   | 'hateful_lyrics'
   | 'untagged_explicit'
+  // Studio purchases: an artist took a member's payment and did not confirm it.
+  | 'payment_never_confirmed'
   // System-filed listing-domain codes (NOT member-selectable — deliberately
   // absent from `REASON_CODES` / `SUBJECT_REASONS`, so `GET /reports/reasons`
   // never offers them and `POST /reports`'s `@IsIn(REASON_CODES)` rejects them).
@@ -66,6 +68,8 @@ export const REASON_CODES: readonly ReasonCode[] = [
   'off_platform',
   'hateful_lyrics',
   'untagged_explicit',
+  // Studio purchases: an artist took a member's payment and did not confirm it.
+  'payment_never_confirmed',
   'other',
 ];
 
@@ -98,6 +102,8 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   off_platform: 'Asked to pay or move off-platform',
   hateful_lyrics: 'Hateful lyrics',
   untagged_explicit: 'Explicit but not marked',
+  // Studio purchases: an artist took a member's payment and did not confirm it.
+  payment_never_confirmed: 'Took my payment and did not confirm it',
   // System-filed listing codes (see the `ReasonCode` union comment) — labelled
   // so any code→label lookup is total, but never surfaced as a report option.
   listing_dispute: 'Dispute or claim of a business listing',
@@ -294,13 +300,16 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
   // A member subprofile / persona. Person-shaped like `Member`/`Flatmate`, so
   // it carries the same set: `harassment`, `hate_speech` (a slur in a persona's
   // name, bio or pronouns), `impersonation` (a persona impersonating someone),
-  // `discrimination`, `spam`, and `other`.
+  // `discrimination`, `spam`, `payment_never_confirmed` (a Studio artist kept
+  // a member's payment unconfirmed), and `other`.
   [ReportSubjectType.Subprofile]: [
     'harassment',
     'hate_speech',
     'impersonation',
     'discrimination',
     'spam',
+    // Studio purchases: an artist took a member's payment and did not confirm it.
+    'payment_never_confirmed',
     'other',
   ],
   // A directory-listing review. No new codes: `harassment` covers an abusive

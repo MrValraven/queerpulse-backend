@@ -31,6 +31,17 @@ import {
 } from './entities/identity-relink-candidate.entity';
 import { EmailCodeRefusedError } from './email-code/email-code-refusal';
 import { SECURITY_NEW_SIGN_IN } from './security.events';
+import { fileStudioAccessRequestForInvite } from '../studio/studio-access-request-filing';
+
+// The Studio access request filing runs its own SQL on the signup
+// transaction manager; its statement is pinned in its own spec, so every
+// signup here reads it as a spy that resolves.
+jest.mock('../studio/studio-access-request-filing', () => ({
+  fileStudioAccessRequestForInvite: jest.fn().mockResolvedValue(undefined),
+}));
+const fileStudioAccessRequestSpy = jest.mocked(
+  fileStudioAccessRequestForInvite,
+);
 
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
 
@@ -928,6 +939,45 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
     expect(mocks.events.emit).toHaveBeenCalledWith(
       'user.promoted',
       expect.objectContaining({ userId: 'new-user' }),
+    );
+  });
+
+  it('files the Studio request inside the signup transaction right after the invite is claimed', async () => {
+    const transactionManager = {
+      getRepository: () => mocks.repo,
+      update: mocks.managerUpdate,
+    };
+    mocks.dataSource.transaction.mockImplementation(
+      (callback: (manager: unknown) => unknown) => callback(transactionManager),
+    );
+    fileStudioAccessRequestSpy.mockClear();
+    mocks.users.findByGoogleId.mockResolvedValue(null);
+    mocks.invites.validateInviteForSignup.mockResolvedValue({
+      inviteId: 'inv-1',
+      inviterId: 'admin-1',
+      personal: false,
+      vouch: null,
+    });
+    mocks.users.createGoogleUser.mockResolvedValue({
+      id: 'new-user',
+      status: UserStatus.Active,
+    });
+
+    await service.validateOrCreateGoogleUser(profile, 'CODE', attested);
+
+    expect(mocks.invites.claimInvite).toHaveBeenCalledWith(
+      transactionManager,
+      'inv-1',
+      'new-user',
+    );
+    expect(fileStudioAccessRequestSpy).toHaveBeenCalledWith(
+      transactionManager,
+      'inv-1',
+      'new-user',
+    );
+    expect(fileStudioAccessRequestSpy).toHaveBeenCalledTimes(1);
+    expect(mocks.invites.claimInvite.mock.invocationCallOrder[0]).toBeLessThan(
+      fileStudioAccessRequestSpy.mock.invocationCallOrder[0]!,
     );
   });
 

@@ -4,7 +4,6 @@ import { DataSource, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { SubprofileSocialLink } from '../subprofiles/entities/subprofile-social-link.entity';
 import { SubprofileFollowersService } from '../subprofiles/subprofile-followers.service';
-import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from '../subprofiles/subprofile-takedown';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import {
@@ -15,6 +14,7 @@ import {
 import { StudioOwnershipService } from './studio-ownership.service';
 import {
   blockedWithAnyPersonaMemberSql,
+  chosenPersonaShowableSql,
   personaIdentityBlockedBySql,
   personaMemberUserIdsSql,
 } from './studio-persona-members';
@@ -92,26 +92,6 @@ function eligibleSupporterSql(supporterAlias: string): string {
    AND (
      ${supporter}."shown_as_subprofile_id" IS NULL
      OR ${chosenPersonaShowableSql(`${supporter}."shown_as_subprofile_id"`)}
-   )`;
-}
-
-/** Owner side only: a chosen persona that is removed or under a moderator
- *  takedown (the `listenablePersonaSql` moderation rule) drops the supporter
- *  until they pick a new identity; a private or draft one still shows. */
-function chosenPersonaShowableSql(chosenPersonaIdExpression: string): string {
-  return `EXISTS (
-     SELECT 1 FROM "subprofiles" "chosen_persona"
-      WHERE "chosen_persona"."id" = ${chosenPersonaIdExpression}
-        AND "chosen_persona"."removed_at" IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM "content_moderation" "chosen_persona_moderation"
-           WHERE "chosen_persona_moderation"."subject_type" = '${SUBPROFILE_MODERATION_SUBJECT_TYPE}'
-             AND "chosen_persona_moderation"."subject_id" = "chosen_persona"."id"::text
-             AND (
-               "chosen_persona_moderation"."hidden_at" IS NOT NULL
-               OR "chosen_persona_moderation"."removed_at" IS NOT NULL
-             )
-        )
    )`;
 }
 

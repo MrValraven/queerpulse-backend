@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -32,6 +33,7 @@ import {
   EVENT_COMMUNITY_INVITED,
 } from './event.events';
 import { EventsService } from './events.service';
+import { GatheringFamily } from './gathering-family';
 
 interface InsertBuilderMock {
   insert: jest.Mock;
@@ -117,7 +119,7 @@ describe('EventCommunitiesService', () => {
     update: jest.Mock;
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
-    manager: { transaction: jest.Mock };
+    manager: { transaction: jest.Mock; query: jest.Mock };
   };
   let transactionManager: {
     findOne: jest.Mock;
@@ -161,7 +163,10 @@ describe('EventCommunitiesService', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => insertBuilder),
-      manager: { transaction: jest.fn() },
+      manager: {
+        transaction: jest.fn(),
+        query: jest.fn().mockResolvedValue([{ is_house: false }]),
+      },
     };
     transactionManager = {
       findOne: jest.fn().mockResolvedValue({ id: 'event-1' }),
@@ -237,6 +242,45 @@ describe('EventCommunitiesService', () => {
         service.invite('pride-picnic', 'stranger', 'drag-club'),
       ).rejects.toBeInstanceOf(ForbiddenException);
       expect(insertBuilder.execute).not.toHaveBeenCalled();
+    });
+
+    it('refuses a guest community on a Music event QueerPulse hosts with music_event_community_unavailable', async () => {
+      events.findOne.mockResolvedValue(
+        eventRow({
+          hostId: 'house-1',
+          communityId: null,
+          gatheringFamily: GatheringFamily.Music,
+        }),
+      );
+      eventCommunities.manager.query.mockResolvedValue([{ is_house: true }]);
+
+      const caught: unknown = await service
+        .invite('pride-picnic', 'house-1', 'drag-club')
+        .catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(HttpException);
+      const refusal = caught as HttpException;
+      expect(refusal.getStatus()).toBe(400);
+      expect(refusal.getResponse()).toMatchObject({
+        code: 'music_event_community_unavailable',
+      });
+      expect(eventCommunities.manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('"is_house"'),
+        ['house-1'],
+      );
+      expect(communities.findOne).not.toHaveBeenCalled();
+      expect(insertBuilder.execute).not.toHaveBeenCalled();
+    });
+
+    it('invites a guest community onto a member-hosted Music event as before', async () => {
+      events.findOne.mockResolvedValue(
+        eventRow({ gatheringFamily: GatheringFamily.Music }),
+      );
+
+      const view = await service.invite('pride-picnic', 'host-1', 'drag-club');
+
+      expect(view.status).toBe(EventCommunityStatus.Pending);
+      expect(insertBuilder.execute).toHaveBeenCalledTimes(1);
     });
 
     it('answers 400 while the gathering has no lead community', async () => {

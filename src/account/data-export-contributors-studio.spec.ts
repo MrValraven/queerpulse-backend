@@ -1,13 +1,16 @@
 import { DataSource } from 'typeorm';
 import { NEW_DOMAIN_EXPORT_CONTRIBUTORS } from './data-export-contributors';
 import {
+  StudioAccessRequestExportContributor,
   StudioCopyrightClaimsExportContributor,
   StudioListeningExportContributor,
   StudioPersonaCreditsExportContributor,
   StudioPlaylistAdditionsExportContributor,
   StudioPlaylistSeatsExportContributor,
   StudioPlaylistsExportContributor,
+  StudioPurchasesExportContributor,
   StudioReleaseRemindersExportContributor,
+  StudioSalesExportContributor,
 } from './data-export-contributors-studio';
 import { EXPORT_CSV_CATEGORIES } from './export-archive';
 
@@ -657,6 +660,338 @@ describe('StudioListeningExportContributor', () => {
     expect(supporterSql).toContain('WHERE "supporter"."user_id" = $1');
     expect(supporterSql).toContain(
       'ORDER BY "supporter"."created_at" ASC, "supporter"."subprofile_id" ASC',
+    );
+  });
+});
+
+describe('StudioAccessRequestExportContributor', () => {
+  let query: jest.Mock;
+  let contributor: StudioAccessRequestExportContributor;
+
+  beforeEach(() => {
+    query = jest.fn();
+    contributor = new StudioAccessRequestExportContributor({
+      query,
+    } as unknown as DataSource);
+  });
+
+  it('rides on the profile category under its own archive key', () => {
+    expect([contributor.category, contributor.archiveKey]).toEqual([
+      'profile',
+      'studioAccessRequest',
+    ]);
+  });
+
+  it('is registered and has a csv file right after the sales', () => {
+    expect(NEW_DOMAIN_EXPORT_CONTRIBUTORS).toContain(
+      StudioAccessRequestExportContributor,
+    );
+    const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
+    expect(csvKeys.indexOf('studioAccessRequest')).toBe(
+      csvKeys.indexOf('studioSales') + 1,
+    );
+  });
+
+  it('writes the waiting request or nothing', async () => {
+    query.mockResolvedValueOnce([
+      {
+        wants_to_release: true,
+        created_at: new Date('2026-10-28T09:00:00.000Z'),
+      },
+    ]);
+    await expect(contributor.buildContribution(USER_ID)).resolves.toEqual([
+      { wantsToRelease: true, requestedAt: '2026-10-28T09:00:00.000Z' },
+    ]);
+
+    query.mockResolvedValueOnce([]);
+    await expect(contributor.buildContribution(USER_ID)).resolves.toEqual([]);
+  });
+
+  it('reads only the member row', async () => {
+    query.mockResolvedValueOnce([]);
+
+    await contributor.buildContribution(USER_ID);
+
+    const [requestSql, requestParams] = query.mock.calls[0] as [
+      string,
+      unknown[],
+    ];
+    expect(requestParams).toEqual([USER_ID]);
+    expect(requestSql).toContain('WHERE "request"."user_id" = $1');
+  });
+});
+
+describe('StudioPurchasesExportContributor', () => {
+  let query: jest.Mock;
+  let contributor: StudioPurchasesExportContributor;
+
+  beforeEach(() => {
+    query = jest.fn();
+    contributor = new StudioPurchasesExportContributor({
+      query,
+    } as unknown as DataSource);
+  });
+
+  it('rides on activityLog and subprofiles under their own keys, after the listening file', () => {
+    const salesContributor = new StudioSalesExportContributor({
+      query,
+    } as unknown as DataSource);
+    expect([
+      contributor.category,
+      contributor.archiveKey,
+      salesContributor.category,
+      salesContributor.archiveKey,
+    ]).toEqual([
+      'activityLog',
+      'studioPurchases',
+      'subprofiles',
+      'studioSales',
+    ]);
+    expect(NEW_DOMAIN_EXPORT_CONTRIBUTORS).toContain(
+      StudioPurchasesExportContributor,
+    );
+    expect(NEW_DOMAIN_EXPORT_CONTRIBUTORS).toContain(
+      StudioSalesExportContributor,
+    );
+    const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
+    const listeningIndex = csvKeys.indexOf('studioListening');
+    expect([
+      csvKeys.indexOf('studioPurchases'),
+      csvKeys.indexOf('studioSales'),
+    ]).toEqual([listeningIndex + 1, listeningIndex + 2]);
+  });
+
+  it('writes the member purchases oldest first with snapshots, status, wall choice and dates', async () => {
+    query.mockResolvedValueOnce([
+      {
+        item_kind: 'release',
+        item_title: 'Lisbon at four',
+        artist_name: 'Night Shift',
+        amount_cents: 700,
+        reference_code: 'QP7K3F',
+        payer_name: 'Ana S',
+        status: 'confirmed',
+        decline_reason: null,
+        decline_note: null,
+        is_on_wall: true,
+        shown_as: 'River Ink',
+        created_at: new Date('2026-10-20T10:00:00.000Z'),
+        decided_at: new Date('2026-10-21T09:00:00.000Z'),
+      },
+      {
+        item_kind: 'track',
+        item_title: 'Opening',
+        artist_name: 'Night Shift',
+        amount_cents: 150,
+        reference_code: 'QP2M9H',
+        payer_name: null,
+        status: 'pending',
+        decline_reason: null,
+        decline_note: null,
+        is_on_wall: false,
+        shown_as: null,
+        created_at: new Date('2026-10-22T10:00:00.000Z'),
+        decided_at: null,
+      },
+    ]);
+
+    expect(await contributor.buildContribution(USER_ID)).toEqual([
+      {
+        itemKind: 'release',
+        itemTitle: 'Lisbon at four',
+        artist: 'Night Shift',
+        amountCents: 700,
+        referenceCode: 'QP7K3F',
+        payerName: 'Ana S',
+        status: 'confirmed',
+        declineReason: null,
+        declineNote: null,
+        isOnWall: true,
+        shownAs: 'River Ink',
+        createdAt: '2026-10-20T10:00:00.000Z',
+        decidedAt: '2026-10-21T09:00:00.000Z',
+      },
+      {
+        itemKind: 'track',
+        itemTitle: 'Opening',
+        artist: 'Night Shift',
+        amountCents: 150,
+        referenceCode: 'QP2M9H',
+        payerName: null,
+        status: 'pending',
+        declineReason: null,
+        declineNote: null,
+        isOnWall: false,
+        shownAs: null,
+        createdAt: '2026-10-22T10:00:00.000Z',
+        decidedAt: null,
+      },
+    ]);
+    expect(
+      query.mock.calls.map(([, parameters]) => parameters as unknown),
+    ).toEqual([[USER_ID]]);
+  });
+
+  it('reads only the buyer rows, oldest first, with the wall choice as account, persona or null', async () => {
+    query.mockResolvedValueOnce([]);
+
+    await contributor.buildContribution(USER_ID);
+
+    const [purchaseSql] = query.mock.calls[0] as [string, unknown[]];
+    expect(purchaseSql).toContain('WHERE "purchase"."buyer_user_id" = $1');
+    expect(purchaseSql).toContain('LEFT JOIN "subprofiles" "chosen"');
+    expect(purchaseSql).toContain(`ELSE 'account' END AS "shown_as"`);
+    expect(purchaseSql).toContain(
+      'ORDER BY "purchase"."created_at" ASC, "purchase"."id" ASC',
+    );
+  });
+});
+
+describe('StudioSalesExportContributor', () => {
+  const PERSONA_ID = '73000000-0000-4000-8000-000000000001';
+  const BUYER_ID = '74000000-0000-4000-8000-000000000001';
+  let query: jest.Mock;
+  let find: jest.Mock;
+  let contributor: StudioSalesExportContributor;
+
+  function saleRow(
+    buyerUserId: string | null,
+    status: string,
+    createdAt: string,
+  ) {
+    return {
+      subprofile_id: PERSONA_ID,
+      buyer_user_id: buyerUserId,
+      item_kind: 'release',
+      item_title: 'Lisbon at four',
+      amount_cents: 700,
+      reference_code: 'QP7K3F',
+      payer_name: 'Ana S',
+      status,
+      decline_reason: null,
+      decline_note: null,
+      created_at: new Date(createdAt),
+      decided_at: null,
+    };
+  }
+
+  beforeEach(() => {
+    query = jest.fn();
+    find = jest.fn();
+    contributor = new StudioSalesExportContributor({
+      query,
+      getRepository: jest.fn().mockReturnValue({ find }),
+    } as unknown as DataSource);
+  });
+
+  it('answers an empty list without more reads when the member runs no persona', async () => {
+    query.mockResolvedValueOnce([]);
+
+    await expect(contributor.buildContribution(USER_ID)).resolves.toEqual([]);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes the payment methods, then every sale, of each persona the member runs', async () => {
+    query
+      .mockResolvedValueOnce([{ id: PERSONA_ID, display_name: 'Night Shift' }])
+      .mockResolvedValueOnce([
+        {
+          subprofile_id: PERSONA_ID,
+          kind: 'iban',
+          label: null,
+          value: 'PT50000201231234567890154',
+          note: 'Use the reference',
+          position: 0,
+        },
+      ])
+      .mockResolvedValueOnce([
+        saleRow(BUYER_ID, 'confirmed', '2026-10-20T10:00:00.000Z'),
+        saleRow(null, 'pending', '2026-10-22T10:00:00.000Z'),
+      ]);
+    find.mockResolvedValueOnce([
+      {
+        userId: BUYER_ID,
+        slug: 'ana-silva',
+        firstName: 'Ana',
+        lastName: 'Silva',
+        pronouns: null,
+        avatarUrl: null,
+        photoVisible: false,
+      },
+    ]);
+
+    expect(await contributor.buildContribution(USER_ID)).toEqual([
+      {
+        type: 'paymentMethod',
+        persona: 'Night Shift',
+        kind: 'iban',
+        label: null,
+        value: 'PT50000201231234567890154',
+        note: 'Use the reference',
+        position: 0,
+      },
+      {
+        type: 'sale',
+        persona: 'Night Shift',
+        itemKind: 'release',
+        itemTitle: 'Lisbon at four',
+        amountCents: 700,
+        referenceCode: 'QP7K3F',
+        payerName: 'Ana S',
+        buyer: 'Ana Silva',
+        status: 'confirmed',
+        declineReason: null,
+        declineNote: null,
+        createdAt: '2026-10-20T10:00:00.000Z',
+        decidedAt: null,
+      },
+      {
+        type: 'sale',
+        persona: 'Night Shift',
+        itemKind: 'release',
+        itemTitle: 'Lisbon at four',
+        amountCents: 700,
+        referenceCode: 'QP7K3F',
+        payerName: 'Ana S',
+        buyer: 'Deleted account',
+        status: 'pending',
+        declineReason: null,
+        declineNote: null,
+        createdAt: '2026-10-22T10:00:00.000Z',
+        decidedAt: null,
+      },
+    ]);
+    expect(
+      query.mock.calls.map(([, parameters]) => parameters as unknown),
+    ).toEqual([[USER_ID], [[PERSONA_ID]], [[PERSONA_ID]]]);
+  });
+
+  it('reads only personas the member is in through subprofile_members', async () => {
+    query.mockResolvedValueOnce([]);
+
+    await contributor.buildContribution(USER_ID);
+
+    const [personaSql] = query.mock.calls[0] as [string, unknown[]];
+    expect(personaSql).toContain('"subprofile_members"');
+    expect(personaSql).toContain('"member"."user_id" = $1');
+  });
+
+  it('orders the methods by position and the sales oldest first', async () => {
+    query
+      .mockResolvedValueOnce([{ id: PERSONA_ID, display_name: 'Night Shift' }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    find.mockResolvedValueOnce([]);
+
+    await contributor.buildContribution(USER_ID);
+
+    const [methodSql] = query.mock.calls[1] as [string, unknown[]];
+    const [saleSql] = query.mock.calls[2] as [string, unknown[]];
+    expect(methodSql).toContain(
+      'ORDER BY "method"."subprofile_id" ASC, "method"."position" ASC',
+    );
+    expect(saleSql).toContain(
+      'ORDER BY "sale"."created_at" ASC, "sale"."id" ASC',
     );
   });
 });

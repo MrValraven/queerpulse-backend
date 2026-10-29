@@ -34,6 +34,13 @@ import { StudioReleaseExtrasService } from './studio-release-extras.service';
 import { EMPTY_RELEASE_EXTRAS } from './studio-response';
 import { listenablePersonaSql } from './studio-visibility';
 import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
+import { findFoundingArtistIds } from './studio-founding-artists-read';
+
+jest.mock('./studio-founding-artists-read', () => ({
+  findFoundingArtistIds: jest.fn(),
+}));
+
+const findFoundingArtistIdsMock = jest.mocked(findFoundingArtistIds);
 
 const VIEWER_ID = '8b000000-0000-4000-8000-000000000001';
 const PERSONA_ID = '8b000000-0000-4000-8000-000000000002';
@@ -114,6 +121,7 @@ const releaseRow = (
     type: StudioReleaseType.Mix,
     description: null,
     genre: null,
+    genres: [],
     coverKey: null,
     releasedOn: null,
     status,
@@ -146,7 +154,11 @@ const thrownBy = async (pending: Promise<unknown>): Promise<HttpException> => {
 };
 
 describe('StudioCatalogService', () => {
-  let releases: { createQueryBuilder: jest.Mock; find: jest.Mock };
+  let releases: {
+    createQueryBuilder: jest.Mock;
+    find: jest.Mock;
+    manager: object;
+  };
   let tracks: {
     createQueryBuilder: jest.Mock;
     find: jest.Mock;
@@ -174,7 +186,10 @@ describe('StudioCatalogService', () => {
     releases = {
       createQueryBuilder: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
+      manager: {},
     };
+    findFoundingArtistIdsMock.mockReset();
+    findFoundingArtistIdsMock.mockResolvedValue(new Set<string>());
     tracks = {
       createQueryBuilder: jest.fn(() => queryBuilderMock()),
       find: jest.fn().mockResolvedValue([]),
@@ -288,7 +303,7 @@ describe('StudioCatalogService', () => {
       releases.createQueryBuilder.mockReturnValueOnce(narrowed);
       await service.listReleases(VIEWER_ID, undefined, { genre: 'fado' });
       expect(narrowed.andWhere).toHaveBeenCalledWith(
-        '"release"."genre" = :studioGenre',
+        '"release"."genres" @> ARRAY[:studioGenre]::varchar[]',
         { studioGenre: 'fado' },
       );
 
@@ -302,6 +317,20 @@ describe('StudioCatalogService', () => {
       ).toBe(false);
     });
 
+    // The predicate is containment, so a release carrying fado and pop is
+    // found by either genre filter.
+    it('matches a release by any one of its genres with the same containment test', async () => {
+      for (const genre of ['fado', 'pop'] as const) {
+        const narrowed = queryBuilderMock();
+        releases.createQueryBuilder.mockReturnValueOnce(narrowed);
+        await service.listReleases(VIEWER_ID, undefined, { genre });
+        expect(narrowed.andWhere).toHaveBeenCalledWith(
+          '"release"."genres" @> ARRAY[:studioGenre]::varchar[]',
+          { studioGenre: genre },
+        );
+      }
+    });
+
     it('narrows the feed by mood and by scene, combined with the genre', async () => {
       const narrowed = queryBuilderMock();
       releases.createQueryBuilder.mockReturnValueOnce(narrowed);
@@ -311,7 +340,7 @@ describe('StudioCatalogService', () => {
         sceneId: 'f1000000-0000-4000-8000-000000000001',
       });
       expect(narrowed.andWhere).toHaveBeenCalledWith(
-        '"release"."genre" = :studioGenre',
+        '"release"."genres" @> ARRAY[:studioGenre]::varchar[]',
         { studioGenre: 'electronic' },
       );
       expect(narrowed.andWhere).toHaveBeenCalledWith(
@@ -358,9 +387,10 @@ describe('StudioCatalogService', () => {
         covers: { fado: 'https://covers.example/fado.jpg' },
       });
       expect(queryBuilder.select).toHaveBeenCalledWith(
-        'DISTINCT ON ("release"."genre") "release"."genre"',
+        'DISTINCT ON ("genre") unnest("release"."genres")',
         'genre',
       );
+      expect(queryBuilder.orderBy).toHaveBeenCalledWith('"genre"', 'ASC');
       expect(queryBuilder.addOrderBy).toHaveBeenCalledWith(
         '"release"."cover_key" IS NULL',
         'ASC',
@@ -370,14 +400,32 @@ describe('StudioCatalogService', () => {
         'DESC',
         'NULLS LAST',
       );
-      expect(andWherePredicates(queryBuilder)).toContain(
-        '"release"."genre" IS NOT NULL',
-      );
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         queryBuilder,
         VIEWER_ID,
         '"persona"."user_id"',
       );
+    });
+
+    // One release carrying two genres comes back as one row per genre, so
+    // both genres are listed and both get the cover of that release.
+    it('lists every genre a release carries, each with that release cover', async () => {
+      const queryBuilder = queryBuilderMock();
+      queryBuilder.getRawMany.mockResolvedValue([
+        { genre: 'fado', cover_key: 'https://covers.example/two.jpg' },
+        { genre: 'pop', cover_key: 'https://covers.example/two.jpg' },
+      ]);
+      releases.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      const result = await service.listGenres(VIEWER_ID);
+
+      expect(result).toEqual({
+        genres: ['fado', 'pop'],
+        covers: {
+          fado: 'https://covers.example/two.jpg',
+          pop: 'https://covers.example/two.jpg',
+        },
+      });
     });
   });
 
@@ -464,7 +512,7 @@ describe('StudioCatalogService', () => {
         .value as QueryBuilderMock;
       for (const queryBuilder of [releaseSearch, trackSearch]) {
         expect(queryBuilder.andWhere).toHaveBeenCalledWith(
-          '"release"."genre" = :studioGenre',
+          '"release"."genres" @> ARRAY[:studioGenre]::varchar[]',
           { studioGenre: 'fado' },
         );
       }
@@ -580,7 +628,7 @@ describe('StudioCatalogService', () => {
       expect(trackSearch.limit).toHaveBeenCalledWith(21);
       expect(trackSearch.offset).not.toHaveBeenCalled();
       expect(trackSearch.andWhere).toHaveBeenCalledWith(
-        '"release"."genre" = :studioGenre',
+        '"release"."genres" @> ARRAY[:studioGenre]::varchar[]',
         { studioGenre: 'fado' },
       );
       expect(subprofiles.createQueryBuilder).not.toHaveBeenCalled();
@@ -1403,6 +1451,26 @@ describe('StudioCatalogService', () => {
       ]);
       expect(artist.followerCount).toBe(12);
       expect(artist.isFollowing).toBe(true);
+    });
+
+    it('marks a founding artist on the artist page', async () => {
+      releases.find.mockResolvedValue([releaseRow(1)]);
+      subprofiles.createQueryBuilder.mockReturnValue(
+        queryBuilderMock({ exists: true }),
+      );
+      findFoundingArtistIdsMock.mockResolvedValue(new Set([PERSONA_ID]));
+
+      const foundingView = await service.getArtist(VIEWER_ID, PERSONA_ID);
+
+      expect(foundingView.artist.isFoundingArtist).toBe(true);
+      expect(findFoundingArtistIdsMock).toHaveBeenCalledWith(releases.manager, [
+        PERSONA_ID,
+      ]);
+
+      findFoundingArtistIdsMock.mockResolvedValue(new Set<string>());
+      const plainView = await service.getArtist(VIEWER_ID, PERSONA_ID);
+
+      expect(plainView.artist.isFoundingArtist).toBe(false);
     });
 
     it('reads a persona nobody follows as zero followers and unfollowed', async () => {

@@ -49,7 +49,8 @@ export type StaffRoleId =
   | 'communities'
   | 'partnerships'
   | 'product_manager'
-  | 'cultural_producer';
+  | 'cultural_producer'
+  | 'music_manager_producer';
 
 export interface StaffRoleDef {
   id: StaffRoleId;
@@ -209,6 +210,17 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       'Maintain the landing-page feature slots (admin/landing) and the press kit (admin/press-kit), alongside editorial',
       'NOT a member directory: the landing picker only lists members who set an Open profile AND explicitly consented to being featured',
       'NOT the editorial queues: story submissions, writer applications, commission interest and the film-club titles stay with editorial',
+    ],
+  },
+  music_manager_producer: {
+    id: 'music_manager_producer',
+    hasPublicStaffBadge: true,
+    grants: [
+      'Create, edit and cancel the music events QueerPulse hosts (admin/music-events), and run them: lineup, announcements, the guest list with its needs and answers, the CSV export, waitlist, removing and barring a guest, invites, door check-in, co-hosts and Go Together',
+      'Book only Studio artists onto a lineup',
+      "NOT a member's own event: every route resolves the event by slug AND checks that its host is the house account AND its family is Music, or it answers 404",
+      'NOT delete an event',
+      'NOT co-host: the grant never seats its holder, another holder, or a moderator or admin as a co-host',
     ],
   },
 };

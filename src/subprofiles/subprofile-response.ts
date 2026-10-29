@@ -245,6 +245,8 @@ export interface SubprofilePublicView {
   // nested persona even when viewing a co-owner's profile, without an N+1
   // members fetch per card.
   viewerIsMember: boolean;
+  /** Studio landing v2: a founding Studio artist, for the badge on the persona page. */
+  isFoundingArtist: boolean;
   // Personas redesign Phase 0 (design plan "Shared Contract"). Display data —
   // present on the public view for BOTH linked and unlinked personas (not
   // identifying).
@@ -591,6 +593,7 @@ export function toPublicDTO(
   worksAt: ListingWorksAt[] = [],
   // The public event each `flash_days` item links to, keyed by item id.
   linkedEventsByItemId: ReadonlyMap<string, FlashDayEventRef> = new Map(),
+  isFoundingArtist = false,
 ): SubprofilePublicView {
   const visitorReadContext: ItemReadContext = {
     isOwnerAudience: false,
@@ -635,6 +638,7 @@ export function toPublicDTO(
     affiliations,
     worksAt,
     viewerIsMember,
+    isFoundingArtist,
     skinData: subprofile.skinData ?? null,
   };
   // Owner identity is exposed ONLY for linked personas — never leak the tie for

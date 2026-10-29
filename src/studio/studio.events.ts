@@ -48,3 +48,43 @@ export const STUDIO_EPISODE_PUBLISHED = 'studio.episode.published';
 export interface StudioEpisodePublishedEvent {
   trackId: string;
 }
+
+// Studio landing v2: access, preview request and preview approval events.
+
+/**
+ * Studio landing v2. Emitted by `StudioAccessService.grant` once its
+ * transaction has committed, for a new grant only (a repeat grant stays
+ * silent). `StudioAccessAlertsListener` tells the member they can open the
+ * Studio.
+ */
+export const STUDIO_ACCESS_GRANTED = 'studio.access.granted';
+
+export interface StudioAccessGrantedEvent {
+  userId: string;
+}
+
+/**
+ * Studio landing v2. Emitted by `AdminStudioLandingPreviewsService` once the
+ * transaction that files a preview request has committed.
+ * `StudioLandingAlertsListener` tells the members who run the artist.
+ */
+export const STUDIO_LANDING_PREVIEW_REQUESTED =
+  'studio.landing.preview_requested';
+
+export interface StudioLandingPreviewRequestedEvent {
+  previewId: string;
+}
+
+/**
+ * Studio landing v2. Emitted by `StudioLandingPreviewsService.approve` once
+ * its transaction has committed, and only for the member who won the
+ * approval. `StudioLandingAlertsListener` tells the other members and the
+ * credited artists that the preview is live.
+ */
+export const STUDIO_LANDING_PREVIEW_APPROVED =
+  'studio.landing.preview_approved';
+
+export interface StudioLandingPreviewApprovedEvent {
+  previewId: string;
+  approverUserId: string;
+}

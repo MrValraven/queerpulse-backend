@@ -50,6 +50,9 @@ import {
   EventCommunityInvitedEvent,
 } from './event.events';
 import { EventsService } from './events.service';
+import { GatheringFamily } from './gathering-family';
+import { houseMusicEventError } from './house-music-event-errors';
+import { isHouseAccountId } from './house-music-events';
 
 /** Columns `RETURNING (*)` surfaces for a freshly inserted guest row. */
 interface InsertedEventCommunityRow {
@@ -122,6 +125,14 @@ export class EventCommunitiesService {
   ): Promise<EventGuestCommunityView> {
     const event = await this.loadEventBySlugOr404(slug);
     await this.assertOrganizer(event, inviterId);
+    // A Music event QueerPulse hosts is open to every member, so it takes no
+    // guest community either.
+    if (
+      event.gatheringFamily === GatheringFamily.Music &&
+      (await isHouseAccountId(this.eventCommunities.manager, event.hostId))
+    ) {
+      throw houseMusicEventError('music_event_community_unavailable');
+    }
     if (!event.communityId) {
       throw new BadRequestException(
         'Set a lead community before inviting guest communities',

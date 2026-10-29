@@ -4,7 +4,12 @@ import { ReportSubjectType } from '../reports/entities/report.entity';
 import { releasePlaylistCreditsOfPersona } from '../studio/studio-playlist-credit-release';
 import { forgetTeamLinksOfPersona } from '../listings/listing-team-unlink';
 import { forgetDiscoveryTiesOfPersona } from '../studio/studio-discovery-unlink';
+import { forgetLandingTiesOfPersona } from '../studio/studio-landing-unlink';
 import { forgetListeningOfPersona } from '../studio/studio-listening-unlink';
+import {
+  forgetSalesOfPersona,
+  StudioSalesUnlinkOutcome,
+} from '../studio/studio-purchases-unlink';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 
 /**
@@ -69,6 +74,14 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * Studio listening: daily totals, listens and supporter opt-ins go before the releases and tracks get fresh ids
  * (`forgetListeningOfPersona`).
  *
+ * Studio landing v2: the Studio page card, the founding place and the previews of its own tracks go before the releases and tracks get fresh ids
+ * (`forgetLandingTiesOfPersona`).
+ *
+ * Studio purchases: payment methods, prices and pending claims go, and the
+ * sales let go of the persona, before the releases and tracks get fresh ids,
+ * while confirmed buyers keep their files (`forgetSalesOfPersona`, whose
+ * outcome reaches `onSalesForgotten`).
+ *
  * Meet the team: every team link the persona holds on a business listing is
  * deleted (`forgetTeamLinksOfPersona`).
  *
@@ -101,6 +114,7 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 export async function issueFreshPersonaId(
   manager: EntityManager,
   previousSubprofileId: string,
+  onSalesForgotten?: (outcome: StudioSalesUnlinkOutcome) => void,
 ): Promise<string> {
   const freshSubprofileId = randomUUID();
   await manager.query(`UPDATE "subprofiles" SET "id" = $1 WHERE "id" = $2`, [
@@ -123,6 +137,8 @@ export async function issueFreshPersonaId(
   await forgetDiscoveryTiesOfPersona(manager, freshSubprofileId);
   // Studio listening: daily totals, listens and supporter opt-ins go before the releases and tracks get fresh ids.
   await forgetListeningOfPersona(manager, freshSubprofileId);
+  // Studio landing v2: the Studio page card, the founding place and the previews of its own tracks go before the releases and tracks get fresh ids.
+  await forgetLandingTiesOfPersona(manager, freshSubprofileId);
   await manager.query(
     `UPDATE "subprofile_item_revisions"
         SET "subprofile_id" = $1
@@ -139,6 +155,10 @@ export async function issueFreshPersonaId(
       SUBPROFILE_MODERATION_SUBJECT_TYPE,
     ],
   );
+  // Studio purchases: payment methods, prices, pending claims and the persona link go before the releases and tracks get fresh ids; confirmed buyers keep their files.
+  // Runs once the takedown above sits on the fresh id, so a persona under a moderator takedown keeps no files for its buyers.
+  const salesOutcome = await forgetSalesOfPersona(manager, freshSubprofileId);
+  onSalesForgotten?.(salesOutcome);
   await manager.query(
     `UPDATE "reports"
         SET "subject_id" = $1

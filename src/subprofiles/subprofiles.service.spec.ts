@@ -82,6 +82,9 @@ import { SubprofileUpdatesService } from './subprofile-updates.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { editableSnapshot, SubprofilesService } from './subprofiles.service';
 import { SUBPROFILE_DELETED } from './subprofile.events';
+import { STUDIO_PURCHASE_EXPIRED } from '../studio/studio-purchase.events';
+import { UNLINK_PENDING_EXPIRE_SQL } from '../studio/studio-purchases-unlink';
+import { studioLandingMemoGeneration } from '../studio/studio-landing-memo';
 import type { FlashDayEventRef } from './flash-day-event-links';
 import { TATTOO_ITEM_SECTIONS } from './tattoo-artist-vocab';
 
@@ -4731,6 +4734,48 @@ describe('SubprofilesService', () => {
       expect(manager.remove).not.toHaveBeenCalled();
     });
 
+    // Studio purchases: the persona's pending claims expire inside the
+    // delete, and each buyer hears it once the delete has committed.
+    it('expires the pending claims before the row goes and announces each after the commit', async () => {
+      subprofiles.findOne.mockResolvedValue(makeSubprofile());
+      rosterWith('user-1');
+      const commit = jest.fn();
+      dataSource.transaction.mockImplementation(
+        async (
+          runInTransaction: (entityManager: typeof manager) => Promise<unknown>,
+        ) => {
+          const result = await runInTransaction(manager);
+          commit();
+          return result;
+        },
+      );
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql === UNLINK_PENDING_EXPIRE_SQL
+            ? [{ id: 'purchase-1' }, { id: 'purchase-2' }]
+            : undefined,
+        ),
+      );
+
+      await service.remove('user-1', 'sp-1');
+
+      const expireIndex = manager.query.mock.calls.findIndex(
+        ([sql]) => sql === UNLINK_PENDING_EXPIRE_SQL,
+      );
+      expect(manager.query.mock.calls[expireIndex]?.[1]).toEqual(['sp-1']);
+      const expireOrder =
+        manager.query.mock.invocationCallOrder[expireIndex] ?? 0;
+      const removeOrder = manager.remove.mock.invocationCallOrder[0] ?? 0;
+      expect(expireOrder).toBeLessThan(removeOrder);
+      expect(eventEmitter.emit.mock.calls).toEqual([
+        [STUDIO_PURCHASE_EXPIRED, { purchaseId: 'purchase-1' }],
+        [STUDIO_PURCHASE_EXPIRED, { purchaseId: 'purchase-2' }],
+      ]);
+      expect(commit.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+        eventEmitter.emit.mock.invocationCallOrder[0] ?? 0,
+      );
+    });
+
     // Studio v2: a playlist credited to this persona turns private and loses
     // the credit inside the delete, so it never reads as the owner's own.
     it('releases the playlists credited to the persona before the row goes', async () => {
@@ -5679,6 +5724,30 @@ describe('SubprofilesService', () => {
             status: SubprofileStatus.Published,
             handle: 'robin-nightform',
           });
+
+        it('bumps the Studio landing memo inside the unlink transaction and again after the commit', async () => {
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+          const generationBefore = studioLandingMemoGeneration();
+          const generationAtCommit: number[] = [];
+          dataSource.transaction.mockImplementation(
+            async (
+              runInTransaction: (
+                entityManager: typeof manager,
+              ) => Promise<unknown>,
+            ) => {
+              const result = await runInTransaction(manager);
+              generationAtCommit.push(studioLandingMemoGeneration());
+              return result;
+            },
+          );
+
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          expect(generationAtCommit).toEqual([generationBefore + 1]);
+          expect(studioLandingMemoGeneration()).toBe(generationBefore + 2);
+        });
 
         it('moves the row to a new id after the cut, and saves and answers under it', async () => {
           subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());

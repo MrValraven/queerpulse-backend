@@ -35,6 +35,16 @@
  * is skipped when in doubt. Case-blind, and the staff routes under
  * `/admin/studio/` are logged as usual.
  *
+ * Studio purchases adds the buyer routes (`/studio/purchases`,
+ * `/me/studio-purchases`, any subpath), the offer and wall reads under
+ * `/studio/releases/<id>/`, the sales routes (`/studio/sales`) and the owner
+ * routes `payment-methods`, `purchases` and `sales` under
+ * `/studio/artists/<id>/`, any method, so no purchase, amount or persona sits
+ * beside a member id.
+ *
+ * Studio landing v2 adds the owner preview routes, so a persona id never sits
+ * beside an owner's member id.
+ *
  * This module imports nothing: `instrument.ts` reads it before `Sentry.init`.
  */
 export function isStudioListeningRequest(
@@ -54,12 +64,15 @@ export function isStudioListeningRequest(
     ) ||
     (STUDIO_RELEASE_READ_PATTERN.test(path) && isReadMethod(method)) ||
     /(?:^|\/)studio\/artists\/[^/]+\/press-kit\/?$/i.test(path) ||
-    /(?:^|\/)studio\/artists\/[^/]+\/(?:stats|plays|placements|milestones|supporters?)(?:\/|$)/i.test(
+    /(?:^|\/)studio\/artists\/[^/]+\/(?:stats|plays|placements|milestones|supporters?|payment-methods|purchases|sales|landing-previews)(?:\/|$)/i.test(
       path,
     ) ||
     /(?:^|\/)studio\/milestones\/[^/]+(?:\/|$)/i.test(path) ||
     /(?:^|\/)studio\/plays\/?$/i.test(path) ||
     /(?:^|\/)me\/studio-listening(?:\/|$)/i.test(path) ||
+    /(?:^|\/)studio\/(?:purchases|sales)(?:\/|$)/i.test(path) ||
+    /(?:^|\/)me\/studio-purchases(?:\/|$)/i.test(path) ||
+    /(?:^|\/)studio\/releases\/[^/]+\/(?:offer|wall)(?:\/|$)/i.test(path) ||
     /(?:^|\/)studio\/search\/?$/i.test(path) ||
     /(?:^|\/)studio\/radio\/?$/i.test(path) ||
     /(?:^|\/)studio\/formats\/?$/i.test(path) ||
@@ -149,16 +162,19 @@ export function dropStudioListeningUrl(
  * Studio v3 adds the private preview page and the press kit pages, which name
  * a release or an artist a member was shown. Liked songs adds `/studio/liked`,
  * the member's own liked tracks. Studio listening adds `/studio/listening`,
- * the member's own history.
+ * the member's own history. Studio purchases adds `/studio/payments`, the
+ * artist's payment methods page, and the account page
+ * `/account/music-purchases`.
  */
 const STUDIO_LISTENING_PAGE_PATTERN =
-  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse|scene|preview|press|liked|listening)(?:\/|$)/i;
+  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse|scene|preview|press|liked|listening|payments)(?:\/|$)/i;
 
 function isStudioListeningReferer(referer: string): boolean {
   try {
     const { pathname } = new URL(referer, 'http://placeholder');
     return (
       STUDIO_LISTENING_PAGE_PATTERN.test(pathname) ||
+      /(?:^|\/)account\/music-purchases(?:\/|$)/i.test(pathname) ||
       isStudioListeningRequest(pathname)
     );
   } catch {

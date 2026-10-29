@@ -123,6 +123,23 @@ export function artistRefFromColumns(columns: PersonaColumns): StudioArtistRef {
   });
 }
 
+/** `openUpcomingEventSql` without its start after now: published, open to
+ *  browse, unmoderated and outside any space. The landing month count reads past events of the month. */
+export function openBrowsableEventSql(eventAlias: string): string {
+  const event = `"${eventAlias}"`;
+  const moderation = `"${eventAlias}_moderation"`;
+  const space = `"${eventAlias}_space"`;
+  return `(${event}."status" = '${EventStatus.Published}'
+    AND ${event}."visibility" IN ('${EventVisibility.Public}', '${EventVisibility.Members}')
+    AND NOT EXISTS (
+      SELECT 1 FROM "content_moderation" ${moderation}
+       WHERE ${moderation}."subject_type" = 'event'
+         AND ${moderation}."subject_id" = ${event}."id"::text
+         AND (${moderation}."hidden_at" IS NOT NULL OR ${moderation}."removed_at" IS NOT NULL)
+    )
+    AND (${event}."community_id" IS NULL OR NOT EXISTS (SELECT 1 FROM "communities" ${space} WHERE ${space}."id" = ${event}."community_id" AND ${space}."parent_id" IS NOT NULL)))`;
+}
+
 /**
  * An event every member may browse right now: published, starting after
  * now, open to browse (public or members) and clear of moderator action
@@ -136,19 +153,7 @@ export function artistRefFromColumns(columns: PersonaColumns): StudioArtistRef {
  * search (Task 9) reads it as written.
  */
 export function openUpcomingEventSql(eventAlias: string): string {
-  const event = `"${eventAlias}"`;
-  const moderation = `"${eventAlias}_moderation"`;
-  const space = `"${eventAlias}_space"`;
-  return `(${event}."status" = '${EventStatus.Published}'
-    AND ${event}."start_at" > now()
-    AND ${event}."visibility" IN ('${EventVisibility.Public}', '${EventVisibility.Members}')
-    AND NOT EXISTS (
-      SELECT 1 FROM "content_moderation" ${moderation}
-       WHERE ${moderation}."subject_type" = 'event'
-         AND ${moderation}."subject_id" = ${event}."id"::text
-         AND (${moderation}."hidden_at" IS NOT NULL OR ${moderation}."removed_at" IS NOT NULL)
-    )
-    AND (${event}."community_id" IS NULL OR NOT EXISTS (SELECT 1 FROM "communities" ${space} WHERE ${space}."id" = ${event}."community_id" AND ${space}."parent_id" IS NOT NULL)))`;
+  return `(${openBrowsableEventSql(eventAlias)} AND "${eventAlias}"."start_at" > now())`;
 }
 
 /** The staff shelves, each pick joined to its release and the release's
