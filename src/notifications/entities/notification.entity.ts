@@ -1920,6 +1920,30 @@ export enum NotificationType {
   ListingTeamAccepted = 'listing_team_accepted',
 
   /**
+   * Meet the team, members. A listing's managers invited a member to join the
+   * listing's team. To the invited member only; no actor, unbundled. Category
+   * Listings; pushed, opening the member's own profile at `#places`.
+   *
+   * PAYLOAD: `{ listingName, listingSlug, roleLabel }`.
+   *
+   * Migration: `AddListingTeamMemberNotificationTypes1838500100000`.
+   */
+  ListingTeamMemberInvite = 'listing_team_member_invite',
+
+  /**
+   * Meet the team, members. An invited member accepted. To the listing's
+   * owner and active co-managers, not the accepting member; no actor,
+   * unbundled. Category Listings; pushed, opening the listing editor's Team
+   * section.
+   *
+   * PAYLOAD: `{ listingRef, listingName, listingSlug, memberName,
+   * memberSlug }`.
+   *
+   * Migration: `AddListingTeamMemberNotificationTypes1838500100000`.
+   */
+  ListingTeamMemberAccepted = 'listing_team_member_accepted',
+
+  /**
    * Studio landing page. Our team granted this member Studio access, from
    * Waiting for Studio or the member drawer.
    *

@@ -276,6 +276,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   // Meet the team: the other side confirmed a team link you started.
   [NotificationType.ListingTeamAccepted]:
     NotificationPreferenceCategory.Listings,
+  // Meet the team, members: a listing you manage invited you to its team.
+  [NotificationType.ListingTeamMemberInvite]:
+    NotificationPreferenceCategory.Listings,
+  // Meet the team, members: a member accepted your listing's team invite.
+  [NotificationType.ListingTeamMemberAccepted]:
+    NotificationPreferenceCategory.Listings,
   [NotificationType.ListingOwnerOffer]: NotificationPreferenceCategory.Listings,
 
   // --- Opportunities --------------------------------------------------------

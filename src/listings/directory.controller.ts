@@ -294,8 +294,9 @@ export class DirectoryController {
     @CurrentUser() user: CurrentUserData | undefined,
     @Param('slug') slug: string,
   ) {
-    // The viewer id reaches the `team` block alone, which drops personas
-    // whose owner has a block with this caller. An anonymous caller passes
+    // The viewer id reaches the `team` block alone, which drops personas and
+    // members that have a block with this caller and members who hid their
+    // profile from this caller. An anonymous caller passes
     // `null`, so the CDN-cached variant names no viewer.
     return this.directoryService.getDirectoryBySlug(
       slug,

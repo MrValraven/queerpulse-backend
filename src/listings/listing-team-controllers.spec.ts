@@ -66,6 +66,12 @@ const teamRoutes: RouteRow[] = [
     status: 201,
   },
   {
+    handler: 'inviteMember',
+    method: RequestMethod.POST,
+    path: ':ref/team/member-invites',
+    status: 201,
+  },
+  {
     handler: 'reorder',
     method: RequestMethod.PUT,
     path: ':ref/team/order',
@@ -193,7 +199,10 @@ describe('Listing team controllers', () => {
 
   it('keeps restricted members out of invite, approve, edit, request and accept alone', () => {
     const guarded: Array<[ControllerClass, string[]]> = [
-      [ListingTeamController, ['invite', 'approve', 'updateRoleLabel']],
+      [
+        ListingTeamController,
+        ['invite', 'inviteMember', 'approve', 'updateRoleLabel'],
+      ],
       [ListingTeamLinksController, ['request', 'accept']],
     ];
     for (const [controller, expectedNames] of guarded) {
@@ -208,6 +217,7 @@ describe('Listing team controllers', () => {
     const expectedLimits: Array<[ControllerClass, string, number]> = [
       [ListingTeamController, 'searchCandidates', 30],
       [ListingTeamController, 'invite', 10],
+      [ListingTeamController, 'inviteMember', 10],
       [ListingTeamLinksController, 'searchCandidates', 30],
       [ListingTeamLinksController, 'request', 10],
     ];
@@ -220,7 +230,12 @@ describe('Listing team controllers', () => {
 
   it('declares the literal segments before the member id', () => {
     const teamOrder = methodOrderOf(ListingTeamController);
-    for (const literal of ['searchCandidates', 'invite', 'reorder']) {
+    for (const literal of [
+      'searchCandidates',
+      'invite',
+      'inviteMember',
+      'reorder',
+    ]) {
       expect(teamOrder.indexOf(literal)).toBeLessThan(
         teamOrder.indexOf('approve'),
       );
@@ -265,6 +280,7 @@ describe('Listing team controllers', () => {
       listForManager: jest.fn().mockResolvedValue('list'),
       searchCandidates: jest.fn().mockResolvedValue('search'),
       invite: jest.fn().mockResolvedValue('invite'),
+      inviteMember: jest.fn().mockResolvedValue('inviteMember'),
       reorder: jest.fn().mockResolvedValue('reorder'),
       approve: jest.fn().mockResolvedValue('approve'),
       decline: jest.fn().mockResolvedValue(undefined),
@@ -276,6 +292,7 @@ describe('Listing team controllers', () => {
       teamService as unknown as ListingTeamService,
     );
     const inviteBody = { subprofileId: 'persona-1' };
+    const memberInviteBody = { memberSlug: 'ana-silva', roleLabel: 'Chef' };
     const approveBody = { roleLabel: 'Chef' };
     const labelBody = { roleLabel: null };
     const orderBody = { memberIds: ['member-1'] };
@@ -283,6 +300,7 @@ describe('Listing team controllers', () => {
     await teamController.list(user, 'ref-1');
     await teamController.searchCandidates(user, 'ref-1', { q: 'ana' });
     await teamController.invite(user, 'ref-1', inviteBody);
+    await teamController.inviteMember(user, 'ref-1', memberInviteBody);
     await teamController.reorder(user, 'ref-1', orderBody);
     await teamController.approve(user, 'ref-1', 'member-1', approveBody);
     await teamController.decline(user, 'ref-1', 'member-1');
@@ -300,6 +318,11 @@ describe('Listing team controllers', () => {
       'ref-1',
       'user-1',
       inviteBody,
+    );
+    expect(teamService.inviteMember).toHaveBeenCalledWith(
+      'ref-1',
+      'user-1',
+      memberInviteBody,
     );
     expect(teamService.reorder).toHaveBeenCalledWith(
       'ref-1',

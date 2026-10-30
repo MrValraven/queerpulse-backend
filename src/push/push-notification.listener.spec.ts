@@ -2414,4 +2414,120 @@ describe('PushNotificationListener', () => {
       expect(listings.push.sendToUsers).not.toHaveBeenCalled();
     });
   });
+
+  describe('Listing team members', () => {
+    const memberInvitePayload = {
+      listingName: 'Ink House',
+      listingSlug: 'ink-house',
+      roleLabel: 'Tattoo artist',
+    };
+    const memberAcceptedPayload = {
+      listingRef: 'QPL-2026-0042',
+      listingName: 'Ink House',
+      listingSlug: 'ink-house',
+      memberName: 'Ana Silva',
+      memberSlug: 'ana-silva',
+    };
+
+    it("pushes an invite behind Listings and opens the member's Places section", async () => {
+      const { listener, push, notificationPreferences } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.ListingTeamMemberInvite,
+            memberInvitePayload,
+          ),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'listings');
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.title).toBe('Team invite');
+      expect(payload.body).toBe('Ink House invited you to join the team');
+      expect(payload.data.url).toBe('/account/profile#places');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:listingTeamMemberInvite.title',
+        bodyKey: 'push:listingTeamMemberInvite.body',
+        params: { listing: 'Ink House' },
+      });
+    });
+
+    it('pushes an acceptance behind Listings and opens the Team section', async () => {
+      const { listener, push, notificationPreferences } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.ListingTeamMemberAccepted,
+            memberAcceptedPayload,
+          ),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'listings');
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.title).toBe('Team invite accepted');
+      expect(payload.body).toBe(
+        'Ana Silva accepted the team invite for Ink House',
+      );
+      expect(payload.data.url).toBe(
+        '/local/directory/list/QPL-2026-0042/edit#lb-editor-team',
+      );
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:listingTeamMemberAccepted.title',
+        bodyKey: 'push:listingTeamMemberAccepted.body',
+        params: { member: 'Ana Silva', listing: 'Ink House' },
+      });
+    });
+
+    it('sends nothing for a member team payload missing a name or its listing ref', async () => {
+      const cases: Array<[NotificationType, Record<string, unknown>]> = [
+        [NotificationType.ListingTeamMemberInvite, memberInvitePayload],
+        [NotificationType.ListingTeamMemberAccepted, memberAcceptedPayload],
+      ];
+      const requiredKeys = ['listingName', 'memberName', 'listingRef'];
+      for (const [type, payload] of cases) {
+        for (const missingKey of requiredKeys) {
+          if (!(missingKey in payload)) continue;
+          const { listener, push } = build({});
+          await listener.handleNotificationBatchCreated(
+            emit(makeNotification(type, { ...payload, [missingKey]: '' })),
+          );
+          expect(push.sendToUsers).not.toHaveBeenCalled();
+        }
+      }
+    });
+
+    it('sends nothing when Listings is off', async () => {
+      const { listener, push } = build({
+        pushDisabledCategories: ['listings'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.ListingTeamMemberInvite,
+            memberInvitePayload,
+          ),
+        ),
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.ListingTeamMemberAccepted,
+            memberAcceptedPayload,
+          ),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+  });
 });

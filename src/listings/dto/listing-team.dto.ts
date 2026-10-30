@@ -37,6 +37,21 @@ export class InviteListingTeamMemberDto {
   roleLabel?: string | null;
 }
 
+/** Invites a member by profile slug. The server re-checks that the member is
+ *  an accepted connection of the acting user. */
+export class InviteListingTeamMemberByProfileDto {
+  @IsString()
+  @Length(1, 64)
+  memberSlug!: string;
+
+  @IsOptional()
+  @Transform(normalizeRoleLabel)
+  @IsString()
+  @MaxLength(LISTING_TEAM_LIMITS.roleLabelMax)
+  @Matches(NO_LINE_BREAK)
+  roleLabel?: string | null;
+}
+
 export class ApproveListingTeamRequestDto {
   @IsOptional()
   @Transform(normalizeRoleLabel)

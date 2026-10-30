@@ -129,6 +129,7 @@ function makeMember(
     id: 'member-1',
     listingId: LISTING_ID,
     subprofileId: SUBPROFILE_ID,
+    userId: null,
     roleLabel: null,
     status: ListingTeamMemberStatus.Pending,
     initiatedBy: ListingTeamInitiator.Listing,

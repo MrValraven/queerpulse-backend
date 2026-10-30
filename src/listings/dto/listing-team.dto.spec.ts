@@ -2,6 +2,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
   ApproveListingTeamRequestDto,
+  InviteListingTeamMemberByProfileDto,
   InviteListingTeamMemberDto,
   ListingTeamPersonaSearchQuery,
   ReorderListingTeamDto,
@@ -60,6 +61,54 @@ describe('listing team DTOs', () => {
     });
     const errors = await validate(dto);
     expect(errors.some((error) => error.property === 'roleLabel')).toBe(true);
+  });
+
+  it('invites a member by slug with the same role label rules', async () => {
+    const trimmed = plainToInstance(InviteListingTeamMemberByProfileDto, {
+      memberSlug: 'ana-silva',
+      roleLabel: '  Host  ',
+    });
+    expect(await validate(trimmed)).toHaveLength(0);
+    expect(trimmed.roleLabel).toBe('Host');
+
+    const blank = plainToInstance(InviteListingTeamMemberByProfileDto, {
+      memberSlug: 'ana-silva',
+      roleLabel: '  ',
+    });
+    expect(await validate(blank)).toHaveLength(0);
+    expect(blank.roleLabel).toBeNull();
+
+    const absent = plainToInstance(InviteListingTeamMemberByProfileDto, {
+      memberSlug: 'ana-silva',
+    });
+    expect(await validate(absent)).toHaveLength(0);
+    expect(absent.roleLabel).toBeUndefined();
+
+    const lineBreak = plainToInstance(InviteListingTeamMemberByProfileDto, {
+      memberSlug: 'ana-silva',
+      roleLabel: 'Guest\nartist',
+    });
+    expect(
+      (await validate(lineBreak)).some(
+        (error) => error.property === 'roleLabel',
+      ),
+    ).toBe(true);
+  });
+
+  it('bounds the member slug to 1 to 64 characters', async () => {
+    for (const memberSlug of ['', 'a'.repeat(65), 42, undefined]) {
+      const dto = plainToInstance(InviteListingTeamMemberByProfileDto, {
+        memberSlug,
+      });
+      const errors = await validate(dto);
+      expect(errors.some((error) => error.property === 'memberSlug')).toBe(
+        true,
+      );
+    }
+    const edge = plainToInstance(InviteListingTeamMemberByProfileDto, {
+      memberSlug: 'a'.repeat(64),
+    });
+    expect(await validate(edge)).toHaveLength(0);
   });
 
   it('keeps an absent role label absent on approve', async () => {

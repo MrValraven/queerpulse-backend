@@ -21,14 +21,26 @@ const indexNamed = (name: string) =>
   );
 
 describe('ListingTeamMember entity', () => {
-  it('declares the position check and the three key names the migration uses', () => {
-    expect(
-      metadata.checks.find((check) => check.target === ListingTeamMember),
-    ).toEqual(
-      expect.objectContaining({
-        name: 'CHK_listing_team_members_position',
-        expression: `("status" = 'accepted') = ("position" IS NOT NULL)`,
-      }),
+  it('declares the three checks and the four key names the migrations use', () => {
+    const checks = metadata.checks.filter(
+      (check) => check.target === ListingTeamMember,
+    );
+    expect(checks).toHaveLength(3);
+    expect(checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'CHK_listing_team_members_position',
+          expression: `("status" = 'accepted') = ("position" IS NOT NULL)`,
+        }),
+        expect.objectContaining({
+          name: 'CHK_listing_team_members_one_subject',
+          expression: `(("subprofile_id" IS NOT NULL)::int + ("user_id" IS NOT NULL)::int) = 1`,
+        }),
+        expect.objectContaining({
+          name: 'CHK_listing_team_members_member_listing_initiated',
+          expression: `"user_id" IS NULL OR "initiated_by" = 'listing'`,
+        }),
+      ]),
     );
     const keyNames = metadata.joinColumns
       .filter((joinColumn) => joinColumn.target === ListingTeamMember)
@@ -38,6 +50,7 @@ describe('ListingTeamMember entity', () => {
       'FK_listing_team_members_listing',
       'FK_listing_team_members_requested_by',
       'FK_listing_team_members_subprofile',
+      'FK_listing_team_members_user',
     ]);
   });
 
@@ -51,6 +64,16 @@ describe('ListingTeamMember entity', () => {
         unique: true,
         where: `"status" IN ('pending', 'accepted')`,
       }),
+    );
+    expect(indexNamed('UQ_listing_team_members_live_member')).toEqual(
+      expect.objectContaining({
+        columns: ['listingId', 'userId'],
+        unique: true,
+        where: `"status" IN ('pending', 'accepted')`,
+      }),
+    );
+    expect(indexNamed('IDX_listing_team_members_user_status')).toEqual(
+      expect.objectContaining({ columns: ['userId', 'status'] }),
     );
     expect(indexNamed('IDX_listing_team_members_listing_status')).toEqual(
       expect.objectContaining({ columns: ['listingId', 'status'] }),
@@ -101,6 +124,24 @@ describe('ListingTeamMember entity', () => {
     for (const column of ownColumns) {
       expect(column.options).not.toHaveProperty('name');
     }
+  });
+
+  it('lets either subject be null and cascades the member key on delete', () => {
+    expect(columnOptions('subprofileId')).toEqual(
+      expect.objectContaining({ type: 'uuid', nullable: true }),
+    );
+    expect(columnOptions('userId')).toEqual(
+      expect.objectContaining({ type: 'uuid', nullable: true }),
+    );
+    const relation = metadata.relations.find(
+      (candidate) =>
+        candidate.target === ListingTeamMember &&
+        candidate.propertyName === 'user',
+    );
+    expect(relation?.options).toEqual(
+      expect.objectContaining({ onDelete: 'CASCADE' }),
+    );
+    expect(relation?.options).not.toHaveProperty('onUpdate');
   });
 
   it('cascades the persona key on update', () => {

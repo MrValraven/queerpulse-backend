@@ -13,7 +13,7 @@ import { Subprofile } from '../../subprofiles/entities/subprofile.entity';
 import { User } from '../../users/entities/user.entity';
 import { Listing } from './listing.entity';
 
-/** Where one persona sits on one listing's team. */
+/** Where one persona or member sits on one listing's team. */
 export enum ListingTeamMemberStatus {
   /** An invite or a request waiting for the other side. Shows nowhere public. */
   Pending = 'pending',
@@ -29,7 +29,7 @@ export enum ListingTeamMemberStatus {
   Left = 'left',
 }
 
-/** Which side started the link. */
+/** Which side started the link. Member rows are always started by the listing. */
 export enum ListingTeamInitiator {
   Listing = 'listing',
   Persona = 'persona',
@@ -42,23 +42,40 @@ export const LIVE_LISTING_TEAM_STATUSES: readonly ListingTeamMemberStatus[] = [
 ];
 
 /**
- * A consent-based link between a business listing and a persona ("Meet the team").
+ * A consent-based link between a business listing and a persona or a member
+ * ("Meet the team").
  *
- * Rows belong to the listing and to the persona. `requestedByUserId` is audit
- * only and never leaves the server. `answeredAt` is set on accept and on
- * decline. `position` is set while the row is accepted and null otherwise.
+ * A row has exactly one subject: `subprofileId` for a persona or `userId` for
+ * a member, never both (`CHK_listing_team_members_one_subject`). A member row
+ * is always started by the listing. Rows belong to the listing and to that
+ * subject. `requestedByUserId` is audit only and never leaves the server, and
+ * neither does `userId`. `answeredAt` is set on accept and on decline.
+ * `position` is set while the row is accepted and null otherwise.
  */
 @Entity('listing_team_members')
 @Check(
   'CHK_listing_team_members_position',
   `("status" = 'accepted') = ("position" IS NOT NULL)`,
 )
+@Check(
+  'CHK_listing_team_members_one_subject',
+  `(("subprofile_id" IS NOT NULL)::int + ("user_id" IS NOT NULL)::int) = 1`,
+)
+@Check(
+  'CHK_listing_team_members_member_listing_initiated',
+  `"user_id" IS NULL OR "initiated_by" = 'listing'`,
+)
 @Index('UQ_listing_team_members_live_pair', ['listingId', 'subprofileId'], {
+  unique: true,
+  where: `"status" IN ('pending', 'accepted')`,
+})
+@Index('UQ_listing_team_members_live_member', ['listingId', 'userId'], {
   unique: true,
   where: `"status" IN ('pending', 'accepted')`,
 })
 @Index('IDX_listing_team_members_listing_status', ['listingId', 'status'])
 @Index('IDX_listing_team_members_subprofile_status', ['subprofileId', 'status'])
+@Index('IDX_listing_team_members_user_status', ['userId', 'status'])
 @Index('IDX_listing_team_members_requested_by_user_id', ['requestedByUserId'])
 export class ListingTeamMember {
   @PrimaryGeneratedColumn('uuid')
@@ -75,16 +92,33 @@ export class ListingTeamMember {
   })
   listing?: Listing;
 
-  @Column({ type: 'uuid' })
-  subprofileId!: string;
+  /** Null on a member row. */
+  @Column({ type: 'uuid', nullable: true })
+  subprofileId!: string | null;
 
   // FK to `subprofiles(id)` ON DELETE CASCADE ON UPDATE CASCADE.
-  @ManyToOne(() => Subprofile, { onDelete: 'CASCADE', onUpdate: 'CASCADE' })
+  @ManyToOne(() => Subprofile, {
+    nullable: true,
+    onDelete: 'CASCADE',
+    onUpdate: 'CASCADE',
+  })
   @JoinColumn({
     name: 'subprofile_id',
     foreignKeyConstraintName: 'FK_listing_team_members_subprofile',
   })
-  subprofile?: Subprofile;
+  subprofile?: Subprofile | null;
+
+  /** The member on a member row; null on a persona row. Never on the wire. */
+  @Column({ type: 'uuid', nullable: true })
+  userId!: string | null;
+
+  // FK to `users(id)` ON DELETE CASCADE.
+  @ManyToOne(() => User, { nullable: true, onDelete: 'CASCADE' })
+  @JoinColumn({
+    name: 'user_id',
+    foreignKeyConstraintName: 'FK_listing_team_members_user',
+  })
+  user?: User | null;
 
   @Column({ type: 'varchar', length: 40, nullable: true })
   roleLabel!: string | null;

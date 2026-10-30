@@ -1,10 +1,11 @@
 import { HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
 
-/** Caps and timing of the "Meet the team" link between a listing and a persona. */
+/** Caps and timing of the "Meet the team" link between a listing and a persona or a member. */
 export const LISTING_TEAM_LIMITS = {
   acceptedPerListing: 40,
   pendingPerListing: 40,
   acceptedPerPersona: 10,
+  acceptedPerMember: 10,
   pendingRequestsPerPersona: 10,
   cooldownDays: 14,
   roleLabelMax: 40,
@@ -31,6 +32,9 @@ export type ListingTeamErrorCode =
   | 'listing_team_pending_full'
   | 'listing_team_persona_full'
   | 'listing_team_persona_requests_full'
+  | 'listing_team_member_not_found'
+  | 'listing_team_member_ineligible'
+  | 'listing_team_member_full'
   | 'listing_team_not_pending'
   | 'listing_team_not_accepted'
   | 'listing_team_order_mismatch';
@@ -68,7 +72,7 @@ export const LISTING_TEAM_ERRORS: Record<
   },
   listing_team_already_accepted: {
     status: HttpStatus.CONFLICT,
-    message: 'This persona is already on the team.',
+    message: 'This person is already on the team.',
   },
   listing_team_cooldown: {
     status: HttpStatus.CONFLICT,
@@ -91,13 +95,27 @@ export const LISTING_TEAM_ERRORS: Record<
     status: HttpStatus.CONFLICT,
     message: 'This persona already has 10 requests waiting.',
   },
+  listing_team_member_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message:
+      'This member is not available. Only your connections can be invited to a team.',
+  },
+  listing_team_member_ineligible: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message:
+      "This member's profile must be open and visible before they can be on a team.",
+  },
+  listing_team_member_full: {
+    status: HttpStatus.CONFLICT,
+    message: 'This member is already on 10 teams.',
+  },
   listing_team_not_pending: {
     status: HttpStatus.CONFLICT,
     message: 'This invite or request has already been answered.',
   },
   listing_team_not_accepted: {
     status: HttpStatus.CONFLICT,
-    message: 'This persona is not on the team.',
+    message: 'This person is not on the team.',
   },
   listing_team_order_mismatch: {
     status: HttpStatus.CONFLICT,

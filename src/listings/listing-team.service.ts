@@ -2,13 +2,16 @@ import { Injectable } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, In } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
+import { MemberLookup } from '../common/member-ref';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import {
   SubprofileLinkVisibility,
   type SubprofileKind,
 } from '../subprofiles/entities/subprofile.entity';
+import { Profile } from '../users/entities/profile.entity';
 import {
   ApproveListingTeamRequestDto,
+  InviteListingTeamMemberByProfileDto,
   InviteListingTeamMemberDto,
   ReorderListingTeamDto,
   UpdateListingTeamMemberDto,
@@ -20,13 +23,18 @@ import {
   ListingTeamMemberStatus,
 } from './entities/listing-team-member.entity';
 import {
+  memberAvatarKeys,
   ownerNameOf,
   personaAvatarKeys,
   teamStatusOf,
   toListingTeamManagerRow,
+  toListingTeamMemberManagerRow,
+  toListingTeamMemberProfile,
   toListingTeamPersona,
   type ListingTeamManagerList,
   type ListingTeamManagerRow,
+  type ListingTeamMemberColumns,
+  type ListingTeamMemberProfile,
   type ListingTeamPersona,
   type ListingTeamPersonaCandidate,
   type ListingTeamPersonaColumns,
@@ -38,24 +46,34 @@ import {
 import {
   LISTING_TEAM_ACCEPTED,
   LISTING_TEAM_INVITED,
+  LISTING_TEAM_MEMBER_INVITED,
   type ListingTeamAlertEvent,
+  type ListingTeamMemberAlertEvent,
 } from './listing-team.events';
 import {
+  eligibleMemberSql,
   eligiblePersonaSql,
   notBlockedEitherWaySql,
+  notHiddenFromViewerSql,
 } from './listing-team-visibility';
 import {
   assertAcceptedRoom,
   assertInviteRoom,
+  assertMemberAcceptedRoom,
+  assertMemberPairOpen,
   assertPairOpen,
   hasBlockEitherWay,
+  insertLiveMemberTeamRow,
   insertLiveTeamRow,
+  isAcceptedConnection,
   isPersonaMember,
   lockListingRow,
+  lockMemberCap,
   lockPersonaRow,
   lockTeamRow,
   nextTeamPosition,
   readListingFacts,
+  readMemberFacts,
   readPersonaFacts,
 } from './listing-team-write-rules';
 import { ListingsService } from './listings.service';
@@ -78,11 +96,25 @@ interface TeamCandidateRow extends TeamPersonaRow {
   team_status: ListingTeamMemberStatus | null;
 }
 
-/** The entity columns a manager row reads. `requestedByUserId` stays out. */
+/** The profile columns every member team read selects, in snake case, plus
+ *  the user id that keys the result map and never leaves the server. */
+interface TeamMemberProfileRow {
+  user_id: string;
+  slug: string;
+  first_name: string;
+  last_name: string;
+  avatar_url: string | null;
+  photo_visible: boolean;
+}
+
+/** The entity columns a manager row reads. `requestedByUserId` stays out.
+ *  `userId` only tells a member row from a persona row and is never mapped to
+ *  the wire. */
 const MANAGER_ROW_COLUMNS = {
   id: true,
   listingId: true,
   subprofileId: true,
+  userId: true,
   roleLabel: true,
   status: true,
   initiatedBy: true,
@@ -112,6 +144,18 @@ const VISIBLE_TEAM_PERSONAS_SQL = `SELECT ${PERSONA_COLUMNS_SQL}
  WHERE "persona"."id" = ANY($1::uuid[])
    AND ${eligiblePersonaSql('persona')}
    AND ${notBlockedEitherWaySql('$2', '"persona"."user_id"')}`;
+
+/** `$1` the member user ids, `$2` the caller. Keeps eligible members with no
+ *  block either way with the caller who did not hide their profile from the
+ *  caller. An ineligible, blocked, hidden or deactivated member is absent, so
+ *  the row keeps standing with `member: null`. */
+const VISIBLE_TEAM_MEMBERS_SQL = `SELECT "member_profile"."user_id", "member_profile"."slug", "member_profile"."first_name", "member_profile"."last_name", "member_profile"."avatar_url", "member_profile"."photo_visible"
+  FROM "profiles" "member_profile"
+  JOIN "users" "member_user" ON "member_user"."id" = "member_profile"."user_id"
+ WHERE "member_profile"."user_id" = ANY($1::uuid[])
+   AND ${eligibleMemberSql('member_profile', 'member_user')}
+   AND ${notBlockedEitherWaySql('$2', '"member_profile"."user_id"')}
+   AND ${notHiddenFromViewerSql('$2', '"member_profile"."user_id"')}`;
 
 /** `$1` the listing, `$2` the escaped contains pattern for the name, `$3` the
  *  raw term for the exact handle match, `$4` the caller, `$5` the escaped
@@ -153,6 +197,11 @@ function compareIds(first: string, second: string): number {
   return 0;
 }
 
+/** True for a row whose subject is a member rather than a persona. */
+function isMemberRow(row: ListingTeamMember): boolean {
+  return row.userId !== null && row.userId !== undefined;
+}
+
 /** Newest first, id as the tie break. */
 function compareNewestFirst(
   first: ListingTeamMember,
@@ -173,11 +222,11 @@ function compareTeamOrder(
 
 /**
  * The business side of "Meet the team": the listing's owner and active
- * co-managers invite personas, answer their requests, label, order and remove
- * them. Every route passes `ListingsService.loadOwnedOrCoManagedOr404` first.
+ * co-managers invite personas and members, answer persona requests, label,
+ * order and remove them. Every route passes `ListingsService.loadOwnedOrCoManagedOr404` first.
  *
- * Writes take their locks in the shared order (listing row, team row, persona
- * row) at the default READ COMMITTED isolation, so each cap count reads a
+ * Writes take their locks in the shared order (listing row, team row, then
+ * the persona row or the member advisory lock) at the default READ COMMITTED isolation, so each cap count reads a
  * fresh snapshot after its lock. Events go out only after the commit.
  */
 @Injectable()
@@ -349,6 +398,71 @@ export class ListingTeamService {
     return this.toManagerRow(member, userId);
   }
 
+  /**
+   * Invites one of the acting manager's connections to the team. The member
+   * is resolved by profile slug. Every refusal before the eligibility check
+   * (unknown or deactivated slug, the acting manager themself, not an accepted
+   * connection, a block either way with the acting manager or the listing
+   * owner) answers the same
+   * `listing_team_member_not_found`, so the response never says which one.
+   */
+  async inviteMember(
+    ref: string,
+    userId: string,
+    body: InviteListingTeamMemberByProfileDto,
+  ): Promise<ListingTeamManagerRow> {
+    const { listing } = await this.listingsService.loadOwnedOrCoManagedOr404(
+      ref,
+      userId,
+    );
+    const member = await this.dataSource.transaction(async (manager) => {
+      await lockListingRow(manager, listing.id);
+      const listingFacts = await readListingFacts(manager, listing.id);
+      if (!listingFacts?.isPubliclyVisible) {
+        throw listingTeamError('listing_team_listing_not_live');
+      }
+      const memberUserId = await new MemberLookup(
+        manager.getRepository(Profile),
+      ).userIdForSlug(body.memberSlug);
+      if (
+        !memberUserId ||
+        memberUserId === userId ||
+        !(await isAcceptedConnection(manager, userId, memberUserId)) ||
+        (await hasBlockEitherWay(manager, userId, memberUserId)) ||
+        (listingFacts.ownerUserId !== userId &&
+          (await hasBlockEitherWay(
+            manager,
+            memberUserId,
+            listingFacts.ownerUserId,
+          )))
+      ) {
+        throw listingTeamError('listing_team_member_not_found');
+      }
+      await lockMemberCap(manager, memberUserId);
+      const memberFacts = await readMemberFacts(manager, memberUserId);
+      if (!memberFacts) {
+        throw listingTeamError('listing_team_member_not_found');
+      }
+      if (!memberFacts.isEligible) {
+        throw listingTeamError('listing_team_member_ineligible');
+      }
+      await assertMemberPairOpen(manager, listing.id, memberFacts.userId);
+      await assertInviteRoom(manager, listing.id);
+      await assertMemberAcceptedRoom(manager, listing.id, memberFacts.userId);
+      return insertLiveMemberTeamRow(manager, {
+        listingId: listing.id,
+        userId: memberFacts.userId,
+        requestedByUserId: userId,
+        roleLabel: body.roleLabel ?? null,
+        status: ListingTeamMemberStatus.Pending,
+        answeredAt: null,
+      });
+    });
+
+    this.emitMemberAlert(LISTING_TEAM_MEMBER_INVITED, member.id, userId);
+    return this.toManagerRow(member, userId);
+  }
+
   async approve(
     ref: string,
     userId: string,
@@ -366,16 +480,25 @@ export class ListingTeamService {
         throw listingTeamError('listing_team_listing_not_live');
       }
       const row = await this.lockRowOnListing(manager, memberId, listing.id);
-      if (row.initiatedBy !== ListingTeamInitiator.Persona) {
+      // A member row is always started by the listing, so only a persona
+      // request can be approved.
+      const requestingSubprofileId = row.subprofileId;
+      if (
+        row.initiatedBy !== ListingTeamInitiator.Persona ||
+        requestingSubprofileId === null
+      ) {
         throw listingTeamError('listing_team_link_not_found');
       }
       if (row.status !== ListingTeamMemberStatus.Pending) {
         throw listingTeamError('listing_team_not_pending');
       }
-      if (!(await lockPersonaRow(manager, row.subprofileId))) {
+      if (!(await lockPersonaRow(manager, requestingSubprofileId))) {
         throw listingTeamError('listing_team_link_not_found');
       }
-      const personaFacts = await readPersonaFacts(manager, row.subprofileId);
+      const personaFacts = await readPersonaFacts(
+        manager,
+        requestingSubprofileId,
+      );
       if (
         !personaFacts ||
         (await this.hasBlockAcrossTheLink(
@@ -422,7 +545,10 @@ export class ListingTeamService {
     );
     await this.dataSource.transaction(async (manager) => {
       const row = await this.lockRowOnListing(manager, memberId, listing.id);
-      if (row.initiatedBy !== ListingTeamInitiator.Persona) {
+      if (
+        row.initiatedBy !== ListingTeamInitiator.Persona ||
+        isMemberRow(row)
+      ) {
         throw listingTeamError('listing_team_link_not_found');
       }
       if (row.status !== ListingTeamMemberStatus.Pending) {
@@ -586,21 +712,33 @@ export class ListingTeamService {
     this.eventEmitter.emit(eventName, event);
   }
 
+  private emitMemberAlert(
+    eventName: string,
+    memberId: string,
+    actingUserId: string,
+  ): void {
+    const event: ListingTeamMemberAlertEvent = { memberId, actingUserId };
+    this.eventEmitter.emit(eventName, event);
+  }
+
   private async toManagerRow(
     member: ListingTeamMember,
     userId: string,
   ): Promise<ListingTeamManagerRow> {
-    const personas = await this.loadVisiblePersonas(
-      [member.subprofileId],
-      userId,
-    );
-    return toListingTeamManagerRow(
-      member,
-      personas.get(member.subprofileId) ?? null,
-    );
+    const [row] = await this.toManagerRows([member], userId);
+    if (!row) {
+      throw listingTeamError('listing_team_link_not_found');
+    }
+    return row;
   }
 
-  /** Answers rows in the order given; a hidden or blocked persona maps to null. */
+  /**
+   * Answers rows in the order given. A persona row maps to null when the
+   * persona is hidden or blocked; a member row maps to null when the member is
+   * ineligible, blocked either way with the caller, or deactivated. Persona and
+   * member subjects load through their own queries, each skipped when the page
+   * holds none of that kind.
+   */
   private async toManagerRows(
     members: ListingTeamMember[],
     userId: string,
@@ -608,16 +746,56 @@ export class ListingTeamService {
     if (members.length === 0) {
       return [];
     }
-    const personas = await this.loadVisiblePersonas(
-      [...new Set(members.map((member) => member.subprofileId))],
-      userId,
-    );
+    const subprofileIds = new Set<string>();
+    const memberUserIds = new Set<string>();
+    for (const member of members) {
+      if (isMemberRow(member)) {
+        if (member.userId) memberUserIds.add(member.userId);
+      } else if (member.subprofileId) {
+        subprofileIds.add(member.subprofileId);
+      }
+    }
+    const [personas, memberProfiles] = await Promise.all([
+      subprofileIds.size > 0
+        ? this.loadVisiblePersonas([...subprofileIds], userId)
+        : new Map<string, ListingTeamPersona>(),
+      memberUserIds.size > 0
+        ? this.loadVisibleMembers([...memberUserIds], userId)
+        : new Map<string, ListingTeamMemberProfile>(),
+    ]);
     return members.map((member) =>
-      toListingTeamManagerRow(
-        member,
-        personas.get(member.subprofileId) ?? null,
-      ),
+      isMemberRow(member)
+        ? toListingTeamMemberManagerRow(
+            member,
+            (member.userId && memberProfiles.get(member.userId)) || null,
+          )
+        : toListingTeamManagerRow(
+            member,
+            (member.subprofileId && personas.get(member.subprofileId)) || null,
+          ),
     );
+  }
+
+  /** The members the caller may see, keyed by user id, with one crop read. */
+  private async loadVisibleMembers(
+    memberUserIds: string[],
+    userId: string,
+  ): Promise<Map<string, ListingTeamMemberProfile>> {
+    const rows = await this.dataSource.manager.query<TeamMemberProfileRow[]>(
+      VISIBLE_TEAM_MEMBERS_SQL,
+      [memberUserIds, userId],
+    );
+    const crops = await this.mediaCropService.getMany(
+      memberAvatarKeys(rows.map(toMemberColumns)),
+    );
+    const memberProfiles = new Map<string, ListingTeamMemberProfile>();
+    for (const row of rows) {
+      memberProfiles.set(
+        row.user_id,
+        toListingTeamMemberProfile(toMemberColumns(row), crops),
+      );
+    }
+    return memberProfiles;
   }
 
   /** The personas the caller may see, keyed by id, with one crop read. */
@@ -653,5 +831,15 @@ function toPersonaColumns(row: TeamPersonaRow): ListingTeamPersonaColumns {
     kind: row.kind,
     avatarUrl: row.avatar_url,
     linkVisibility: row.link_visibility,
+  };
+}
+
+function toMemberColumns(row: TeamMemberProfileRow): ListingTeamMemberColumns {
+  return {
+    slug: row.slug,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    avatarUrl: row.avatar_url,
+    photoVisible: row.photo_visible,
   };
 }

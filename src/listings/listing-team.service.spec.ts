@@ -13,10 +13,15 @@ import {
   ListingTeamMemberStatus,
 } from './entities/listing-team-member.entity';
 import type { Listing } from './entities/listing.entity';
-import { notBlockedEitherWaySql } from './listing-team-visibility';
+import {
+  eligibleMemberSql,
+  notBlockedEitherWaySql,
+  notHiddenFromViewerSql,
+} from './listing-team-visibility';
 import {
   LISTING_TEAM_ACCEPTED,
   LISTING_TEAM_INVITED,
+  LISTING_TEAM_MEMBER_INVITED,
 } from './listing-team.events';
 import { ListingTeamService } from './listing-team.service';
 import { ListingsService } from './listings.service';
@@ -29,6 +34,9 @@ const PERSONA_OWNER_ID = 'persona-owner-1';
 /** The listing's owner when the caller is a co-manager. */
 const LISTING_OWNER_ID = 'listing-owner-1';
 const INSERTED_MEMBER_ID = 'member-new';
+/** The member a manager invites from the profile slug `MEMBER_SLUG`. */
+const MEMBER_USER_ID = 'member-user-1';
+const MEMBER_SLUG = 'ana-silva';
 
 interface PersonaFactsRow {
   id: string;
@@ -45,6 +53,20 @@ interface PersonaRow {
   link_visibility: SubprofileLinkVisibility;
   owner_first_name: string | null;
   owner_last_name: string | null;
+}
+
+interface MemberFactsRow {
+  user_id: string;
+  is_eligible: boolean;
+}
+
+interface MemberProfileRow {
+  user_id: string;
+  slug: string;
+  first_name: string;
+  last_name: string;
+  avatar_url: string | null;
+  photo_visible: boolean;
 }
 
 interface CandidateRow extends PersonaRow {
@@ -71,9 +93,17 @@ interface Scenario {
   candidateRows: CandidateRow[];
   acceptedIds: string[];
   members: ListingTeamMember[];
+  /** The user id the slug `MEMBER_SLUG` resolves to, null for an unknown slug. */
+  slugUserId: string | null;
+  isConnected: boolean;
+  memberFacts: MemberFactsRow | null;
+  acceptedOfMember: number;
+  cooldownRetryAt: Date | null;
+  visibleMemberRows: MemberProfileRow[];
 }
 
 interface ManagerMock {
+  getRepository: jest.Mock;
   query: jest.Mock;
   findOne: jest.Mock;
   findOneOrFail: jest.Mock;
@@ -86,6 +116,7 @@ const teamRow = (overrides: Partial<ListingTeamMember>): ListingTeamMember => ({
   id: 'member-1',
   listingId: LISTING_ID,
   subprofileId: PERSONA_ID,
+  userId: null,
   roleLabel: null,
   status: ListingTeamMemberStatus.Pending,
   initiatedBy: ListingTeamInitiator.Persona,
@@ -109,6 +140,29 @@ const personaRow = (overrides: Partial<PersonaRow> = {}): PersonaRow => ({
   ...overrides,
 });
 
+const memberProfileRow = (
+  overrides: Partial<MemberProfileRow> = {},
+): MemberProfileRow => ({
+  user_id: MEMBER_USER_ID,
+  slug: MEMBER_SLUG,
+  first_name: 'Ana',
+  last_name: 'Silva',
+  avatar_url: null,
+  photo_visible: true,
+  ...overrides,
+});
+
+const memberTeamRow = (
+  overrides: Partial<ListingTeamMember>,
+): ListingTeamMember =>
+  teamRow({
+    subprofileId: null,
+    userId: MEMBER_USER_ID,
+    initiatedBy: ListingTeamInitiator.Listing,
+    requestedByUserId: USER_ID,
+    ...overrides,
+  });
+
 const baseScenario = (): Scenario => ({
   isListingVisible: true,
   listingOwnerId: USER_ID,
@@ -131,6 +185,12 @@ const baseScenario = (): Scenario => ({
   candidateRows: [],
   acceptedIds: [],
   members: [],
+  slugUserId: MEMBER_USER_ID,
+  isConnected: true,
+  memberFacts: { user_id: MEMBER_USER_ID, is_eligible: true },
+  acceptedOfMember: 0,
+  cooldownRetryAt: null,
+  visibleMemberRows: [memberProfileRow()],
 });
 
 /** Runs the call and answers the response body of the HttpException it threw. */
@@ -150,6 +210,7 @@ describe('ListingTeamService', () => {
   let scenario: Scenario;
   let journal: string[];
   let insertedParameters: unknown[] | null;
+  let isInsertedRowMember: boolean;
   let manager: ManagerMock;
   let eventEmitter: { emit: jest.Mock };
   let loadOwnedOrCoManagedOr404: jest.Mock;
@@ -158,6 +219,23 @@ describe('ListingTeamService', () => {
   const answerQuery = (sql: string, parameters: unknown[] = []): unknown[] => {
     if (sql.includes('ILIKE')) {
       return scenario.candidateRows;
+    }
+    if (sql.includes('FROM "profiles" "member_profile"')) {
+      const ids = parameters[0] as string[];
+      return scenario.visibleMemberRows.filter((row) =>
+        ids.includes(row.user_id),
+      );
+    }
+    if (sql.includes('FROM "users" "member_user"')) {
+      return scenario.memberFacts ? [scenario.memberFacts] : [];
+    }
+    if (sql.includes('AS "is_connected"')) {
+      journal.push('read connection');
+      return [{ is_connected: scenario.isConnected }];
+    }
+    if (sql.includes('pg_advisory_xact_lock')) {
+      journal.push('lock member cap');
+      return [];
     }
     if (sql.includes('ANY($1::uuid[])')) {
       const ids = parameters[0] as string[];
@@ -197,13 +275,16 @@ describe('ListingTeamService', () => {
       return [{ is_blocked: scenario.isBlocked || isPairBlocked }];
     }
     if (sql.includes('make_interval')) {
-      return [];
+      return scenario.cooldownRetryAt
+        ? [{ retry_at: scenario.cooldownRetryAt }]
+        : [];
     }
     if (sql.includes('"next_position"')) {
       return [{ next_position: scenario.nextPosition }];
     }
     if (sql.includes('INSERT INTO "listing_team_members"')) {
       insertedParameters = parameters;
+      isInsertedRowMember = sql.includes('"listing_id", "user_id"');
       return [{ id: INSERTED_MEMBER_ID }];
     }
     if (sql.includes('unnest(')) {
@@ -220,7 +301,8 @@ describe('ListingTeamService', () => {
     return teamRow({
       id: INSERTED_MEMBER_ID,
       listingId: values[0] as string,
-      subprofileId: values[1] as string,
+      subprofileId: isInsertedRowMember ? null : (values[1] as string),
+      userId: isInsertedRowMember ? (values[1] as string) : null,
       initiatedBy: values[2] as ListingTeamInitiator,
       requestedByUserId: values[3] as string,
       roleLabel: values[4] as string | null,
@@ -238,6 +320,9 @@ describe('ListingTeamService', () => {
       return scenario.isPersonaMember ? 1 : 0;
     }
     const where = options.where;
+    if (where.status === ListingTeamMemberStatus.Accepted && where.userId) {
+      return scenario.acceptedOfMember;
+    }
     if (where.status === ListingTeamMemberStatus.Accepted) {
       return where.listingId
         ? scenario.acceptedOnListing
@@ -258,7 +343,9 @@ describe('ListingTeamService', () => {
     scenario = baseScenario();
     journal = [];
     insertedParameters = null;
+    isInsertedRowMember = false;
     manager = {
+      getRepository: jest.fn(),
       query: jest.fn((sql: string, parameters?: unknown[]) =>
         Promise.resolve(answerQuery(sql, parameters)),
       ),
@@ -286,8 +373,30 @@ describe('ListingTeamService', () => {
       ),
       update: jest.fn(() => Promise.resolve({ affected: 1 })),
     };
+    interface MemberQueryBuilder {
+      innerJoin: jest.Mock<MemberQueryBuilder, []>;
+      where: jest.Mock<MemberQueryBuilder, []>;
+      getMany: jest.Mock<Promise<{ slug: string; userId: string }[]>, []>;
+    }
+    const memberQueryBuilder: MemberQueryBuilder = {
+      innerJoin: jest.fn(() => memberQueryBuilder),
+      where: jest.fn(() => memberQueryBuilder),
+      getMany: jest.fn(() =>
+        Promise.resolve(
+          scenario.slugUserId
+            ? [{ slug: MEMBER_SLUG, userId: scenario.slugUserId }]
+            : [],
+        ),
+      ),
+    };
+    manager.getRepository = jest.fn(() => ({
+      createQueryBuilder: jest.fn(() => memberQueryBuilder),
+    }));
     const dataSource = {
       manager,
+      getRepository: jest.fn(() => {
+        throw new Error('Open no second pool connection inside a transaction');
+      }),
       transaction: jest.fn(
         async (
           work: (transactionManager: EntityManager) => Promise<unknown>,
@@ -499,6 +608,305 @@ describe('ListingTeamService', () => {
       });
       expect(queriesContaining('INSERT INTO')).toHaveLength(0);
       expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('inviteMember', () => {
+    const inviteMember = (roleLabel?: string | null) =>
+      service.inviteMember(LISTING_REF, USER_ID, {
+        memberSlug: MEMBER_SLUG,
+        roleLabel,
+      });
+
+    it('invites a connection as pending, emits after commit and answers a member row', async () => {
+      const row = await inviteMember('Chef');
+
+      expect(row).toMatchObject({
+        kind: 'member',
+        id: INSERTED_MEMBER_ID,
+        status: 'pending',
+        initiatedBy: 'listing',
+        roleLabel: 'Chef',
+        position: null,
+        answeredAt: null,
+        member: { slug: MEMBER_SLUG, name: 'Ana Silva', avatarUrl: null },
+      });
+      expect(row).not.toHaveProperty('persona');
+      expect(row).not.toHaveProperty('userId');
+      expect(row).not.toHaveProperty('requestedByUserId');
+      expect(insertedParameters).toEqual([
+        LISTING_ID,
+        MEMBER_USER_ID,
+        'listing',
+        USER_ID,
+        'Chef',
+        'pending',
+        null,
+        null,
+      ]);
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        LISTING_TEAM_MEMBER_INVITED,
+        { memberId: INSERTED_MEMBER_ID, actingUserId: USER_ID },
+      );
+      expect(journal.indexOf('commit')).toBeLessThan(journal.indexOf('emit'));
+    });
+
+    it('locks the listing, then the member advisory lock, before any cap count', async () => {
+      await inviteMember();
+
+      expect(journal.filter((entry) => entry.startsWith('lock '))).toEqual([
+        'lock listings',
+        'lock member cap',
+      ]);
+      expect(journal.indexOf('lock member cap')).toBeLessThan(
+        journal.indexOf('commit'),
+      );
+    });
+
+    it('refuses an invite from a hidden listing with listing not live', async () => {
+      scenario.isListingVisible = false;
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_listing_not_live',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('answers member not found to an unknown slug', async () => {
+      scenario.slugUserId = null;
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_member_not_found',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('answers member not found to a self invite before reading the connection', async () => {
+      scenario.slugUserId = USER_ID;
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_member_not_found',
+      });
+      expect(journal).not.toContain('read connection');
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('answers member not found to a member who is not an accepted connection', async () => {
+      scenario.isConnected = false;
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_member_not_found',
+      });
+      expect(queriesContaining('AS "is_connected"')[0]?.[1]).toEqual([
+        USER_ID,
+        MEMBER_USER_ID,
+      ]);
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('answers the same member not found to a block, never naming it', async () => {
+      scenario.blockedPair = [USER_ID, MEMBER_USER_ID];
+
+      const refusal = await refusalOf(inviteMember());
+
+      expect(refusal).toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_member_not_found',
+      });
+      expect(JSON.stringify(refusal).toLowerCase()).not.toContain('block');
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('answers the same member not found when the member and the listing owner have a block', async () => {
+      scenario.listingOwnerId = LISTING_OWNER_ID;
+      scenario.blockedPair = [LISTING_OWNER_ID, MEMBER_USER_ID];
+
+      const refusal = await refusalOf(inviteMember());
+
+      expect(refusal).toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_member_not_found',
+      });
+      expect(JSON.stringify(refusal).toLowerCase()).not.toContain('block');
+      expect(queriesContaining('AS "is_blocked"')).toHaveLength(2);
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('checks no second block when the acting manager is the listing owner', async () => {
+      await inviteMember();
+
+      expect(queriesContaining('AS "is_blocked"')).toHaveLength(1);
+    });
+
+    it('handles a listing with no owner like the persona path, with one block check', async () => {
+      scenario.listingOwnerId = null;
+
+      await expect(inviteMember()).resolves.toMatchObject({
+        status: 'pending',
+      });
+      expect(queriesContaining('AS "is_blocked"')).toHaveLength(1);
+    });
+
+    it('resolves the slug through the transaction manager, never a second pool connection', async () => {
+      await inviteMember();
+
+      expect(manager.getRepository).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers already pending for a re-invite at 40 pending, before the pending room check', async () => {
+      scenario.pendingOnListing = 40;
+      scenario.liveRow = memberTeamRow({
+        status: ListingTeamMemberStatus.Pending,
+      });
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_already_pending',
+        initiatedBy: 'listing',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('refuses an ineligible member with 422 after the connection checks pass', async () => {
+      scenario.memberFacts = { user_id: MEMBER_USER_ID, is_eligible: false };
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 422,
+        code: 'listing_team_member_ineligible',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('answers member not found when the member has no profile row at the lock', async () => {
+      scenario.memberFacts = null;
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_member_not_found',
+      });
+    });
+
+    it('counts the 40 pending across both kinds and refuses the 41st', async () => {
+      scenario.pendingOnListing = 39;
+      await expect(inviteMember()).resolves.toMatchObject({
+        status: 'pending',
+      });
+
+      scenario.pendingOnListing = 40;
+      insertedParameters = null;
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_pending_full',
+      });
+      expect(insertedParameters).toBeNull();
+    });
+
+    it('refuses the 41st accepted row on the listing', async () => {
+      scenario.acceptedOnListing = 40;
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_full',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('refuses a member who is already on 10 teams', async () => {
+      scenario.acceptedOfMember = 10;
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_member_full',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('refuses a member who is already on the team or already invited', async () => {
+      scenario.liveRow = memberTeamRow({
+        status: ListingTeamMemberStatus.Accepted,
+        position: 1,
+      });
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_already_accepted',
+      });
+
+      scenario.liveRow = memberTeamRow({
+        status: ListingTeamMemberStatus.Pending,
+      });
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_already_pending',
+        initiatedBy: 'listing',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+    });
+
+    it('refuses a re-invite inside the 14 day cooldown with the retry date', async () => {
+      scenario.cooldownRetryAt = new Date('2026-11-05T10:00:00.000Z');
+
+      await expect(refusalOf(inviteMember())).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_cooldown',
+        retryAt: '2026-11-05T10:00:00.000Z',
+      });
+      expect(queriesContaining('INSERT INTO')).toHaveLength(0);
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('member rows on the other routes', () => {
+    it('answers link not found to an approve and a decline of a member row', async () => {
+      scenario.teamRow = memberTeamRow({});
+
+      await expect(
+        refusalOf(service.approve(LISTING_REF, USER_ID, 'member-1', {})),
+      ).resolves.toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_link_not_found',
+      });
+      await expect(
+        refusalOf(service.decline(LISTING_REF, USER_ID, 'member-1')),
+      ).resolves.toMatchObject({
+        statusCode: 404,
+        code: 'listing_team_link_not_found',
+      });
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('cancels a pending member invite', async () => {
+      scenario.teamRow = memberTeamRow({});
+
+      await service.cancel(LISTING_REF, USER_ID, 'member-1');
+
+      expect(manager.update).toHaveBeenCalledWith(
+        ListingTeamMember,
+        { id: 'member-1' },
+        { status: ListingTeamMemberStatus.Cancelled },
+      );
+    });
+
+    it('removes an accepted member row', async () => {
+      scenario.teamRow = memberTeamRow({
+        status: ListingTeamMemberStatus.Accepted,
+        position: 1,
+      });
+
+      await service.remove(LISTING_REF, USER_ID, 'member-1');
+
+      expect(manager.update).toHaveBeenCalledWith(
+        ListingTeamMember,
+        { id: 'member-1' },
+        { status: ListingTeamMemberStatus.Removed, position: null },
+      );
     });
   });
 
@@ -819,7 +1227,179 @@ describe('ListingTeamService', () => {
     );
   });
 
+  it('lists personas and members together, keeps position interleaved and counts persona requests only', async () => {
+    scenario.members = [
+      teamRow({
+        id: 'persona-accepted',
+        status: ListingTeamMemberStatus.Accepted,
+        initiatedBy: ListingTeamInitiator.Listing,
+        position: 2,
+      }),
+      memberTeamRow({
+        id: 'member-accepted-first',
+        status: ListingTeamMemberStatus.Accepted,
+        position: 1,
+      }),
+      memberTeamRow({
+        id: 'member-accepted-third',
+        status: ListingTeamMemberStatus.Accepted,
+        position: 3,
+      }),
+      memberTeamRow({
+        id: 'member-invite',
+        createdAt: new Date('2026-10-04T00:00:00.000Z'),
+      }),
+      teamRow({ id: 'persona-request' }),
+    ];
+
+    const list = await service.listForManager(LISTING_REF, USER_ID);
+
+    expect(list.accepted.map((row) => [row.id, row.kind])).toEqual([
+      ['member-accepted-first', 'member'],
+      ['persona-accepted', 'persona'],
+      ['member-accepted-third', 'member'],
+    ]);
+    expect(list.invitesSent.map((row) => [row.id, row.kind])).toEqual([
+      ['member-invite', 'member'],
+    ]);
+    expect(list.requestsReceived.map((row) => row.id)).toEqual([
+      'persona-request',
+    ]);
+    expect(list.awaitingYouCount).toBe(1);
+    const memberRow = list.accepted[0];
+    expect(memberRow).toHaveProperty('member.slug', MEMBER_SLUG);
+    expect(memberRow).not.toHaveProperty('persona');
+    expect(list.accepted[1]).not.toHaveProperty('member');
+    const memberSql = String(
+      queriesContaining('FROM "profiles" "member_profile"')[0]?.[0],
+    );
+    expect(memberSql).toContain(
+      eligibleMemberSql('member_profile', 'member_user'),
+    );
+    expect(memberSql).toContain(
+      notBlockedEitherWaySql('$2', '"member_profile"."user_id"'),
+    );
+    expect(memberSql).toContain(
+      notHiddenFromViewerSql('$2', '"member_profile"."user_id"'),
+    );
+    expect(
+      queriesContaining('FROM "profiles" "member_profile"')[0]?.[1],
+    ).toEqual([[MEMBER_USER_ID], USER_ID]);
+  });
+
+  it('skips the member query when the team holds no member row and the persona query when it holds no persona row', async () => {
+    scenario.members = [teamRow({ id: 'persona-request' })];
+    await service.listForManager(LISTING_REF, USER_ID);
+    expect(queriesContaining('FROM "profiles" "member_profile"')).toHaveLength(
+      0,
+    );
+
+    manager.query.mockClear();
+    scenario.members = [memberTeamRow({ id: 'member-invite' })];
+    await service.listForManager(LISTING_REF, USER_ID);
+    expect(queriesContaining('"persona"."user_id"')).toHaveLength(0);
+  });
+
+  it("keeps an ineligible, blocked, hidden or deactivated member's row with a null member so the business can remove it", async () => {
+    scenario.members = [
+      memberTeamRow({
+        id: 'member-gone',
+        status: ListingTeamMemberStatus.Accepted,
+        position: 1,
+      }),
+      memberTeamRow({ id: 'member-gone-invite' }),
+    ];
+    scenario.visibleMemberRows = [];
+
+    const list = await service.listForManager(LISTING_REF, USER_ID);
+
+    expect(list.accepted).toHaveLength(1);
+    expect(list.accepted[0]).toMatchObject({
+      id: 'member-gone',
+      kind: 'member',
+      member: null,
+    });
+    expect(list.invitesSent[0]).toMatchObject({
+      id: 'member-gone-invite',
+      kind: 'member',
+      member: null,
+    });
+
+    scenario.teamRow = memberTeamRow({
+      id: 'member-gone',
+      status: ListingTeamMemberStatus.Accepted,
+      position: 1,
+    });
+    await service.remove(LISTING_REF, USER_ID, 'member-gone');
+    expect(manager.update).toHaveBeenCalledWith(
+      ListingTeamMember,
+      { id: 'member-gone' },
+      { status: ListingTeamMemberStatus.Removed, position: null },
+    );
+  });
+
+  it('hides the avatar of a member who turned their photo off', async () => {
+    scenario.members = [memberTeamRow({ id: 'member-invite' })];
+    scenario.visibleMemberRows = [
+      memberProfileRow({ avatar_url: 'avatars/ana.jpg', photo_visible: false }),
+    ];
+
+    const list = await service.listForManager(LISTING_REF, USER_ID);
+
+    expect(list.invitesSent[0]).toMatchObject({
+      member: { slug: MEMBER_SLUG, avatarUrl: null },
+    });
+    expect(list.invitesSent[0]?.member).not.toHaveProperty('avatarCrop');
+  });
+
   describe('reorder', () => {
+    it('accepts an order that names persona and member rows together', async () => {
+      scenario.acceptedIds = ['persona-a', 'member-b', 'persona-c'];
+      scenario.members = [
+        teamRow({
+          id: 'persona-a',
+          status: ListingTeamMemberStatus.Accepted,
+          position: 1,
+        }),
+        memberTeamRow({
+          id: 'member-b',
+          status: ListingTeamMemberStatus.Accepted,
+          position: 2,
+        }),
+        teamRow({
+          id: 'persona-c',
+          status: ListingTeamMemberStatus.Accepted,
+          position: 3,
+        }),
+      ];
+
+      const result = await service.reorder(LISTING_REF, USER_ID, {
+        memberIds: ['member-b', 'persona-c', 'persona-a'],
+      });
+
+      expect(queriesContaining('unnest(')[0]?.[1]).toEqual([
+        LISTING_ID,
+        ['member-b', 'persona-c', 'persona-a'],
+      ]);
+      expect(result.accepted.map((row) => row.kind).sort()).toEqual([
+        'member',
+        'persona',
+        'persona',
+      ]);
+    });
+
+    it('refuses an order that leaves a member row out', async () => {
+      scenario.acceptedIds = ['persona-a', 'member-b'];
+
+      await expect(
+        refusalOf(
+          service.reorder(LISTING_REF, USER_ID, { memberIds: ['persona-a'] }),
+        ),
+      ).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_order_mismatch',
+      });
+    });
     it('refuses an order that leaves out a member or names a stranger', async () => {
       scenario.acceptedIds = ['member-a', 'member-b'];
 

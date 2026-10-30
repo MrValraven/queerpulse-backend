@@ -16,3 +16,37 @@ export interface ListingTeamAlertEvent {
   memberId: string;
   actingUserId: string;
 }
+
+/** Emitted after a listing invites a member and the row commits; the listener
+ *  tells that member only. The acting manager's id is for block and mute
+ *  filtering only. */
+export const LISTING_TEAM_MEMBER_INVITED = 'listing_team.member_invited';
+
+/** Emitted after a member accepts a team invite; the listener tells the
+ *  listing's owner and active co-managers, never the accepting member. */
+export const LISTING_TEAM_MEMBER_ACCEPTED = 'listing_team.member_accepted';
+
+/** Carried by both member events. Same shape as `ListingTeamAlertEvent`; here
+ *  `actingUserId` is the inviting manager for the invite and the accepting
+ *  member for the accepted event. */
+export interface ListingTeamMemberAlertEvent {
+  /** The `listing_team_members` row id. */
+  memberId: string;
+  actingUserId: string;
+}
+
+/** Client payload of `listing_team_member_invite`. */
+export interface ListingTeamMemberInvitePayload {
+  listingName: string;
+  listingSlug: string;
+  roleLabel: string | null;
+}
+
+/** Client payload of `listing_team_member_accepted`. */
+export interface ListingTeamMemberAcceptedPayload {
+  listingRef: string;
+  listingName: string;
+  listingSlug: string;
+  memberName: string;
+  memberSlug: string;
+}

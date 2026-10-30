@@ -107,6 +107,11 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
   'push:listingTeamAccepted.title': 'Ligação à equipa confirmada',
   'push:listingTeamAccepted.body':
     '{persona} faz agora parte da equipa de {listing}',
+  'push:listingTeamMemberInvite.title': 'Convite para a equipa',
+  'push:listingTeamMemberInvite.body': '{listing} convidou-te para a equipa',
+  'push:listingTeamMemberAccepted.title': 'Convite aceite',
+  'push:listingTeamMemberAccepted.body':
+    '{member} aceitou o convite para a equipa de {listing}',
   'push:housing.decision.approved.title': 'A tua casa está publicada',
   'push:housing.decision.approved.body':
     '{title} já está no quadro de alojamento.',

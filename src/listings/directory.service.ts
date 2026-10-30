@@ -922,8 +922,8 @@ export class DirectoryService {
     /**
      * The signed-in caller's user id, `null` for an anonymous caller. Only the
      * `team` block reads it: the team is the one block-aware block on this
-     * page, and it drops each persona whose owner has a block with this caller
-     * either way. Any signed-in caller already gets `private, no-store` from
+     * page, and it drops each persona or member that has a block with this
+     * caller either way, and each member who hid their profile from them. Any signed-in caller already gets `private, no-store` from
      * `AnonymousNoStaleCacheInterceptor`, so the per-viewer answer never
      * reaches a shared cache. Defaults to `null`, which reads the anonymous team.
      */

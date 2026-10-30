@@ -803,6 +803,23 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'listingRef',
       'subprofileId',
     ],
+    // Meet the team, members. The invite goes to the invited member alone and
+    // carries only the business's public name and slug plus the role label the
+    // manager typed. The acceptance goes to the listing's managers, who already
+    // hold the listing ref, and names the member who just accepted. Neither
+    // names an actor.
+    [NotificationType.ListingTeamMemberInvite]: [
+      'listingName',
+      'listingSlug',
+      'roleLabel',
+    ],
+    [NotificationType.ListingTeamMemberAccepted]: [
+      'listingRef',
+      'listingName',
+      'listingSlug',
+      'memberName',
+      'memberSlug',
+    ],
     // The business's own public name, for copy like "an admin has offered you
     // ownership of Lux Cafe". `listingSlug` already rides along in
     // `COMMON_PAYLOAD_KEYS`, which is what the deep link is built from.

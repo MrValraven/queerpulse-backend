@@ -5,22 +5,33 @@ import {
   ListingTeamMember,
   ListingTeamMemberStatus,
 } from './entities/listing-team-member.entity';
-import { eligiblePersonaSql } from './listing-team-visibility';
+import {
+  eligibleMemberSql,
+  eligiblePersonaSql,
+} from './listing-team-visibility';
 import {
   assertAcceptedRoom,
   assertInviteRoom,
+  assertMemberAcceptedRoom,
+  assertMemberPairOpen,
   assertPairOpen,
   assertRequestRoom,
   hasBlockEitherWay,
+  insertLiveMemberTeamRow,
   insertLiveTeamRow,
+  isAcceptedConnection,
   lockListingRow,
+  lockMemberCap,
   lockPersonaRow,
   type NewTeamRowValues,
+  readMemberFacts,
   readPersonaFacts,
 } from './listing-team-write-rules';
 
 const LISTING_ID = 'listing-1';
 const SUBPROFILE_ID = 'persona-1';
+const MEMBER_USER_ID = 'member-user-1';
+const ACTING_USER_ID = 'manager-1';
 
 interface ManagerMock {
   query: jest.Mock;
@@ -47,6 +58,7 @@ const teamRow = (overrides: Partial<ListingTeamMember>): ListingTeamMember => ({
   id: 'member-1',
   listingId: LISTING_ID,
   subprofileId: SUBPROFILE_ID,
+  userId: null,
   roleLabel: null,
   status: ListingTeamMemberStatus.Pending,
   initiatedBy: ListingTeamInitiator.Listing,
@@ -402,5 +414,282 @@ describe('listing team write rules', () => {
       hasBlockEitherWay(asManager(manager), 'a', null),
     ).resolves.toBe(false);
     expect(manager.query).not.toHaveBeenCalled();
+  });
+
+  describe('member rows', () => {
+    it('reads member facts through the member eligibility fragment', async () => {
+      manager.query.mockResolvedValueOnce([
+        { user_id: MEMBER_USER_ID, is_eligible: false },
+      ]);
+
+      await expect(
+        readMemberFacts(asManager(manager), MEMBER_USER_ID),
+      ).resolves.toEqual({ userId: MEMBER_USER_ID, isEligible: false });
+      expect(sqlOfCall(manager, 0)).toContain(
+        eligibleMemberSql('member_profile', 'member_user'),
+      );
+      expect(parametersOfCall(manager, 0)).toEqual([MEMBER_USER_ID]);
+    });
+
+    it('answers null member facts when the member has no profile or account', async () => {
+      await expect(
+        readMemberFacts(asManager(manager), MEMBER_USER_ID),
+      ).resolves.toBeNull();
+    });
+
+    it('finds an accepted connection in either direction and nothing else', async () => {
+      manager.query.mockResolvedValueOnce([{ is_connected: true }]);
+      await expect(
+        isAcceptedConnection(
+          asManager(manager),
+          ACTING_USER_ID,
+          MEMBER_USER_ID,
+        ),
+      ).resolves.toBe(true);
+      expect(sqlOfCall(manager, 0)).toContain(
+        `"connection"."status" = 'accepted'`,
+      );
+      expect(parametersOfCall(manager, 0)).toEqual([
+        ACTING_USER_ID,
+        MEMBER_USER_ID,
+      ]);
+
+      manager.query.mockResolvedValueOnce([{ is_connected: false }]);
+      await expect(
+        isAcceptedConnection(
+          asManager(manager),
+          ACTING_USER_ID,
+          MEMBER_USER_ID,
+        ),
+      ).resolves.toBe(false);
+    });
+
+    it('takes the advisory lock keyed on the member', async () => {
+      await lockMemberCap(asManager(manager), MEMBER_USER_ID);
+
+      expect(sqlOfCall(manager, 0)).toContain('pg_advisory_xact_lock');
+      expect(parametersOfCall(manager, 0)).toEqual([MEMBER_USER_ID]);
+    });
+
+    it('refuses an accepted member pair before a pending one', async () => {
+      manager.findOne.mockResolvedValueOnce(
+        teamRow({
+          userId: MEMBER_USER_ID,
+          subprofileId: null,
+          status: ListingTeamMemberStatus.Accepted,
+        }),
+      );
+      await expect(
+        refusalOf(
+          assertMemberPairOpen(asManager(manager), LISTING_ID, MEMBER_USER_ID),
+        ),
+      ).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_already_accepted',
+      });
+
+      manager.findOne.mockResolvedValueOnce(
+        teamRow({
+          userId: MEMBER_USER_ID,
+          subprofileId: null,
+          status: ListingTeamMemberStatus.Pending,
+        }),
+      );
+      await expect(
+        refusalOf(
+          assertMemberPairOpen(asManager(manager), LISTING_ID, MEMBER_USER_ID),
+        ),
+      ).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_already_pending',
+        initiatedBy: 'listing',
+      });
+      expect(manager.findOne).toHaveBeenLastCalledWith(
+        ListingTeamMember,
+        expect.objectContaining({
+          where: expect.objectContaining({
+            listingId: LISTING_ID,
+            userId: MEMBER_USER_ID,
+          }) as unknown,
+        }),
+      );
+    });
+
+    it('refuses a re-invite inside the cooldown, keyed on listing, member and the listing side', async () => {
+      const retryAt = new Date('2026-11-02T10:00:00.000Z');
+      manager.query.mockResolvedValueOnce([{ retry_at: retryAt }]);
+
+      await expect(
+        refusalOf(
+          assertMemberPairOpen(asManager(manager), LISTING_ID, MEMBER_USER_ID),
+        ),
+      ).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_cooldown',
+        retryAt: retryAt.toISOString(),
+      });
+      expect(sqlOfCall(manager, 0)).toContain(`"user_id" = $2`);
+      expect(parametersOfCall(manager, 0)).toEqual([
+        LISTING_ID,
+        MEMBER_USER_ID,
+        'listing',
+        14,
+      ]);
+    });
+
+    it('lets an open member pair through', async () => {
+      await expect(
+        assertMemberPairOpen(asManager(manager), LISTING_ID, MEMBER_USER_ID),
+      ).resolves.toBeUndefined();
+    });
+
+    it('refuses the 41st accepted row on the listing with the listing code', async () => {
+      manager.count.mockResolvedValueOnce(39).mockResolvedValueOnce(0);
+      await expect(
+        assertMemberAcceptedRoom(
+          asManager(manager),
+          LISTING_ID,
+          MEMBER_USER_ID,
+        ),
+      ).resolves.toBeUndefined();
+
+      manager.count.mockResolvedValueOnce(40);
+      await expect(
+        refusalOf(
+          assertMemberAcceptedRoom(
+            asManager(manager),
+            LISTING_ID,
+            MEMBER_USER_ID,
+          ),
+        ),
+      ).resolves.toMatchObject({ statusCode: 409, code: 'listing_team_full' });
+    });
+
+    it('refuses the member who is already on 10 teams', async () => {
+      manager.count.mockResolvedValueOnce(0).mockResolvedValueOnce(10);
+
+      await expect(
+        refusalOf(
+          assertMemberAcceptedRoom(
+            asManager(manager),
+            LISTING_ID,
+            MEMBER_USER_ID,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_member_full',
+      });
+      expect(manager.count).toHaveBeenLastCalledWith(ListingTeamMember, {
+        where: {
+          userId: MEMBER_USER_ID,
+          status: ListingTeamMemberStatus.Accepted,
+        },
+      });
+    });
+
+    it('inserts a pending member row on the member index with no position', async () => {
+      const inserted = teamRow({ id: 'member-new', userId: MEMBER_USER_ID });
+      manager.query.mockResolvedValueOnce([{ id: 'member-new' }]);
+      manager.findOneOrFail.mockResolvedValueOnce(inserted);
+
+      await expect(
+        insertLiveMemberTeamRow(asManager(manager), {
+          listingId: LISTING_ID,
+          userId: MEMBER_USER_ID,
+          requestedByUserId: ACTING_USER_ID,
+          roleLabel: 'Chef',
+          status: ListingTeamMemberStatus.Pending,
+          answeredAt: null,
+        }),
+      ).resolves.toBe(inserted);
+      expect(sqlOfCall(manager, 0)).toContain(
+        `ON CONFLICT ("listing_id", "user_id") WHERE "status" IN ('pending', 'accepted') DO NOTHING`,
+      );
+      expect(parametersOfCall(manager, 0)).toEqual([
+        LISTING_ID,
+        MEMBER_USER_ID,
+        'listing',
+        ACTING_USER_ID,
+        'Chef',
+        'pending',
+        null,
+        null,
+      ]);
+    });
+
+    it('places an accepted member row last across both kinds', async () => {
+      manager.query
+        .mockResolvedValueOnce([{ next_position: 4 }])
+        .mockResolvedValueOnce([{ id: 'member-new' }]);
+      manager.findOneOrFail.mockResolvedValueOnce(
+        teamRow({ id: 'member-new' }),
+      );
+
+      await insertLiveMemberTeamRow(asManager(manager), {
+        listingId: LISTING_ID,
+        userId: MEMBER_USER_ID,
+        requestedByUserId: ACTING_USER_ID,
+        roleLabel: null,
+        status: ListingTeamMemberStatus.Accepted,
+        answeredAt: new Date('2026-10-30T00:00:00.000Z'),
+      });
+
+      expect(sqlOfCall(manager, 0)).toContain('"next_position"');
+      expect(parametersOfCall(manager, 1)).toEqual(
+        expect.arrayContaining([4]) as unknown,
+      );
+    });
+
+    it("maps a live member conflict to the pair's current refusal", async () => {
+      manager.query.mockResolvedValueOnce([]);
+      manager.findOne.mockResolvedValueOnce(
+        teamRow({
+          userId: MEMBER_USER_ID,
+          subprofileId: null,
+          status: ListingTeamMemberStatus.Pending,
+        }),
+      );
+
+      await expect(
+        refusalOf(
+          insertLiveMemberTeamRow(asManager(manager), {
+            listingId: LISTING_ID,
+            userId: MEMBER_USER_ID,
+            requestedByUserId: ACTING_USER_ID,
+            roleLabel: null,
+            status: ListingTeamMemberStatus.Pending,
+            answeredAt: null,
+          }),
+        ),
+      ).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_already_pending',
+        initiatedBy: 'listing',
+      });
+      expect(manager.findOneOrFail).not.toHaveBeenCalled();
+    });
+
+    it('answers the already pending code when the member conflict outlives the one retry', async () => {
+      await expect(
+        refusalOf(
+          insertLiveMemberTeamRow(asManager(manager), {
+            listingId: LISTING_ID,
+            userId: MEMBER_USER_ID,
+            requestedByUserId: ACTING_USER_ID,
+            roleLabel: null,
+            status: ListingTeamMemberStatus.Pending,
+            answeredAt: null,
+          }),
+        ),
+      ).resolves.toMatchObject({
+        statusCode: 409,
+        code: 'listing_team_already_pending',
+        initiatedBy: 'listing',
+      });
+      // Insert, cooldown read, the retried insert, the second cooldown read.
+      expect(manager.query).toHaveBeenCalledTimes(4);
+      expect(manager.findOneOrFail).not.toHaveBeenCalled();
+    });
   });
 });

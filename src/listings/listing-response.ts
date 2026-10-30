@@ -1610,11 +1610,12 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * the page can print "Confirmed by the owner on 12 August". `null` only for
    * a listing whose owner has never confirmed and never edited it. */
   detailsConfirmedAt: string | null;
-  /** "Meet the team": the accepted members in the order the business set, at
-   * most 40, always present (`[]` when empty). The anonymous variant carries
-   * open, unlinked personas; an active member also sees network and linked
-   * personas; every signed-in viewer loses personas whose owner has a block
-   * with them either way. */
+  /** "Meet the team": the accepted personas and members in the order the
+   * business set, at most 40, always present (`[]` when empty). The anonymous
+   * variant carries open, unlinked personas and members who turned their public
+   * profile on; an active member also sees network and linked personas; every
+   * signed-in viewer loses personas and members that have a block with them
+   * either way, and members who hid their profile from them. */
   team: ListingTeamMemberPublic[];
 }
 

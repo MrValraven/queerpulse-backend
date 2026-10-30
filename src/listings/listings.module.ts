@@ -43,6 +43,9 @@ import { ListingOwnershipService } from './listing-ownership.service';
 import { ListingTeamAlertsListener } from './listing-team-alerts.listener';
 import { ListingTeamLinksController } from './listing-team-links.controller';
 import { ListingTeamLinksService } from './listing-team-links.service';
+import { ListingTeamMemberAlertsListener } from './listing-team-member-alerts.listener';
+import { ListingTeamMemberLinksController } from './listing-team-member-links.controller';
+import { ListingTeamMemberLinksService } from './listing-team-member-links.service';
 import { ListingTeamController } from './listing-team.controller';
 import { ListingTeamService } from './listing-team.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
@@ -195,6 +198,9 @@ import { ListingsService } from './listings.service';
     // The persona side of Meet the team, on the `subprofiles` base path with
     // two or more segments under `:id`.
     ListingTeamLinksController,
+    // The member side of Meet the team, on its own `me/team-links` base path
+    // that no other controller uses.
+    ListingTeamMemberLinksController,
   ],
   providers: [
     ListingsService,
@@ -210,6 +216,10 @@ import { ListingsService } from './listings.service';
     ListingTeamService,
     ListingTeamLinksService,
     ListingTeamAlertsListener,
+    // Meet the team, members: the member side's service and the in-app and
+    // push alerts for a member invite and a member acceptance.
+    ListingTeamMemberLinksService,
+    ListingTeamMemberAlertsListener,
     ListingEditSuggestionsService,
     // The one place a listing changes hands. `ListingClaimsService` calls it
     // on an approved claim and the staff owner-offer path calls it on an

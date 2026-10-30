@@ -36,6 +36,7 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import {
   ApproveListingTeamRequestDto,
+  InviteListingTeamMemberByProfileDto,
   InviteListingTeamMemberDto,
   ListingTeamPersonaSearchQuery,
   ReorderListingTeamDto,
@@ -56,8 +57,8 @@ import { ListingTeamService } from './listing-team.service';
  * `@Get(':ref')` on the same `listings` base path and Nest resolves handlers in
  * controller-registration order, so this controller is registered BEFORE
  * `ListingsController` in `ListingsModule`. Inside this class the literal
- * segments (`candidates`, `invites`, `order`) are declared ahead of every
- * `:memberId` route so a literal never reads as a member id.
+ * segments (`candidates`, `invites`, `member-invites`, `order`) are declared
+ * ahead of every `:memberId` route so a literal never reads as a member id.
  */
 @Feature('listings')
 @ApiTags('Listings')
@@ -132,6 +133,39 @@ export class ListingTeamController {
     @Body() body: InviteListingTeamMemberDto,
   ) {
     return this.listingTeamService.invite(ref, user.userId, body);
+  }
+
+  @Post(':ref/team/member-invites')
+  @UseGuards(NotRestrictedGuard)
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Invite one of your connections to the team of a listing',
+  })
+  @ApiCreatedResponse({
+    description: 'The pending invite, as a member row.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed body.' })
+  @ApiNotFoundResponse({
+    description:
+      'listing_team_member_not_found, or a 404 without a code when no such listing exists for the caller.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description: 'listing_team_member_ineligible.',
+  })
+  @ApiConflictResponse({
+    description:
+      'listing_team_listing_not_live, listing_team_already_pending, listing_team_already_accepted, listing_team_cooldown, listing_team_full, listing_team_pending_full or listing_team_member_full.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  inviteMember(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Body() body: InviteListingTeamMemberByProfileDto,
+  ) {
+    return this.listingTeamService.inviteMember(ref, user.userId, body);
   }
 
   @Put(':ref/team/order')

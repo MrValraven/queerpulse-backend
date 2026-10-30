@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import type { CropRect } from '../media-crops/crop-rect';
 import { toBareKey } from '../storage/bare-key';
 import {
@@ -15,12 +16,18 @@ import {
   LISTING_TEAM_LISTING_COLUMNS,
   ownerNameOf,
   personaAvatarKeys,
+  memberAvatarKeys,
   teamStatusOf,
   toListingTeamListing,
   toListingTeamManagerRow,
+  toListingTeamMemberManagerRow,
+  toListingTeamMemberProfile,
+  toListingTeamMemberPublic,
   toListingTeamPersona,
+  toListingTeamPersonaPublic,
   toListingTeamPersonaRow,
   toListingWorksAt,
+  type ListingTeamMemberColumns,
   type ListingTeamPersonaColumns,
 } from './listing-team-response';
 
@@ -43,6 +50,21 @@ function makePersona(
     kind: SubprofileKind.Photographer,
     avatarUrl: AVATAR_KEY,
     linkVisibility: SubprofileLinkVisibility.Unlinked,
+    ...overrides,
+  };
+}
+
+const MEMBER_AVATAR_KEY = 'uploads/member-avatar.jpg';
+
+function makeMemberProfile(
+  overrides: Partial<ListingTeamMemberColumns> = {},
+): ListingTeamMemberColumns {
+  return {
+    slug: 'ana-silva',
+    firstName: 'Ana',
+    lastName: 'Silva',
+    avatarUrl: MEMBER_AVATAR_KEY,
+    photoVisible: true,
     ...overrides,
   };
 }
@@ -209,6 +231,7 @@ describe('listing team response mappers', () => {
     expect(pending.createdAt).toBe('2026-10-18T09:00:00.000Z');
 
     const accepted = toListingTeamManagerRow(makeMember(), persona);
+    expect(accepted.kind).toBe('persona');
     expect(accepted.position).toBe(2);
     expect(accepted.status).toBe('accepted');
     expect(accepted.answeredAt).toBe('2026-10-19T10:00:00.000Z');
@@ -227,7 +250,7 @@ describe('listing team response mappers', () => {
       toListingWorksAt(summary, member.roleLabel),
       { persona, teamStatus: teamStatusOf(member.status) },
       { listing: summary, teamStatus: teamStatusOf(member.status) },
-      { persona, roleLabel: member.roleLabel },
+      { kind: 'persona', persona, roleLabel: member.roleLabel },
     ];
     const forbidden = [
       'member-uuid',
@@ -246,6 +269,110 @@ describe('listing team response mappers', () => {
         expect(serialized).not.toContain(term);
       }
     }
+  });
+
+  it('shapes a member with the photo gate honoured and the crop omitted when none was saved', () => {
+    const crops = new Map<string, CropRect>([
+      [toBareKey(MEMBER_AVATAR_KEY), CROP],
+    ]);
+    const shown = toListingTeamMemberProfile(makeMemberProfile(), crops);
+    expect(shown.slug).toBe('ana-silva');
+    expect(shown.name).toBe('Ana Silva');
+    expect(shown.avatarUrl).toBe(toImageUrl(MEMBER_AVATAR_KEY));
+    expect(shown.avatarCrop).toEqual(CROP);
+
+    const uncropped = toListingTeamMemberProfile(
+      makeMemberProfile(),
+      new Map(),
+    );
+    expect(uncropped.avatarUrl).not.toBeNull();
+    expect('avatarCrop' in uncropped).toBe(false);
+
+    const hidden = toListingTeamMemberProfile(
+      makeMemberProfile({ photoVisible: false }),
+      crops,
+    );
+    expect(hidden.avatarUrl).toBeNull();
+    expect('avatarCrop' in hidden).toBe(false);
+    expect(JSON.stringify(hidden)).not.toContain(MEMBER_AVATAR_KEY);
+
+    const noPhoto = toListingTeamMemberProfile(
+      makeMemberProfile({ avatarUrl: null }),
+      crops,
+    );
+    expect(noPhoto.avatarUrl).toBeNull();
+  });
+
+  it('trims the member name and tolerates a blank last name', () => {
+    expect(
+      toListingTeamMemberProfile(makeMemberProfile({ lastName: '' }), new Map())
+        .name,
+    ).toBe('Ana');
+  });
+
+  it('builds a member manager row with a member and no persona, and keeps the user id off it', () => {
+    const profile = toListingTeamMemberProfile(makeMemberProfile(), new Map());
+    const row = toListingTeamMemberManagerRow(
+      makeMember({
+        subprofileId: null,
+        userId: 'invited-user-uuid',
+        user: { id: 'invited-user-uuid' },
+      } as Partial<ListingTeamMember>),
+      profile,
+    );
+    expect(row.kind).toBe('member');
+    expect(row.member).toEqual(profile);
+    expect('persona' in row).toBe(false);
+    const serialized = JSON.stringify(row);
+    for (const term of ['invited-user-uuid', 'userId', 'requestedBy']) {
+      expect(serialized).not.toContain(term);
+    }
+
+    const withheld = toListingTeamMemberManagerRow(makeMember(), null);
+    expect(withheld.kind).toBe('member');
+    expect(withheld.member).toBeNull();
+    expect('persona' in withheld).toBe(false);
+  });
+
+  it('never gives a persona row a member field', () => {
+    const row = toListingTeamManagerRow(makeMember(), null);
+    expect(row.kind).toBe('persona');
+    expect('member' in row).toBe(false);
+  });
+
+  it('tags public entries with their kind and keeps persona and member fields apart', () => {
+    const persona = toListingTeamPersona(makePersona(), new Map(), null);
+    const profile = toListingTeamMemberProfile(makeMemberProfile(), new Map());
+    const personaEntry = toListingTeamPersonaPublic(
+      persona as NonNullable<typeof persona>,
+      'Resident artist',
+    );
+    expect(personaEntry).toEqual({
+      kind: 'persona',
+      persona,
+      roleLabel: 'Resident artist',
+    });
+    expect('member' in personaEntry).toBe(false);
+    const memberEntry = toListingTeamMemberPublic(profile, null);
+    expect(memberEntry).toEqual({
+      kind: 'member',
+      member: profile,
+      roleLabel: null,
+    });
+    expect('persona' in memberEntry).toBe(false);
+  });
+
+  it('lists avatar keys only for members whose photo is shown', () => {
+    expect(
+      memberAvatarKeys([
+        makeMemberProfile(),
+        makeMemberProfile({
+          avatarUrl: 'uploads/other.jpg',
+          photoVisible: false,
+        }),
+        makeMemberProfile({ avatarUrl: null }),
+      ]),
+    ).toEqual([MEMBER_AVATAR_KEY]);
   });
 
   it('maps ended statuses to no team status', () => {

@@ -238,6 +238,13 @@ export class PushNotificationListener {
         case NotificationType.ListingTeamAccepted:
           await this.pushListingTeamAccepted(userIds, notification);
           return;
+        // Meet the team, members: both answer to Listings.
+        case NotificationType.ListingTeamMemberInvite:
+          await this.pushListingTeamMemberInvite(userIds, notification);
+          return;
+        case NotificationType.ListingTeamMemberAccepted:
+          await this.pushListingTeamMemberAccepted(userIds, notification);
+          return;
         // Platform staff offering a struggling community help (OPS-05).
         // Always-on, no category gate, for the same reason as the types
         // above: it is the platform reaching the people running a room that
@@ -1524,6 +1531,70 @@ export class PushNotificationListener {
 
   private listingTeamRequestUrl(listingRef: string): string {
     return `/local/directory/list/${encodeURIComponent(listingRef)}/edit#lb-editor-team`;
+  }
+
+  /**
+   * "Ink House invited you to join the team" (Meet the team, members). Sent
+   * to the invited member alone; opens the Places section of their profile
+   * page. The listing name is required. The payload names no member, so the
+   * l10n params carry the listing alone.
+   */
+  private async pushListingTeamMemberInvite(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const listing = this.payloadString(notification, 'listingName');
+    if (!listing) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Listings,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Team invite',
+      body: `${listing} invited you to join the team`,
+      tag: `notification:${notification.id}`,
+      data: { url: '/account/profile#places' },
+      l10n: {
+        titleKey: 'push:listingTeamMemberInvite.title',
+        bodyKey: 'push:listingTeamMemberInvite.body',
+        params: { listing },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "Ana Silva accepted the team invite for Ink House" (Meet the team,
+   * members). Sent to the listing's owner and co-managers; opens the listing
+   * editor's Team section. Listing ref, listing name and member name are
+   * required.
+   */
+  private async pushListingTeamMemberAccepted(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const listingRef = this.payloadString(notification, 'listingRef');
+    const member = this.payloadString(notification, 'memberName');
+    const listing = this.payloadString(notification, 'listingName');
+    if (!listingRef || !member || !listing) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Listings,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Team invite accepted',
+      body: `${member} accepted the team invite for ${listing}`,
+      tag: `notification:${notification.id}`,
+      data: { url: this.listingTeamRequestUrl(listingRef) },
+      l10n: {
+        titleKey: 'push:listingTeamMemberAccepted.title',
+        bodyKey: 'push:listingTeamMemberAccepted.body',
+        params: { member, listing },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
   }
 
   /**

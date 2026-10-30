@@ -12,6 +12,7 @@ import {
   listingTeamError,
 } from './listing-team.constants';
 import {
+  eligibleMemberSql,
   eligiblePersonaSql,
   publiclyVisibleListingSql,
 } from './listing-team-visibility';
@@ -25,6 +26,10 @@ import {
  * `listing_team_members` row, then the `subprofiles` row, each `FOR UPDATE`.
  * Listing caps and positions are counted only after the listing row is
  * locked; persona caps only after the persona row is locked.
+ *
+ * A member row has no persona row to lock. Its order is the listing row, the
+ * `listing_team_members` row, then `lockMemberCap`'s advisory lock keyed on
+ * the member; member caps are counted only after that lock is held.
  */
 
 /** Locks one `listings` row for the rest of the transaction. */
@@ -144,6 +149,74 @@ export async function readPersonaFacts(
   };
 }
 
+/** What a team write needs to know about the member side. */
+export interface TeamMemberFacts {
+  userId: string;
+  isEligible: boolean;
+}
+
+interface TeamMemberFactsRow {
+  user_id: string;
+  is_eligible: boolean;
+}
+
+/**
+ * Null when the member has no profile or no account. Eligibility is the
+ * `eligibleMemberSql` rule: an active account, an open profile, not self-hidden
+ * and free of a moderator takedown.
+ */
+export async function readMemberFacts(
+  manager: EntityManager,
+  memberUserId: string,
+): Promise<TeamMemberFacts | null> {
+  const rows = await manager.query<TeamMemberFactsRow[]>(
+    `SELECT "member_user"."id" AS "user_id",
+            (${eligibleMemberSql('member_profile', 'member_user')}) AS "is_eligible"
+       FROM "users" "member_user"
+       JOIN "profiles" "member_profile" ON "member_profile"."user_id" = "member_user"."id"
+      WHERE "member_user"."id" = $1`,
+    [memberUserId],
+  );
+  const row = rows[0];
+  if (!row) {
+    return null;
+  }
+  return { userId: row.user_id, isEligible: row.is_eligible === true };
+}
+
+/** True when the two members hold an accepted connection, in either direction. */
+export async function isAcceptedConnection(
+  manager: EntityManager,
+  actingUserId: string,
+  memberUserId: string,
+): Promise<boolean> {
+  const rows = await manager.query<{ is_connected: boolean }[]>(
+    `SELECT EXISTS (
+       SELECT 1 FROM "connections" "connection"
+        WHERE "connection"."status" = 'accepted'
+          AND (("connection"."requester_id" = $1 AND "connection"."addressee_id" = $2)
+            OR ("connection"."requester_id" = $2 AND "connection"."addressee_id" = $1))
+     ) AS "is_connected"`,
+    [actingUserId, memberUserId],
+  );
+  return rows[0]?.is_connected === true;
+}
+
+/**
+ * Serialises every write that counts one member's accepted teams, so two
+ * listings cannot both take the member past the cap. Taken after the listing
+ * row and the team row, and held until the transaction ends.
+ */
+export async function lockMemberCap(
+  manager: EntityManager,
+  memberUserId: string,
+): Promise<void> {
+  await manager.query(
+    `SELECT pg_advisory_xact_lock(hashtext('listing_team_member:' || $1::text))`,
+    [memberUserId],
+  );
+}
+
 /**
  * True when either member has blocked the other. A listing with no owner and
  * a member compared with themself have no block to find.
@@ -244,6 +317,74 @@ export async function assertPairOpen(
     throw listingTeamError('listing_team_cooldown', {
       retryAt: new Date(cooldownRow.retry_at).toISOString(),
     });
+  }
+}
+
+/**
+ * Refuses a new member invite for a member who is already on the listing's
+ * team, already invited, or inside the cooldown of a decline the member sent
+ * this listing. Member rows are always started by the listing.
+ */
+export async function assertMemberPairOpen(
+  manager: EntityManager,
+  listingId: string,
+  memberUserId: string,
+): Promise<void> {
+  const liveRow = await manager.findOne(ListingTeamMember, {
+    where: {
+      listingId,
+      userId: memberUserId,
+      status: In([...LIVE_LISTING_TEAM_STATUSES]),
+    },
+  });
+  if (liveRow?.status === ListingTeamMemberStatus.Accepted) {
+    throw listingTeamError('listing_team_already_accepted');
+  }
+  if (liveRow?.status === ListingTeamMemberStatus.Pending) {
+    throw listingTeamError('listing_team_already_pending', {
+      initiatedBy: liveRow.initiatedBy,
+    });
+  }
+  const cooldownRows = await manager.query<{ retry_at: Date | string }[]>(
+    `SELECT "answered_at" + make_interval(days => $4) AS "retry_at"
+       FROM "listing_team_members"
+      WHERE "listing_id" = $1 AND "user_id" = $2 AND "initiated_by" = $3
+        AND "status" = '${ListingTeamMemberStatus.Declined}'
+        AND "answered_at" + make_interval(days => $4) > now()
+      ORDER BY "answered_at" DESC
+      LIMIT 1`,
+    [
+      listingId,
+      memberUserId,
+      ListingTeamInitiator.Listing,
+      LISTING_TEAM_LIMITS.cooldownDays,
+    ],
+  );
+  const cooldownRow = cooldownRows[0];
+  if (cooldownRow) {
+    throw listingTeamError('listing_team_cooldown', {
+      retryAt: new Date(cooldownRow.retry_at).toISOString(),
+    });
+  }
+}
+
+/** Room for one more accepted row on the listing (both kinds counted) and one more team on the member. */
+export async function assertMemberAcceptedRoom(
+  manager: EntityManager,
+  listingId: string,
+  memberUserId: string,
+): Promise<void> {
+  const acceptedOnListing = await manager.count(ListingTeamMember, {
+    where: { listingId, status: ListingTeamMemberStatus.Accepted },
+  });
+  if (acceptedOnListing >= LISTING_TEAM_LIMITS.acceptedPerListing) {
+    throw listingTeamError('listing_team_full');
+  }
+  const acceptedOfMember = await manager.count(ListingTeamMember, {
+    where: { userId: memberUserId, status: ListingTeamMemberStatus.Accepted },
+  });
+  if (acceptedOfMember >= LISTING_TEAM_LIMITS.acceptedPerMember) {
+    throw listingTeamError('listing_team_member_full');
   }
 }
 
@@ -388,6 +529,84 @@ async function tryInsertLiveTeamRow(
       values.roleLabel,
       values.status,
       values.position,
+      values.answeredAt,
+    ],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/** The values of a new live member row. The listing started it, so `initiatedBy` is fixed. */
+export interface NewMemberTeamRowValues {
+  listingId: string;
+  userId: string;
+  requestedByUserId: string;
+  roleLabel: string | null;
+  status: ListingTeamMemberStatus.Pending | ListingTeamMemberStatus.Accepted;
+  answeredAt: Date | null;
+}
+
+/**
+ * Inserts a live member row with the member partial unique index as the
+ * conflict target, so a lost race comes back as no row and leaves the
+ * transaction usable. A miss answers the pair's current refusal through
+ * `assertMemberPairOpen`. A pending row has no position; an accepted row goes
+ * last on the team, counted across personas and members together.
+ */
+export async function insertLiveMemberTeamRow(
+  manager: EntityManager,
+  values: NewMemberTeamRowValues,
+): Promise<ListingTeamMember> {
+  const position =
+    values.status === ListingTeamMemberStatus.Accepted
+      ? await nextTeamPosition(manager, values.listingId)
+      : null;
+  const insertedId = await tryInsertLiveMemberTeamRow(
+    manager,
+    values,
+    position,
+  );
+  if (insertedId !== null) {
+    return manager.findOneOrFail(ListingTeamMember, {
+      where: { id: insertedId },
+    });
+  }
+  await assertMemberPairOpen(manager, values.listingId, values.userId);
+  // The conflicting row was answered between the insert and the re-read, so
+  // the pair is open again: one more try settles it.
+  const retriedId = await tryInsertLiveMemberTeamRow(manager, values, position);
+  if (retriedId !== null) {
+    return manager.findOneOrFail(ListingTeamMember, {
+      where: { id: retriedId },
+    });
+  }
+  await assertMemberPairOpen(manager, values.listingId, values.userId);
+  throw listingTeamError('listing_team_already_pending', {
+    initiatedBy: ListingTeamInitiator.Listing,
+  });
+}
+
+async function tryInsertLiveMemberTeamRow(
+  manager: EntityManager,
+  values: NewMemberTeamRowValues,
+  position: number | null,
+): Promise<string | null> {
+  const rows = await manager.query<{ id: string }[]>(
+    `WITH "inserted" AS (
+       INSERT INTO "listing_team_members"
+              ("listing_id", "user_id", "initiated_by", "requested_by_user_id", "role_label", "status", "position", "answered_at")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT ("listing_id", "user_id") WHERE "status" IN ('pending', 'accepted') DO NOTHING
+       RETURNING "id"
+     )
+     SELECT "id" FROM "inserted"`,
+    [
+      values.listingId,
+      values.userId,
+      ListingTeamInitiator.Listing,
+      values.requestedByUserId,
+      values.roleLabel,
+      values.status,
+      position,
       values.answeredAt,
     ],
   );
