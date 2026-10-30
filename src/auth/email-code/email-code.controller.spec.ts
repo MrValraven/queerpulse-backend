@@ -147,6 +147,7 @@ describe('EmailCodeController.request', () => {
       rawEmail: 'Sam@Example.com',
       requesterKey: value,
       locale: 'pt',
+      isRegistration: false,
     });
     expect(body).toEqual({
       challengeId: 'c1',
@@ -179,6 +180,29 @@ describe('EmailCodeController.request', () => {
     expect(replacement).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(emailCodes.issueSignInChallenge).toHaveBeenLastCalledWith(
       expect.objectContaining({ requesterKey: replacement }),
+    );
+  });
+
+  it('request passes isRegistration true through and treats an absent flag as false', async () => {
+    const { controller, emailCodes } = build();
+    await controller.request(
+      { email: 'sam@example.com', locale: 'en', isRegistration: true },
+      makeReq(),
+      makeRes() as unknown as Response,
+    );
+    await controller.request(
+      { email: 'sam@example.com', locale: 'en' },
+      makeReq(),
+      makeRes() as unknown as Response,
+    );
+
+    expect(emailCodes.issueSignInChallenge).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ isRegistration: true }),
+    );
+    expect(emailCodes.issueSignInChallenge).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ isRegistration: false }),
     );
   });
 

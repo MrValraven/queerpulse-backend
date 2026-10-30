@@ -6,6 +6,8 @@ const EMAIL_VARIABLES = [
   'RESEND_FROM',
   'RESEND_SIGNIN_TEMPLATE_ID_EN',
   'RESEND_SIGNIN_TEMPLATE_ID_PT',
+  'RESEND_SIGNUP_TEMPLATE_ID_EN',
+  'RESEND_SIGNUP_TEMPLATE_ID_PT',
   'RESEND_WELCOME_TEMPLATE_ID_EN',
   'RESEND_WELCOME_TEMPLATE_ID_PT',
   'EMAIL_CODE_SECRET',
@@ -49,6 +51,25 @@ describe('email config', () => {
     expect(config.welcomeTemplateIdEn).toBe('welcome-en');
     expect(config.welcomeTemplateIdPt).toBe('welcome-pt');
     expect(config.enabled).toBe(false);
+  });
+
+  it('reads the signup template ids without changing enabled', () => {
+    const withoutSignIn = loadWith({
+      NODE_ENV: 'production',
+      RESEND_API_KEY: 're_test_key',
+      RESEND_SIGNUP_TEMPLATE_ID_EN: 'signup-en',
+      RESEND_SIGNUP_TEMPLATE_ID_PT: 'signup-pt',
+    });
+    expect(withoutSignIn.signUpTemplateIdEn).toBe('signup-en');
+    expect(withoutSignIn.signUpTemplateIdPt).toBe('signup-pt');
+    expect(withoutSignIn.enabled).toBe(false);
+
+    const withSignIn = loadWith({
+      NODE_ENV: 'production',
+      ...RESEND_CONFIGURED,
+    });
+    expect(withSignIn.signUpTemplateIdEn).toBeUndefined();
+    expect(withSignIn.enabled).toBe(true);
   });
 
   it('is enabled in production when the key and both template ids are set', () => {

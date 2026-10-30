@@ -191,6 +191,11 @@ export class EnvironmentVariables {
   // Resend template ids for the English and Portuguese sign-in emails.
   @IsOptional() @IsString() RESEND_SIGNIN_TEMPLATE_ID_EN?: string;
   @IsOptional() @IsString() RESEND_SIGNIN_TEMPLATE_ID_PT?: string;
+  // Resend template ids for the English and Portuguese create-your-account
+  // emails a newcomer gets when registering from an invite. Optional: with one
+  // unset, that language sends the sign-in email instead.
+  @IsOptional() @IsString() RESEND_SIGNUP_TEMPLATE_ID_EN?: string;
+  @IsOptional() @IsString() RESEND_SIGNUP_TEMPLATE_ID_PT?: string;
   // Resend template ids for the English and Portuguese welcome emails a
   // reviewer sends to an approved applicant. Optional: with one unset, sending
   // the welcome email in that language answers 503 welcome_email_not_configured.

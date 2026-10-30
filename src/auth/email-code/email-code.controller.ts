@@ -143,6 +143,7 @@ export class EmailCodeController {
       rawEmail: body.email,
       requesterKey,
       locale: toLocale(body.locale),
+      isRegistration: body.isRegistration === true,
     });
     return issuedBody(issued);
   }

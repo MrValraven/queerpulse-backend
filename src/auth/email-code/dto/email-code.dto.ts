@@ -24,6 +24,15 @@ export class RequestEmailCodeDto {
   @IsString()
   @MaxLength(16)
   locale?: string;
+
+  /**
+   * `true` from the invite landing page, where a newcomer creates an account:
+   * the email then uses the create-your-account template. The flag alone picks
+   * the template; the server never looks up whether the address has an account.
+   */
+  @IsOptional()
+  @IsBoolean()
+  isRegistration?: boolean;
 }
 
 /** Body for `POST /auth/email-code/verify`. */

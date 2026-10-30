@@ -60,6 +60,8 @@ interface IssueInput {
   userId: string | null;
   requesterKey: string;
   locale: EmailCodeLocale;
+  /** Picks the create-your-account email template over the sign-in one. */
+  isRegistration?: boolean;
   shouldDeliver: boolean;
 }
 
@@ -166,6 +168,7 @@ export class EmailCodeService {
     rawEmail: string;
     requesterKey: string;
     locale: EmailCodeLocale;
+    isRegistration?: boolean;
   }): Promise<IssuedEmailCode> {
     const email = normalizeEmailAddress(input.rawEmail);
     if (!isDeliverableEmailAddress(email)) {
@@ -179,6 +182,7 @@ export class EmailCodeService {
       userId: null,
       requesterKey: input.requesterKey,
       locale: input.locale,
+      isRegistration: input.isRegistration,
       shouldDeliver: !owner?.isSystem,
     });
   }
@@ -294,7 +298,8 @@ export class EmailCodeService {
   }
 
   private async issue(input: IssueInput): Promise<IssuedEmailCode> {
-    const { purpose, email, userId, locale, shouldDeliver } = input;
+    const { purpose, email, userId, locale, isRegistration, shouldDeliver } =
+      input;
     const requesterHash = sha256Hex(input.requesterKey);
     const now = new Date();
     const challengeId = randomUUID();
@@ -358,7 +363,13 @@ export class EmailCodeService {
     });
 
     if (shouldDeliver) {
-      const sent = await this.send({ email, code, locale, challengeId });
+      const sent = await this.send({
+        email,
+        code,
+        locale,
+        isRegistration,
+        challengeId,
+      });
       if (!sent.delivered) {
         // Older codes stay open: nothing has been superseded yet.
         try {
@@ -408,6 +419,7 @@ export class EmailCodeService {
     email: string;
     code: string;
     locale: EmailCodeLocale;
+    isRegistration?: boolean;
     challengeId: string;
   }): Promise<SignInCodeSendResult> {
     try {
@@ -416,6 +428,7 @@ export class EmailCodeService {
         code: input.code,
         minutes: EMAIL_CODE_TTL_MINUTES,
         locale: input.locale,
+        isRegistration: input.isRegistration,
         challengeId: input.challengeId,
       });
     } catch (error) {

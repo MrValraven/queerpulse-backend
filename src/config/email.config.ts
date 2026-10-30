@@ -13,6 +13,11 @@ export const DEFAULT_RESEND_FROM = 'QueerPulse <hello@queerpulse.com>';
 // `email_code_unavailable` and /platform-status reports `emailCodeSignIn:
 // false`, so the frontend hides the email-code options.
 //
+// The create-your-account email a newcomer gets when registering from an invite
+// uses its own pair of template ids (RESEND_SIGNUP_TEMPLATE_ID_EN / _PT) with
+// the same variables as the sign-in template. With one unset, that locale falls
+// back to the sign-in template. These never change `enabled`.
+//
 // The welcome email a reviewer sends to an approved applicant uses its own
 // pair of template ids (RESEND_WELCOME_TEMPLATE_ID_EN / _PT). It is available
 // for a locale when RESEND_API_KEY and that locale's template id are set, and
@@ -25,6 +30,8 @@ export default registerAs('email', () => {
   const resendApiKey = process.env.RESEND_API_KEY;
   const signInTemplateIdEn = process.env.RESEND_SIGNIN_TEMPLATE_ID_EN;
   const signInTemplateIdPt = process.env.RESEND_SIGNIN_TEMPLATE_ID_PT;
+  const signUpTemplateIdEn = process.env.RESEND_SIGNUP_TEMPLATE_ID_EN;
+  const signUpTemplateIdPt = process.env.RESEND_SIGNUP_TEMPLATE_ID_PT;
   const welcomeTemplateIdEn = process.env.RESEND_WELCOME_TEMPLATE_ID_EN;
   const welcomeTemplateIdPt = process.env.RESEND_WELCOME_TEMPLATE_ID_PT;
   const isResendConfigured = Boolean(
@@ -38,6 +45,8 @@ export default registerAs('email', () => {
     from: process.env.RESEND_FROM || DEFAULT_RESEND_FROM,
     signInTemplateIdEn,
     signInTemplateIdPt,
+    signUpTemplateIdEn,
+    signUpTemplateIdPt,
     welcomeTemplateIdEn,
     welcomeTemplateIdPt,
     codeSecret: process.env.EMAIL_CODE_SECRET,

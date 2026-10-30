@@ -271,6 +271,8 @@ describe('env validate()', () => {
       RESEND_FROM: 'QueerPulse <hello@queerpulse.com>',
       RESEND_SIGNIN_TEMPLATE_ID_EN: 'template-en',
       RESEND_SIGNIN_TEMPLATE_ID_PT: 'template-pt',
+      RESEND_SIGNUP_TEMPLATE_ID_EN: 'signup-en',
+      RESEND_SIGNUP_TEMPLATE_ID_PT: 'signup-pt',
     };
     expect(() => validate(production)).not.toThrow();
   });

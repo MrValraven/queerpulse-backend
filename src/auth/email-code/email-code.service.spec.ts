@@ -245,6 +245,23 @@ describe('EmailCodeService', () => {
       );
     });
 
+    it('hands isRegistration to the mailer and leaves it unset when the flag is absent', async () => {
+      await service.issueSignInChallenge({
+        rawEmail: 'sam@example.com',
+        requesterKey: 'cookie-1',
+        locale: 'en',
+        isRegistration: true,
+      });
+      expect(mailer.sendSignInCode).toHaveBeenLastCalledWith(
+        expect.objectContaining({ isRegistration: true }),
+      );
+
+      await issue('lee@example.com');
+      expect(mailer.sendSignInCode).toHaveBeenLastCalledWith(
+        expect.objectContaining({ isRegistration: undefined }),
+      );
+    });
+
     it('takes the per-address advisory lock before any count', async () => {
       await issue();
 

@@ -25,6 +25,12 @@ const CONFIGURED: Record<string, string | undefined> = {
   'email.signInTemplateIdPt': 'tpl-pt',
 };
 
+const CONFIGURED_WITH_SIGN_UP: Record<string, string | undefined> = {
+  ...CONFIGURED,
+  'email.signUpTemplateIdEn': 'signup-en',
+  'email.signUpTemplateIdPt': 'signup-pt',
+};
+
 function buildConfig(
   values: Record<string, string | boolean | undefined>,
 ): ConfigService {
@@ -169,6 +175,82 @@ describe('EmailCodeMailer', () => {
     expect(result).toEqual({ delivered: true, emailId: 're_1' });
     expect(logSpy).toHaveBeenCalledWith(
       'Sign-in code email accepted by Resend: emailId=re_1 challengeId=c1',
+    );
+  });
+
+  it.each([
+    ['pt', 'signup-pt'],
+    ['en', 'signup-en'],
+  ] as const)(
+    'sends the %s create-your-account template when isRegistration is true and it is set',
+    async (locale, expectedTemplateId) => {
+      send.mockResolvedValueOnce(success('re_1'));
+      const mailer = new EmailCodeMailer(buildConfig(CONFIGURED_WITH_SIGN_UP));
+
+      const result = await mailer.sendSignInCode({
+        ...EMAIL,
+        locale,
+        isRegistration: true,
+      });
+
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          template: {
+            id: expectedTemplateId,
+            variables: { code: '123456', minutes: 10 },
+          },
+        }),
+        expect.objectContaining({ idempotencyKey: 'sign-in-code/c1' }),
+      );
+      expect(result).toEqual({ delivered: true, emailId: 're_1' });
+    },
+  );
+
+  it('sends the sign-in template when isRegistration is absent or false, even with signup templates set', async () => {
+    send.mockResolvedValue(success('re_1'));
+    const mailer = new EmailCodeMailer(buildConfig(CONFIGURED_WITH_SIGN_UP));
+
+    await mailer.sendSignInCode(EMAIL);
+    await mailer.sendSignInCode({ ...EMAIL, isRegistration: false });
+
+    const templateIds = send.mock.calls.map(
+      (call: [{ template: { id: string } }]) => call[0].template.id,
+    );
+    expect(templateIds).toEqual(['tpl-pt', 'tpl-pt']);
+  });
+
+  it('falls back to the sign-in template when isRegistration is true and the signup template is unset', async () => {
+    send.mockResolvedValueOnce(success('re_1'));
+    const mailer = new EmailCodeMailer(buildConfig(CONFIGURED));
+
+    const result = await mailer.sendSignInCode({
+      ...EMAIL,
+      isRegistration: true,
+    });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        template: expect.objectContaining({ id: 'tpl-pt' }) as unknown,
+      }),
+      expect.any(Object),
+    );
+    expect(result).toEqual({ delivered: true, emailId: 're_1' });
+  });
+
+  it('names the sign-in variable when isRegistration is true and both templates are unset', async () => {
+    const mailer = new EmailCodeMailer(
+      buildConfig({ ...CONFIGURED, 'email.signInTemplateIdPt': undefined }),
+    );
+
+    const result = await mailer.sendSignInCode({
+      ...EMAIL,
+      isRegistration: true,
+    });
+
+    expect(result).toEqual({ delivered: false, failure: 'not_configured' });
+    expect(send).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('RESEND_SIGNIN_TEMPLATE_ID_PT is unset'),
     );
   });
 
