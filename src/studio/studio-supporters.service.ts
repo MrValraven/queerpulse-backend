@@ -18,7 +18,10 @@ import {
   personaIdentityBlockedBySql,
   personaMemberUserIdsSql,
 } from './studio-persona-members';
-import { studioPersonaTrackIdsSql } from './studio-play-attribution';
+import {
+  studioPersonaTrackIdsSql,
+  studioTrackArtistIdsSql,
+} from './studio-play-attribution';
 import { toStudioCount } from './studio-stats';
 import { toStudioSupportLinks } from './studio-support-links';
 import {
@@ -59,40 +62,69 @@ function supportableArtistSql(
 }
 
 /**
- * Section 8 eligibility of one supporter opt-in row for the persona `$1`:
- * an active account with a Studio grant, clear of blocks either way with
- * every persona member, outside the persona members today, still a member
- * of the persona it chose to show, that chosen persona clear of an
- * identity block by any persona member (ruling 4), and that chosen persona
- * neither removed nor taken down by a moderator. The listen rule is applied
- * by the ranking alone.
+ * Section 8 eligibility of one listener of the persona `$1`, shown as
+ * `shownAsExpression` (a persona id, or NULL for the account when the
+ * listener has no preference row or chose the account): an active account
+ * with a Studio grant, clear of blocks either way with every persona member,
+ * outside the persona members today, still a member of the persona it chose
+ * to show, that chosen persona clear of an identity block by any persona
+ * member (ruling 4), and that chosen persona neither removed nor taken down
+ * by a moderator. `userIdExpression` is a uuid expression such as
+ * `"listener"."user_id"`. The listen and hide rules are applied by the
+ * callers.
  */
-function eligibleSupporterSql(supporterAlias: string): string {
-  const supporter = `"${supporterAlias}"`;
-  return `${supporter}."subprofile_id" = $1::uuid
-   AND EXISTS (
+function eligibleSupporterSql(
+  userIdExpression: string,
+  shownAsExpression: string,
+): string {
+  return `EXISTS (
      SELECT 1 FROM "users" "supporter_user"
-      WHERE "supporter_user"."id" = ${supporter}."user_id"
+      WHERE "supporter_user"."id" = ${userIdExpression}
         AND "supporter_user"."status" = '${UserStatus.Active}'
    )
    AND EXISTS (
      SELECT 1 FROM "studio_access_grants" "supporter_grant"
-      WHERE "supporter_grant"."user_id" = ${supporter}."user_id"
+      WHERE "supporter_grant"."user_id" = ${userIdExpression}
    )
-   AND NOT ${blockedWithAnyPersonaMemberSql(`${supporter}."user_id"`, '$1')}
-   AND ${supporter}."user_id" NOT IN ${personaMemberUserIdsSql('$1')}
+   AND NOT ${blockedWithAnyPersonaMemberSql(userIdExpression, '$1')}
+   AND ${userIdExpression} NOT IN ${personaMemberUserIdsSql('$1')}
    AND (
-     ${supporter}."shown_as_subprofile_id" IS NULL
-     OR ${supporter}."user_id" IN ${personaMemberUserIdsSql(`${supporter}."shown_as_subprofile_id"`)}
+     ${shownAsExpression} IS NULL
+     OR ${userIdExpression} IN ${personaMemberUserIdsSql(shownAsExpression)}
    )
    AND NOT ${personaIdentityBlockedBySql(
      personaMemberUserIdsSql('$1'),
-     `${supporter}."shown_as_subprofile_id"`,
+     shownAsExpression,
    )}
    AND (
-     ${supporter}."shown_as_subprofile_id" IS NULL
-     OR ${chosenPersonaShowableSql(`${supporter}."shown_as_subprofile_id"`)}
+     ${shownAsExpression} IS NULL
+     OR ${chosenPersonaShowableSql(shownAsExpression)}
    )`;
+}
+
+/**
+ * The listeners of the persona `$1` the owner side shows: every member with a
+ * listen on the persona's own or credited tracks inside the window, grouped
+ * by member with `listen_count` and `first_listened_at`, joined to their
+ * preference row for the persona when there is one (alias `supporter`),
+ * hidden rows left out and the eligibility rule applied to the shown
+ * identity. A FROM and WHERE body, used by the ranking and the count.
+ */
+function shownListenersSql(): string {
+  return `(
+         SELECT "listen"."user_id" AS "user_id",
+                COUNT("listen"."id") AS "listen_count",
+                MIN("listen"."played_at") AS "first_listened_at"
+           FROM "studio_listens" "listen"
+          WHERE "listen"."played_at" >= now() - interval '${STUDIO_SUPPORTER_WINDOW_INTERVAL}'
+            AND "listen"."track_id" IN ${studioPersonaTrackIdsSql('$1::uuid')}
+          GROUP BY "listen"."user_id"
+       ) "listener"
+  LEFT JOIN "studio_supporters" "supporter"
+    ON "supporter"."user_id" = "listener"."user_id"
+   AND "supporter"."subprofile_id" = $1::uuid
+ WHERE "supporter"."is_hidden" IS NOT TRUE
+   AND ${eligibleSupporterSql('"listener"."user_id"', '"supporter"."shown_as_subprofile_id"')}`;
 }
 
 /** The columns `SupporterPersonaRow` reads, for a persona shown as an
@@ -139,85 +171,120 @@ export const MEMBER_PERSONAS_SQL = `SELECT ${supporterPersonaColumnsSql('persona
    AND ${chosenPersonaShowableSql('"persona"."id"')}
  ORDER BY "persona"."display_name" ASC, "persona"."id" ASC`;
 
-/** `$1` persona ids: the chosen personas of a set of opt-in rows. */
+/** `$1` persona ids: the chosen personas of a set of preference rows. */
 export const SUPPORTER_PERSONAS_SQL = `SELECT ${supporterPersonaColumnsSql('persona')}
   FROM "subprofiles" "persona"
  WHERE "persona"."id" = ANY($1::uuid[])
  ORDER BY "persona"."id" ASC`;
 
-/** `$1` the caller, `$2` the artist persona: the caller's opt-in, if any. */
+/** `$1` the caller, `$2` the artist persona: the caller's preference row,
+ *  if any. */
 export const SUPPORTER_ROW_SQL = `SELECT "supporter"."shown_as_subprofile_id" AS "shown_as_subprofile_id",
+       "supporter"."is_hidden" AS "is_hidden",
        "supporter"."created_at" AS "created_at"
   FROM "studio_supporters" "supporter"
  WHERE "supporter"."user_id" = $1::uuid
    AND "supporter"."subprofile_id" = $2::uuid`;
 
 /** `$1` the caller, `$2` the artist persona, `$3` the persona shown or null
- *  for the account. `created_at` never moves; `updated_at` moves on a change
- *  of identity only. */
-export const SUPPORTER_UPSERT_SQL = `INSERT INTO "studio_supporters" ("user_id", "subprofile_id", "shown_as_subprofile_id")
-VALUES ($1, $2, $3)
+ *  for the account: shows the caller with that identity. `created_at` never
+ *  moves; `updated_at` moves when the identity or the hide flag changes. */
+export const SUPPORTER_UPSERT_SQL = `INSERT INTO "studio_supporters" ("user_id", "subprofile_id", "shown_as_subprofile_id", "is_hidden")
+VALUES ($1, $2, $3, false)
 ON CONFLICT ("user_id", "subprofile_id") DO UPDATE
-   SET "shown_as_subprofile_id" = EXCLUDED."shown_as_subprofile_id", "updated_at" = now()
- WHERE "studio_supporters"."shown_as_subprofile_id" IS DISTINCT FROM EXCLUDED."shown_as_subprofile_id"`;
+   SET "shown_as_subprofile_id" = EXCLUDED."shown_as_subprofile_id", "is_hidden" = false, "updated_at" = now()
+ WHERE "studio_supporters"."shown_as_subprofile_id" IS DISTINCT FROM EXCLUDED."shown_as_subprofile_id"
+    OR "studio_supporters"."is_hidden"`;
 
-/** `$1` the caller, `$2` the artist persona. */
-export const SUPPORTER_DELETE_SQL = `DELETE FROM "studio_supporters"
- WHERE "user_id" = $1::uuid
-   AND "subprofile_id" = $2::uuid`;
+/** `$1` the caller, `$2` the artist persona: hides the caller from the
+ *  persona's top listeners, keeping any chosen identity so showing again
+ *  restores it. The row is read from `subprofiles`, so an unknown persona
+ *  inserts nothing and returns no row. The update always runs so the row
+ *  comes back; `updated_at` moves only when the flag turns on. */
+export const SUPPORTER_HIDE_SQL = `INSERT INTO "studio_supporters" ("user_id", "subprofile_id", "is_hidden")
+SELECT $1::uuid, "artist"."id", true
+  FROM "subprofiles" "artist"
+ WHERE "artist"."id" = $2::uuid
+ON CONFLICT ("user_id", "subprofile_id") DO UPDATE
+   SET "is_hidden" = true,
+       "updated_at" = CASE WHEN "studio_supporters"."is_hidden"
+                           THEN "studio_supporters"."updated_at"
+                           ELSE now()
+                      END
+RETURNING "studio_supporters"."subprofile_id" AS "subprofile_id"`;
 
-/** `$1` the caller, `$2` the artist kinds: the caller's opt-ins whose artist
- *  still passes the artist rule, newest first. */
+/** `$1` the caller, `$2` the artist kinds: the artists that show the caller
+ *  among their top listeners. Driven from the caller's own listens inside
+ *  the window (the `user_id`, `played_at` history index), attributed to each
+ *  track's owning and credited personas, kept when the artist passes the
+ *  artist rule, the caller is none of its members and no preference row
+ *  hides the caller. `since` is the preference row's `created_at`, else the
+ *  caller's first listen on the artist inside the window. The most recently
+ *  played artist comes first. */
 export const SUPPORTING_ROWS_SQL = `SELECT ${personaColumnsSql('artist', 'artist')},
        "supporter"."shown_as_subprofile_id" AS "shown_as_subprofile_id",
-       "supporter"."created_at" AS "created_at"
-  FROM "studio_supporters" "supporter"
-  INNER JOIN "subprofiles" "artist" ON "artist"."id" = "supporter"."subprofile_id"
- WHERE "supporter"."user_id" = $1::uuid
+       COALESCE("supporter"."created_at", "listened_artist"."first_listened_at") AS "since"
+  FROM (
+    SELECT "attributed"."artist_id" AS "artist_id",
+           MIN("listened_track"."first_listened_at") AS "first_listened_at",
+           MAX("listened_track"."last_listened_at") AS "last_listened_at"
+      FROM (
+        SELECT "listen"."track_id" AS "track_id",
+               MIN("listen"."played_at") AS "first_listened_at",
+               MAX("listen"."played_at") AS "last_listened_at"
+          FROM "studio_listens" "listen"
+         WHERE "listen"."user_id" = $1::uuid
+           AND "listen"."played_at" >= now() - interval '${STUDIO_SUPPORTER_WINDOW_INTERVAL}'
+         GROUP BY "listen"."track_id"
+      ) "listened_track"
+      INNER JOIN "studio_tracks" "track" ON "track"."id" = "listened_track"."track_id"
+      CROSS JOIN LATERAL ${studioTrackArtistIdsSql('track')} "attributed"
+     GROUP BY "attributed"."artist_id"
+  ) "listened_artist"
+  INNER JOIN "subprofiles" "artist" ON "artist"."id" = "listened_artist"."artist_id"
+  LEFT JOIN "studio_supporters" "supporter"
+    ON "supporter"."user_id" = $1::uuid
+   AND "supporter"."subprofile_id" = "artist"."id"
+ WHERE "supporter"."is_hidden" IS NOT TRUE
+   AND $1::uuid NOT IN ${personaMemberUserIdsSql('"artist"."id"')}
    AND ${supportableArtistSql('artist', '$1::uuid', '$2')}
- ORDER BY "supporter"."created_at" DESC, "supporter"."subprofile_id" DESC`;
+ ORDER BY "listened_artist"."last_listened_at" DESC, "artist"."id" DESC`;
 
-/** `$1` the artist persona, `$2` the limit: eligible supporters with a
- *  listen on the persona's own or credited tracks inside the window, by
- *  listen count, then opt-in date, then user id. The count orders the rows
- *  and stays inside the query. Each shown identity appears once, at its best
- *  rank: an account row is keyed by its user id and a persona row by the
- *  chosen persona id, so two co-owners who both show as the same persona
- *  yield one row (and the list never hints that the persona has several
- *  members). */
+/** `$1` the artist persona, `$2` the limit: the listeners shown (see
+ *  `shownListenersSql`), by listen count, then first listen inside the
+ *  window, then user id. The count orders the rows and stays inside the
+ *  query. A listener with no preference row shows as their account. Each
+ *  shown identity appears once, at its best rank: an account row is keyed by
+ *  its user id and a persona row by the chosen persona id, so two co-owners
+ *  who both show as the same persona yield one row (and the list never hints
+ *  that the persona has several members). */
 export const TOP_SUPPORTERS_SQL = `SELECT "best_ranked"."user_id" AS "user_id",
        "best_ranked"."shown_as_subprofile_id" AS "shown_as_subprofile_id"
   FROM (
     SELECT DISTINCT ON ("ranked"."identity_key")
            "ranked"."user_id", "ranked"."shown_as_subprofile_id",
-           "ranked"."listen_count", "ranked"."created_at"
+           "ranked"."listen_count", "ranked"."first_listened_at"
       FROM (
-        SELECT "supporter"."user_id" AS "user_id",
+        SELECT "listener"."user_id" AS "user_id",
                "supporter"."shown_as_subprofile_id" AS "shown_as_subprofile_id",
-               "supporter"."created_at" AS "created_at",
-               COUNT("listen"."id") AS "listen_count",
+               "listener"."listen_count" AS "listen_count",
+               "listener"."first_listened_at" AS "first_listened_at",
                CASE WHEN "supporter"."shown_as_subprofile_id" IS NULL
-                    THEN 'account:' || "supporter"."user_id"::text
+                    THEN 'account:' || "listener"."user_id"::text
                     ELSE 'persona:' || "supporter"."shown_as_subprofile_id"::text
                END AS "identity_key"
-          FROM "studio_supporters" "supporter"
-          INNER JOIN "studio_listens" "listen"
-            ON "listen"."user_id" = "supporter"."user_id"
-           AND "listen"."played_at" >= now() - interval '${STUDIO_SUPPORTER_WINDOW_INTERVAL}'
-           AND "listen"."track_id" IN ${studioPersonaTrackIdsSql('$1::uuid')}
-         WHERE ${eligibleSupporterSql('supporter')}
-         GROUP BY "supporter"."user_id", "supporter"."shown_as_subprofile_id", "supporter"."created_at"
+          FROM ${shownListenersSql()}
       ) "ranked"
-     ORDER BY "ranked"."identity_key", "ranked"."listen_count" DESC, "ranked"."created_at" ASC, "ranked"."user_id" ASC
+     ORDER BY "ranked"."identity_key", "ranked"."listen_count" DESC, "ranked"."first_listened_at" ASC, "ranked"."user_id" ASC
   ) "best_ranked"
- ORDER BY "best_ranked"."listen_count" DESC, "best_ranked"."created_at" ASC, "best_ranked"."user_id" ASC
+ ORDER BY "best_ranked"."listen_count" DESC, "best_ranked"."first_listened_at" ASC, "best_ranked"."user_id" ASC
  LIMIT $2`;
 
-/** `$1` the artist persona: how many opt-in rows are eligible, listens
- *  aside. */
+/** `$1` the artist persona: how many listeners are shown (eligible, left
+ *  visible by their preference, with a listen inside the window), one per
+ *  member. */
 export const OPTED_IN_COUNT_SQL = `SELECT COUNT(*)::int AS "count"
-  FROM "studio_supporters" "supporter"
- WHERE ${eligibleSupporterSql('supporter')}`;
+  FROM ${shownListenersSql()}`;
 
 interface SupporterArtistRow extends Record<string, unknown> {
   artist_id: string;
@@ -226,13 +293,14 @@ interface SupporterArtistRow extends Record<string, unknown> {
 
 interface SupporterRow {
   shown_as_subprofile_id: string | null;
+  is_hidden: boolean;
   created_at: Date | string;
 }
 
 interface SupportingRow extends Record<string, unknown> {
   artist_id: string;
   shown_as_subprofile_id: string | null;
-  created_at: Date | string;
+  since: Date | string;
 }
 
 interface TopSupporterRow {
@@ -242,6 +310,10 @@ interface TopSupporterRow {
 
 interface OptedInCountRow {
   count: number | string;
+}
+
+interface HiddenSupporterRow {
+  subprofile_id: string;
 }
 
 function toIsoString(value: Date | string): string {
@@ -255,11 +327,12 @@ function personasByIdOf(
 }
 
 /**
- * Supporters, contract Part 2 sections 4.4, 5 and 8 with ruling 4. A member
- * opts in to show as a supporter of an artist persona, as their account or
- * as a persona they are a member of. The artist side reads a ranked list of
+ * Top listeners, contract Part 2 sections 4.4, 5 and 8 with ruling 4. Every
+ * eligible listener of an artist persona is shown by default, as their
+ * account; a member can pick a persona they are a member of instead, or hide
+ * themselves from one artist's list. The artist side reads a ranked list of
  * identities only: the owner list carries no counts and no user ids, and the
- * opted-in total is floored with `toStudioCount`.
+ * total of listeners shown is floored with `toStudioCount`.
  */
 @Injectable()
 export class StudioSupportersService {
@@ -309,13 +382,21 @@ export class StudioSupportersService {
     return this.stateFor(userId, artistId);
   }
 
-  /** Section 5.4: no persona checks, so a member can always withdraw. */
+  /** Section 5.4: hides the caller from the artist's top listeners. No
+   *  persona checks, so a member can always turn it off; only an unknown
+   *  persona id answers the artist 404. */
   async removeSupporter(userId: string, subprofileId: string): Promise<void> {
-    await this.dataSource.query(SUPPORTER_DELETE_SQL, [userId, subprofileId]);
+    const hiddenRows: HiddenSupporterRow[] = await this.dataSource.query(
+      SUPPORTER_HIDE_SQL,
+      [userId, subprofileId],
+    );
+    if (!hiddenRows.length) {
+      throw studioError('studio_supporter_artist_not_found');
+    }
   }
 
-  /** Section 4.4: the caller's opt-ins whose artist still passes the artist
-   *  rule, newest first. */
+  /** Section 4.4: the artists that show the caller among their top
+   *  listeners, newest first. */
   async listSupporting(userId: string): Promise<StudioSupportingResponse> {
     const rows: SupportingRow[] = await this.dataSource.query(
       SUPPORTING_ROWS_SQL,
@@ -358,7 +439,7 @@ export class StudioSupportersService {
       return [
         {
           artist: artistRefFromColumns(personaColumnsFromRow(row, 'artist')),
-          since: toIsoString(row.created_at),
+          since: toIsoString(row.since),
           shownAs,
           supportLinks: toStudioSupportLinks(
             linksByArtistId.get(row.artist_id) ?? [],
@@ -443,8 +524,9 @@ export class StudioSupportersService {
     return artist.artist_id;
   }
 
-  /** "Your account" first, then the caller's personas by name, with the
-   *  caller's opt-in when there is one. */
+  /** "Your account" first, then the caller's personas by name. The caller
+   *  is shown unless a preference row hides them; the stored identity comes
+   *  back even while hidden, so showing again restores it. */
   private async stateFor(
     userId: string,
     artistId: string,
@@ -479,20 +561,11 @@ export class StudioSupportersService {
         this.optionFor(row.id, member, personasById),
       ),
     ];
-    if (!supporterRow) {
-      return {
-        isSupporting: false,
-        shownAsSubprofileId: null,
-        shownAs: null,
-        since: null,
-        options,
-      };
-    }
     return {
-      isSupporting: true,
+      isSupporting: !supporterRow?.is_hidden,
       shownAsSubprofileId: chosenPersonaId,
       shownAs: toStudioSupporterIdentity(chosenPersonaId, member, personasById),
-      since: toIsoString(supporterRow.created_at),
+      since: supporterRow ? toIsoString(supporterRow.created_at) : null,
       options,
     };
   }
@@ -510,7 +583,7 @@ export class StudioSupportersService {
     return identity ? [{ shownAsSubprofileId, identity }] : [];
   }
 
-  /** One read for every chosen persona of a set of opt-in rows. */
+  /** One read for every chosen persona of a set of preference rows. */
   private async chosenPersonasById(
     shownAsSubprofileIds: (string | null)[],
   ): Promise<Map<string, SupporterPersonaRow>> {

@@ -10,8 +10,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * - `studio_listens` is a member's own listening history. Only that member
  *   reads it, and a scheduled job prunes rows after 13 months. The history
  *   index orders by `played_at` then `id`, both descending, for keyset paging.
- * - `studio_supporters` holds opt-ins: a member who chose to show as a
- *   supporter of one artist persona, as their account or as another persona.
+ * - `studio_supporters` holds a member's top listener preference for one
+ *   artist persona: the identity shown, their account or another persona.
+ *   Listeners with no row show as their account (since
+ *   `AddStudioSupporterHidden`, which also adds the hide flag).
  * - `member_preferences` gains `is_listening_history_on` (on by default) and
  *   `listening_notice_seen_at` (the first time the member saw the notice).
  *

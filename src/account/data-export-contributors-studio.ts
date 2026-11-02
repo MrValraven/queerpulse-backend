@@ -475,17 +475,19 @@ interface ListenExportRow {
 interface SupporterExportRow {
   artist: string | null;
   shown_as: string | null;
+  is_hidden: boolean;
   created_at: Date;
   updated_at: Date;
 }
 
 /**
  * `activityLog` -> `studioListening` (Studio listening): the member's own
- * history and opt-ins. Every listen comes first, oldest first, with the
- * track title while its release is published (a null title once the
- * release left publication) and the artist persona; the supporter
- * opt-ins follow, oldest first, each naming the artist and how the member
- * shows themselves ("account" or the chosen persona's display name).
+ * history and top-listener preferences. Every listen comes first, oldest
+ * first, with the track title while its release is published (a null title
+ * once the release left publication) and the artist persona; the stored
+ * preferences follow, oldest first, each naming the artist, how the member
+ * shows themselves ("account" or the chosen persona's display name) and
+ * whether they hid themselves from that artist's top listeners.
  * Daily play totals carry no member and are not personal data.
  */
 @Injectable()
@@ -511,6 +513,7 @@ export class StudioListeningExportContributor implements DataExportContribution 
     const supporters: SupporterExportRow[] = await this.dataSource.query(
       `SELECT "artist"."display_name" AS "artist",
               "chosen"."display_name" AS "shown_as",
+              "supporter"."is_hidden" AS "is_hidden",
               "supporter"."created_at" AS "created_at",
               "supporter"."updated_at" AS "updated_at"
          FROM "studio_supporters" "supporter"
@@ -531,6 +534,7 @@ export class StudioListeningExportContributor implements DataExportContribution 
         type: 'supporter',
         artist: supporter.artist,
         shownAs: supporter.shown_as ?? 'account',
+        isHidden: supporter.is_hidden,
         createdAt: supporter.created_at.toISOString(),
         updatedAt: supporter.updated_at.toISOString(),
       })),

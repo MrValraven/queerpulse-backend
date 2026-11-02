@@ -41,6 +41,9 @@ import { MemberEventReminderPreferences } from './entities/member-event-reminder
 import { EventAnnouncementsService } from './event-announcements.service';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBansService } from './event-bans.service';
+import { EventBatchService } from './event-batch.service';
+import { EventBatchTemplateService } from './event-batch-template.service';
+import { EventBatchThrottlerGuard } from './event-batch-throttler.guard';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCapacityAlertsService } from './event-capacity-alerts.service';
 import { EventCheckInService } from './event-check-in.service';
@@ -199,6 +202,15 @@ import { RsvpService } from './rsvp.service';
     // circular dependency a direct `RsvpService` -> `EventsService` edge
     // would create (`EventsService` already injects `RsvpService`).
     EventAudienceGateService,
+    // A month of events (2026-11-02): which starting event a member may copy,
+    // and what drops for them, behind `GET /events/:slug/batch-template`.
+    EventBatchTemplateService,
+    // Publishes every date of a batch in one transaction, behind
+    // `POST /events/batch`.
+    EventBatchService,
+    // Provided here because `@UseGuards` on `createBatch` resolves it from
+    // this module, as `ReportsModule` provides `ReportFilingThrottlerGuard`.
+    EventBatchThrottlerGuard,
   ],
   // The music events admin calls the last seven as the house account.
   exports: [

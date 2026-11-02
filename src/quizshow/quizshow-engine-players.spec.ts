@@ -709,7 +709,7 @@ describe('Pulse Live engine, players', () => {
         createTeam(
           state,
           sparkleMember.playerId,
-          { name: 'Disco', colorKey: 'triangle' },
+          { name: 'Disco', colorKey: 'circle' },
           2_400,
           random,
         ),
@@ -730,14 +730,18 @@ describe('Pulse Live engine, players', () => {
     );
     const createdSuccess = successOf(created);
     expect(createdSuccess.me.teamId).toBe(createdSuccess.teamId);
+    // Sparkle had no one else, so it goes and its triangle is free again.
     expect(effectKinds(effectsOf(created))).toEqual([
+      'persist delete_teams',
       'persist insert_team',
       'persist update_player',
       'lobby_changed',
       'me_changed',
     ]);
+    expect(state.teams.size).toBe(2);
 
     const remainingColorKeys = [
+      'triangle',
       'diamond',
       'star',
       'hexagon',
@@ -1538,7 +1542,7 @@ describe('Pulse Live engine, players', () => {
         createTeam(
           state,
           founder.playerId,
-          { name: 'Disco', colorKey: 'star' },
+          { name: 'sparkle', colorKey: 'star' },
           3_150,
           random,
         ),
@@ -1547,6 +1551,246 @@ describe('Pulse Live engine, players', () => {
     expect(state.players.get(otherPlayer.playerId)?.teamId).toBe(
       otherPlayer.teamId,
     );
+  });
+
+  it('deletes the team a player switches away from once no one is left in it, in the lobby', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+    });
+    const random = seededRandom();
+    const glitterFounder = join(state, 'user-a', 2_000, random, {
+      team: { newTeam: { name: 'Glitter', colorKey: 'circle' } },
+    });
+    const sparkleFounder = join(state, 'user-b', 2_100, random, {
+      team: { newTeam: { name: 'Sparkle', colorKey: 'triangle' } },
+    });
+    const glitterTeamId = glitterFounder.teamId;
+    const sparkleTeamId = sparkleFounder.teamId;
+    if (glitterTeamId === null || sparkleTeamId === null) {
+      throw new Error('A founder has no team.');
+    }
+    const sparkleMember = join(state, 'user-c', 2_200, random, {
+      team: { teamId: sparkleTeamId },
+    });
+
+    const keptMove = pickTeam(
+      state,
+      sparkleMember.playerId,
+      glitterTeamId,
+      3_000,
+    );
+    expect(successOf(keptMove).me.teamId).toBe(glitterTeamId);
+    expect(effectKinds(effectsOf(keptMove))).toEqual([
+      'persist update_player',
+      'lobby_changed',
+      'me_changed',
+    ]);
+    expect(state.teams.has(sparkleTeamId)).toBe(true);
+
+    const emptyingMove = pickTeam(
+      state,
+      sparkleFounder.playerId,
+      glitterTeamId,
+      3_100,
+    );
+    expect(successOf(emptyingMove).me.teamId).toBe(glitterTeamId);
+    expect(effectKinds(effectsOf(emptyingMove))).toEqual([
+      'persist update_player',
+      'lobby_changed',
+      'me_changed',
+      'persist delete_teams',
+    ]);
+    expect(effectsOf(emptyingMove).at(-1)).toEqual({
+      kind: 'persist',
+      operation: { type: 'delete_teams', teamIds: [sparkleTeamId] },
+    });
+    expect([...state.teams.keys()]).toEqual([glitterTeamId]);
+
+    const refounded = join(state, 'user-d', 3_200, random, {
+      team: { newTeam: { name: 'Sparkle', colorKey: 'triangle' } },
+    });
+    expect(refounded.teamId).not.toBeNull();
+    expect(refounded.teamId).not.toBe(sparkleTeamId);
+    expect(state.teams.size).toBe(2);
+  });
+
+  it('deletes the team a founder leaves empty by creating another and keeps one with members left', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+    });
+    const random = seededRandom();
+    const founder = join(state, 'user-a', 2_000, random, {
+      team: { newTeam: { name: 'Glitter', colorKey: 'circle' } },
+    });
+    const glitterTeamId = founder.teamId;
+    if (glitterTeamId === null) throw new Error('The founder has no team.');
+    const member = join(state, 'user-b', 2_100, random, {
+      team: { teamId: glitterTeamId },
+    });
+
+    const keptCreate = createTeam(
+      state,
+      member.playerId,
+      { name: 'Sparkle', colorKey: 'triangle' },
+      3_000,
+      random,
+    );
+    expect(successOf(keptCreate).me.teamId).toBe(successOf(keptCreate).teamId);
+    expect(effectKinds(effectsOf(keptCreate))).toEqual([
+      'persist insert_team',
+      'persist update_player',
+      'lobby_changed',
+      'me_changed',
+    ]);
+    expect(state.teams.has(glitterTeamId)).toBe(true);
+
+    const emptyingCreate = createTeam(
+      state,
+      founder.playerId,
+      { name: 'Disco', colorKey: 'square' },
+      3_100,
+      random,
+    );
+    const discoTeamId = successOf(emptyingCreate).teamId;
+    expect(successOf(emptyingCreate).me.teamId).toBe(discoTeamId);
+    expect(effectKinds(effectsOf(emptyingCreate))).toEqual([
+      'persist delete_teams',
+      'persist insert_team',
+      'persist update_player',
+      'lobby_changed',
+      'me_changed',
+    ]);
+    expect(effectsOf(emptyingCreate).at(0)).toEqual({
+      kind: 'persist',
+      operation: { type: 'delete_teams', teamIds: [glitterTeamId] },
+    });
+    expect(state.teams.has(glitterTeamId)).toBe(false);
+    expect(state.teams.has(discoTeamId)).toBe(true);
+    expect(state.teams.size).toBe(2);
+  });
+
+  it('lets a player alone in their team found another one with the same colour', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+    });
+    const random = seededRandom();
+    const founder = join(state, 'user-a', 2_000, random, {
+      team: { newTeam: { name: 'Bears', colorKey: 'circle' } },
+    });
+    const bearsTeamId = founder.teamId;
+    if (bearsTeamId === null) throw new Error('The founder has no team.');
+
+    const created = createTeam(
+      state,
+      founder.playerId,
+      { name: 'Cubs', colorKey: 'circle' },
+      3_000,
+      random,
+    );
+
+    const cubsTeamId = successOf(created).teamId;
+    expect(successOf(created).me.teamId).toBe(cubsTeamId);
+    expect(effectKinds(effectsOf(created))).toEqual([
+      'persist delete_teams',
+      'persist insert_team',
+      'persist update_player',
+      'lobby_changed',
+      'me_changed',
+    ]);
+    expect(effectsOf(created).at(0)).toEqual({
+      kind: 'persist',
+      operation: { type: 'delete_teams', teamIds: [bearsTeamId] },
+    });
+    expect([...state.teams.keys()]).toEqual([cubsTeamId]);
+    expect(state.teams.get(cubsTeamId)?.name).toBe('Cubs');
+    expect(state.teams.get(cubsTeamId)?.colorKey).toBe('circle');
+  });
+
+  it('lets a player alone in their team found another one at the team limit', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+    });
+    const random = seededRandom();
+    const colorKeys = [
+      'circle',
+      'triangle',
+      'square',
+      'diamond',
+      'star',
+      'hexagon',
+      'heart',
+      'moon',
+    ] as const;
+    const founders = colorKeys.map((colorKey, index) =>
+      join(state, `user-team-${index}`, 2_000 + index, random, {
+        team: { newTeam: { name: `Team ${colorKey}`, colorKey } },
+      }),
+    );
+    expect(state.teams.size).toBe(8);
+    const moonFounder = at(founders, 7);
+    const circleTeamId = at(founders, 0).teamId;
+    if (circleTeamId === null) throw new Error('The founder has no team.');
+    const circleMember = join(state, 'user-circle-member', 2_100, random, {
+      team: { teamId: circleTeamId },
+    });
+
+    expect(
+      refusalCode(
+        createTeam(
+          state,
+          circleMember.playerId,
+          { name: 'Ninth', colorKey: 'circle' },
+          3_000,
+          random,
+        ),
+      ),
+    ).toBe('quizshow_team_limit');
+
+    const created = createTeam(
+      state,
+      moonFounder.playerId,
+      { name: 'Night owls', colorKey: 'moon' },
+      3_100,
+      random,
+    );
+
+    const nightOwlsTeamId = successOf(created).teamId;
+    expect(successOf(created).me.teamId).toBe(nightOwlsTeamId);
+    expect(state.teams.has(moonFounder.teamId ?? '')).toBe(false);
+    expect(state.teams.get(nightOwlsTeamId)?.name).toBe('Night owls');
+    expect(state.teams.size).toBe(8);
+  });
+
+  it('still refuses the colour of a team the player shares with someone else', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+    });
+    const random = seededRandom();
+    const founder = join(state, 'user-a', 2_000, random, {
+      team: { newTeam: { name: 'Bears', colorKey: 'circle' } },
+    });
+    const bearsTeamId = founder.teamId;
+    if (bearsTeamId === null) throw new Error('The founder has no team.');
+    join(state, 'user-b', 2_100, random, { team: { teamId: bearsTeamId } });
+
+    expect(
+      refusalCode(
+        createTeam(
+          state,
+          founder.playerId,
+          { name: 'Cubs', colorKey: 'circle' },
+          3_000,
+          random,
+        ),
+      ),
+    ).toBe('quizshow_team_color_taken');
+    expect([...state.teams.keys()]).toEqual([bearsTeamId]);
+    expect(state.players.get(founder.playerId)?.teamId).toBe(bearsTeamId);
   });
 
   it("refuses a joker outside the round's intro, the leaderboard before it, or the lobby for round 0", () => {

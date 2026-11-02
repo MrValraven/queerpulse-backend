@@ -19,7 +19,7 @@ import { StudioCount } from './studio-stats';
 /** The owner's ranking shows this many supporters. */
 export const STUDIO_TOP_SUPPORTERS_SHOWN = 10;
 
-/** Supporters are ranked by listens inside this window. */
+/** Top listeners are ranked by listens inside this window. */
 export const STUDIO_SUPPORTER_WINDOW_INTERVAL = '28 days';
 
 export interface StudioSupporterPersona {
@@ -63,6 +63,8 @@ export interface StudioSupportingResponse {
 
 export interface StudioTopSupporters {
   items: { identity: StudioSupporterIdentity }[];
+  /** How many listeners are shown, floored with `toStudioCount`. The wire
+   *  name predates default-on listing and stays for the frontend. */
   optedInCount: StudioCount;
 }
 

@@ -122,15 +122,46 @@ function isTeamFull(state: QuizshowLiveState, teamId: string): boolean {
   );
 }
 
-/** Checks a team a player wants to found: name, the session's team limit, a free name and a free colour. */
+/**
+ * Lobby only: deletes those of `candidateTeamIds` that have no active player
+ * left, so their name and colour are free again and they stop counting toward
+ * the team limit. Once the game runs a team stays for good, as its scores hang
+ * on it. Returns the persist effect when a team went; callers announce the
+ * lobby change themselves.
+ */
+export function dropEmptyLobbyTeams(
+  state: QuizshowLiveState,
+  candidateTeamIds: readonly (string | null)[],
+): QuizshowEngineEffect[] {
+  if (state.status !== 'lobby') return [];
+  const players = activePlayers(state);
+  const emptyTeamIds = [...new Set(candidateTeamIds)].filter(
+    (teamId): teamId is string =>
+      teamId !== null &&
+      state.teams.has(teamId) &&
+      !players.some((player) => player.teamId === teamId),
+  );
+  if (emptyTeamIds.length === 0) return [];
+  for (const teamId of emptyTeamIds) state.teams.delete(teamId);
+  return [persist({ type: 'delete_teams', teamIds: emptyTeamIds })];
+}
+
+/**
+ * Checks a team a player wants to found: name, the session's team limit, a
+ * free name and a free colour. `ignoredTeamId` leaves out a team that goes as
+ * the founder leaves it, so its place, name and colour count as free.
+ */
 function newTeamRefusal(
   state: QuizshowLiveState,
   trimmedName: string,
   colorKey: QuizshowTeamColorKey,
+  ignoredTeamId: string | null = null,
 ): QuizshowErrorCode | null {
   const nameRefusal = textRefusal(trimmedName);
   if (nameRefusal !== null) return nameRefusal;
-  const teams = [...state.teams.values()];
+  const teams = [...state.teams.values()].filter(
+    (team) => team.teamId !== ignoredTeamId,
+  );
   if (teams.length >= QUIZSHOW_LIMITS.teamsPerSessionMax) {
     return 'quizshow_team_limit';
   }
@@ -316,11 +347,12 @@ export function pickTeam(
   if (isTeamFull(state, team.teamId)) {
     return refuse('quizshow_team_full', state, false);
   }
+  const leftTeamId = player.teamId;
   player.teamId = team.teamId;
-  return succeed(
-    { me: toMe(state, playerId) },
-    playerChangedEffects(playerId, { teamId: team.teamId }),
-  );
+  return succeed({ me: toMe(state, playerId) }, [
+    ...playerChangedEffects(playerId, { teamId: team.teamId }),
+    ...dropEmptyLobbyTeams(state, [leftTeamId]),
+  ]);
 }
 
 /** `lobby:createTeam`, teams play in the lobby only; the creator moves into the new team. */
@@ -351,12 +383,27 @@ export function createTeam(
   ) {
     return succeed({ me: toMe(state, playerId), teamId: heldTeam.teamId }, []);
   }
-  const teamRefusal = newTeamRefusal(state, teamName, input.colorKey);
+  const leftTeamId = player.teamId;
+  // A team the founder is alone in goes as they leave it, so it does not block the new one.
+  const ignoredTeamId =
+    leftTeamId !== null && activeMemberCount(state, leftTeamId) === 1
+      ? leftTeamId
+      : null;
+  const teamRefusal = newTeamRefusal(
+    state,
+    teamName,
+    input.colorKey,
+    ignoredTeamId,
+  );
   if (teamRefusal !== null) return refuse(teamRefusal, state, false);
   const team = buildTeam(teamName, input.colorKey, now, random);
   state.teams.set(team.teamId, team);
   player.teamId = team.teamId;
+  // The left team's row is deleted first: the new team may reuse its name or
+  // colour, and both are unique per session in the database.
+  const droppedTeamEffects = dropEmptyLobbyTeams(state, [leftTeamId]);
   return succeed({ me: toMe(state, playerId), teamId: team.teamId }, [
+    ...droppedTeamEffects,
     persist({ type: 'insert_team', team: { ...team } }),
     ...playerChangedEffects(playerId, { teamId: team.teamId }),
   ]);

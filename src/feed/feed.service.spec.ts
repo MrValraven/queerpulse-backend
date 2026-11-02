@@ -1633,6 +1633,91 @@ describe('FeedService', () => {
     });
   });
 
+  describe('gathering feed time', () => {
+    // An event posted after it took place sits at when it happened: its end
+    // time, or its start time when it has no end. The card still reports the
+    // row's real posted time.
+    it('orders an event posted after it ended by its end time, or its start time when it has no end', async () => {
+      const post = basePost({
+        id: 'post-mid',
+        communityId: 'community-1',
+        createdAt: t('2026-07-20T00:00:00.000Z'),
+      });
+      const endedEvent = baseEvent({
+        id: 'event-ended',
+        communityId: 'community-1',
+        startAt: t('2026-07-15T18:00:00.000Z'),
+        endAt: t('2026-07-15T22:00:00.000Z'),
+        createdAt: t('2026-07-25T00:00:00.000Z'),
+      });
+      const startOnlyEvent = baseEvent({
+        id: 'event-start-only',
+        communityId: 'community-1',
+        startAt: t('2026-07-12T18:00:00.000Z'),
+        endAt: null,
+        createdAt: t('2026-07-26T00:00:00.000Z'),
+      });
+      const eventQueryBuilder = qbStub([endedEvent, startOnlyEvent]);
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub([post]));
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      const page = await service.getFeed('viewer-1', 'communities', undefined);
+
+      expect(page.data.map((item) => item.id)).toEqual([
+        'post-mid',
+        'event-ended',
+        'event-start-only',
+      ]);
+      expect(
+        page.data.find((item) => item.id === 'event-ended')?.createdAt,
+      ).toBe('2026-07-25T00:00:00.000Z');
+      expect(eventQueryBuilder.orderBy).toHaveBeenCalledWith(
+        `LEAST("e"."created_at", date_trunc('milliseconds', COALESCE("e"."end_at", "e"."start_at")))`,
+        'DESC',
+      );
+    });
+
+    it('builds the next cursor from an ended event’s end time', async () => {
+      const post = basePost({
+        id: 'post-mid',
+        communityId: 'community-1',
+        createdAt: t('2026-07-20T00:00:00.000Z'),
+      });
+      const endedEvent = baseEvent({
+        id: 'event-ended',
+        communityId: 'community-1',
+        startAt: t('2026-07-15T18:00:00.000Z'),
+        endAt: t('2026-07-15T22:00:00.000Z'),
+        createdAt: t('2026-07-25T00:00:00.000Z'),
+      });
+      const olderPost = basePost({
+        id: 'post-old',
+        communityId: 'community-1',
+        createdAt: t('2026-07-10T00:00:00.000Z'),
+      });
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([post, olderPost]),
+      );
+      events.createQueryBuilder.mockReturnValue(qbStub([endedEvent]));
+
+      const page = await service.getFeed(
+        'viewer-1',
+        'communities',
+        undefined,
+        2,
+      );
+
+      expect(page.data.map((item) => item.id)).toEqual([
+        'post-mid',
+        'event-ended',
+      ]);
+      expect(decodeCursor(page.pageInfo.nextCursor as string)).toEqual({
+        createdAt: t('2026-07-15T22:00:00.000Z'),
+        id: 'event-ended',
+      });
+    });
+  });
+
   it('returns an empty page when every included source has no rows', async () => {
     const page = await service.getFeed('viewer-1', 'all', undefined);
 

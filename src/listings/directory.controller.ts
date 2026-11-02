@@ -73,7 +73,8 @@ import {
  * So every read that carries either fact keeps the 60-second freshness window
  * and drops the stale window: the badge-bearing grids (`GET /directory`,
  * `safe-spaces`, `safe-spaces/:slug`, `by-member/:slug`), the partner spaces
- * (`GET /directory/spaces`), and the listing detail with its reviews
+ * (`GET /directory/spaces`), the directory partners
+ * (`GET /directory/partners`), and the listing detail with its reviews
  * (`:slug`, `:slug/reviews`). Those two set
  * their headers through `AnonymousNoStaleCacheInterceptor`, which is
  * `AnonymousPublicCacheInterceptor` with this one value changed, so the
@@ -96,9 +97,9 @@ const MEMBER_ONLY_READ_CACHE = 'private, no-store';
  * it. Every read here is `@Public()` except `GET /directory/adult`, and there
  * is no class guard.
  *
- * `spaces`, `attributes` and `adult` are static segments declared before the `:slug` detail
- * route (added in a later sub-project) so route matching resolves them
- * literally.
+ * `spaces`, `partners`, `attributes` and `adult` are static segments
+ * declared before the `:slug` detail route (added in a later sub-project) so
+ * route matching resolves them literally.
  *
  * Every public read here carries a positive cache header (AUDIT-2026-07-30.md
  * §I "No CDN cache headers on public GETs"), so Vercel's CDN can answer repeat
@@ -152,6 +153,21 @@ export class DirectoryController {
   @ApiOkResponse({ description: 'The partner spaces.' })
   listPartnerSpaces() {
     return this.directoryService.listPartnerSpaces();
+  }
+
+  // The directory's partner row: listings an admin picked, in their order,
+  // as grid cards with the admin's note. Lists listings by identity, so a
+  // paused or taken-down partner must drop out promptly.
+  @Public()
+  @Get('partners')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', NO_STALE_READ_CDN_CACHE)
+  @ApiOperation({ summary: 'List the directory partners in admin order' })
+  @ApiOkResponse({
+    description: 'Grid cards with `partnerNote`, ordered by position.',
+  })
+  listDirectoryPartners() {
+    return this.directoryService.listDirectoryPartners();
   }
 
   // The listing attribute vocabulary, grouped and scoped, for the "list your

@@ -168,4 +168,33 @@ describe('ListingRunByService', () => {
       expect(refs.has(WALK.id)).toBe(false);
     });
   });
+
+  describe('displayNameOf', () => {
+    it('names a listing whatever its state', async () => {
+      // Paused by its owner and taken down by a moderator: the notice still
+      // names it, so no state or moderation filter applies.
+      listings.findOne.mockResolvedValue({
+        id: WALK.id,
+        name: WALK.name,
+        status: ListingStatus.Live,
+        isHiddenByOwner: true,
+      });
+      contentModeration.statesForAnyType.mockResolvedValue(
+        new Map([[WALK.slug, { hidden: true, removed: false }]]),
+      );
+
+      await expect(service.displayNameOf(WALK.id)).resolves.toBe(WALK.name);
+      expect(listings.findOne).toHaveBeenCalledWith({
+        where: { id: WALK.id },
+        select: { id: true, name: true },
+      });
+      expect(contentModeration.statesForAnyType).not.toHaveBeenCalled();
+    });
+
+    it('answers null for an unknown id', async () => {
+      listings.findOne.mockResolvedValue(null);
+
+      await expect(service.displayNameOf('listing-gone')).resolves.toBeNull();
+    });
+  });
 });

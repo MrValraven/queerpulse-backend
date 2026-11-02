@@ -10,6 +10,7 @@ const LISTENING_TABLES =
 const FILES_ALLOWED_TO_NAME_LISTENING_TABLES = [
   'src/account/data-export-contributors-studio.ts',
   'src/migrations/1837800000000-AddStudioListening.ts',
+  'src/migrations/1838600000000-AddStudioSupporterHidden.ts',
   'src/studio/entities/studio-listen.entity.ts',
   'src/studio/entities/studio-supporter.entity.ts',
   'src/studio/entities/studio-track-play-daily.entity.ts',

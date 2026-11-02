@@ -26,6 +26,7 @@ import {
   setSessionStatus,
   succeed,
 } from './quizshow-engine-state';
+import { dropEmptyLobbyTeams } from './quizshow-engine-players';
 import type {
   QuizshowCommandOutcome,
   QuizshowEngineEffect,
@@ -961,14 +962,11 @@ export function hostStart(
   const players = activePlayers(state);
   if (players.length === 0) return refuse('quizshow_no_players', state, false);
   const effects: QuizshowEngineEffect[] = [];
-  const emptyTeamIds = [...state.teams.values()]
-    .filter((team) => !players.some((player) => player.teamId === team.teamId))
-    .map((team) => team.teamId);
-  if (emptyTeamIds.length > 0) {
-    for (const teamId of emptyTeamIds) state.teams.delete(teamId);
-    effects.push(persist({ type: 'delete_teams', teamIds: emptyTeamIds }), {
-      kind: 'lobby_changed',
-    });
+  const droppedTeamEffects = dropEmptyLobbyTeams(state, [
+    ...state.teams.keys(),
+  ]);
+  if (droppedTeamEffects.length > 0) {
+    effects.push(...droppedTeamEffects, { kind: 'lobby_changed' });
   }
   state.status = 'running';
   effects.push(...openRoundIntro(state, 0, now));
@@ -1367,6 +1365,7 @@ export function hostRemovePlayer(
   }
   effects.push(
     persist({ type: 'update_player', playerId, fields: { removedAt: now } }),
+    ...dropEmptyLobbyTeams(state, [player.teamId]),
     persist({
       type: 'hide_player_answers',
       playerId,

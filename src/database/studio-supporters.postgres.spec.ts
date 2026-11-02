@@ -5,7 +5,7 @@ import {
   MEMBER_PERSONAS_SQL,
   OPTED_IN_COUNT_SQL,
   SUPPORTER_ARTIST_SQL,
-  SUPPORTER_DELETE_SQL,
+  SUPPORTER_HIDE_SQL,
   SUPPORTER_PERSONAS_SQL,
   SUPPORTER_UPSERT_SQL,
   SUPPORTING_ROWS_SQL,
@@ -23,7 +23,7 @@ import {
 import { User, UserStatus } from '../users/entities/user.entity';
 
 /**
- * The supporter queries on real Postgres. Skipped unless
+ * The top listener queries on real Postgres. Skipped unless
  * `STUDIO_MIGRATIONS_DATABASE_URL` names a database whose name ends in
  * `_test` (it drops and synchronizes the schema from the entities).
  */
@@ -38,6 +38,7 @@ const SUPPORTER_B = 'b1000000-0000-4000-8000-000000000004';
 const SUPPORTER_D = 'b1000000-0000-4000-8000-000000000005';
 const SUPPORTER_C = 'b1000000-0000-4000-8000-000000000006';
 const QUIET_SUPPORTER = 'b1000000-0000-4000-8000-000000000007';
+const UNKNOWN_PERSONA = 'b2000000-0000-4000-8000-000000000099';
 const DEACTIVATED_SUPPORTER = 'b1000000-0000-4000-8000-000000000008';
 const UNGRANTED_SUPPORTER = 'b1000000-0000-4000-8000-000000000009';
 const OTHER_CREATOR = 'b1000000-0000-4000-8000-000000000010';
@@ -74,11 +75,14 @@ const UNCREDITED_TRACK = 'b5000000-0000-4000-8000-000000000004';
 
 const ARTIST_KINDS = [...STUDIO_ARTIST_PERSONA_KINDS];
 
-// A: three listens (one own, two credited), B and C and D: two each, with
-// C and D opted in at the same instant.
+// A: three listens (one own, two credited), B and C and D: two each. B
+// first listened six days ago; C and D both first listened four days ago,
+// in the same statement, so they tie fully. Only B has a preference row (it
+// shows as SHOWN_PERSONA); A, C and D rank as their accounts by default.
 const RANKED = [SUPPORTER_A, SUPPORTER_B, SUPPORTER_D, SUPPORTER_C];
-// The ranked supporters plus the one with no listen in the window.
-const OPTED_IN_COUNT = 5;
+// The ranked listeners: every eligible, shown member with a listen in the
+// window.
+const SHOWN_LISTENER_COUNT = 4;
 
 interface TopSupporterRow {
   user_id: string;
@@ -87,6 +91,7 @@ interface TopSupporterRow {
 
 interface SupporterTimesRow {
   shown_as_subprofile_id: string | null;
+  is_hidden: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -111,7 +116,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
   const rankedUserIds = async (): Promise<string[]> =>
     (await topRows()).map((row) => row.user_id);
 
-  const optedInCount = async (): Promise<number> => {
+  const shownListenerCount = async (): Promise<number> => {
     const rows: { count: number }[] = await dataSource.query(
       OPTED_IN_COUNT_SQL,
       [MUSIC_PERSONA],
@@ -298,11 +303,11 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
       [SUPPORTER_A, CREDITED_TRACK, 2],
       [SUPPORTER_A, CREDITED_TRACK, 3],
       [SUPPORTER_B, TRACK_2, 1],
-      [SUPPORTER_B, TRACK_2, 2],
+      [SUPPORTER_B, TRACK_2, 6],
       [SUPPORTER_C, TRACK_1, 1],
       [SUPPORTER_C, TRACK_2, 4],
       [SUPPORTER_D, TRACK_1, 1],
-      [SUPPORTER_D, TRACK_1, 5],
+      [SUPPORTER_D, TRACK_1, 4],
       // Another persona's track with no credit: never counts for the artist.
       [SUPPORTER_D, UNCREDITED_TRACK, 1],
       [SUPPORTER_D, UNCREDITED_TRACK, 2],
@@ -323,38 +328,36 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
         daysAgo,
       ]),
     ];
-    for (const [userId, trackId, daysAgo] of listens) {
-      await dataSource.query(
-        `INSERT INTO "studio_listens" ("user_id", "track_id", "played_at")
-         VALUES ($1, $2, now() - make_interval(days => $3::int))`,
-        [userId, trackId, daysAgo],
-      );
-    }
-    const supporters: [string, string, string | null, string][] = [
-      [SUPPORTER_A, MUSIC_PERSONA, null, '2026-10-01T08:00:00.000Z'],
-      [SUPPORTER_B, MUSIC_PERSONA, SHOWN_PERSONA, '2026-10-02T08:00:00.000Z'],
-      [SUPPORTER_C, MUSIC_PERSONA, null, '2026-10-03T08:00:00.000Z'],
-      [SUPPORTER_D, MUSIC_PERSONA, null, '2026-10-03T08:00:00.000Z'],
-      [QUIET_SUPPORTER, MUSIC_PERSONA, null, '2026-09-01T08:00:00.000Z'],
-      [DEACTIVATED_SUPPORTER, MUSIC_PERSONA, null, '2026-09-02T08:00:00.000Z'],
-      [UNGRANTED_SUPPORTER, MUSIC_PERSONA, null, '2026-09-03T08:00:00.000Z'],
-      [SUPPORTER_A, OTHER_PERSONA, null, '2026-10-05T08:00:00.000Z'],
-    ];
-    for (const [userId, artistId, shownAsId, createdAt] of supporters) {
-      await dataSource.query(
-        `INSERT INTO "studio_supporters"
-           ("user_id", "subprofile_id", "shown_as_subprofile_id", "created_at", "updated_at")
-         VALUES ($1, $2, $3, $4::timestamptz, $4::timestamptz)`,
-        [userId, artistId, shownAsId, createdAt],
-      );
-    }
+    // One statement, so every listen reads the same now() and equal
+    // days-ago values are equal instants.
+    await dataSource.query(
+      `INSERT INTO "studio_listens" ("user_id", "track_id", "played_at")
+       SELECT "listen"."user_id", "listen"."track_id",
+              now() - make_interval(days => "listen"."days_ago")
+         FROM unnest($1::uuid[], $2::uuid[], $3::int[])
+           AS "listen"("user_id", "track_id", "days_ago")`,
+      [
+        listens.map(([userId]) => userId),
+        listens.map(([, trackId]) => trackId),
+        listens.map(([, , daysAgo]) => daysAgo),
+      ],
+    );
+    // Preference rows: B shows as a persona on the artist, A keeps an
+    // account row on the other artist from ten days ago.
+    await dataSource.query(
+      `INSERT INTO "studio_supporters"
+         ("user_id", "subprofile_id", "shown_as_subprofile_id", "created_at", "updated_at")
+       VALUES ($1, $2, $3, now() - interval '20 days', now() - interval '20 days'),
+              ($4, $5, NULL, now() - interval '10 days', now() - interval '10 days')`,
+      [SUPPORTER_B, MUSIC_PERSONA, SHOWN_PERSONA, SUPPORTER_A, OTHER_PERSONA],
+    );
   }, 120000);
 
   afterAll(async () => {
     await dataSource?.destroy();
   });
 
-  it('ranks opted-in listeners by listens in the last 28 days, then by opt-in date, then by user id', async () => {
+  it('ranks every listener by listens in the last 28 days, then by first listen in the window, then by user id', async () => {
     expect(await topRows()).toEqual([
       { user_id: SUPPORTER_A, shown_as_subprofile_id: null },
       { user_id: SUPPORTER_B, shown_as_subprofile_id: SHOWN_PERSONA },
@@ -365,7 +368,140 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
       SUPPORTER_A,
       SUPPORTER_B,
     ]);
-    expect(await optedInCount()).toBe(OPTED_IN_COUNT);
+    expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT);
+  });
+
+  it('ranks a listener with no preference row as their account', async () => {
+    const accountRows: { count: number }[] = await dataSource.query(
+      `SELECT COUNT(*)::int AS "count" FROM "studio_supporters"
+        WHERE "user_id" = ANY($1::uuid[]) AND "subprofile_id" = $2`,
+      [[SUPPORTER_A, SUPPORTER_C, SUPPORTER_D], MUSIC_PERSONA],
+    );
+    expect(accountRows).toEqual([{ count: 0 }]);
+    expect(
+      (await topRows()).filter((row) => row.user_id !== SUPPORTER_B),
+    ).toEqual([
+      { user_id: SUPPORTER_A, shown_as_subprofile_id: null },
+      { user_id: SUPPORTER_D, shown_as_subprofile_id: null },
+      { user_id: SUPPORTER_C, shown_as_subprofile_id: null },
+    ]);
+  });
+
+  it('leaves out a hidden listener until they show again', async () => {
+    try {
+      expect(
+        await dataSource.query(SUPPORTER_HIDE_SQL, [
+          SUPPORTER_A,
+          MUSIC_PERSONA,
+        ]),
+      ).toEqual([{ subprofile_id: MUSIC_PERSONA }]);
+      expect(await rankedUserIds()).toEqual([
+        SUPPORTER_B,
+        SUPPORTER_D,
+        SUPPORTER_C,
+      ]);
+      expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
+
+      await dataSource.query(SUPPORTER_UPSERT_SQL, [
+        SUPPORTER_A,
+        MUSIC_PERSONA,
+        null,
+      ]);
+      expect(await rankedUserIds()).toEqual(RANKED);
+      expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT);
+    } finally {
+      await dataSource.query(
+        `DELETE FROM "studio_supporters" WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+        [SUPPORTER_A, MUSIC_PERSONA],
+      );
+    }
+    expect(await rankedUserIds()).toEqual(RANKED);
+  });
+
+  it('keeps the stored identity through a hide, so showing again restores it', async () => {
+    const supporterBRow = async (): Promise<SupporterTimesRow> => {
+      const rows: SupporterTimesRow[] = await dataSource.query(
+        `SELECT "shown_as_subprofile_id", "is_hidden", "created_at", "updated_at"
+           FROM "studio_supporters"
+          WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+        [SUPPORTER_B, MUSIC_PERSONA],
+      );
+      const supporterRow = rows[0];
+      if (!supporterRow) {
+        throw new Error(
+          'The studio_supporters fixture row for supporter B is missing',
+        );
+      }
+      return supporterRow;
+    };
+    const fixtureRow = await supporterBRow();
+    try {
+      await dataSource.query(SUPPORTER_HIDE_SQL, [SUPPORTER_B, MUSIC_PERSONA]);
+      const hiddenRow = await supporterBRow();
+      expect([
+        hiddenRow.shown_as_subprofile_id,
+        hiddenRow.is_hidden,
+        hiddenRow.created_at,
+        hiddenRow.updated_at > fixtureRow.updated_at,
+      ]).toEqual([SHOWN_PERSONA, true, fixtureRow.created_at, true]);
+      expect(await rankedUserIds()).toEqual([
+        SUPPORTER_A,
+        SUPPORTER_D,
+        SUPPORTER_C,
+      ]);
+
+      // Hiding again changes nothing.
+      await dataSource.query(SUPPORTER_HIDE_SQL, [SUPPORTER_B, MUSIC_PERSONA]);
+      expect(await supporterBRow()).toEqual(hiddenRow);
+
+      // The state answers the stored identity while hidden, and the PUT
+      // sends it back.
+      await dataSource.query(SUPPORTER_UPSERT_SQL, [
+        SUPPORTER_B,
+        MUSIC_PERSONA,
+        SHOWN_PERSONA,
+      ]);
+      const shownRow = await supporterBRow();
+      expect([
+        shownRow.shown_as_subprofile_id,
+        shownRow.is_hidden,
+        shownRow.created_at,
+      ]).toEqual([SHOWN_PERSONA, false, fixtureRow.created_at]);
+      expect(await topRows()).toEqual([
+        { user_id: SUPPORTER_A, shown_as_subprofile_id: null },
+        { user_id: SUPPORTER_B, shown_as_subprofile_id: SHOWN_PERSONA },
+        { user_id: SUPPORTER_D, shown_as_subprofile_id: null },
+        { user_id: SUPPORTER_C, shown_as_subprofile_id: null },
+      ]);
+    } finally {
+      await dataSource.query(
+        `UPDATE "studio_supporters"
+            SET "shown_as_subprofile_id" = $3, "is_hidden" = false,
+                "created_at" = $4, "updated_at" = $5
+          WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+        [
+          SUPPORTER_B,
+          MUSIC_PERSONA,
+          SHOWN_PERSONA,
+          fixtureRow.created_at,
+          fixtureRow.updated_at,
+        ],
+      );
+    }
+  });
+
+  it('hides nothing and answers no row for an unknown persona id', async () => {
+    expect(
+      await dataSource.query(SUPPORTER_HIDE_SQL, [
+        SUPPORTER_A,
+        UNKNOWN_PERSONA,
+      ]),
+    ).toEqual([]);
+    const rows: unknown[] = await dataSource.query(
+      `SELECT 1 FROM "studio_supporters" WHERE "subprofile_id" = $1`,
+      [UNKNOWN_PERSONA],
+    );
+    expect(rows).toEqual([]);
   });
 
   it('counts listens on credited tracks toward the credited persona', async () => {
@@ -395,9 +531,9 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
     expect(await rankedUserIds()).toEqual(RANKED);
   });
 
-  it('leaves out a supporter with no listen in 28 days and keeps them in the opted-in count', async () => {
+  it('leaves out a listener with no listen in 28 days from the ranking and the count', async () => {
     expect(await rankedUserIds()).not.toContain(QUIET_SUPPORTER);
-    expect(await optedInCount()).toBe(OPTED_IN_COUNT);
+    expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT);
 
     await withRows(
       [
@@ -415,7 +551,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
       ],
       async () => {
         expect(await rankedUserIds()).toEqual([...RANKED, QUIET_SUPPORTER]);
-        expect(await optedInCount()).toBe(OPTED_IN_COUNT);
+        expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT + 1);
       },
     );
   });
@@ -427,7 +563,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
         SUPPORTER_D,
         SUPPORTER_C,
       ]);
-      expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+      expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
     });
     await withBlocks([[SUPPORTER_B, CO_OWNER]], async () => {
       expect(await rankedUserIds()).toEqual([
@@ -435,7 +571,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
         SUPPORTER_D,
         SUPPORTER_C,
       ]);
-      expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+      expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
     });
     expect(await rankedUserIds()).toEqual(RANKED);
   });
@@ -445,12 +581,12 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
     // A direct block names the persona's identity row.
     await withIdentityBlock(CO_OWNER, SHOWN_IDENTITY, null, async () => {
       expect(await rankedUserIds()).toEqual(withoutSupporterB);
-      expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+      expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
     });
     // A carried block names the persona itself.
     await withIdentityBlock(CO_OWNER, null, SHOWN_PERSONA, async () => {
       expect(await rankedUserIds()).toEqual(withoutSupporterB);
-      expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+      expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
     });
     // A block by someone outside the artist changes nothing.
     await withIdentityBlock(OTHER_CREATOR, SHOWN_IDENTITY, null, async () => {
@@ -460,7 +596,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
 
   it('leaves out a deactivated supporter and one without a grant', async () => {
     expect(await rankedUserIds()).toEqual(RANKED);
-    expect(await optedInCount()).toBe(OPTED_IN_COUNT);
+    expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT);
 
     // Each would lead the ranking with five listens once eligible.
     await withRows(
@@ -523,7 +659,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
           SUPPORTER_D,
           SUPPORTER_C,
         ]);
-        expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+        expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
       },
     );
     expect(await rankedUserIds()).toEqual(RANKED);
@@ -549,7 +685,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
           SUPPORTER_D,
           SUPPORTER_C,
         ]);
-        expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+        expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
       },
     );
     expect(await rankedUserIds()).toEqual(RANKED);
@@ -573,11 +709,11 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
       ],
       async () => {
         expect(await rankedUserIds()).toEqual(withoutSupporterB);
-        expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+        expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
       },
     );
     expect(await rankedUserIds()).toEqual(RANKED);
-    expect(await optedInCount()).toBe(OPTED_IN_COUNT);
+    expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT);
 
     await withRows(
       [
@@ -594,7 +730,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
       ],
       async () => {
         expect(await rankedUserIds()).toEqual(withoutSupporterB);
-        expect(await optedInCount()).toBe(OPTED_IN_COUNT - 1);
+        expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT - 1);
         // Picking the account brings the supporter back.
         await withRows(
           [
@@ -646,7 +782,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
             { user_id: SUPPORTER_D, shown_as_subprofile_id: null },
             { user_id: SUPPORTER_C, shown_as_subprofile_id: null },
           ]);
-          expect(await optedInCount()).toBe(OPTED_IN_COUNT);
+          expect(await shownListenerCount()).toBe(SHOWN_LISTENER_COUNT);
           const chosenRows: { is_linkable: boolean }[] = await dataSource.query(
             SUPPORTER_PERSONAS_SQL,
             [[SHOWN_PERSONA]],
@@ -719,25 +855,38 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
     expect(await artistRowsFor(SUPPORTER_C)).toHaveLength(1);
   });
 
-  it('lists the caller opt-ins newest first and leaves out an artist behind a block', async () => {
+  it('lists the artists the caller listened to, most recently played first, and leaves out an artist behind a block', async () => {
     const supportingOf = async (
       kinds: string[] = ARTIST_KINDS,
     ): Promise<[string, string | null, Date][]> => {
       const rows: {
         artist_id: string;
         shown_as_subprofile_id: string | null;
-        created_at: Date;
+        since: Date;
       }[] = await dataSource.query(SUPPORTING_ROWS_SQL, [SUPPORTER_A, kinds]);
       return rows.map((row): [string, string | null, Date] => [
         row.artist_id,
         row.shown_as_subprofile_id,
-        row.created_at,
+        row.since,
       ]);
     };
+    // MUSIC_PERSONA has no row, so `since` is A's first listen on its own
+    // or credited tracks; OTHER_PERSONA (the credited track's release) has
+    // A's account row from ten days ago.
+    const [firstListen]: { first_listened_at: Date }[] = await dataSource.query(
+      `SELECT MIN("played_at") AS "first_listened_at" FROM "studio_listens"
+          WHERE "user_id" = $1 AND "track_id" = ANY($2::uuid[])`,
+      [SUPPORTER_A, [TRACK_1, TRACK_2, CREDITED_TRACK]],
+    );
+    const [otherRow]: { created_at: Date }[] = await dataSource.query(
+      `SELECT "created_at" FROM "studio_supporters"
+        WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+      [SUPPORTER_A, OTHER_PERSONA],
+    );
 
     expect(await supportingOf()).toEqual([
-      [OTHER_PERSONA, null, new Date('2026-10-05T08:00:00.000Z')],
-      [MUSIC_PERSONA, null, new Date('2026-10-01T08:00:00.000Z')],
+      [MUSIC_PERSONA, null, firstListen?.first_listened_at],
+      [OTHER_PERSONA, null, otherRow?.created_at],
     ]);
     expect((await supportingOf(['musician'])).map((row) => row[0])).toEqual([
       MUSIC_PERSONA,
@@ -747,13 +896,62 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
         MUSIC_PERSONA,
       ]);
     });
+    // A hidden row leaves the artist out.
+    await withRows(
+      [
+        [
+          `UPDATE "studio_supporters" SET "is_hidden" = true
+            WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+          [SUPPORTER_A, OTHER_PERSONA],
+        ],
+      ],
+      [
+        [
+          `UPDATE "studio_supporters" SET "is_hidden" = false
+            WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+          [SUPPORTER_A, OTHER_PERSONA],
+        ],
+      ],
+      async () => {
+        expect((await supportingOf()).map((row) => row[0])).toEqual([
+          MUSIC_PERSONA,
+        ]);
+      },
+    );
+    // A caller who became a member of the artist is left out.
+    await withRows(
+      [
+        [
+          `INSERT INTO "subprofile_members" ("subprofile_id", "user_id") VALUES ($1, $2)`,
+          [OTHER_PERSONA, SUPPORTER_A],
+        ],
+      ],
+      [
+        [
+          `DELETE FROM "subprofile_members" WHERE "subprofile_id" = $1 AND "user_id" = $2`,
+          [OTHER_PERSONA, SUPPORTER_A],
+        ],
+      ],
+      async () => {
+        expect((await supportingOf()).map((row) => row[0])).toEqual([
+          MUSIC_PERSONA,
+        ]);
+      },
+    );
+    // Another member with no listen in the window sees no artist.
+    expect(
+      await dataSource.query(SUPPORTING_ROWS_SQL, [
+        QUIET_SUPPORTER,
+        ARTIST_KINDS,
+      ]),
+    ).toEqual([]);
   });
 
   it('upserts keeping created_at and moves updated_at on a change only', async () => {
     const pastInstant = new Date('2026-01-01T00:00:00.000Z');
     const supporterTimes = async (): Promise<SupporterTimesRow[]> =>
       dataSource.query(
-        `SELECT "shown_as_subprofile_id", "created_at", "updated_at"
+        `SELECT "shown_as_subprofile_id", "is_hidden", "created_at", "updated_at"
            FROM "studio_supporters"
           WHERE "user_id" = $1 AND "subprofile_id" = $2`,
         [SUPPORTER_C, OTHER_PERSONA],
@@ -783,6 +981,7 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
       expect(await supporterTimes()).toEqual([
         {
           shown_as_subprofile_id: null,
+          is_hidden: false,
           created_at: pastInstant,
           updated_at: pastInstant,
         },
@@ -810,11 +1009,31 @@ describeWithDatabase('Studio supporters on real Postgres', () => {
         SHOWN_PERSONA,
       ]);
       expect(await supporterTimes()).toEqual(changedRows);
-    } finally {
-      await dataSource.query(SUPPORTER_DELETE_SQL, [
+
+      // Showing again after a hide clears the flag and moves updated_at.
+      await dataSource.query(
+        `UPDATE "studio_supporters" SET "is_hidden" = true, "updated_at" = $3
+          WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+        [SUPPORTER_C, OTHER_PERSONA, pastInstant],
+      );
+      await dataSource.query(SUPPORTER_UPSERT_SQL, [
         SUPPORTER_C,
         OTHER_PERSONA,
+        SHOWN_PERSONA,
       ]);
+      expect(
+        (await supporterTimes()).map((row) => [
+          row.shown_as_subprofile_id,
+          row.is_hidden,
+          row.created_at,
+          row.updated_at > pastInstant,
+        ]),
+      ).toEqual([[SHOWN_PERSONA, false, pastInstant, true]]);
+    } finally {
+      await dataSource.query(
+        `DELETE FROM "studio_supporters" WHERE "user_id" = $1 AND "subprofile_id" = $2`,
+        [SUPPORTER_C, OTHER_PERSONA],
+      );
     }
     expect(await supporterTimes()).toEqual([]);
   });

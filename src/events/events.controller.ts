@@ -26,6 +26,7 @@ import { CohostDto } from './dto/cohost.dto';
 import { CreateCohostInviteDto } from './dto/create-cohost-invite.dto';
 import { CreateEventAnnouncementDto } from './dto/create-event-announcement.dto';
 import { CreateEventBanDto } from './dto/create-event-ban.dto';
+import { CreateEventBatchDto } from './dto/create-event-batch.dto';
 import { CreateEventDto } from './dto/create-event.dto';
 import { CreateLineupInviteDto } from './dto/create-lineup-invite.dto';
 import { CreateMemberInvitesDto } from './dto/create-member-invites.dto';
@@ -41,6 +42,10 @@ import { UpdateEventDto } from './dto/update-event.dto';
 import { UpdateRsvpDetailsDto } from './dto/update-rsvp-details.dto';
 import { EventAnnouncementsService } from './event-announcements.service';
 import { EventBansService } from './event-bans.service';
+import type { CreatedEventBatch, EventBatchTemplateView } from './event-batch';
+import { EventBatchService } from './event-batch.service';
+import { EventBatchTemplateService } from './event-batch-template.service';
+import { EventBatchThrottlerGuard } from './event-batch-throttler.guard';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
@@ -60,6 +65,7 @@ import {
   ApiOperation,
   ApiServiceUnavailableResponse,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
@@ -87,6 +93,10 @@ export class EventsController {
     // Member invites (2026-10-21). Last, so the positional constructor in
     // `creator-draft-publish-paths.spec.ts` keeps its earlier slots.
     private readonly memberEventInvitesService: MemberEventInvitesService,
+    // A month of events (2026-11-02). Last, so the positional constructors
+    // in the specs keep their earlier slots.
+    private readonly eventBatchTemplates: EventBatchTemplateService,
+    private readonly eventBatch: EventBatchService,
   ) {}
 
   @Get()
@@ -143,6 +153,90 @@ export class EventsController {
     const created = await this.eventsService.create(user.userId, dto);
     await this.creatorDraftSlots.discardAfterPublish(user.userId, 'event');
     return created;
+  }
+
+  // A month of events (2026-11-02). Both routes carry a method-level
+  // `@Feature('eventBatch')`, which overrides the class `events` tag because
+  // the feature guards read `getAllAndOverride([handler, class])`, so a
+  // member without the grant gets the shared 404 on either route.
+  // `EventBatchThrottlerGuard` holds the batch limit per member with its own
+  // numbers, so `createBatch` carries zero throttler decorator metadata and
+  // the shared IP bucket keeps the app default. `createBatch` stays off
+  // `SHARED_UPLOAD_HANDLERS`: every cover in the body must be the caller's
+  // own upload, and the starting event's cover is copied server side. The
+  // batch page keeps its own local draft, so `creatorDraftSlots` is left
+  // alone here and the create wizard's draft stays saved.
+  @Get(':slug/batch-template')
+  @Feature('eventBatch')
+  @ApiOperation({
+    summary:
+      'Preview what a month of events would copy from one of your events',
+  })
+  @ApiOkResponse({
+    description:
+      'The fields every new event copies from the starting event, after the ' +
+      'drop rules for the caller (run by, community, venue), with the ' +
+      'starting event cover as a display URL.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      '`code: EVENT_BATCH_TEMPLATE_NOT_FOUND` when the event is missing, ' +
+      'cancelled, taken down or neither hosted nor co-hosted by you. ' +
+      'Uncoded when the feature is switched off for you.',
+  })
+  @ApiConflictResponse({
+    description:
+      '`code: EVENT_BATCH_TEMPLATE_COMMUNITY_ONLY`: the starting event is ' +
+      'only for members of a community where you cannot post events.',
+  })
+  getBatchTemplate(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ): Promise<EventBatchTemplateView> {
+    return this.eventBatchTemplates.getTemplateView(slug, user.userId);
+  }
+
+  @Post('batch')
+  @Feature('eventBatch')
+  @UseGuards(NotRestrictedGuard, EventBatchThrottlerGuard)
+  @ApiOperation({
+    summary: 'Publish up to 31 events from one of your events, all or nothing',
+  })
+  @ApiCreatedResponse({
+    description:
+      '`{ events: [{ slug, title, startAt }] }`, every published event in ' +
+      'date order.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      '`EVENT_BATCH_TOO_MANY_DATES` (`limit`), `EVENT_BATCH_DUPLICATE_DATE`, ' +
+      '`EVENT_BATCH_DATE_IN_PAST`, `EVENT_BATCH_DATE_TOO_FAR` (`lastDate`), ' +
+      '`EVENT_BATCH_ROW_INVALID` and `EVENT_BATCH_VENUE_NOT_FOUND`. Each ' +
+      'row error carries `rowIndex`, `field` and `date`. A malformed body ' +
+      'answers the uncoded validation 400.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      '`code: EVENT_BATCH_TEMPLATE_NOT_FOUND`, or uncoded when the feature ' +
+      'is switched off for you.',
+  })
+  @ApiConflictResponse({
+    description:
+      '`code: EVENT_BATCH_TEMPLATE_COMMUNITY_ONLY` (`communityName`).',
+  })
+  @ApiForbiddenResponse({
+    description:
+      '`code: ACCOUNT_RESTRICTED`, or uncoded when a cover in the body is ' +
+      'an upload you did not make.',
+  })
+  @ApiTooManyRequestsResponse({
+    description: 'Over five batches in ten minutes from your account.',
+  })
+  createBatch(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: CreateEventBatchDto,
+  ): Promise<CreatedEventBatch> {
+    return this.eventBatch.createBatch(user.userId, dto);
   }
 
   @Get(':slug')

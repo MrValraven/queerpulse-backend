@@ -12,9 +12,12 @@ import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageModule } from '../storage/storage.module';
 import { SubmissionsModule } from '../submissions/submissions.module';
 import { UsersModule } from '../users/users.module';
+import { AdminDirectoryPartnersController } from './admin-directory-partners.controller';
 import { AdminListingsController } from './admin-listings.controller';
+import { DirectoryPartnersService } from './directory-partners.service';
 import { DirectoryController } from './directory.controller';
 import { DirectoryService } from './directory.service';
+import { DirectoryPartnerPick } from './entities/directory-partner-pick.entity';
 import { ListingClaim } from './entities/listing-claim.entity';
 import { ListingCoManager } from './entities/listing-co-manager.entity';
 import { ListingEditSuggestion } from './entities/listing-edit-suggestion.entity';
@@ -87,6 +90,8 @@ import { ListingsService } from './listings.service';
       // Meet the team: the consent-based link between a listing and a persona.
       // Never present in a response without the eligibility and block rules.
       ListingTeamMember,
+      // Admin-curated directory partners, read by `DirectoryService` and written by `DirectoryPartnersService`.
+      DirectoryPartnerPick,
       // An admin nominating a member as the owner of a listing that has
       // none. Sits at `offered` until the member answers; an accept then
       // calls the same ownership-transfer path a claim uses.
@@ -187,6 +192,10 @@ import { ListingsService } from './listings.service';
     // `listings` base path and `@Get(':ref')`.
     ListingTeamController,
     ListingsController,
+    // Ahead of `AdminListingsController`: the literal `partners` segments are
+    // registered before that class's `:ref` routes (same rule as the
+    // co-manager comment at the top of this array).
+    AdminDirectoryPartnersController,
     // Every moderator/admin route over listings, split out so the whole class
     // shares one `ActiveMemberGuard + RolesGuard` pair (BE-HSG-29).
     AdminListingsController,
@@ -247,6 +256,8 @@ import { ListingsService } from './listings.service';
     // read. Reads `listings` alone through the repository registered above.
     MySuggestedListingsService,
     DirectoryService,
+    // The admin side of the directory partners row. Not exported.
+    DirectoryPartnersService,
   ],
   exports: [
     DirectoryService,

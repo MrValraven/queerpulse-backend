@@ -881,7 +881,7 @@ describe('Studio controllers', () => {
       expect(plays.recordPlay).toHaveBeenCalledWith(VIEWER_ID, TRACK_ID);
     });
 
-    it('answers 204 to a cleared history and a withdrawn opt-in', async () => {
+    it('answers 204 to a cleared history and a hidden top listener', async () => {
       const history = { clearHistory: jest.fn().mockResolvedValue(undefined) };
       const supporters = {
         removeSupporter: jest.fn().mockResolvedValue(undefined),
@@ -908,6 +908,18 @@ describe('Studio controllers', () => {
         VIEWER_ID,
         TRACK_ID,
       );
+    });
+
+    it('passes the artist 404 from hiding a top listener through', async () => {
+      const artistNotFound = new Error('studio_supporter_artist_not_found');
+      const supporters = {
+        removeSupporter: jest.fn().mockRejectedValue(artistNotFound),
+      };
+      await expect(
+        new StudioArtistSupporterController(
+          supporters as unknown as StudioSupportersService,
+        ).removeSupporter(viewer, TRACK_ID),
+      ).rejects.toBe(artistNotFound);
     });
 
     it('reads the default range when none is sent', async () => {

@@ -1212,6 +1212,14 @@ export function toDirectoryCard(
   };
 }
 
+/**
+ * One partner card in the public directory's top row: the grid card plus the
+ * admin's one-line note. It carries no pick id, position or creator.
+ */
+export interface DirectoryPartnerCardDTO extends DirectoryCardDTO {
+  partnerNote: string | null;
+}
+
 /** Opening-hours template the frontend renders (mirrors FE `HoursType`). */
 export type DirectoryHoursType =
   | 'cafe'

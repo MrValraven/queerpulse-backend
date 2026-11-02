@@ -564,9 +564,14 @@ describe('StudioListeningExportContributor', () => {
     artist: 'Midnight Static',
     played_at: new Date(playedAt),
   });
-  const supporterRow = (shownAs: string | null, createdAt: string) => ({
+  const supporterRow = (
+    shownAs: string | null,
+    createdAt: string,
+    isHidden = false,
+  ) => ({
     artist: 'Midnight Static',
     shown_as: shownAs,
+    is_hidden: isHidden,
     created_at: new Date(createdAt),
     updated_at: new Date('2026-10-20T08:00:00.000Z'),
   });
@@ -595,7 +600,7 @@ describe('StudioListeningExportContributor', () => {
     );
   });
 
-  it('writes the listens oldest first, then the supporter opt-ins oldest first', async () => {
+  it('writes the listens oldest first, then the top-listener preferences oldest first', async () => {
     query
       .mockResolvedValueOnce([
         listenRow('Night bus', '2026-10-01T08:00:00.000Z'),
@@ -603,7 +608,7 @@ describe('StudioListeningExportContributor', () => {
       ])
       .mockResolvedValueOnce([
         supporterRow(null, '2026-10-05T08:00:00.000Z'),
-        supporterRow('Patch Notes', '2026-10-06T08:00:00.000Z'),
+        supporterRow('Patch Notes', '2026-10-06T08:00:00.000Z', true),
       ]);
 
     await expect(contributor.buildContribution(USER_ID)).resolves.toEqual([
@@ -623,6 +628,7 @@ describe('StudioListeningExportContributor', () => {
         type: 'supporter',
         artist: 'Midnight Static',
         shownAs: 'account',
+        isHidden: false,
         createdAt: '2026-10-05T08:00:00.000Z',
         updatedAt: '2026-10-20T08:00:00.000Z',
       },
@@ -630,6 +636,7 @@ describe('StudioListeningExportContributor', () => {
         type: 'supporter',
         artist: 'Midnight Static',
         shownAs: 'Patch Notes',
+        isHidden: true,
         createdAt: '2026-10-06T08:00:00.000Z',
         updatedAt: '2026-10-20T08:00:00.000Z',
       },

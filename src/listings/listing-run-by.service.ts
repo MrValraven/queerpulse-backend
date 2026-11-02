@@ -129,6 +129,22 @@ export class ListingRunByService {
     return refsById;
   }
 
+  /**
+   * The stored name of a listing in any state, or `null` for an unknown id.
+   * For the batch preview's notice, which names a "Run by" line the caller
+   * can no longer keep: the business may be paused, closed or taken down, and
+   * the notice still has to say which one it was. A display read that grants
+   * nothing, so it skips every state and moderation check the two reads above
+   * apply.
+   */
+  async displayNameOf(listingId: string): Promise<string | null> {
+    const listing = await this.listings.findOne({
+      where: { id: listingId },
+      select: { id: true, name: true },
+    });
+    return listing ? listing.name : null;
+  }
+
   private async isRunBy(listing: Listing, userId: string): Promise<boolean> {
     if (listing.ownerId === userId) return true;
     return this.coManagers.exists({

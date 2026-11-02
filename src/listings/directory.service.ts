@@ -70,6 +70,8 @@ import {
   toListingAttributeVocabularyDTO,
 } from './listing-attributes';
 import { UpdateReviewDto } from './dto/update-review.dto';
+import type { ListedListingSearchRow } from './directory-partners-response';
+import { DirectoryPartnerPick } from './entities/directory-partner-pick.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
@@ -83,6 +85,7 @@ import {
   AnySafeSpaceDetailDTO,
   DirectoryCardDTO,
   DirectoryDetailDTO,
+  DirectoryPartnerCardDTO,
   MovedToListingView,
   PartnerSpaceDTO,
   RemovedSpaceCardDTO,
@@ -324,8 +327,10 @@ export class DirectoryService {
   }
 
   // Post-query variant for the `find`-based reads (`listByMemberSlug`,
-  // `listSafeSpaces`, `listPartnerSpaces`) that don't build a querybuilder.
-  // Drops any listing whose slug carries a takedown.
+  // `listSafeSpaces`, `listPartnerSpaces`, `listDirectoryPartners`) that
+  // don't build a querybuilder. Drops any listing whose slug carries a
+  // takedown. Twin of `moderatedListingSlugs` (below): both read the same
+  // subject types and count a slug as moderated when it is hidden or removed.
   private async dropModeratedListings<ListingLike extends { slug: string }>(
     rows: ListingLike[],
   ): Promise<ListingLike[]> {
@@ -338,6 +343,27 @@ export class DirectoryService {
       const state = states.get(row.slug);
       return !state || (!state.hidden && !state.removed);
     });
+  }
+
+  /**
+   * The slugs among `slugs` that carry a takedown (hidden or removed) under
+   * either listing subject type. Twin of `dropModeratedListings` (above),
+   * with the same subject types and the same hidden-or-removed rule, for a
+   * caller that holds slugs and needs the answer per slug: the admin partner
+   * list reports a moderated partner as `moderated`.
+   */
+  async moderatedListingSlugs(slugs: readonly string[]): Promise<Set<string>> {
+    if (!slugs.length) return new Set();
+    const states = await this.contentModeration.statesForAnyType(
+      DirectoryService.SUBJECT_TYPES,
+      slugs,
+    );
+    return new Set(
+      slugs.filter((slug) => {
+        const state = states.get(slug);
+        return state !== undefined && (state.hidden || state.removed);
+      }),
+    );
   }
 
   // TRUE for a listing with an OPEN safe-space badge suspension against it.
@@ -506,6 +532,52 @@ export class DirectoryService {
       take: DEFAULT_LIST_LIMIT,
     });
     return (await this.dropModeratedListings(rows)).map(toPartnerSpace);
+  }
+
+  /**
+   * The directory's partner row (`GET /directory/partners`): the listings an
+   * admin picked, in the admin's order, as grid cards carrying the admin's
+   * note as `partnerNote`.
+   *
+   * A pick shows only while its listing passes the same four visibility rules
+   * as the grid: live, unmoderated, still trading (closed for good drops out)
+   * and not paused by its owner. The 18+ category is left out in the query
+   * (`PUBLICLY_LISTED`), because this read is CDN-cached and served to
+   * everybody from one stored copy. Owner and persona fields are exactly the
+   * grid card's (`toDirectoryCards`), so a partner card reveals nothing its
+   * grid card would withhold. A pick whose listing fails a rule is skipped
+   * and the rest keep their order.
+   *
+   * The read has no `take`: the write side caps the picks at
+   * `DIRECTORY_PARTNER_LIMIT` (12).
+   */
+  async listDirectoryPartners(): Promise<DirectoryPartnerCardDTO[]> {
+    const picks = await this.dataSource.manager.find(DirectoryPartnerPick, {
+      select: { listingId: true, note: true },
+      order: { position: 'ASC' },
+    });
+    if (!picks.length) return [];
+    const rows = await this.listings.find({
+      where: {
+        id: In(picks.map((pick) => pick.listingId)),
+        status: ListingStatus.Live,
+        ...DirectoryService.PUBLICLY_LISTED,
+      },
+    });
+    const visibleRowsById = new Map(
+      (await this.dropModeratedListings(rows)).map((row) => [row.id, row]),
+    );
+    const orderedRows = picks.flatMap(
+      (pick) => visibleRowsById.get(pick.listingId) ?? [],
+    );
+    const notesByListingId = new Map(
+      picks.map((pick) => [pick.listingId, pick.note]),
+    );
+    const cards = await this.toDirectoryCards(orderedRows);
+    return cards.map((card) => ({
+      ...card,
+      partnerNote: notesByListingId.get(card.id) ?? null,
+    }));
   }
 
   /**
@@ -744,6 +816,23 @@ export class DirectoryService {
     term: string,
     limit: number,
   ): Promise<BusinessSearchRow[]> {
+    return (await this.searchListedListings(term, limit)).map(
+      toBusinessSearchRow,
+    );
+  }
+
+  /**
+   * The query behind `searchByText`, answering the listing id as well, for
+   * the admin partner picker (`DirectoryPartnersService`), which adds a
+   * listing by id. Same filters, same relevance tiers, same `limit`: by
+   * folded name (a blurb or neighbourhood hit ranks after name hits), then
+   * the grid's verified-badge order, then name, over live, publicly listed,
+   * unmoderated listings outside the 18+ category.
+   */
+  async searchListedListings(
+    term: string,
+    limit: number,
+  ): Promise<ListedListingSearchRow[]> {
     const loweredTerm = term.trim().toLowerCase();
     const escapedTerm = escapeLikeTerm(loweredTerm);
     const rows = await this.buildDirectoryQuery({ q: term })
@@ -770,7 +859,7 @@ export class DirectoryService {
       })
       .take(limit)
       .getMany();
-    return rows.map(toBusinessSearchRow);
+    return rows;
   }
 
   /**

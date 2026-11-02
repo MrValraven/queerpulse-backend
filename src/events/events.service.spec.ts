@@ -44,6 +44,7 @@ import { PREVIEW_STAND_IN_VIEWER_ID } from './event-preview';
 import {
   Event,
   EventStatus,
+  EventVenueConfirmation,
   EventVisibility,
   GatheringFamily,
 } from './entities/event.entity';
@@ -5225,6 +5226,243 @@ describe('EventsService', () => {
       const { response } = await runFor(VISITOR_ID);
 
       expect(response).toEqual({ upcoming: [], past: [] });
+    });
+  });
+
+  // "Add a month of events" writes its events through the same pieces
+  // `create` uses: the column builder, the slug allocator and the mention
+  // fan-out. These tests pin that `create` still behaves as before through
+  // them, and that the batch's transaction manager and exclusion list reach
+  // where they need to.
+  describe('helpers shared with the batch', () => {
+    const quizNightInput = {
+      title: 'Quiz Night',
+      description: 'Bring a pen and a friend.',
+      startAt: '2099-01-07T21:00:00.000Z',
+      timezone: 'Europe/Lisbon',
+    };
+    const resolvedFields = () => ({
+      startAt: new Date('2099-01-07T21:00:00.000Z'),
+      endAt: null,
+      visibility: EventVisibility.Public,
+      status: EventStatus.Published,
+      communityId: null,
+      listingId: null,
+      runByListingId: null,
+      venueOwnerNotifiedAt: null,
+      seriesId: null,
+      seriesIndex: null,
+    });
+    let transactionEvents: { exists: jest.Mock; save: jest.Mock };
+    let attemptManager: { getRepository: () => typeof transactionEvents };
+    let transactionManager: {
+      getRepository: jest.Mock;
+      transaction: jest.Mock;
+    };
+    const asEntityManager = () =>
+      transactionManager as unknown as EntityManager;
+
+    beforeEach(() => {
+      transactionEvents = {
+        exists: jest.fn().mockResolvedValue(false),
+        save: jest.fn(async (event: Event) => ({ ...event, id: 'event-1' })),
+      };
+      attemptManager = { getRepository: () => transactionEvents };
+      transactionManager = {
+        getRepository: jest.fn(() => transactionEvents),
+        transaction: jest.fn(
+          async (
+            runAttempt: (manager: typeof attemptManager) => Promise<Event>,
+          ) => runAttempt(attemptManager),
+        ),
+      };
+    });
+
+    it('create builds its event through buildNewEventEntity', async () => {
+      const buildSpy = jest.spyOn(service, 'buildNewEventEntity');
+
+      await service.create('u1', quizNightInput);
+
+      expect(buildSpy).toHaveBeenCalledTimes(1);
+      expect(buildSpy).toHaveBeenCalledWith(
+        'u1',
+        quizNightInput,
+        expect.objectContaining({
+          startAt: new Date(quizNightInput.startAt),
+          endAt: null,
+          visibility: EventVisibility.Public,
+          status: EventStatus.Published,
+          communityId: null,
+          listingId: null,
+          runByListingId: null,
+          venueOwnerNotifiedAt: null,
+          seriesId: null,
+          seriesIndex: null,
+        }),
+      );
+    });
+
+    it('create writes outside any transaction, as before', async () => {
+      await service.create('u1', quizNightInput);
+
+      expect(events.manager.transaction).not.toHaveBeenCalled();
+      expect(events.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('buildNewEventEntity clears cost and payment fields on a free event', () => {
+      service.buildNewEventEntity(
+        'u1',
+        {
+          ...quizNightInput,
+          costKind: 'free',
+          cost: '10 EUR',
+          paymentUrl: 'https://pay.example.com',
+          paymentInstructions: 'MB Way',
+        },
+        resolvedFields(),
+      );
+
+      expect(events.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cost: null,
+          paymentUrl: null,
+          paymentInstructions: null,
+          venueConfirmation: EventVenueConfirmation.Pending,
+        }),
+      );
+    });
+
+    it('saveWithUniqueSlug without a manager saves through the events repository', async () => {
+      const event = service.buildNewEventEntity(
+        'u1',
+        quizNightInput,
+        resolvedFields(),
+      );
+
+      await service.saveWithUniqueSlug(event, quizNightInput.title);
+
+      expect(events.save).toHaveBeenCalledWith(
+        expect.objectContaining({ slug: 'quiz-night' }),
+      );
+      expect(transactionManager.transaction).not.toHaveBeenCalled();
+    });
+
+    it('saveWithUniqueSlug with a manager checks and saves inside it', async () => {
+      const event = service.buildNewEventEntity(
+        'u1',
+        quizNightInput,
+        resolvedFields(),
+      );
+
+      await service.saveWithUniqueSlug(
+        event,
+        quizNightInput.title,
+        asEntityManager(),
+      );
+
+      expect(transactionEvents.exists).toHaveBeenCalledWith({
+        where: { slug: 'quiz-night' },
+      });
+      expect(transactionEvents.save).toHaveBeenCalledTimes(1);
+      expect(events.save).not.toHaveBeenCalled();
+      expect(events.exists).not.toHaveBeenCalled();
+    });
+
+    it('sees a slug an earlier row of the same transaction took', async () => {
+      transactionEvents.exists
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false);
+      const event = service.buildNewEventEntity(
+        'u1',
+        quizNightInput,
+        resolvedFields(),
+      );
+
+      const saved = await service.saveWithUniqueSlug(
+        event,
+        quizNightInput.title,
+        asEntityManager(),
+      );
+
+      expect(saved.slug).toMatch(/^quiz-night-[0-9a-f]{6}$/);
+    });
+
+    it('retries a lost slug race under a savepoint', async () => {
+      transactionEvents.save.mockRejectedValueOnce({ code: '23505' });
+      const event = service.buildNewEventEntity(
+        'u1',
+        quizNightInput,
+        resolvedFields(),
+      );
+
+      const saved = await service.saveWithUniqueSlug(
+        event,
+        quizNightInput.title,
+        asEntityManager(),
+      );
+
+      expect(transactionManager.transaction).toHaveBeenCalledTimes(2);
+      expect(saved).toEqual(
+        expect.objectContaining({ id: 'event-1', title: 'Quiz Night' }),
+      );
+    });
+
+    it('rethrows after five lost races so the batch rolls back', async () => {
+      transactionEvents.save.mockRejectedValue({ code: '23505' });
+      const event = service.buildNewEventEntity(
+        'u1',
+        quizNightInput,
+        resolvedFields(),
+      );
+
+      await expect(
+        service.saveWithUniqueSlug(
+          event,
+          quizNightInput.title,
+          asEntityManager(),
+        ),
+      ).rejects.toEqual({ code: '23505' });
+      expect(transactionManager.transaction).toHaveBeenCalledTimes(5);
+    });
+
+    it('forwards the batch exclusions to the mention fan-out and returns who it reached', async () => {
+      mentions.notify.mockResolvedValue(new Set(['ana-id']));
+      alreadyNotifiedMentionRows = [
+        { entityKind: 'member', entityRef: 'ben', userId: 'ben-id' },
+      ];
+      const event = {
+        id: 'event-1',
+        slug: 'quiz-night',
+        seriesId: null,
+        description: '@ana and @ben',
+      } as Event;
+
+      const reached = await service.notifyDescriptionMentions(
+        event,
+        event.description,
+        'u1',
+        ['cris-id'],
+      );
+
+      const excludedUserIds = mentions.notify.mock.calls[0]![3];
+      expect(excludedUserIds).toEqual(
+        expect.arrayContaining(['ben-id', 'cris-id']),
+      );
+      expect(reached).toEqual(new Set(['ana-id']));
+    });
+
+    it('returns an empty set when the fan-out throws', async () => {
+      mentions.notify.mockRejectedValue(new Error('down'));
+      const event = {
+        id: 'event-1',
+        slug: 'quiz-night',
+        seriesId: null,
+        description: '@ana',
+      } as Event;
+
+      await expect(
+        service.notifyDescriptionMentions(event, event.description, 'u1'),
+      ).resolves.toEqual(new Set());
     });
   });
 });

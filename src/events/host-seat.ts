@@ -3,8 +3,10 @@ import type { EntityManager } from 'typeorm';
 /**
  * THE HOST IS GOING. Seats `hostUserId` on `eventId` with a 'going' RSVP, the
  * one write every path that makes somebody a gathering's host goes through:
- * `EventsService.create` for a new gathering, and the erasure handover in
- * `ContentOwnerErasureService` when a co-host inherits one.
+ * `EventsService.create` for a new gathering, `EventBatchService.createBatch`,
+ * which seats the caller on every event of a month inside the batch
+ * transaction, and the erasure handover in `ContentOwnerErasureService` when
+ * a co-host inherits one.
  *
  * The seat counts against capacity like any other. It is capacity-exempt on
  * the way in (a host is seated even on a full roster, and never waitlisted),

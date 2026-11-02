@@ -11,10 +11,12 @@ import { Subprofile } from '../../subprofiles/entities/subprofile.entity';
 import { User } from '../../users/entities/user.entity';
 
 /**
- * A member's opt-in to show as a supporter of one artist persona. The member
- * is shown as their account (`shownAsSubprofileId` is null) or as another
- * persona they belong to; the check constraint refuses the artist persona
- * itself.
+ * A member's top listener preference for one artist persona. Every eligible
+ * listener is shown by default as their account, so a row exists only once
+ * the member picks an identity or turns the listing off. The member is shown
+ * as their account (`shownAsSubprofileId` is null) or as another persona they
+ * belong to, and `isHidden` leaves them off that artist's list while keeping
+ * the chosen identity. The check constraint refuses the artist persona itself.
  */
 @Entity('studio_supporters')
 @Check(
@@ -59,6 +61,9 @@ export class StudioSupporter {
     foreignKeyConstraintName: 'FK_studio_supporters_shown_as_subprofile',
   })
   shownAs?: Subprofile | null;
+
+  @Column({ type: 'boolean', default: false })
+  isHidden!: boolean;
 
   @Column({ type: 'timestamptz', precision: 3, default: () => 'now()' })
   createdAt!: Date;

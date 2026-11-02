@@ -30,6 +30,11 @@ describe('FEATURE_DEPTH', () => {
     expect(isTrackedFeature('quizshow')).toBe(false);
   });
 
+  it('never measures add a month of events', () => {
+    expect(UNTRACKED_FEATURES).toContain('eventBatch');
+    expect(isTrackedFeature('eventBatch')).toBe(false);
+  });
+
   it('gives every reach-only feature a stated reason', () => {
     for (const [featureKey, spec] of Object.entries(FEATURE_DEPTH)) {
       if (spec.kind === 'reach-only') {

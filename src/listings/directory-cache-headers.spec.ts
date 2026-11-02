@@ -3,6 +3,7 @@ import {
   INTERCEPTORS_METADATA,
   PATH_METADATA,
 } from '@nestjs/common/constants';
+import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
 import {
   NO_STALE_READ_CDN_CACHE,
   PUBLIC_READ_CACHE,
@@ -66,11 +67,35 @@ describe('DirectoryController cache headers', () => {
     ).not.toContain('listTagVocabulary');
   });
 
+  it('serves the directory partners publicly at partners with no CDN stale window', () => {
+    expect(declaredHeaders('listDirectoryPartners')).toEqual({
+      'Cache-Control': PUBLIC_READ_CACHE,
+      'CDN-Cache-Control': NO_STALE_READ_CDN_CACHE,
+    });
+    expect(
+      Reflect.getMetadata(PATH_METADATA, handlerOf('listDirectoryPartners')),
+    ).toBe('partners');
+    expect(
+      Reflect.getMetadata(IS_PUBLIC_KEY, handlerOf('listDirectoryPartners')),
+    ).toBe(true);
+  });
+
+  it('declares partners above the :slug detail route', () => {
+    const handlerNames = Object.getOwnPropertyNames(
+      DirectoryController.prototype,
+    );
+    expect(handlerNames.indexOf('listDirectoryPartners')).toBeGreaterThan(-1);
+    expect(handlerNames.indexOf('listDirectoryPartners')).toBeLessThan(
+      handlerNames.indexOf('getDirectoryListing'),
+    );
+  });
+
   it.each([
     'listDirectory',
     'listSafeSpaces',
     'getSafeSpace',
     'listByMember',
+    'listDirectoryPartners',
   ] as const)('serves %s with no CDN stale window', (handlerName) => {
     expect(declaredHeaders(handlerName)['CDN-Cache-Control']).toBe(
       NO_STALE_READ_CDN_CACHE,

@@ -30,7 +30,8 @@ import { StudioAccessGuard } from './studio-access.guard';
 import { StudioSupporterState } from './studio-supporters';
 import { StudioSupportersService } from './studio-supporters.service';
 
-/** The caller's supporter opt-in for one artist persona. */
+/** The caller's top listener preference for one artist persona. Listeners
+ *  are shown by default; these routes change the identity or hide them. */
 @Feature('studio')
 @ApiTags('Studio')
 @ApiCookieAuth()
@@ -54,7 +55,10 @@ export class StudioArtistSupporterController {
   }
 
   @Put(':subprofileId/supporter')
-  @ApiOperation({ summary: 'Opts in as a supporter, or changes the identity.' })
+  @ApiOperation({
+    summary:
+      "Shows the caller among the artist's top listeners, or changes the identity",
+  })
   @ApiOkResponse({ description: '`StudioSupporterState`.' })
   @ApiNotFoundResponse({ description: '`studio_supporter_artist_not_found`.' })
   @ApiForbiddenResponse({
@@ -75,8 +79,14 @@ export class StudioArtistSupporterController {
 
   @Delete(':subprofileId/supporter')
   @HttpCode(204)
-  @ApiOperation({ summary: 'Withdraws the supporter opt-in.' })
-  @ApiNoContentResponse({ description: 'For any artist id.' })
+  @ApiOperation({
+    summary: "Hides the caller from the artist's top listeners",
+  })
+  @ApiNoContentResponse({ description: 'The caller is hidden.' })
+  @ApiNotFoundResponse({
+    description:
+      '`studio_supporter_artist_not_found` for an unknown persona id.',
+  })
   async removeSupporter(
     @CurrentUser() user: CurrentUserData,
     @Param('subprofileId', ParseUUIDPipe) subprofileId: string,

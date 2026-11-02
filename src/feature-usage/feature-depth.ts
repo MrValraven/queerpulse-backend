@@ -52,12 +52,15 @@ export type DepthSpec =
  * Go together action, aggregate counts included. Studio is here because its
  * design records nothing about what a member listens to or browses, aggregate
  * counts included. Pulse Live records nothing about how members play beyond
- * one night's results card.
+ * one night's results card. Add a month of events publishes ordinary Event
+ * rows, which `events` already counts, so measuring the batch itself would
+ * add only a record of how hosts use it.
  */
 export const UNTRACKED_FEATURES = [
   'goTogether',
   'studio',
   'quizshow',
+  'eventBatch',
 ] as const satisfies readonly FeatureKey[];
 
 export type UntrackedFeatureKey = (typeof UNTRACKED_FEATURES)[number];

@@ -9,7 +9,7 @@ import {
   OPTED_IN_COUNT_SQL,
   StudioSupportersService,
   SUPPORTER_ARTIST_SQL,
-  SUPPORTER_DELETE_SQL,
+  SUPPORTER_HIDE_SQL,
   SUPPORTER_PERSONAS_SQL,
   SUPPORTER_ROW_SQL,
   SUPPORTER_UPSERT_SQL,
@@ -111,6 +111,7 @@ interface QueryAnswers {
   supportingRows: unknown[];
   topSupporterRows: unknown[];
   optedInCountRows: unknown[];
+  hiddenRows: unknown[];
 }
 
 function defaultAnswers(): QueryAnswers {
@@ -122,6 +123,7 @@ function defaultAnswers(): QueryAnswers {
     supportingRows: [],
     topSupporterRows: [],
     optedInCountRows: [{ count: 0 }],
+    hiddenRows: [{ subprofile_id: ARTIST_ID }],
   };
 }
 
@@ -172,6 +174,8 @@ describe('StudioSupportersService', () => {
           return Promise.resolve(answers.topSupporterRows);
         case OPTED_IN_COUNT_SQL:
           return Promise.resolve(answers.optedInCountRows);
+        case SUPPORTER_HIDE_SQL:
+          return Promise.resolve(answers.hiddenRows);
         default:
           return Promise.resolve([]);
       }
@@ -219,15 +223,15 @@ describe('StudioSupportersService', () => {
       expect(sqlCalled()).toEqual([SUPPORTER_ARTIST_SQL]);
     });
 
-    it('lists your account first, then your personas by name, and says when you are not supporting', async () => {
+    it('lists your account first, then your personas by name, and shows you as your account by default', async () => {
       answers.memberPersonaRows = [PERSONA_A_ROW];
 
       const state = await service.getSupporterState(USER_ID, ARTIST_ID);
 
       expect(state).toEqual({
-        isSupporting: false,
+        isSupporting: true,
         shownAsSubprofileId: null,
-        shownAs: null,
+        shownAs: ACCOUNT_IDENTITY,
         since: null,
         options: [
           { shownAsSubprofileId: null, identity: ACCOUNT_IDENTITY },
@@ -245,10 +249,11 @@ describe('StudioSupportersService', () => {
       ]);
     });
 
-    it('shows the chosen identity and the opt-in date', async () => {
+    it('shows the chosen identity and the preference date', async () => {
       answers.supporterRows = [
         {
           shown_as_subprofile_id: PERSONA_A,
+          is_hidden: false,
           created_at: new Date('2026-10-20T08:00:00.123Z'),
         },
       ];
@@ -274,6 +279,7 @@ describe('StudioSupportersService', () => {
       answers.supporterRows = [
         {
           shown_as_subprofile_id: PERSONA_B,
+          is_hidden: false,
           created_at: new Date('2026-10-21T09:30:00.000Z'),
         },
       ];
@@ -290,10 +296,11 @@ describe('StudioSupportersService', () => {
       expect(query).toHaveBeenCalledWith(SUPPORTER_PERSONAS_SQL, [[PERSONA_B]]);
     });
 
-    it('shows the account opt-in', async () => {
+    it('shows the stored account preference', async () => {
       answers.supporterRows = [
         {
           shown_as_subprofile_id: null,
+          is_hidden: false,
           created_at: '2026-10-22T10:00:00.000Z',
         },
       ];
@@ -306,6 +313,30 @@ describe('StudioSupportersService', () => {
         state.shownAs,
         state.since,
       ]).toEqual([true, null, ACCOUNT_IDENTITY, '2026-10-22T10:00:00.000Z']);
+    });
+
+    it('says a hidden caller is off the list and keeps the stored identity', async () => {
+      answers.supporterRows = [
+        {
+          shown_as_subprofile_id: PERSONA_A,
+          is_hidden: true,
+          created_at: new Date('2026-10-22T10:00:00.000Z'),
+        },
+      ];
+
+      const state = await service.getSupporterState(USER_ID, ARTIST_ID);
+
+      expect([
+        state.isSupporting,
+        state.shownAsSubprofileId,
+        state.shownAs,
+        state.since,
+      ]).toEqual([
+        false,
+        PERSONA_A,
+        PERSONA_A_IDENTITY,
+        '2026-10-22T10:00:00.000Z',
+      ]);
     });
   });
 
@@ -358,6 +389,7 @@ describe('StudioSupportersService', () => {
       answers.supporterRows = [
         {
           shown_as_subprofile_id: null,
+          is_hidden: false,
           created_at: new Date('2026-10-23T11:00:00.000Z'),
         },
       ];
@@ -392,6 +424,7 @@ describe('StudioSupportersService', () => {
       answers.supporterRows = [
         {
           shown_as_subprofile_id: PERSONA_A,
+          is_hidden: false,
           created_at: new Date('2026-10-23T11:00:00.000Z'),
         },
       ];
@@ -439,17 +472,46 @@ describe('StudioSupportersService', () => {
     });
   });
 
-  it('deletes the caller row with no persona read', async () => {
-    await service.removeSupporter(USER_ID, ARTIST_ID);
+  describe('removeSupporter', () => {
+    it('hides the caller with no persona read', async () => {
+      await expect(
+        service.removeSupporter(USER_ID, ARTIST_ID),
+      ).resolves.toBeUndefined();
 
-    expect(query.mock.calls).toEqual([
-      [SUPPORTER_DELETE_SQL, [USER_ID, ARTIST_ID]],
-    ]);
-    expect(ownership.isPersonaMember).not.toHaveBeenCalled();
+      expect(query.mock.calls).toEqual([
+        [SUPPORTER_HIDE_SQL, [USER_ID, ARTIST_ID]],
+      ]);
+      expect(ownership.isPersonaMember).not.toHaveBeenCalled();
+    });
+
+    it('answers 404 studio_supporter_artist_not_found when the persona does not exist', async () => {
+      answers.hiddenRows = [];
+
+      const body = await refusalBodyOf(
+        service.removeSupporter(USER_ID, ARTIST_ID),
+      );
+
+      expect(body).toEqual(ARTIST_NOT_FOUND_BODY);
+    });
+
+    it('keeps the stored identity when hiding', () => {
+      const conflictUpdate = SUPPORTER_HIDE_SQL.slice(
+        SUPPORTER_HIDE_SQL.indexOf('ON CONFLICT'),
+      );
+      expect(conflictUpdate).toContain('"is_hidden" = true');
+      expect(conflictUpdate).not.toContain('"shown_as_subprofile_id"');
+    });
+
+    it('shows the caller again with every PUT', () => {
+      expect(SUPPORTER_UPSERT_SQL).toContain('"is_hidden" = false');
+      expect(SUPPORTER_UPSERT_SQL).toContain(
+        'OR "studio_supporters"."is_hidden"',
+      );
+    });
   });
 
   describe('listSupporting', () => {
-    it('lists supporting rows with since, identity, support links in link order and the follow state', async () => {
+    it('lists the artists that show the caller with since, identity, support links in link order and the follow state', async () => {
       answers.supportingRows = [
         {
           artist_id: OTHER_ARTIST_ID,
@@ -458,12 +520,12 @@ describe('StudioSupportersService', () => {
           artist_kind: 'dj',
           artist_avatar_url: null,
           shown_as_subprofile_id: null,
-          created_at: new Date('2026-10-24T08:00:00.000Z'),
+          since: new Date('2026-10-24T08:00:00.000Z'),
         },
         {
           ...ARTIST_ROW,
           shown_as_subprofile_id: PERSONA_A,
-          created_at: new Date('2026-10-20T08:00:00.000Z'),
+          since: new Date('2026-10-20T08:00:00.000Z'),
         },
         {
           artist_id: QUIET_ARTIST_ID,
@@ -472,7 +534,7 @@ describe('StudioSupportersService', () => {
           artist_kind: 'poet',
           artist_avatar_url: null,
           shown_as_subprofile_id: GONE_PERSONA,
-          created_at: new Date('2026-10-19T08:00:00.000Z'),
+          since: new Date('2026-10-19T08:00:00.000Z'),
         },
       ];
       answers.chosenPersonaRows = [PERSONA_A_ROW];
@@ -637,6 +699,22 @@ describe('StudioSupportersService', () => {
       expect(TOP_SUPPORTERS_SQL).toContain('LIMIT $2');
     });
 
+    it('ranks listeners with no preference row and leaves hidden rows out', () => {
+      expect(TOP_SUPPORTERS_SQL).toContain('FROM "studio_listens" "listen"');
+      expect(TOP_SUPPORTERS_SQL).toContain(
+        'LEFT JOIN "studio_supporters" "supporter"',
+      );
+      expect(TOP_SUPPORTERS_SQL).toContain(
+        '"supporter"."is_hidden" IS NOT TRUE',
+      );
+      expect(TOP_SUPPORTERS_SQL).toContain(
+        `'account:' || "listener"."user_id"::text`,
+      );
+      expect(OPTED_IN_COUNT_SQL).toContain(
+        '"supporter"."is_hidden" IS NOT TRUE',
+      );
+    });
+
     it('offers only personas the owner side would show in the picker', () => {
       expect(MEMBER_PERSONAS_SQL).toContain(
         '"chosen_persona_moderation"."hidden_at" IS NOT NULL',
@@ -649,7 +727,7 @@ describe('StudioSupportersService', () => {
       );
     });
 
-    it('floors the opted-in count', async () => {
+    it('floors the count of listeners shown', async () => {
       answers.optedInCountRows = [{ count: '3' }];
 
       const result = await service.listTopSupporters(USER_ID, ARTIST_ID);

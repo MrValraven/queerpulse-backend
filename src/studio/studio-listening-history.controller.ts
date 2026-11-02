@@ -33,7 +33,8 @@ import { StudioListeningHistoryService } from './studio-listening-history.servic
 import { StudioSupportersService } from './studio-supporters.service';
 import { StudioSupportingResponse } from './studio-supporters';
 
-/** The listener's own history and the artists they support. */
+/** The listener's own history and the artists that show them as a top
+ *  listener. */
 @Feature('studio')
 @ApiTags('Studio')
 @ApiCookieAuth()
@@ -79,7 +80,9 @@ export class StudioListeningHistoryController {
   }
 
   @Get('studio-listening/supporting')
-  @ApiOperation({ summary: 'The artists the caller supports.' })
+  @ApiOperation({
+    summary: 'The artists that show the caller among their top listeners.',
+  })
   @ApiOkResponse({ description: '`StudioSupportingResponse`.' })
   listSupporting(
     @CurrentUser() user: CurrentUserData,

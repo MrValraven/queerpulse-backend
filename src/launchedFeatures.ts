@@ -120,6 +120,13 @@ export const launchedFeatures = {
   // then, testers holding an early-access grant use it; admins set grants from
   // the member drawer.
   quizshow: { launched: false, earlyAccess: true },
+  // Add a month of events: a host turns one of their events into up to 31
+  // dated events at once (`GET /events/:slug/batch-template` and
+  // `POST /events/batch`). Hidden from everyone else until the user flips it.
+  // Until then, testers holding an early-access grant use it; admins set
+  // grants from the member drawer. The frontend mirrors this key in
+  // `EARLY_ACCESS_FEATURE_KEYS`.
+  eventBatch: { launched: false, earlyAccess: true },
 } satisfies Record<string, FeatureConfig>;
 
 export type FeatureKey = keyof typeof launchedFeatures;

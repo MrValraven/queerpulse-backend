@@ -1925,6 +1925,61 @@ describe('Pulse Live engine phases', () => {
     ).toBe(true);
   });
 
+  it('deletes the team a removal leaves empty in the lobby and keeps a team with members left', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addTeam(state, 'team-a');
+    addTeam(state, 'team-b', { colorKey: 'triangle' });
+    addPlayer(state, 'player-1', { teamId: 'team-a' });
+    addPlayer(state, 'player-2', { teamId: 'team-a' });
+    addPlayer(state, 'player-3', { teamId: 'team-b' });
+
+    const keptRemoval = expectSuccess(
+      hostRemovePlayer(state, 'player-1', HOST_USER_ID, NOW),
+    );
+
+    expect(findPersist(keptRemoval.effects, 'delete_teams')).toBeUndefined();
+    expect(teamOf(state, 'team-a').teamId).toBe('team-a');
+
+    const emptyingRemoval = expectSuccess(
+      hostRemovePlayer(state, 'player-3', HOST_USER_ID, NOW + 1000),
+    );
+
+    expect(findPersist(emptyingRemoval.effects, 'delete_teams')).toEqual({
+      type: 'delete_teams',
+      teamIds: ['team-b'],
+    });
+    const persistTypes = emptyingRemoval.effects.flatMap((effect) =>
+      effect.kind === 'persist' ? [effect.operation.type] : [],
+    );
+    expect(persistTypes.indexOf('update_player')).toBeLessThan(
+      persistTypes.indexOf('delete_teams'),
+    );
+    expect(effectKinds(emptyingRemoval.effects)).toContain('lobby_changed');
+    expect([...state.teams.keys()]).toEqual(['team-a']);
+  });
+
+  it('keeps the team of a player removed while the game runs', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addTeam(state, 'team-a');
+    addTeam(state, 'team-b', { colorKey: 'triangle' });
+    addPlayer(state, 'player-1', { teamId: 'team-a' });
+    addPlayer(state, 'player-2', { teamId: 'team-b' });
+    startGame(state, NOW);
+
+    const removal = expectSuccess(
+      hostRemovePlayer(state, 'player-2', HOST_USER_ID, NOW + 1000),
+    );
+
+    expect(findPersist(removal.effects, 'delete_teams')).toBeUndefined();
+    expect([...state.teams.keys()]).toEqual(['team-a', 'team-b']);
+  });
+
   it('mutes the screen for every screen and host socket and acks a repeat as a noop', () => {
     const state = stateWithQuiz({
       rounds: [quizRound('round-one', ['question-1'])],

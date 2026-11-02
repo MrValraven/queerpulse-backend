@@ -69,7 +69,12 @@ describe('early access helpers', () => {
   // The frontend mirrors this list in `shared/contracts/earlyAccess.ts`
   // (`EARLY_ACCESS_FEATURE_KEYS`); update both in the same change.
   it('lists exactly the features in early access, in registry order', () => {
-    expect(earlyAccessFeatureKeys()).toEqual(['quizshow']);
+    expect(earlyAccessFeatureKeys()).toEqual(['quizshow', 'eventBatch']);
+  });
+
+  it('keeps add a month of events behind a grant', () => {
+    expect(isInEarlyAccess('eventBatch')).toBe(true);
+    expect(isFeatureLaunched('eventBatch')).toBe(false);
   });
 
   it('lists only keys whose entry is flagged and unlaunched', () => {

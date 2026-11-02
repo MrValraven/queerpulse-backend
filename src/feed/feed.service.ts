@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
 import {
+  CursorKeyset,
   CursorPage,
   cursorPaginate,
   decodeCursor,
@@ -207,6 +208,29 @@ function compareCandidatesDesc(a: Candidate, b: Candidate): number {
   if (diff !== 0) return diff;
   if (a.id === b.id) return 0;
   return a.id < b.id ? 1 : -1;
+}
+
+/**
+ * A gathering's place in the feed: `LEAST(created_at, COALESCE(end_at,
+ * start_at))`. Once an event has ended it sits at when it happened. An
+ * upcoming or running event has `end/start >= now >= created_at`, so it keeps
+ * its posted time. An event posted after it finished drops back to its own
+ * date, and one announced weeks ahead stays where it was posted when it ends.
+ * The value never reads `now()`, so keyset paging over it stays stable.
+ *
+ * `start_at`/`end_at` are plain (microsecond) `timestamptz`, so that side is
+ * truncated to milliseconds to match the cursor's resolution, per the
+ * `CursorKeyset` precision contract. `created_at` is already `timestamptz(3)`.
+ */
+const GATHERING_FEED_AT_SQL = `LEAST("e"."created_at", date_trunc('milliseconds', COALESCE("e"."end_at", "e"."start_at")))`;
+
+/** JS twin of `GATHERING_FEED_AT_SQL`, for the cursor and the cross-source
+ *  merge. The pg driver already parses timestamps to millisecond `Date`s. */
+function gatheringFeedAt(event: Event): Date {
+  const happenedAt = event.endAt ?? event.startAt;
+  return happenedAt.getTime() < event.createdAt.getTime()
+    ? happenedAt
+    : event.createdAt;
 }
 
 /** A candidate's identity ACROSS sources. Ids alone aren't enough: a
@@ -1311,26 +1335,42 @@ export class FeedService {
             connectionAuthorIds,
           });
         }
-        // `true`: `Event.createdAt` is migrated to `timestamptz(3)` (see
-        // `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so the general
-        // feed's `status`+`visibility` filter (public/members) can be served
-        // by the partial index `IDX_events_feed_created_at_id`
-        // (`1785001500000-AddFeedCursorIndexes.ts`), which was built to match
-        // that exact predicate. The `membershipScoped` branch's WIDENED set
-        // (adds `community`) no longer matches the index's own
-        // `visibility IN ('public','members')` predicate — a query admitting
-        // `community` rows is no longer a subset of what the index covers, so
-        // Postgres can't use it for this branch (fix round 2, Task B: noted,
-        // not fixed here — the `communities` tab is a much smaller
-        // per-viewer slice than the open feed, and the query still has
-        // `e.community_id IS NOT NULL AND EXISTS(...)` plus
-        // `IDX_events_community_id` to fall back on; revisit only if a
-        // measurement shows this tab is actually slow).
+        // Gatherings page on their feed time (`GATHERING_FEED_AT_SQL`). The
+        // partial index `IDX_events_feed_created_at_id` covers
+        // `(created_at, id)` and no longer serves this ordering: Postgres
+        // sorts the filtered events in memory. The events table is small,
+        // so this is accepted without a new index; add an expression index
+        // only if a measurement shows the gathering source is slow.
+        //
+        // The ranked window's ceiling stays on `created_at`. The window must
+        // hold exactly the events that existed at the anchor (ENG-134), and
+        // `created_at <= anchor` already implies `feedAt <= anchor`. Bounding
+        // on feed time instead would admit an event posted mid-scroll for a
+        // past date, shifting the ranked offset the cursor already served.
         this.applyWindowCeiling(qb, '"e"."created_at"', createdAtAtMost);
-        const { rows } = await cursorPaginate(qb, cursor, limit, 'e', true);
+        // Ended events sit at when they happened: the keyset orders by the
+        // earlier of posted time and finish time (start time when there is
+        // no end). The cursor encodes as `ISO|id` exactly like
+        // `encodeCursor`, so the shared cross-source cursor still applies.
+        const gatheringKeyset: CursorKeyset<Event> = {
+          columnExpr: GATHERING_FEED_AT_SQL,
+          direction: 'DESC',
+          kind: 'date',
+          getValue: gatheringFeedAt,
+        };
+        const { rows } = await cursorPaginate(
+          qb,
+          cursor,
+          limit,
+          'e',
+          true,
+          gatheringKeyset,
+        );
         return rows.map((row) => ({
           id: row.id,
-          createdAt: row.createdAt,
+          // The feed time drives the merge and the next cursor. The API item
+          // still reports the row's real `createdAt` (see `eventToFeedItem`).
+          createdAt: gatheringFeedAt(row),
           type: 'gathering' as const,
           authorId: row.hostId,
           row,

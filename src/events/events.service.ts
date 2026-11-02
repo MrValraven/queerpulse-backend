@@ -184,6 +184,10 @@ import { quizshowError } from '../quizshow/quizshow-errors';
 import { RsvpService } from './rsvp.service';
 import { seatHostAsGoing } from './host-seat';
 import { occurrenceStartAt } from './series-occurrences';
+import {
+  eventScheduleProblem,
+  MAX_GATHERING_SPAN_DAYS,
+} from './event-schedule-rules';
 import { houseMusicEventError } from './house-music-event-errors';
 import {
   cohostSeatRefusalFor,
@@ -307,6 +311,24 @@ export interface CreateEventInput {
   };
 }
 
+/** What `EventsService.buildNewEventEntity` takes beside the host's input:
+ *  the schedule of this one row and every value the caller already resolved
+ *  and authorized (the audience, the community, the venue and "run by"
+ *  links, the venue owner stamp, the series slot). `create` fills it per
+ *  occurrence; `EventBatchService.createBatch` fills it per date. */
+export interface ResolvedNewEventFields {
+  startAt: Date;
+  endAt: Date | null;
+  visibility: EventVisibility;
+  status: EventStatus;
+  communityId: string | null;
+  listingId: string | null;
+  runByListingId: string | null;
+  venueOwnerNotifiedAt: Date | null;
+  seriesId: string | null;
+  seriesIndex: number | null;
+}
+
 export type UpdateEventInput = Partial<Omit<CreateEventInput, 'recurrence'>>;
 export type EventListFilter =
   'upcoming' | 'going' | 'hosting' | 'waitlisted' | 'past' | 'saved';
@@ -345,14 +367,6 @@ const PAGE_SIZE = 20;
 // design (see `EventSeries`'s class doc) bounded regardless of how far out
 // an `endUntil` date is, or how large an `endCount` is requested.
 const MAX_OCCURRENCES = 52;
-
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
-
-/** The longest a single gathering may run, start to end. A festival or a
- *  multi-night retreat fits comfortably; a typo that would pin a gathering to
- *  the top of browse for two years does not. Mirrored client-side by
- *  `MAX_GATHERING_SPAN_DAYS` in the wizard's `createGathering.data.ts`. */
-const MAX_GATHERING_SPAN_DAYS = 14;
 
 // Global search's accent-folded haystack over a gathering's title, venue and
 // description, so "Joao" finds "João". Snake_case DB columns under the `e`
@@ -565,82 +579,15 @@ export class EventsService {
     // as it lands, since the suffixed ones cannot be derived afterwards.
     const occurrenceSlugs: string[] = [];
     for (const [index, occurrence] of occurrences.entries()) {
-      const event = this.events.create({
-        hostId,
-        slug: '', // assigned (race-safely) by saveWithUniqueSlug
-        title: dto.title,
-        description: dto.description,
+      const event = this.buildNewEventEntity(hostId, dto, {
         startAt: occurrence.startAt,
         endAt: occurrence.endAt,
-        timezone: dto.timezone,
-        venue: dto.venue ?? null,
-        listingId,
-        runByListingId,
-        // LOC-16, see `EventVenueConfirmation`. Set explicitly rather than
-        // left to the column default so the in-memory row and the stored row
-        // agree from the first line of code that reads either.
-        venueConfirmation: EventVenueConfirmation.Pending,
-        venueOwnerNotifiedAt: shouldAskVenueOwner ? new Date() : null,
-        isOnline: dto.isOnline ?? false,
-        onlineUrl: dto.onlineUrl ?? null,
-        capacity: dto.capacity ?? null,
         visibility,
         status,
-        coverImageUrl: dto.coverImageUrl ?? null,
-        // LOC-04/LOC-18. `?? null` for every one of them, including the empty
-        // string a wizard sends for a field the host skipped: an empty
-        // address is "no address given", never a zero-length street.
-        address: EventsService.blankToNull(dto.address),
-        arrivalNotes: EventsService.blankToNull(dto.arrivalNotes),
-        neighbourhood: EventsService.blankToNull(dto.neighbourhood),
-        language: EventsService.blankToNull(dto.language),
-        eventType: EventsService.blankToNull(dto.eventType),
-        gatheringFamily: dto.gatheringFamily ?? null,
-        // Stripped against the family being created with, so a bag carried
-        // over from a family the host tried and abandoned never reaches the
-        // column. An empty bag is stored as `null`.
-        formatDetails: stripDisallowedDetails(
-          dto.gatheringFamily ?? null,
-          dto.formatDetails ?? null,
-          EventsService.blankToNull(dto.eventType),
-        ),
-        // Always a COMPLETE six-question map on write, so a reader never has
-        // to tell an absent key from an unanswered question — the whole point
-        // of the three-valued model this borrows from `listings`.
-        accessibilityAnswers: normalizeAccessibilityAnswers(
-          dto.accessibility?.answers,
-        ),
-        accessibilityNote: dto.accessibility?.note?.trim() ?? '',
-        // A free gathering has no price to state, so whatever the wizard left
-        // in the amount field is dropped.
-        cost:
-          dto.costKind === 'free' ? null : EventsService.blankToNull(dto.cost),
-        costKind: dto.costKind ?? null,
-        // Nothing to pay for a free gathering either, so the payment link and
-        // instructions go the same way as the amount.
-        paymentUrl:
-          dto.costKind === 'free'
-            ? null
-            : EventsService.blankToNull(dto.paymentUrl),
-        paymentInstructions:
-          dto.costKind === 'free'
-            ? null
-            : EventsService.blankToNull(dto.paymentInstructions),
-        // Care (create-gathering v2), written onto every occurrence of a
-        // series like the rest of the content. Each row gets its own arrays.
-        themes: EventsService.distinctKeys(dto.themes),
-        contentNotes: EventsService.distinctKeys(dto.contentNotes),
-        houseRules: EventsService.blankToNull(dto.houseRules),
-        rsvpCutoff: dto.rsvpCutoff ?? null,
-        // A new gathering asks only the questions the host switched on.
-        rsvpQuestions: mergeRsvpQuestions(
-          DEFAULT_RSVP_QUESTIONS,
-          dto.rsvpQuestions,
-        ),
-        customRsvpQuestion: EventsService.blankToNull(dto.customRsvpQuestion),
         communityId,
-        allowWaitlist: dto.allowWaitlist ?? true,
-        showAttendeeCount: dto.showAttendeeCount ?? true,
+        listingId,
+        runByListingId,
+        venueOwnerNotifiedAt: shouldAskVenueOwner ? new Date() : null,
         seriesId,
         seriesIndex: seriesId ? index : null,
       });
@@ -679,6 +626,99 @@ export class EventsService {
     }
     const detail = await this.buildDetail(firstSaved!, hostId);
     return { ...detail, occurrenceSlugs };
+  }
+
+  /** The one place a new gathering's columns are decided, shared by `create`
+   *  and `EventBatchService.createBatch`, so a batch event can never hold a
+   *  value `create` would store differently. Every content field comes from
+   *  `dto`; the schedule, the audience and every link the caller already
+   *  resolved and authorized come from `resolved`. Reads nothing and writes
+   *  nothing: the caller saves the entity through `saveWithUniqueSlug`.
+   *  Public for `EventBatchService`. */
+  buildNewEventEntity(
+    hostId: string,
+    dto: CreateEventInput,
+    resolved: ResolvedNewEventFields,
+  ): Event {
+    return this.events.create({
+      hostId,
+      slug: '', // assigned (race-safely) by saveWithUniqueSlug
+      title: dto.title,
+      description: dto.description,
+      startAt: resolved.startAt,
+      endAt: resolved.endAt,
+      timezone: dto.timezone,
+      venue: dto.venue ?? null,
+      listingId: resolved.listingId,
+      runByListingId: resolved.runByListingId,
+      // LOC-16, see `EventVenueConfirmation`. Set explicitly so the
+      // in-memory row and the stored row agree from the first line of code
+      // that reads either, whatever the column default is.
+      venueConfirmation: EventVenueConfirmation.Pending,
+      venueOwnerNotifiedAt: resolved.venueOwnerNotifiedAt,
+      isOnline: dto.isOnline ?? false,
+      onlineUrl: dto.onlineUrl ?? null,
+      capacity: dto.capacity ?? null,
+      visibility: resolved.visibility,
+      status: resolved.status,
+      coverImageUrl: dto.coverImageUrl ?? null,
+      // LOC-04/LOC-18. `?? null` for every one of them, including the empty
+      // string a wizard sends for a field the host skipped: an empty
+      // address is "no address given", never a zero-length street.
+      address: EventsService.blankToNull(dto.address),
+      arrivalNotes: EventsService.blankToNull(dto.arrivalNotes),
+      neighbourhood: EventsService.blankToNull(dto.neighbourhood),
+      language: EventsService.blankToNull(dto.language),
+      eventType: EventsService.blankToNull(dto.eventType),
+      gatheringFamily: dto.gatheringFamily ?? null,
+      // Stripped against the family being created with, so a bag carried
+      // over from a family the host tried and abandoned never reaches the
+      // column. An empty bag is stored as `null`.
+      formatDetails: stripDisallowedDetails(
+        dto.gatheringFamily ?? null,
+        dto.formatDetails ?? null,
+        EventsService.blankToNull(dto.eventType),
+      ),
+      // Always a COMPLETE six-question map on write, so a reader finds
+      // every question present with an explicit answer. This is the
+      // purpose of the three-valued model borrowed from `listings`.
+      accessibilityAnswers: normalizeAccessibilityAnswers(
+        dto.accessibility?.answers,
+      ),
+      accessibilityNote: dto.accessibility?.note?.trim() ?? '',
+      // A free gathering has no price to state, so whatever the wizard left
+      // in the amount field is dropped.
+      cost:
+        dto.costKind === 'free' ? null : EventsService.blankToNull(dto.cost),
+      costKind: dto.costKind ?? null,
+      // Nothing to pay for a free gathering either, so the payment link and
+      // instructions go the same way as the amount.
+      paymentUrl:
+        dto.costKind === 'free'
+          ? null
+          : EventsService.blankToNull(dto.paymentUrl),
+      paymentInstructions:
+        dto.costKind === 'free'
+          ? null
+          : EventsService.blankToNull(dto.paymentInstructions),
+      // Care (create-gathering v2), written onto every occurrence of a
+      // series like the rest of the content. Each row gets its own arrays.
+      themes: EventsService.distinctKeys(dto.themes),
+      contentNotes: EventsService.distinctKeys(dto.contentNotes),
+      houseRules: EventsService.blankToNull(dto.houseRules),
+      rsvpCutoff: dto.rsvpCutoff ?? null,
+      // A new gathering asks only the questions the host switched on.
+      rsvpQuestions: mergeRsvpQuestions(
+        DEFAULT_RSVP_QUESTIONS,
+        dto.rsvpQuestions,
+      ),
+      customRsvpQuestion: EventsService.blankToNull(dto.customRsvpQuestion),
+      communityId: resolved.communityId,
+      allowWaitlist: dto.allowWaitlist ?? true,
+      showAttendeeCount: dto.showAttendeeCount ?? true,
+      seriesId: resolved.seriesId,
+      seriesIndex: resolved.seriesIndex,
+    });
   }
 
   // Computes every occurrence's own `{ startAt, endAt }` for a create() call,
@@ -1373,20 +1413,28 @@ export class EventsService {
    * Runs after the save has committed and NEVER THROWS: `notify` is
    * best-effort on its own, and this guard keeps a failure anywhere on the
    * way from reaching the organizer's create or edit.
+   *
+   * `excludeUserIds` and the returned set are the batch's
+   * (`EventBatchService.createBatch`): it walks its events in date order and
+   * passes everyone an earlier date already reached, so a member tagged on
+   * three dates hears once, at the first. The set is who this call reached,
+   * empty when it reached nobody or failed. `create` and `update` pass no
+   * exclusions and ignore the set. Public for `EventBatchService`.
    */
-  private async notifyDescriptionMentions(
+  async notifyDescriptionMentions(
     event: Event,
     mentionText: string,
     authorId: string,
-  ): Promise<void> {
+    excludeUserIds: readonly string[] = [],
+  ): Promise<Set<string>> {
     try {
-      if (!mentionText.trim()) return;
+      if (!mentionText.trim()) return new Set();
       const unnotified = await this.withoutAlreadyNotifiedMentions(
         event,
         mentionText,
       );
-      if (!unnotified.text.trim()) return;
-      await this.mentions.notify(
+      if (!unnotified.text.trim()) return new Set();
+      return await this.mentions.notify(
         unnotified.text,
         authorId,
         {
@@ -1399,7 +1447,7 @@ export class EventsService {
             EVENT_MENTION_EXCERPT_LENGTH,
           ),
         },
-        unnotified.alreadyNotifiedUserIds,
+        [...unnotified.alreadyNotifiedUserIds, ...excludeUserIds],
       );
     } catch (error) {
       this.logger.warn(
@@ -1407,6 +1455,7 @@ export class EventsService {
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      return new Set();
     }
   }
 
@@ -1533,8 +1582,10 @@ export class EventsService {
    * The stamp is written even if the notification write fails. A missing bell
    * is a missed message; a missing stamp is the same owner asked again on
    * every subsequent edit of the gathering.
+   *
+   * Public for `EventBatchService`, which raises one ask per batch.
    */
-  private async notifyVenueOwnerBestEffort(
+  async notifyVenueOwnerBestEffort(
     event: Event,
     listing: AttachableListingRef,
   ): Promise<void> {
@@ -3068,17 +3119,17 @@ export class EventsService {
     endAt: Date | null,
     opts: { rejectPast: boolean },
   ): void {
-    if (opts.rejectPast && startAt.getTime() < Date.now()) {
+    // The rules live in `event-schedule-rules.ts` so the batch can name the
+    // row that breaks one; the messages here stay the ones `create` and
+    // `update` have always sent.
+    const problem = eventScheduleProblem(startAt, endAt, opts);
+    if (problem === 'startInPast') {
       throw new BadRequestException('startAt must be in the future');
     }
-    if (endAt && endAt.getTime() <= startAt.getTime()) {
+    if (problem === 'endNotAfterStart') {
       throw new BadRequestException('endAt must be after startAt');
     }
-    if (
-      endAt &&
-      endAt.getTime() - startAt.getTime() >
-        MAX_GATHERING_SPAN_DAYS * MILLISECONDS_PER_DAY
-    ) {
+    if (problem === 'spanTooLong') {
       throw new BadRequestException(
         `endAt must be at most ${MAX_GATHERING_SPAN_DAYS} days after startAt`,
       );
@@ -3912,11 +3963,42 @@ export class EventsService {
 
   // Assigns a unique slug and persists, retrying on the (rare) race where a
   // concurrent create grabs the same slug between the pre-check and this INSERT.
-  private async saveWithUniqueSlug(
+  //
+  // `transactionManager` is the batch's path (`EventBatchService.createBatch`),
+  // and both the read and the write go through it, for two reasons. The
+  // pre-check reads through the caller's manager because rows an earlier date
+  // of the same batch saved are visible only inside that transaction: read
+  // outside it, four rows titled "Quiz Night" would all pick `quiz-night` and
+  // rows two to four would spend every attempt on the unique index. Each
+  // attempt then saves under its own savepoint (`transaction` on a manager
+  // already in a transaction becomes `SAVEPOINT` / `ROLLBACK TO SAVEPOINT`),
+  // because a unique violation aborts a Postgres transaction and a plain retry
+  // would fail with "current transaction is aborted". Without a manager this
+  // is the path `create` has always taken. Public for `EventBatchService`.
+  async saveWithUniqueSlug(
     event: Event,
     title: string,
+    transactionManager?: EntityManager,
   ): Promise<Event> {
     const MAX_ATTEMPTS = 5;
+    if (transactionManager) {
+      const transactionEvents = transactionManager.getRepository(Event);
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        event.slug = await this.generateUniqueSlug(title, transactionEvents);
+        try {
+          return await transactionManager.transaction((attemptManager) =>
+            attemptManager.getRepository(Event).save(event),
+          );
+        } catch (error) {
+          if (isUniqueViolation(error) && attempt < MAX_ATTEMPTS) {
+            continue; // lost the slug race; the savepoint rolled back, retry
+          }
+          throw error;
+        }
+      }
+      // Unreachable: the loop either returns a saved event or rethrows.
+      throw new ConflictException('Could not allocate a unique event slug');
+    }
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       event.slug = await this.generateUniqueSlug(title);
       try {
@@ -3932,7 +4014,10 @@ export class EventsService {
     throw new ConflictException('Could not allocate a unique event slug');
   }
 
-  private async generateUniqueSlug(title: string): Promise<string> {
+  private async generateUniqueSlug(
+    title: string,
+    eventRepository: Repository<Event> = this.events,
+  ): Promise<string> {
     const base =
       title
         .normalize('NFKD')
@@ -3942,7 +4027,7 @@ export class EventsService {
         .replace(/^-+|-+$/g, '')
         .slice(0, 80) || 'event';
     let slug = base;
-    while (await this.events.exists({ where: { slug } })) {
+    while (await eventRepository.exists({ where: { slug } })) {
       slug = `${base}-${randomBytes(3).toString('hex')}`;
     }
     return slug;
