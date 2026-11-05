@@ -79,6 +79,15 @@ import { kindsMatchingSearch } from './subprofile-kind-search';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { PublishUnmetCode, validatePublish } from './subprofile-validation';
 import {
+  PERSONA_WALL_MAX_PICKS,
+  type PersonaWallFillOrder,
+  type PersonaWallSource,
+} from './persona-wall.constants';
+import {
+  PERSONA_WALL_PERSONA_FIELDS,
+  type PersonaWallPersonaRow,
+} from './persona-wall-response';
+import {
   QUEST_KINDS,
   toCardTableSummary,
   type CardTableSummary,
@@ -138,6 +147,57 @@ const PERSONA_SEARCH_HAYSTACK = foldedHaystack('sp', SUBPROFILE_SEARCH_COLUMNS);
 // quoted select alias.
 const DIRECTORY_FOLLOWER_RANK_ALIAS = 'follower_rank';
 
+/** Per-persona follower count as a correlated subquery over `sp`, shared by the
+ *  directory's `followed` sort and the persona wall's `followed` fill. */
+export const DIRECTORY_FOLLOWER_COUNT_SQL = `(SELECT COUNT(*) FROM "subprofile_followers" "follower"
+          WHERE "follower"."subprofile_id" = "sp"."id")`;
+
+/** 1 when the persona has an avatar or a banner, else 0. An empty string counts
+ *  as no photo, matching the frontend's truthiness test in `pickDirectoryCardImage`. */
+export const PERSONA_WALL_HAS_PHOTO_SQL = `CASE WHEN NULLIF("sp"."avatar_url", '') IS NOT NULL OR NULLIF("sp"."cover_url", '') IS NOT NULL THEN 1 ELSE 0 END`;
+
+/** Per-persona count of active endorsements (withdrawn ones excluded), the
+ *  persona wall's `endorsed` fill rank. */
+export const PERSONA_WALL_ENDORSEMENT_COUNT_SQL = `(SELECT COUNT(*) FROM "subprofile_endorsements" "endorsement"
+  WHERE "endorsement"."subprofile_id" = "sp"."id" AND "endorsement"."withdrawn_at" IS NULL)`;
+
+/** A stable per-day shuffle key for the wall's `daily_shuffle` fill: the
+ *  persona id hashed with the Lisbon day bound as `:wallDay`. */
+export const PERSONA_WALL_DAILY_SHUFFLE_SQL = `md5("sp"."id"::text || CAST(:wallDay AS text))`;
+
+// The wall fill's photo rank and order rank, selected under these aliases and
+// ordered by them. Lower snake case for the same reason as the follower alias.
+const PERSONA_WALL_PHOTO_RANK_ALIAS = 'wall_photo_rank';
+const PERSONA_WALL_FILL_RANK_ALIAS = 'wall_fill_rank';
+
+// The columns a persona card is drawn from, projected on alias `sp` by every
+// card list (`directory()` and `loadCardRowsFor`). Only what `toCardDTO` (plus
+// the id used to key the batched social-count/tag/follower lookups in
+// `buildCardsFor`) actually reads: the directory is offset-paginated but was
+// still hydrating full rows, including `bio`, the CTA fields, and the 16KB
+// `skinData` jsonb blob, on every request. `coverUrl` IS read (the card renders
+// the banner in its header band); it is a short varchar, unlike the blob above.
+const CARD_ROW_SELECT: string[] = [
+  'sp.id',
+  'sp.handle',
+  'sp.kind',
+  'sp.displayName',
+  'sp.avatarUrl',
+  'sp.coverUrl',
+  'sp.tagline',
+  'sp.accent',
+  'sp.availability',
+  // PRD-435: the therapist cards say how fresh the status is.
+  'sp.availabilityUpdatedAt',
+  // Inc2 Task A: the directory now includes linked personas too, so the card
+  // needs to route them to `/members/:ownerSlug/:slug`. `slug` and
+  // `linkVisibility` feed `toCardDTO`, `userId` keys the batched owner-slug
+  // lookup in `buildCardsFor`.
+  'sp.slug',
+  'sp.linkVisibility',
+  'sp.userId',
+];
+
 /** One page of `GET /subprofiles/directory`. `facets` rides on page 1 only. */
 export interface SubprofileDirectoryResponse {
   items: SubprofileCardView[];
@@ -145,6 +205,23 @@ export interface SubprofileDirectoryResponse {
   page: number;
   limit: number;
   facets?: SubprofileDirectoryFacets;
+}
+
+/** What `listWallCards` needs: the picks in position order, the fill order,
+ *  the viewer (`null` only for the admin preview) and the Lisbon day for the
+ *  daily shuffle (`YYYY-MM-DD`). */
+export interface PersonaWallCardsRequest {
+  pickedSubprofileIds: string[];
+  fillOrder: PersonaWallFillOrder;
+  viewerId: string | null;
+  wallDay: string;
+}
+
+/** One wall tile: the directory's own card plus whether an admin picked it or
+ *  the automatic fill placed it. */
+export interface PersonaWallCard {
+  card: SubprofileCardView;
+  wallSource: PersonaWallSource;
 }
 
 // The public/card read surface for personas: the profile-nested list, the
@@ -1204,33 +1281,7 @@ export class SubprofilePublicReadService {
     viewerId: string,
   ): Promise<SubprofileDirectoryResponse> {
     const refinement = toDirectoryRefinement(query);
-    const qb = this.directoryBaseQuery(query, viewerId)
-      // Project only what `toCardDTO` (plus the id used to key the batched
-      // social-count/tag/follower lookups below) actually reads — this list is
-      // now offset-paginated (see below) but was still hydrating full rows,
-      // including `bio`, the CTA fields, and the 16KB `skinData` jsonb blob, on
-      // every request. `coverUrl` IS read now (the card renders the banner in
-      // its header band); it is a short varchar, unlike the blob above.
-      .select([
-        'sp.id',
-        'sp.handle',
-        'sp.kind',
-        'sp.displayName',
-        'sp.avatarUrl',
-        'sp.coverUrl',
-        'sp.tagline',
-        'sp.accent',
-        'sp.availability',
-        // PRD-435: the therapist cards say how fresh the status is.
-        'sp.availabilityUpdatedAt',
-        // Inc2 Task A: the directory now includes linked personas too, so the
-        // card needs to route them to `/members/:ownerSlug/:slug` — `slug` +
-        // `linkVisibility` feed `toCardDTO`, `userId` keys the batched
-        // owner-slug lookup below.
-        'sp.slug',
-        'sp.linkVisibility',
-        'sp.userId',
-      ]);
+    const qb = this.directoryBaseQuery(query, viewerId).select(CARD_ROW_SELECT);
     // Every sidebar group narrows the WHOLE table before paging, so `total` and
     // the pages are the exact answer (they used to narrow only the pages the
     // browser had loaded).
@@ -1272,12 +1323,49 @@ export class SubprofilePublicReadService {
     this.applyDirectorySort(qb, query.sort ?? DIRECTORY_DEFAULT_SORT);
     qb.offset((page - 1) * limit).limit(limit);
     const rows = await qb.getMany();
+    return {
+      items: await this.buildCardsFor(rows, viewerId),
+      total,
+      page,
+      limit,
+      ...(facets ? { facets } : {}),
+    };
+  }
+
+  /**
+   * Loads the persona rows a card is drawn from, projected through the same
+   * `CARD_ROW_SELECT` the directory pages over, for a caller that chose its
+   * page somewhere else (the viewer's own following list chooses it from
+   * `subprofile_followers`). Loads by id only and applies no visibility gate:
+   * the caller's page query is the gate. Rows come back in no particular
+   * order, so the caller keys them by id.
+   */
+  async loadCardRowsFor(ids: string[]): Promise<Subprofile[]> {
+    if (!ids.length) return [];
+    return this.subprofiles
+      .createQueryBuilder('sp')
+      .select(CARD_ROW_SELECT)
+      .where('sp.id IN (:...ids)', { ids })
+      .getMany();
+  }
+
+  /**
+   * Draws the directory's portrait card for each row, in input order. The ONE
+   * place a card is decorated, shared by the directory and the viewer's own
+   * following list so the two tabs render the same card from the same data.
+   * `rows` need at least the `CARD_ROW_SELECT` columns.
+   */
+  async buildCardsFor(
+    rows: Subprofile[],
+    viewerId: string,
+  ): Promise<SubprofileCardView[]> {
+    if (!rows.length) return [];
     const rowIds = rows.map((row) => row.id);
     // Inc2 Task A: the directory now includes linked rows, so resolve the
-    // owner's profile slug for those — ONE grouped query over the page's
+    // owner's profile slug for those: ONE grouped query over the page's
     // linked userIds (never per-card), mirroring the socialCount/tags/
     // followerCount batches below. Skipped entirely when the page has no
-    // linked rows.
+    // linked rows, so an unlinked persona's owner is never resolved at all.
     const linkedUserIds = [
       ...new Set(
         rows
@@ -1309,14 +1397,14 @@ export class SubprofilePublicReadService {
         ? this.profiles.find({
             where: { userId: In(linkedUserIds) },
             // The name parts ride along for the card's "Owner Name | Poet"
-            // title on a persona still named after its profession — two extra
+            // title on a persona still named after its profession: two extra
             // columns on the query that already resolves `ownerSlug`, never a
             // new read. Composed exactly like `SubprofileOwnerRef.name` above.
             select: ['userId', 'slug', 'firstName', 'lastName'],
           })
         : Promise.resolve([]),
-      // ONE batched crop lookup for every card's avatar AND banner on the page
-      // — never a per-card query, and one call for both keys rather than two.
+      // ONE batched crop lookup covers every card's avatar AND banner on the
+      // page, both keys in one call, so the page never pays a per-card query.
       this.mediaCropService.getMany(
         rows.flatMap((row) =>
           [row.avatarUrl, row.coverUrl].filter((key): key is string =>
@@ -1342,42 +1430,157 @@ export class SubprofilePublicReadService {
       ownerProfiles.map((profile) => [profile.userId, profile.slug]),
     );
     // An owner with both name parts blank composes to "", which would title a
-    // card as " | Poet" — normalised to null so the persona keeps its bare name.
+    // card as " | Poet", so it is normalised to null and the persona keeps its
+    // bare name.
     const ownerNameByUserId = new Map(
       ownerProfiles.map((profile) => [
         profile.userId,
         `${profile.firstName} ${profile.lastName}`.trim() || null,
       ]),
     );
-    return {
-      items: rows.map((row) =>
-        toCardDTO(
-          row,
-          socialCountsById.get(row.id) ?? 0,
-          tagsById.get(row.id) ?? [],
-          followerCountsById.get(row.id) ?? 0,
-          ownerSlugByUserId.get(row.userId) ?? null,
-          crops,
-          ownerNameByUserId.get(row.userId) ?? null,
-          tableSummariesById.get(row.id),
-          {
-            viewerFollowing: viewerFollowingIds.has(row.id),
-            viewerIsMember: viewerMemberIds.has(row.id),
-            credits: creditsById.get(row.id) ?? emptyCardCredits(),
-          },
-        ),
+    return rows.map((row) =>
+      toCardDTO(
+        row,
+        socialCountsById.get(row.id) ?? 0,
+        tagsById.get(row.id) ?? [],
+        followerCountsById.get(row.id) ?? 0,
+        ownerSlugByUserId.get(row.userId) ?? null,
+        crops,
+        ownerNameByUserId.get(row.userId) ?? null,
+        tableSummariesById.get(row.id),
+        {
+          viewerFollowing: viewerFollowingIds.has(row.id),
+          viewerIsMember: viewerMemberIds.has(row.id),
+          credits: creditsById.get(row.id) ?? emptyCardCredits(),
+        },
       ),
-      total,
-      page,
-      limit,
-      ...(facets ? { facets } : {}),
-    };
+    );
   }
 
   /**
-   * Card credits are a garnish on the directory: a credit-graph failure is
-   * logged and every card falls back to "nobody credited", so the page itself
-   * still loads.
+   * The People Directory hero wall: the admin's picks in position order, then
+   * the automatic fill up to `PERSONA_WALL_MAX_PICKS`. Picks and fill both
+   * start from `directoryBaseQuery`, so a pick the directory would hide (a
+   * draft, a takedown, a blocked owner) is skipped and its slot goes to the
+   * fill. Every tile is drawn by `buildCardsFor` in one batch, so the wall
+   * renders exactly the directory's card.
+   */
+  async listWallCards(
+    request: PersonaWallCardsRequest,
+  ): Promise<PersonaWallCard[]> {
+    const wallPickIds = request.pickedSubprofileIds;
+    let shownPicks: Subprofile[] = [];
+    if (wallPickIds.length > 0) {
+      const pickRows = await this.directoryBaseQuery(
+        {},
+        request.viewerId,
+        false,
+      )
+        .select(CARD_ROW_SELECT)
+        .andWhere('sp.id IN (:...wallPickIds)', { wallPickIds })
+        .getMany();
+      const pickRowById = new Map(pickRows.map((row) => [row.id, row]));
+      shownPicks = wallPickIds
+        .map((pickId) => pickRowById.get(pickId))
+        .filter((row): row is Subprofile => row !== undefined);
+    }
+
+    const fillLimit = PERSONA_WALL_MAX_PICKS - shownPicks.length;
+    let fillRows: Subprofile[] = [];
+    if (fillLimit > 0) {
+      const fillQueryBuilder = this.directoryBaseQuery(
+        {},
+        request.viewerId,
+        false,
+      ).select(CARD_ROW_SELECT);
+      if (wallPickIds.length > 0) {
+        fillQueryBuilder.andWhere('sp.id NOT IN (:...wallExcludedIds)', {
+          wallExcludedIds: wallPickIds,
+        });
+      }
+      this.applyWallFillOrder(
+        fillQueryBuilder,
+        request.fillOrder,
+        request.wallDay,
+      );
+      fillRows = await fillQueryBuilder.limit(fillLimit).getMany();
+    }
+
+    const cards = await this.buildCardsFor(
+      [...shownPicks, ...fillRows],
+      request.viewerId ?? ANONYMOUS_VIEWER_ID,
+    );
+    return cards.map((card, index) => ({
+      card,
+      wallSource: index < shownPicks.length ? 'picked' : 'filled',
+    }));
+  }
+
+  /**
+   * Orders the wall fill: personas with a photo first, then the fill order's
+   * rank, then name and id. Ranks are correlated subquery aliases like the
+   * directory's `followed` sort, so the query joins nothing and stays one row
+   * per persona.
+   */
+  private applyWallFillOrder(
+    queryBuilder: SelectQueryBuilder<Subprofile>,
+    fillOrder: PersonaWallFillOrder,
+    wallDay: string,
+  ): void {
+    queryBuilder
+      .addSelect(PERSONA_WALL_HAS_PHOTO_SQL, PERSONA_WALL_PHOTO_RANK_ALIAS)
+      .orderBy(PERSONA_WALL_PHOTO_RANK_ALIAS, 'DESC');
+    switch (fillOrder) {
+      case 'endorsed':
+        queryBuilder
+          .addSelect(
+            PERSONA_WALL_ENDORSEMENT_COUNT_SQL,
+            PERSONA_WALL_FILL_RANK_ALIAS,
+          )
+          .addOrderBy(PERSONA_WALL_FILL_RANK_ALIAS, 'DESC');
+        break;
+      case 'followed':
+        queryBuilder
+          .addSelect(DIRECTORY_FOLLOWER_COUNT_SQL, PERSONA_WALL_FILL_RANK_ALIAS)
+          .addOrderBy(PERSONA_WALL_FILL_RANK_ALIAS, 'DESC');
+        break;
+      case 'newest':
+        queryBuilder.addOrderBy('sp.createdAt', 'DESC');
+        break;
+      case 'daily_shuffle':
+        queryBuilder
+          .addSelect(
+            PERSONA_WALL_DAILY_SHUFFLE_SQL,
+            PERSONA_WALL_FILL_RANK_ALIAS,
+          )
+          .addOrderBy(PERSONA_WALL_FILL_RANK_ALIAS, 'ASC')
+          .setParameter('wallDay', wallDay);
+        break;
+    }
+    queryBuilder.addOrderBy('sp.displayName', 'ASC').addOrderBy('sp.id', 'ASC');
+  }
+
+  /**
+   * Admin search for the wall picker: the directory's own haystack over its
+   * base set, so a linked owner's name finds only linked personas. Runs as no
+   * particular member (no block filter) and selects persona columns only.
+   */
+  async searchWallPersonas(
+    term: string,
+    limit: number,
+  ): Promise<PersonaWallPersonaRow[]> {
+    return this.directoryBaseQuery({ query: term }, null)
+      .select(PERSONA_WALL_PERSONA_FIELDS.map((field) => `sp.${field}`))
+      .orderBy('sp.displayName', 'ASC')
+      .addOrderBy('sp.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Card credits are a garnish on every persona card (the directory and the
+   * following list): a credit-graph failure is logged and every card falls
+   * back to "nobody credited", so the page itself still loads.
    */
   private async loadCardCreditsOrEmpty(
     rows: Subprofile[],
@@ -1387,7 +1590,7 @@ export class SubprofilePublicReadService {
       return await this.creditGraph.loadCardCreditsFor(rows, viewerId);
     } catch (error) {
       this.logger.error(
-        `Directory card credits failed, cards show no credits: ${
+        `Persona card credits failed, cards show no credits: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
         error instanceof Error ? error.stack : undefined,
@@ -1415,11 +1618,7 @@ export class SubprofilePublicReadService {
       return;
     }
     if (sort === 'followed') {
-      qb.addSelect(
-        `(SELECT COUNT(*) FROM "subprofile_followers" "follower"
-          WHERE "follower"."subprofile_id" = "sp"."id")`,
-        DIRECTORY_FOLLOWER_RANK_ALIAS,
-      )
+      qb.addSelect(DIRECTORY_FOLLOWER_COUNT_SQL, DIRECTORY_FOLLOWER_RANK_ALIAS)
         .orderBy(DIRECTORY_FOLLOWER_RANK_ALIAS, 'DESC')
         .addOrderBy('sp.displayName', 'ASC')
         .addOrderBy('sp.id', 'ASC');
@@ -1433,11 +1632,13 @@ export class SubprofilePublicReadService {
    * not removed, nobody blocked either way, no takedown, the `kind` scope, and
    * (unless `isSearchApplied` is false) the free-text search. The page query
    * and every facet count start from here, so they cannot drift apart on what
-   * the directory contains.
+   * the directory contains. A `null` viewer is the admin wall preview and
+   * admin search, which read the wall as no particular member; every
+   * member-facing caller passes the viewer.
    */
   private directoryBaseQuery(
     query: ListSubprofileDirectoryQuery,
-    viewerId: string,
+    viewerId: string | null,
     isSearchApplied = true,
   ): SelectQueryBuilder<Subprofile> {
     const qb = this.subprofiles
@@ -1454,7 +1655,9 @@ export class SubprofilePublicReadService {
 
     // Hide personas of members blocked either way (design spec §4). The raw
     // column reference must match the DB's snake_case name (SnakeNamingStrategy).
-    this.blockFilter.excludeBlocked(qb, viewerId, '"sp"."user_id"');
+    if (viewerId !== null) {
+      this.blockFilter.excludeBlocked(qb, viewerId, '"sp"."user_id"');
+    }
     // Withhold any persona under a moderator takedown, in-query so the capped
     // directory result stays consistent.
     this.excludeModeratedSubprofiles(qb);

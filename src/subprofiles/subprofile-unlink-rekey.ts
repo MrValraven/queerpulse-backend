@@ -10,6 +10,7 @@ import {
   forgetSalesOfPersona,
   StudioSalesUnlinkOutcome,
 } from '../studio/studio-purchases-unlink';
+import { forgetWallPickOfPersona } from './persona-wall-unlink';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 
 /**
@@ -84,6 +85,9 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  *
  * Meet the team: every team link the persona holds on a business listing is
  * deleted (`forgetTeamLinksOfPersona`).
+ *
+ * Persona wall: the persona's place on the directory wall is deleted
+ * (`forgetWallPickOfPersona`).
  *
  * Three references hold the persona id with no foreign key and are moved
  * here:
@@ -323,6 +327,9 @@ export async function issueFreshPersonaId(
   // may abort one side with a deadlock; that is acceptable and the member can
   // retry.
   await forgetTeamLinksOfPersona(manager, freshSubprofileId);
+  // Persona wall: the pick goes too, so the slot the named persona held on
+  // the directory wall never shows the pseudonymous persona.
+  await forgetWallPickOfPersona(manager, freshSubprofileId);
   return freshSubprofileId;
 }
 

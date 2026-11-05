@@ -9,7 +9,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
-import { toImageUrl } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { PAGE_SIZE, Paginated, normalizePage } from '../common/pagination';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -24,11 +23,14 @@ import { SubprofileMembershipService } from './subprofile-membership.service';
 import { lockEngageablePersonaWithin } from './subprofile-engagement-lock';
 import {
   Subprofile,
-  SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
-import { FollowedPersonaView } from './subprofile-following-response';
+import {
+  FOLLOWING_CURSOR_TIMESTAMP_SQL,
+  decodeFollowingCursor,
+  encodeFollowingCursor,
+} from './subprofile-following-cursor';
 import { FollowerView } from './subprofile-response';
 import {
   SUBPROFILE_FOLLOWED,
@@ -44,6 +46,26 @@ const FOLLOWERS_LIST_CAP = 50;
 // message text stays as it always was; only the code is new.
 export const PERSONA_SELF_FOLLOW_CODE = 'PERSONA_SELF_FOLLOW';
 export const PERSONA_NOT_FOLLOWABLE_CODE = 'PERSONA_NOT_FOLLOWABLE';
+
+/** One followed persona on a page of the viewer's following list. */
+export interface FollowedPersonaEntry {
+  subprofileId: string;
+  /** When the viewer followed it, the list's sort key. */
+  followedAt: Date;
+}
+
+/**
+ * One page of the viewer's following list as ids, before the card is drawn.
+ * Shaped like `FollowedPersonaPage` so the caller only swaps `entries` for
+ * `items`.
+ */
+export interface FollowedPersonaEntryPage extends Omit<
+  Paginated<FollowedPersonaEntry>,
+  'items'
+> {
+  entries: FollowedPersonaEntry[];
+  nextCursor: string | null;
+}
 
 // Owns the follow / unfollow behaviour plus the batched count/viewer-state
 // derivations the persona read paths consume. Extracted from
@@ -214,8 +236,11 @@ export class SubprofileFollowersService {
   }
 
   /**
-   * The other side of the follow: every persona THIS member follows, newest
-   * follow first, paginated.
+   * The other side of the follow: which personas THIS member follows, newest
+   * follow first, one page at a time. Returns the page's persona ids and follow
+   * times only; `SubprofilesService.listFollowedPersonas` draws each one as the
+   * directory's card through `SubprofilePublicReadService.buildCardsFor`, which
+   * this service cannot call (that service already depends on this one).
    *
    * Following used to be write-only. A member tapped Follow, the owner got one
    * notification, and the follower got a pill and nothing else: no list, no way
@@ -238,19 +263,32 @@ export class SubprofileFollowersService {
    * canonical subject type (`SUBPROFILE_MODERATION_SUBJECT_TYPE`), so there is
    * one spelling of WHICH rows count even though there are two of the SQL.
    *
-   * TWO STEPS, DELIBERATELY. The page is chosen by a projection over
-   * `subprofile_followers` (`offset`/`limit`, never `skip`/`take`: this query
-   * carries a join, and `skip`/`take` wraps a join in a DISTINCT subquery that
-   * pages wrongly), then the personas are loaded by id and put back into follow
-   * order. `ORDER BY created_at DESC` also takes an `id` tiebreak, or two
-   * follows saved in the same millisecond would let an offset boundary repeat
-   * one row and skip another.
+   * A PROJECTION OVER `subprofile_followers`. The page is chosen with
+   * `offset`/`limit`, never `skip`/`take`: this query carries a join, and
+   * `skip`/`take` wraps a join in a DISTINCT subquery that pages wrongly.
+   * `ORDER BY created_at DESC` also takes an `id` tiebreak, or two follows saved
+   * in the same instant would let a page boundary repeat one row and skip
+   * another.
+   *
+   * TWO WAYS TO NAME A PAGE. `page` is the offset the Studio's followed-artists
+   * list has always sent. `before` is a keyset cursor (`nextCursor` of the page
+   * before): the rows strictly after that `(created_at, id)` position, with
+   * `page` ignored. The cursor is what the Following tab pages with, because it
+   * unfollows in place: each unfollow pulls every later row up by one, and an
+   * offset would then skip the persona that slid across the boundary. `total`
+   * stays the full gated count either way. One row past the page is fetched so
+   * `nextCursor` is `null` exactly when nothing follows.
    */
-  async listFollowedPersonas(
+  async listFollowedPersonaPage(
     viewerId: string,
     page?: number,
-  ): Promise<Paginated<FollowedPersonaView>> {
+    before?: string,
+  ): Promise<FollowedPersonaEntryPage> {
     const safePage = normalizePage(page);
+    // Decoded before any query runs, so a malformed cursor is a 400 carrying
+    // `FOLLOWING_CURSOR_INVALID` and never reaches Postgres as a bad cast.
+    const cursorPosition =
+      before !== undefined ? decodeFollowingCursor(before) : null;
     const pageQuery = this.followers
       .createQueryBuilder('sf')
       .innerJoin(Subprofile, 'sp', 'sp.id = sf.subprofileId')
@@ -275,95 +313,65 @@ export class SubprofileFollowersService {
 
     const total = await pageQuery.getCount();
     if (total === 0) {
-      return { items: [], total: 0, page: safePage, pageSize: PAGE_SIZE };
+      return {
+        entries: [],
+        total: 0,
+        page: safePage,
+        pageSize: PAGE_SIZE,
+        nextCursor: null,
+      };
     }
 
+    // Added after `getCount()`, so `total` stays the whole gated list. A row
+    // value comparison matches the two-column `ORDER BY` exactly, ties on
+    // `created_at` included. The cursor's row itself need not exist any more:
+    // an unfollowed row still names a position.
+    if (cursorPosition) {
+      pageQuery.andWhere(
+        '("sf"."created_at", "sf"."id") < (CAST(:cursorFollowedAt AS timestamptz), CAST(:cursorFollowId AS uuid))',
+        {
+          cursorFollowedAt: cursorPosition.followedAt,
+          cursorFollowId: cursorPosition.followId,
+        },
+      );
+    }
     const pageRows = await pageQuery
       .select('sf.subprofileId', 'subprofileId')
       .addSelect('sf.createdAt', 'followedAt')
+      .addSelect('sf.id', 'followId')
+      .addSelect(FOLLOWING_CURSOR_TIMESTAMP_SQL, 'cursorFollowedAt')
       .orderBy('sf.createdAt', 'DESC')
       .addOrderBy('sf.id', 'DESC')
-      .offset((safePage - 1) * PAGE_SIZE)
-      .limit(PAGE_SIZE)
-      .getRawMany<{ subprofileId: string; followedAt: Date }>();
+      .offset(cursorPosition ? 0 : (safePage - 1) * PAGE_SIZE)
+      .limit(PAGE_SIZE + 1)
+      .getRawMany<{
+        subprofileId: string;
+        followedAt: Date;
+        followId: string;
+        cursorFollowedAt: string;
+      }>();
 
-    const personaIds = pageRows.map((row) => row.subprofileId);
-    if (!personaIds.length) {
-      return { items: [], total, page: safePage, pageSize: PAGE_SIZE };
-    }
+    const hasMoreRows = pageRows.length > PAGE_SIZE;
+    const visibleRows = pageRows.slice(0, PAGE_SIZE);
+    const lastRow = visibleRows[visibleRows.length - 1];
+    const nextCursor =
+      hasMoreRows && lastRow
+        ? encodeFollowingCursor({
+            followedAt: lastRow.cursorFollowedAt,
+            followId: lastRow.followId,
+          })
+        : null;
 
-    const [personas, followerCounts] = await Promise.all([
-      this.subprofiles.find({ where: { id: In(personaIds) } }),
-      this.loadFollowerCountsFor(personaIds),
-    ]);
-    const personaById = new Map(
-      personas.map((persona) => [persona.id, persona]),
-    );
-
-    // Only a LINKED persona's address needs its creator's profile slug, and
-    // only a linked persona may disclose one, so the lookup is narrowed to
-    // those owners before it runs: an unlinked persona's owner is never
-    // resolved here at all, which is the cheapest way to keep a pseudonymous
-    // persona pseudonymous.
-    const linkedOwnerIds = personas
-      .filter(
-        (persona) => persona.linkVisibility === SubprofileLinkVisibility.Linked,
-      )
-      .map((persona) => persona.userId);
-    const ownerProfiles = linkedOwnerIds.length
-      ? await this.profiles.find({ where: { userId: In(linkedOwnerIds) } })
-      : [];
-    const ownerSlugByUserId = new Map(
-      ownerProfiles.map((profile) => [profile.userId, profile.slug]),
-    );
-    // The name parts ride along on the read that already resolves `ownerSlug`,
-    // for the row's "Owner Name | Dancer" title on a persona still named after
-    // its profession — composed exactly as the directory card's does. An owner
-    // with both parts blank composes to "", normalised to null so the persona
-    // keeps its bare name rather than titling as " | Dancer".
-    const ownerNameByUserId = new Map(
-      ownerProfiles.map((profile) => [
-        profile.userId,
-        `${profile.firstName} ${profile.lastName}`.trim() || null,
-      ]),
-    );
-
-    const items = pageRows.flatMap<FollowedPersonaView>((row) => {
-      const persona = personaById.get(row.subprofileId);
-      if (!persona) return [];
-      const isLinked =
-        persona.linkVisibility === SubprofileLinkVisibility.Linked;
-      return [
-        {
-          id: persona.id,
-          displayName: persona.displayName,
-          kind: persona.kind,
-          tagline: persona.tagline,
-          // Through `toImageUrl`, like every other persona mapper: the column
-          // holds a storage KEY for an uploaded avatar, and shipping it raw
-          // renders as a broken relative image — the row fell back to initials
-          // while the directory card, which resolves the key, showed the face.
-          avatarUrl: toImageUrl(persona.avatarUrl),
-          accent: persona.accent,
-          slug: persona.slug,
-          // Every persona is addressed by its handle (`/p/<handle>`). A linked
-          // persona is addressed by its handle when it has one; `ownerSlug`
-          // below stays for the nested fallback while it has none yet.
-          handle: persona.handle,
-          linkVisibility: persona.linkVisibility,
-          ownerSlug: isLinked
-            ? (ownerSlugByUserId.get(persona.userId) ?? null)
-            : null,
-          ownerName: isLinked
-            ? (ownerNameByUserId.get(persona.userId) ?? null)
-            : null,
-          followerCount: followerCounts.get(persona.id) ?? 0,
-          followedAt: row.followedAt,
-        },
-      ];
-    });
-
-    return { items, total, page: safePage, pageSize: PAGE_SIZE };
+    return {
+      entries: visibleRows.map((row) => ({
+        subprofileId: row.subprofileId,
+        followedAt: row.followedAt,
+      })),
+      total,
+      page: safePage,
+      pageSize: PAGE_SIZE,
+      nextCursor,
+    };
   }
 
   // Batches the follower COUNT for many personas into ONE query (mirrors

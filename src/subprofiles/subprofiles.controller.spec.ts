@@ -5,6 +5,7 @@ import {
   PATH_METADATA,
 } from '@nestjs/common/constants';
 import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
 import {
   ACCOUNT_RESTRICTED_CODE,
   NotRestrictedGuard,
@@ -133,6 +134,7 @@ describe('SubprofilesController.update restriction gate (M3, fix round 2)', () =
     };
     const controller = new SubprofilesController(
       subprofilesService as never,
+      {} as never,
       {} as never,
       {} as never,
     );
@@ -322,6 +324,7 @@ describe('SubprofilesController replace-all PUTs pass expectedEditVersion (ENG-4
       subprofilesService as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     return { controller, subprofilesService };
   }
@@ -401,6 +404,7 @@ describe('SubprofilesController.listFlashDayEventOptions', () => {
       subprofilesService as never,
       {} as never,
       {} as never,
+      {} as never,
     );
 
     await expect(
@@ -426,5 +430,51 @@ describe('SubprofilesController.listFlashDayEventOptions', () => {
     expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
       RequestMethod.GET,
     );
+  });
+});
+
+describe('SubprofilesController persona wall route', () => {
+  it('reads the wall for the caller', async () => {
+    const wallAnswer = { items: [{ id: 'sp1' }] };
+    const personaWall = {
+      publicWall: jest.fn().mockResolvedValue(wallAnswer),
+    };
+    const controller = new SubprofilesController(
+      {} as never,
+      {} as never,
+      {} as never,
+      personaWall as never,
+    );
+
+    await expect(
+      controller.wall({ userId: 'u1' } as CurrentUserData),
+    ).resolves.toBe(wallAnswer);
+    expect(personaWall.publicWall).toHaveBeenCalledWith('u1');
+  });
+
+  it('declares the wall route before the :id route', () => {
+    const declarationOrder = Object.getOwnPropertyNames(
+      SubprofilesController.prototype,
+    );
+
+    expect(declarationOrder.indexOf('wall')).toBeGreaterThanOrEqual(0);
+    expect(declarationOrder.indexOf('wall')).toBeLessThan(
+      declarationOrder.indexOf('getOne'),
+    );
+  });
+
+  it('serves the wall at GET wall with no public marker', () => {
+    const handler = (
+      SubprofilesController.prototype as unknown as Record<
+        'wall',
+        () => unknown
+      >
+    ).wall;
+
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe('wall');
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.GET,
+    );
+    expect(Reflect.getMetadata(IS_PUBLIC_KEY, handler)).toBeUndefined();
   });
 });

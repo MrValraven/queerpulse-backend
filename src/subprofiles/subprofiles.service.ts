@@ -138,8 +138,10 @@ import {
   sortByMemberPosition,
   toSubprofileDTO,
 } from './subprofile-response';
-import { Paginated } from '../common/pagination';
-import { FollowedPersonaView } from './subprofile-following-response';
+import {
+  FollowedPersonaPage,
+  FollowedPersonaView,
+} from './subprofile-following-response';
 import { MemberView } from './subprofile-invite-response';
 import {
   SUBPROFILE_DELETED,
@@ -2754,13 +2756,61 @@ export class SubprofilesService {
     return this.followersService.listFollowers(viewerId, id, page, limit);
   }
 
-  // The viewer's OWN following list — every persona they follow that is still
-  // publicly readable to them (PRD-208).
-  listFollowedPersonas(
+  // The viewer's OWN following list: every persona they follow that is still
+  // publicly readable to them (PRD-208), each drawn as the directory's card.
+  //
+  // Orchestrated here because it needs both halves and neither may call the
+  // other: the followers service owns the gated, block-filtered page query, and
+  // the public-read service owns the card, but the public-read service already
+  // injects the followers service, so the followers service reaching back
+  // would be a circular provider. The page query picks WHICH personas and in
+  // what order; the card rows are then loaded by id and decorated through the
+  // directory's own `buildCardsFor`, so this list and the directory cannot
+  // disagree about a card.
+  async listFollowedPersonas(
     viewerId: string,
     page?: number,
-  ): Promise<Paginated<FollowedPersonaView>> {
-    return this.followersService.listFollowedPersonas(viewerId, page);
+    before?: string,
+  ): Promise<FollowedPersonaPage> {
+    const followedPage = await this.followersService.listFollowedPersonaPage(
+      viewerId,
+      page,
+      before,
+    );
+    const { entries, ...pageEnvelope } = followedPage;
+    const cardRows = await this.publicRead.loadCardRowsFor(
+      entries.map((entry) => entry.subprofileId),
+    );
+    const cardRowById = new Map(cardRows.map((row) => [row.id, row]));
+    // Back into follow order, dropping an id whose row vanished between the
+    // page query and this load (a persona hard-deleted in that window).
+    const orderedFollows = entries.flatMap((entry) => {
+      const row = cardRowById.get(entry.subprofileId);
+      return row ? [{ row, followedAt: entry.followedAt }] : [];
+    });
+    // `buildCardsFor` returns one card per row in input order, so card `index`
+    // belongs to `orderedFollows[index]`.
+    const cards = await this.publicRead.buildCardsFor(
+      orderedFollows.map((follow) => follow.row),
+      viewerId,
+    );
+    const items = orderedFollows.flatMap<FollowedPersonaView>(
+      (follow, index) => {
+        const card = cards[index];
+        if (!card) return [];
+        return [
+          {
+            ...card,
+            // The card ships `''` for a persona with no handle yet; this list
+            // has always shipped `null`, which is what the client's address
+            // fallback and the Studio's followed-artists list test for.
+            handle: follow.row.handle,
+            followedAt: follow.followedAt,
+          },
+        ];
+      },
+    );
+    return { ...pageEnvelope, items };
   }
 
   // ---- internals -----------------------------------------------------------

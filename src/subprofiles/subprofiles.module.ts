@@ -15,6 +15,8 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
+import { PersonaWallPick } from './entities/persona-wall-pick.entity';
+import { PersonaWallSettings } from './entities/persona-wall-settings.entity';
 import { Subprofile } from './entities/subprofile.entity';
 import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
@@ -25,6 +27,8 @@ import { SubprofileItem } from './entities/subprofile-item.entity';
 import { SubprofileItemRevision } from './entities/subprofile-item-revision.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
+import { AdminPersonaWallController } from './admin-persona-wall.controller';
+import { PersonaWallService } from './persona-wall.service';
 import {
   ProfileSubprofilesController,
   SubprofilesController,
@@ -55,6 +59,10 @@ import { SubprofilesService } from './subprofiles.service';
       SubprofileItemRevision,
       SubprofileMember,
       SubprofileSocialLink,
+      // The People Directory persona wall: the admin picks and the one-row
+      // fill-order setting.
+      PersonaWallPick,
+      PersonaWallSettings,
       Event,
       Community,
       // Read-only: "Part of" eligibility (`SubprofileAffiliationEligibilityService`)
@@ -107,6 +115,8 @@ import { SubprofilesService } from './subprofiles.service';
     // Protect Your Work (revision history), Task 8: list/get/restore an
     // item's saved revisions.
     SubprofileItemRevisionsController,
+    // Admin-only curation of the People Directory persona wall.
+    AdminPersonaWallController,
   ],
   providers: [
     SubprofilesService,
@@ -117,6 +127,8 @@ import { SubprofilesService } from './subprofiles.service';
     SubprofileCreditGraphService,
     // "Made together" strip, on top of the credit graph.
     SubprofileMadeTogetherService,
+    // The People Directory persona wall: admin writes and the public read.
+    PersonaWallService,
     SubprofilePublicReadService,
     SubprofileEndorsementsService,
     SubprofileFollowersService,

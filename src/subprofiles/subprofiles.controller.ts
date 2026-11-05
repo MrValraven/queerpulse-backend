@@ -40,6 +40,7 @@ import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofileVisibility } from './entities/subprofile.entity';
 import { SubprofileInvitesService } from './subprofile-invites.service';
+import { PersonaWallService } from './persona-wall.service';
 import { SubprofileMadeTogetherService } from './subprofile-made-together.service';
 import { SubprofilesService } from './subprofiles.service';
 import {
@@ -98,6 +99,7 @@ export class SubprofilesController {
     private readonly subprofilesService: SubprofilesService,
     private readonly subprofileInvitesService: SubprofileInvitesService,
     private readonly madeTogetherService: SubprofileMadeTogetherService,
+    private readonly personaWall: PersonaWallService,
   ) {}
 
   // --- literal routes first, so 'mine'/'directory'/'by-handle' are never
@@ -192,6 +194,27 @@ export class SubprofilesController {
     return this.madeTogetherService.list(user.userId, query.limit);
   }
 
+  // The persona wall on the People Directory hero: the admin picks first, then
+  // the fill order, 0 to 9 directory cards. A literal route, so it sits up
+  // here with `directory` and is never swallowed by the `:id` param route
+  // below. Members only (the class-level `ActiveMemberGuard`, no `@Public()`),
+  // viewer-dependent because blocks change what a viewer may see, so it
+  // carries no shared cache interceptor.
+  @Get('wall')
+  @ApiOperation({ summary: 'The persona wall on the People Directory hero' })
+  @ApiOkResponse({
+    description:
+      '`{ items }`: up to 9 directory cards in wall order, the admin picks ' +
+      'first and then the fill order. Each card passes the same visibility ' +
+      'rules as the directory for this viewer.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  wall(@CurrentUser() user: CurrentUserData) {
+    return this.personaWall.publicWall(user.userId);
+  }
+
   // The viewer's OWN following list (PRD-208). A literal route, so it sits up
   // here with `mine`/`directory` and is never swallowed by the `:id` param
   // route further down. Reads only the caller's own follows: there is no
@@ -199,9 +222,23 @@ export class SubprofilesController {
   // member follows is theirs alone (the owner-facing `:id/followers` list is
   // the separate, co-owner-gated view of the same table).
   @Get('following')
-  @ApiOperation({ summary: 'List the personas the current member follows' })
+  @ApiOperation({
+    summary: 'List the personas the current member follows',
+    description:
+      'Each row is the directory portrait card plus `followedAt`. Page with ' +
+      "`page` (offset) or with `before`, the previous page's `nextCursor`; " +
+      'under a cursor `page` is ignored, and unfollowing in place never ' +
+      'makes the next page skip a persona.',
+  })
   @ApiOkResponse({
-    description: 'One page of followed personas, newest follow first.',
+    description:
+      'One page of followed personas, newest follow first: `items`, `total` ' +
+      '(the full visible count), `page`, `pageSize` and `nextCursor` (the ' +
+      '`before` value for the next page, null when nothing follows).',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'FOLLOWING_CURSOR_INVALID: the `before` cursor is not one this server issued.',
   })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
@@ -213,6 +250,7 @@ export class SubprofilesController {
     return this.subprofilesService.listFollowedPersonas(
       user.userId,
       query.page,
+      query.before,
     );
   }
 

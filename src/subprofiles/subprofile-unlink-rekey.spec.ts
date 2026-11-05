@@ -3,6 +3,7 @@ import {
   carryIdentityBlocksToPersona,
   issueFreshPersonaId,
 } from './subprofile-unlink-rekey';
+import { FORGET_PERSONA_WALL_PICK_SQL } from './persona-wall-unlink';
 import {
   UNLINK_KEEP_TRACKS_SQL,
   UNLINK_PAYMENT_METHODS_DELETE_SQL,
@@ -434,6 +435,20 @@ describe('issueFreshPersonaId', () => {
     expect(quotaIndex).toBeGreaterThan(-1);
     expect(teamIndex).toBeGreaterThan(quotaIndex);
     expect(rekeyCalls()[teamIndex]?.[1]).toEqual([freshId]);
+  });
+
+  it('deletes the wall pick of the persona once its row has moved', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const moveIndex = rekeyCalls().findIndex(([sql]) =>
+      sql.startsWith('UPDATE "subprofiles" SET "id"'),
+    );
+    const wallIndex = rekeyCalls().findIndex(
+      ([sql]) => sql === FORGET_PERSONA_WALL_PICK_SQL,
+    );
+    expect(moveIndex).toBeGreaterThan(-1);
+    expect(wallIndex).toBeGreaterThan(moveIndex);
+    expect(rekeyCalls()[wallIndex]?.[1]).toEqual([freshId]);
   });
 
   // Studio purchases (contract 4.7): the payment methods, prices and pending

@@ -46,7 +46,14 @@ import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
-import { SubprofilePublicReadService } from './subprofile-public-read.service';
+import {
+  DIRECTORY_FOLLOWER_COUNT_SQL,
+  PERSONA_WALL_DAILY_SHUFFLE_SQL,
+  PERSONA_WALL_ENDORSEMENT_COUNT_SQL,
+  PERSONA_WALL_HAS_PHOTO_SQL,
+  SubprofilePublicReadService,
+} from './subprofile-public-read.service';
+import type { PersonaWallFillOrder } from './persona-wall.constants';
 import { restrictedAccessBody } from './subprofile-response';
 
 // --- fixtures ---------------------------------------------------------------
@@ -863,6 +870,375 @@ describe('SubprofilePublicReadService', () => {
 
       expect(result.items).toHaveLength(1);
       expect(result.items[0]!.credits).toEqual({ count: 0, faces: [] });
+    });
+  });
+
+  // --- persona wall --------------------------------------------------------
+
+  describe('directory follower count', () => {
+    it('sorts sort=followed by the shared follower count SQL', async () => {
+      const queryBuilder = makeSubprofilesQueryBuilderStub([
+        makeSubprofile({ id: 'sp-a' }),
+      ]);
+      subprofiles.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.directory({ sort: 'followed' }, 'viewer-1');
+
+      const rankSelect = queryBuilder.addSelect.mock.calls.find(
+        (call) => call[1] === 'follower_rank',
+      );
+      expect(rankSelect).toBeDefined();
+      expect(rankSelect![0]).toBe(DIRECTORY_FOLLOWER_COUNT_SQL);
+    });
+  });
+
+  describe('listWallCards', () => {
+    const baseRequest = {
+      fillOrder: 'endorsed',
+      viewerId: 'viewer-1',
+      wallDay: '2026-11-05',
+    } as const;
+
+    // The wall runs the pick query first and the fill query second, each on a
+    // fresh builder from the repository.
+    function stubPickAndFillQueries(
+      pickRows: Subprofile[],
+      fillRows: Subprofile[],
+    ): {
+      pickQueryBuilder: DirectoryQueryBuilderStub;
+      fillQueryBuilder: DirectoryQueryBuilderStub;
+    } {
+      const pickQueryBuilder = makeSubprofilesQueryBuilderStub(pickRows);
+      const fillQueryBuilder = makeSubprofilesQueryBuilderStub(fillRows);
+      subprofiles.createQueryBuilder
+        .mockReturnValueOnce(pickQueryBuilder)
+        .mockReturnValueOnce(fillQueryBuilder);
+      return { pickQueryBuilder, fillQueryBuilder };
+    }
+
+    // An empty pick list runs the fill query alone.
+    function stubFillQueryOnly(
+      fillRows: Subprofile[],
+    ): DirectoryQueryBuilderStub {
+      const fillQueryBuilder = makeSubprofilesQueryBuilderStub(fillRows);
+      subprofiles.createQueryBuilder.mockReturnValueOnce(fillQueryBuilder);
+      return fillQueryBuilder;
+    }
+
+    it('filters the picks through the directory base query with the viewer and keeps their order', async () => {
+      const { pickQueryBuilder } = stubPickAndFillQueries(
+        [makeSubprofile({ id: 'sp-a' }), makeSubprofile({ id: 'sp-b' })],
+        [makeSubprofile({ id: 'sp-f1' })],
+      );
+
+      const cards = await service.listWallCards({
+        ...baseRequest,
+        pickedSubprofileIds: ['sp-b', 'sp-a'],
+      });
+
+      expect(cards.map(({ card }) => card.id)).toEqual([
+        'sp-b',
+        'sp-a',
+        'sp-f1',
+      ]);
+      expect(
+        cards.slice(0, 2).every(({ wallSource }) => wallSource === 'picked'),
+      ).toBe(true);
+      expect(cards[2]!.wallSource).toBe('filled');
+      expect(pickQueryBuilder.where).toHaveBeenCalledWith(
+        'sp.status = :published',
+        { published: SubprofileStatus.Published },
+      );
+      expect(pickQueryBuilder.select).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          'sp.id',
+          'sp.avatarUrl',
+          'sp.coverUrl',
+          'sp.userId',
+        ]),
+      );
+      expect(pickQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'sp.id IN (:...wallPickIds)',
+        { wallPickIds: ['sp-b', 'sp-a'] },
+      );
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        pickQueryBuilder,
+        'viewer-1',
+        '"sp"."user_id"',
+      );
+    });
+
+    it('skips a pick the base query drops and tops the wall up from the fill, excluding every pick', async () => {
+      const { fillQueryBuilder } = stubPickAndFillQueries(
+        [makeSubprofile({ id: 'sp-a' }), makeSubprofile({ id: 'sp-c' })],
+        [makeSubprofile({ id: 'sp-f1' })],
+      );
+
+      const cards = await service.listWallCards({
+        ...baseRequest,
+        pickedSubprofileIds: ['sp-a', 'sp-b', 'sp-c'],
+      });
+
+      expect(cards.map(({ card }) => card.id)).toEqual([
+        'sp-a',
+        'sp-c',
+        'sp-f1',
+      ]);
+      expect(fillQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'sp.id NOT IN (:...wallExcludedIds)',
+        { wallExcludedIds: ['sp-a', 'sp-b', 'sp-c'] },
+      );
+      expect(fillQueryBuilder.limit).toHaveBeenCalledWith(7);
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        fillQueryBuilder,
+        'viewer-1',
+        '"sp"."user_id"',
+      );
+    });
+
+    it('runs no fill query when nine picks show', async () => {
+      const pickIds = Array.from(
+        { length: 9 },
+        (_unused, index) => `sp-${index + 1}`,
+      );
+      const pickQueryBuilder = makeSubprofilesQueryBuilderStub(
+        pickIds.map((pickId) => makeSubprofile({ id: pickId })),
+      );
+      subprofiles.createQueryBuilder.mockReturnValueOnce(pickQueryBuilder);
+
+      const cards = await service.listWallCards({
+        ...baseRequest,
+        pickedSubprofileIds: pickIds,
+      });
+
+      expect(subprofiles.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(pickQueryBuilder.limit).not.toHaveBeenCalled();
+      expect(cards.map(({ card }) => card.id)).toEqual(pickIds);
+      expect(cards.every(({ wallSource }) => wallSource === 'picked')).toBe(
+        true,
+      );
+    });
+
+    it('runs no pick query and fills nine when nothing is picked', async () => {
+      const fillQueryBuilder = stubFillQueryOnly([
+        makeSubprofile({ id: 'sp-f1' }),
+        makeSubprofile({ id: 'sp-f2' }),
+      ]);
+
+      const cards = await service.listWallCards({
+        ...baseRequest,
+        pickedSubprofileIds: [],
+      });
+
+      expect(subprofiles.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(fillQueryBuilder.limit).toHaveBeenCalledWith(9);
+      const filterClauses = fillQueryBuilder.andWhere.mock.calls.map(
+        (call) => call[0],
+      );
+      expect(filterClauses.some((clause) => clause.includes('NOT IN'))).toBe(
+        false,
+      );
+      expect(
+        filterClauses.some((clause) => clause.includes('wallPickIds')),
+      ).toBe(false);
+      expect(cards.every(({ wallSource }) => wallSource === 'filled')).toBe(
+        true,
+      );
+    });
+
+    it.each([
+      ['endorsed', PERSONA_WALL_ENDORSEMENT_COUNT_SQL, 'DESC'],
+      ['followed', DIRECTORY_FOLLOWER_COUNT_SQL, 'DESC'],
+      ['daily_shuffle', PERSONA_WALL_DAILY_SHUFFLE_SQL, 'ASC'],
+    ] as const)(
+      'orders a %s fill by photo, then its rank, then name and id',
+      async (fillOrder, rankSql, direction) => {
+        const fillQueryBuilder = stubFillQueryOnly([]);
+
+        await service.listWallCards({
+          ...baseRequest,
+          fillOrder,
+          pickedSubprofileIds: [],
+        });
+
+        expect(fillQueryBuilder.addSelect).toHaveBeenCalledWith(
+          PERSONA_WALL_HAS_PHOTO_SQL,
+          'wall_photo_rank',
+        );
+        expect(fillQueryBuilder.addSelect).toHaveBeenCalledWith(
+          rankSql,
+          'wall_fill_rank',
+        );
+        expect(fillQueryBuilder.orderBy).toHaveBeenCalledWith(
+          'wall_photo_rank',
+          'DESC',
+        );
+        expect(fillQueryBuilder.addOrderBy.mock.calls).toEqual([
+          ['wall_fill_rank', direction],
+          ['sp.displayName', 'ASC'],
+          ['sp.id', 'ASC'],
+        ]);
+      },
+    );
+
+    it('orders a newest fill by photo, then creation time, then name and id', async () => {
+      const fillQueryBuilder = stubFillQueryOnly([]);
+
+      await service.listWallCards({
+        ...baseRequest,
+        fillOrder: 'newest',
+        pickedSubprofileIds: [],
+      });
+
+      expect(fillQueryBuilder.orderBy).toHaveBeenCalledWith(
+        'wall_photo_rank',
+        'DESC',
+      );
+      expect(fillQueryBuilder.addOrderBy.mock.calls).toEqual([
+        ['sp.createdAt', 'DESC'],
+        ['sp.displayName', 'ASC'],
+        ['sp.id', 'ASC'],
+      ]);
+      expect(
+        fillQueryBuilder.addSelect.mock.calls.some(
+          (call) => call[1] === 'wall_fill_rank',
+        ),
+      ).toBe(false);
+    });
+
+    it('binds the Lisbon day for the daily shuffle', async () => {
+      const fillQueryBuilder = stubFillQueryOnly([]);
+
+      await service.listWallCards({
+        ...baseRequest,
+        fillOrder: 'daily_shuffle',
+        pickedSubprofileIds: [],
+      });
+
+      expect(fillQueryBuilder.setParameter).toHaveBeenCalledWith(
+        'wallDay',
+        '2026-11-05',
+      );
+    });
+
+    it('treats an empty image column as no photo', () => {
+      expect(PERSONA_WALL_HAS_PHOTO_SQL).toContain(
+        `NULLIF("sp"."avatar_url", '')`,
+      );
+      expect(PERSONA_WALL_HAS_PHOTO_SQL).toContain(
+        `NULLIF("sp"."cover_url", '')`,
+      );
+    });
+
+    it('counts only active endorsements', () => {
+      expect(PERSONA_WALL_ENDORSEMENT_COUNT_SQL).toContain(
+        '"endorsement"."withdrawn_at" IS NULL',
+      );
+    });
+
+    it('ranks by persona columns and persona counts only', async () => {
+      const fillOrders: PersonaWallFillOrder[] = [
+        'endorsed',
+        'followed',
+        'newest',
+        'daily_shuffle',
+      ];
+      const sqlFragments: string[] = [];
+      for (const fillOrder of fillOrders) {
+        const fillQueryBuilder = stubFillQueryOnly([]);
+        await service.listWallCards({
+          ...baseRequest,
+          fillOrder,
+          pickedSubprofileIds: [],
+        });
+        sqlFragments.push(
+          ...fillQueryBuilder.addSelect.mock.calls.map((call) => call[0]),
+          ...fillQueryBuilder.orderBy.mock.calls.map((call) => call[0]),
+          ...fillQueryBuilder.addOrderBy.mock.calls.map((call) => call[0]),
+        );
+      }
+      const everySqlFragment = sqlFragments.join(' ');
+
+      expect(everySqlFragment).not.toMatch(/vouch|"profiles"|"users"|owner/i);
+    });
+
+    it('draws picks and fill as one batch of directory cards', async () => {
+      stubPickAndFillQueries(
+        [makeSubprofile({ id: 'sp-a' }), makeSubprofile({ id: 'sp-b' })],
+        [makeSubprofile({ id: 'sp-f1' })],
+      );
+
+      await service.listWallCards({
+        ...baseRequest,
+        pickedSubprofileIds: ['sp-b', 'sp-a'],
+      });
+
+      expect(followersService.loadFollowerCountsFor).toHaveBeenCalledTimes(1);
+      expect(followersService.loadFollowerCountsFor).toHaveBeenCalledWith([
+        'sp-b',
+        'sp-a',
+        'sp-f1',
+      ]);
+    });
+
+    it('applies no block filter and reads cards as nobody when no viewer is given', async () => {
+      const { pickQueryBuilder } = stubPickAndFillQueries(
+        [makeSubprofile({ id: 'sp-a' })],
+        [makeSubprofile({ id: 'sp-f1' })],
+      );
+
+      await service.listWallCards({
+        ...baseRequest,
+        viewerId: null,
+        pickedSubprofileIds: ['sp-a'],
+      });
+
+      expect(blockFilter.excludeBlocked).not.toHaveBeenCalled();
+      expect(followersService.viewerFollowingFor).toHaveBeenCalledWith(
+        '00000000-0000-0000-0000-000000000000',
+        expect.any(Array),
+      );
+      expect(pickQueryBuilder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"content_moderation"'),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('searchWallPersonas', () => {
+    it('searches the directory haystack over the base set with no block filter and persona columns only', async () => {
+      const personaRows = [makeSubprofile({ id: 'sp-a', displayName: 'Ana' })];
+      const queryBuilder = makeSubprofilesQueryBuilderStub(personaRows);
+      subprofiles.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      const result = await service.searchWallPersonas('ana', 20);
+
+      expect(result).toEqual(personaRows);
+      expect(queryBuilder.leftJoin).toHaveBeenCalledWith(
+        Profile,
+        'owner',
+        'owner.userId = sp.userId',
+      );
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('sp.linkVisibility = :linkedForSearch'),
+        expect.objectContaining({ term: '%ana%' }),
+      );
+      expect(queryBuilder.select).toHaveBeenCalledWith([
+        'sp.id',
+        'sp.handle',
+        'sp.displayName',
+        'sp.kind',
+        'sp.avatarUrl',
+        'sp.coverUrl',
+        'sp.accent',
+      ]);
+      expect(blockFilter.excludeBlocked).not.toHaveBeenCalled();
+      expect(queryBuilder.orderBy).toHaveBeenCalledWith(
+        'sp.displayName',
+        'ASC',
+      );
+      expect(queryBuilder.addOrderBy).toHaveBeenCalledWith('sp.id', 'ASC');
+      expect(queryBuilder.limit).toHaveBeenCalledWith(20);
     });
   });
 
