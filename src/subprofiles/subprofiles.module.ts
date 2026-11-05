@@ -14,6 +14,7 @@ import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { StorageModule } from '../storage/storage.module';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UsersModule } from '../users/users.module';
 import { PersonaWallPick } from './entities/persona-wall-pick.entity';
 import { PersonaWallSettings } from './entities/persona-wall-settings.entity';
@@ -73,6 +74,9 @@ import { SubprofilesService } from './subprofiles.service';
       EventLineupEntry,
       EventRsvp,
       Handle,
+      // Read-only: `RolesOrStaffGuard` on `AdminPersonaWallController` injects
+      // this repository, so the module that mounts the controller registers it.
+      UserStaffRole,
     ]),
     // Exports the `Profile` repository (used to resolve an owner slug → user).
     UsersModule,
