@@ -65,8 +65,11 @@ export const STUDIO_ARTIST_PERSONA_KINDS = Object.keys(
   STUDIO_FORMAT_BY_KIND,
 ) as readonly StudioArtistPersonaKind[];
 
-/** What a persona kind changed outside the artist kinds reads as on the
- *  wire (the v1 rule); the API itself never changes a persona's kind. */
+/** What a persona kind outside the artist kinds reads as on the wire (the
+ *  v1 rule). `POST /subprofiles/:id/kind` (`persona-kind-change.ts`) refuses
+ *  a switch that changes the Studio format while the persona holds a
+ *  release, so this fallback only covers a row whose kind changed outside
+ *  that endpoint. */
 export const STUDIO_FALLBACK_ARTIST_PERSONA_KIND: StudioArtistPersonaKind =
   'musician';
 

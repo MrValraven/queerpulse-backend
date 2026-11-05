@@ -41,4 +41,46 @@ describe('HttpMetricsMiddleware', () => {
     );
     expect(next).toHaveBeenCalledTimes(2);
   });
+
+  it('skips a leads request', () => {
+    const metrics = { observeHttpRequest: jest.fn() };
+    const middleware = new HttpMetricsMiddleware(metrics as never);
+    const next = jest.fn();
+    const listeners: Record<string, () => void> = {};
+    const response = {
+      statusCode: 200,
+      on: (name: string, listener: () => void) => {
+        listeners[name] = listener;
+      },
+    };
+    middleware.use(
+      { originalUrl: '/v1/admin/leads?q=ana', method: 'GET' } as never,
+      response as never,
+      next,
+    );
+    expect(listeners.finish).toBeUndefined();
+    expect(metrics.observeHttpRequest).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a VJ request', () => {
+    const metrics = { observeHttpRequest: jest.fn() };
+    const middleware = new HttpMetricsMiddleware(metrics as never);
+    const next = jest.fn();
+    const listeners: Record<string, () => void> = {};
+    const response = {
+      statusCode: 200,
+      on: (name: string, listener: () => void) => {
+        listeners[name] = listener;
+      },
+    };
+    middleware.use(
+      { originalUrl: '/v1/admin/vj/packs', method: 'GET' } as never,
+      response as never,
+      next,
+    );
+    expect(listeners.finish).toBeUndefined();
+    expect(metrics.observeHttpRequest).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(1);
+  });
 });

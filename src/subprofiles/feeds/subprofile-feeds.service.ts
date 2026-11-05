@@ -541,6 +541,17 @@ export class SubprofileFeedsService {
     mode: FeedSyncMode,
     now: Date = new Date(),
   ): Promise<{ newEntryCount: number; newPendingCount: number }> {
+    // A persona that changed type may no longer have this feed's section, and
+    // no member can see or disconnect the feed then. Skip it quietly (no
+    // fetch, insert or bell) but keep the feed, so syncing resumes on a switch
+    // back. The check is pushed out so a dormant feed never crowds the sweep.
+    if (mode.kind === 'scheduled' && !(await this.isSectionOpenForKind(feed))) {
+      await this.feeds.update(
+        { id: feed.id },
+        { nextCheckAt: nextCheckAfterSuccess(now) },
+      );
+      return { newEntryCount: 0, newPendingCount: 0 };
+    }
     const validators: ConditionalValidators = {
       etag: feed.etag,
       lastModified: feed.lastModified,
@@ -803,6 +814,16 @@ export class SubprofileFeedsService {
     return persona?.linkVisibility === SubprofileLinkVisibility.Unlinked
       ? subprofileId
       : null;
+  }
+
+  /** Whether the persona's current kind still has the feed's section. A
+   *  persona that cannot be read counts as open, so the sync behaves as before. */
+  private async isSectionOpenForKind(feed: SubprofileFeed): Promise<boolean> {
+    const persona = await this.subprofiles.findOne({
+      where: { id: feed.subprofileId },
+      select: { id: true, kind: true },
+    });
+    return !persona || isSectionAllowed(persona.kind, feed.section);
   }
 
   /** The feed's creator, when a scheduled sync may act as them: still a

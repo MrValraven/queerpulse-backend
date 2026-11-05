@@ -28,6 +28,11 @@ import {
   toMadeTogetherView,
 } from './subprofile-credits-response';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
+import {
+  VISIBLE_SECTIONS_BY_KIND_JSON,
+  VISIBLE_SECTIONS_PARAMETER,
+  visibleSectionSql,
+} from './subprofile-visible-sections-sql';
 import { TATTOO_BODY_PHOTO_SECTIONS } from './tattoo-artist-vocab';
 
 /** How many of the newest qualifying credited items one request scans. */
@@ -125,6 +130,9 @@ export class SubprofileMadeTogetherService {
       .where("item.collaborators <> '{}'")
       .andWhere('item.section NOT IN (:...excludedSections)', {
         excludedSections: EXCLUDED_SECTIONS,
+      })
+      .andWhere(visibleSectionSql('"item"."section"', '"sp"."kind"'), {
+        [VISIBLE_SECTIONS_PARAMETER]: VISIBLE_SECTIONS_BY_KIND_JSON,
       })
       .andWhere('sp.status = :published', {
         published: SubprofileStatus.Published,

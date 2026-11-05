@@ -16,6 +16,10 @@ import {
   type TableVibe,
 } from './subprofile-table-summary';
 import { AVAILABILITY_KEYS } from './subprofile-validation';
+import {
+  VISIBLE_SECTIONS_BY_KIND_JSON,
+  visibleSectionSql,
+} from './subprofile-visible-sections-sql';
 
 /** How many of the directory's most-used tags the sidebar is offered. */
 export const DIRECTORY_FACET_TAG_CAP = 20;
@@ -103,6 +107,26 @@ async function countByColumn<Option extends string>(
  * per tag however many of its items carry it. Postgres rejects a set-returning
  * function in `GROUP BY`, so the fan-out runs as a subquery.
  */
+export function buildTagVocabularySql(
+  scopeSql: string,
+  linksSectionPlaceholder: string,
+  visibleSectionsPlaceholder: string,
+  capPlaceholder: string,
+): string {
+  return `SELECT "tag_entry"."tag" AS "tag", COUNT(*) AS "persona_count"
+     FROM (
+       SELECT DISTINCT "tag_item"."subprofile_id", unnest("tag_item"."tags") AS "tag"
+       FROM "subprofile_items" "tag_item"
+       INNER JOIN "subprofiles" "tag_persona" ON "tag_persona"."id" = "tag_item"."subprofile_id"
+       WHERE "tag_item"."section" <> ${linksSectionPlaceholder}
+         AND ${visibleSectionSql('"tag_item"."section"', '"tag_persona"."kind"', visibleSectionsPlaceholder)}
+         AND "tag_item"."subprofile_id" IN (${scopeSql})
+     ) "tag_entry"
+     GROUP BY "tag_entry"."tag"
+     ORDER BY "persona_count" DESC, "tag_entry"."tag" ASC
+     LIMIT ${capPlaceholder}`;
+}
+
 async function loadTagVocabulary(
   sources: DirectoryFacetSources,
 ): Promise<string[]> {
@@ -111,19 +135,21 @@ async function loadTagVocabulary(
     .select('sp.id')
     .getQueryAndParameters();
   const sectionPosition = scopeParameters.length + 1;
-  const capPosition = scopeParameters.length + 2;
+  const visibleSectionsPosition = scopeParameters.length + 2;
+  const capPosition = scopeParameters.length + 3;
   const rows = await sources.manager.query<{ tag: string }[]>(
-    `SELECT "tag_entry"."tag" AS "tag", COUNT(*) AS "persona_count"
-     FROM (
-       SELECT DISTINCT "tag_item"."subprofile_id", unnest("tag_item"."tags") AS "tag"
-       FROM "subprofile_items" "tag_item"
-       WHERE "tag_item"."section" <> $${sectionPosition}
-         AND "tag_item"."subprofile_id" IN (${scopeSql})
-     ) "tag_entry"
-     GROUP BY "tag_entry"."tag"
-     ORDER BY "persona_count" DESC, "tag_entry"."tag" ASC
-     LIMIT $${capPosition}`,
-    [...scopeParameters, SubprofileSection.Links, DIRECTORY_FACET_TAG_CAP],
+    buildTagVocabularySql(
+      scopeSql,
+      `$${sectionPosition}`,
+      `$${visibleSectionsPosition}`,
+      `$${capPosition}`,
+    ),
+    [
+      ...scopeParameters,
+      SubprofileSection.Links,
+      VISIBLE_SECTIONS_BY_KIND_JSON,
+      DIRECTORY_FACET_TAG_CAP,
+    ],
   );
   return [...new Set([...rows.map((row) => row.tag), ...sources.selectedTags])];
 }

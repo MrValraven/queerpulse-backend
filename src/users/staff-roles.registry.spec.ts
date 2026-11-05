@@ -55,6 +55,12 @@ describe('staff roles registry: music_manager_producer', () => {
     expect(joinedGrants).toContain('Waiting for Studio');
   });
 
+  it('opens the leads directory', () => {
+    const joinedGrants = STAFF_ROLES.music_manager_producer.grants.join('\n');
+    expect(joinedGrants).toContain('admin/leads');
+    expect(joinedGrants).toContain('link a lead to a persona');
+  });
+
   it('accepts the new id through isStaffRoleId and isBadgedStaffRoleId', () => {
     expect(isStaffRoleId('music_manager_producer')).toBe(true);
     expect(isBadgedStaffRoleId('music_manager_producer')).toBe(true);

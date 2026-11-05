@@ -4,6 +4,8 @@ import {
   Delete,
   Get,
   Header,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -26,6 +28,7 @@ import {
 } from '../auth/guards/not-restricted.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { AnonymousPublicCacheInterceptor } from './anonymous-public-cache.interceptor';
+import { ChangeSubprofileKindDTO } from './dto/change-subprofile-kind.dto';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { EndorseDTO } from './dto/endorse.dto';
 import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
@@ -492,6 +495,36 @@ export class SubprofilesController {
     return (
       VISIBILITY_RANK[dto.visibility] > VISIBILITY_RANK[current.visibility]
     );
+  }
+
+  // Same ownership check and restricted-member refusal as a non-visibility
+  // PATCH (`update` above). Any co-owner may change the type, the same as
+  // `displayName`.
+  @Post(':id/kind')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({ summary: 'Change a subprofile’s type within its family' })
+  @ApiOkResponse({
+    description:
+      'The updated subprofile (owner-facing view), with editVersion raised by 1.',
+  })
+  @ApiForbiddenResponse({
+    description: 'The subprofile is not yours, or you are restricted.',
+  })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnprocessableEntityResponse({
+    description:
+      '`{ code, message, ...details }`: PERSONA_KIND_UNCHANGED, PERSONA_KIND_OTHER_FAMILY `{ currentFamily, requestedFamily }`, PERSONA_KIND_STUDIO_TAKEN_DOWN `{ takenDownCount }`, PERSONA_KIND_STUDIO_RELEASES `{ releaseCount, requestedHasStudio }`.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  changeKind(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ChangeSubprofileKindDTO,
+  ) {
+    return this.subprofilesService.changeKind(user.userId, id, dto.kind);
   }
 
   @Put(':id/sections/:section')

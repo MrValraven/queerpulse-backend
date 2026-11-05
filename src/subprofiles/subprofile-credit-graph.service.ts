@@ -29,6 +29,11 @@ import {
   toCardCreditsView,
 } from './subprofile-credits-response';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
+import {
+  VISIBLE_SECTIONS_BY_KIND_JSON,
+  VISIBLE_SECTIONS_PARAMETER,
+  visibleSectionSql,
+} from './subprofile-visible-sections-sql';
 
 /**
  * Safety cap on the OUTBOUND scan (the page's own credited items). A page of
@@ -267,8 +272,9 @@ export class SubprofileCreditGraphService {
    * most eight queries per page: two credited-item scans in parallel (the
    * page's own items by `item.subprofile_id IN (...)`, and other items that
    * list an unlinked row's handle via `collaborators && :handles::text[]`),
-   * then `resolveCounterparts`. A page whose rows carry no credits stops after
-   * the scans.
+   * then `resolveCounterparts`. Both scans join each item to its author and
+   * read only sections the author's current kind shows, so the query count is
+   * unchanged. A page whose rows carry no credits stops after the scans.
    */
   async loadCardCreditsFor(
     rows: readonly CreditSubject[],
@@ -346,7 +352,8 @@ export class SubprofileCreditGraphService {
   /**
    * The page's own credited items (outbound). `collaborators <> '{}'` matches
    * the partial index `IDX_subprofile_items_credited_recent`. Only the three
-   * columns the rules read are projected.
+   * columns the rules read are projected. Items in a section the author's
+   * current kind no longer shows are skipped.
    */
   private async loadOutboundItems(
     subjectIds: readonly string[],
@@ -359,10 +366,14 @@ export class SubprofileCreditGraphService {
         'item.collaborators',
         'item.createdAt',
       ])
+      .innerJoin(Subprofile, 'author', 'author.id = item.subprofileId')
       .where('item.subprofileId IN (:...subjectIds)', {
         subjectIds: [...subjectIds],
       })
       .andWhere("item.collaborators <> '{}'")
+      .andWhere(visibleSectionSql('"item"."section"', '"author"."kind"'), {
+        [VISIBLE_SECTIONS_PARAMETER]: VISIBLE_SECTIONS_BY_KIND_JSON,
+      })
       .orderBy('item.createdAt', 'DESC')
       .addOrderBy('item.id', 'ASC')
       .limit(OUTBOUND_CREDIT_SCAN_LIMIT)
@@ -372,7 +383,8 @@ export class SubprofileCreditGraphService {
 
   /**
    * Other items that list one of `inboundHandles` (inbound), newest first and
-   * capped. The handles bind as ONE text array parameter.
+   * capped. The handles bind as ONE text array parameter. Items in a section
+   * the author's current kind no longer shows are skipped.
    */
   private async loadInboundItems(
     inboundHandles: readonly string[],
@@ -385,9 +397,13 @@ export class SubprofileCreditGraphService {
         'item.collaborators',
         'item.createdAt',
       ])
+      .innerJoin(Subprofile, 'author', 'author.id = item.subprofileId')
       .where("item.collaborators <> '{}'")
       .andWhere('item.collaborators && :handles::text[]', {
         handles: [...inboundHandles],
+      })
+      .andWhere(visibleSectionSql('"item"."section"', '"author"."kind"'), {
+        [VISIBLE_SECTIONS_PARAMETER]: VISIBLE_SECTIONS_BY_KIND_JSON,
       })
       .orderBy('item.createdAt', 'DESC')
       .addOrderBy('item.id', 'ASC')

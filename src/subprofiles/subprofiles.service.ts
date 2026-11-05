@@ -46,6 +46,7 @@ import {
 } from './subprofile-affiliation-eligibility.service';
 import {
   Subprofile,
+  SubprofileKind,
   SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
@@ -80,6 +81,14 @@ import {
   type SubprofileDirectoryResponse,
 } from './subprofile-public-read.service';
 import { isSectionAllowed } from './subprofile-kinds';
+import {
+  countStudioReleasesByStatus,
+  hasStudioFormatChange,
+  personaKindChangeException,
+  personaKindRuleRejection,
+  skinDataAfterKindSwitch,
+  studioReleaseRejection,
+} from './persona-kind-change';
 import { availabilityUpdatedAtAfterSave } from './subprofile-availability-stamp';
 import { assertValidTattooSkinData } from './tattoo-skin-data-validation';
 import { availabilityAfterTattooSync } from './tattoo-books-status';
@@ -161,6 +170,7 @@ import {
   expirePendingSalesOfPersona,
 } from '../studio/studio-purchases-unlink';
 import { invalidateStudioLandingMemo } from '../studio/studio-landing-memo';
+import { isStudioArtistPersonaKind } from '../studio/studio.constants';
 import { describePlayErrorWithoutIds } from '../studio/studio-play-log';
 import {
   SUBPROFILE_PUBLISHED,
@@ -396,6 +406,34 @@ class PersonaEditConflictException extends ConflictException {
       currentEditVersion,
     });
   }
+}
+
+/** The typed code of the 400 a section write gets when the persona's type
+ * hides that section. */
+export const SECTION_NOT_IN_PERSONA_TYPE_CODE = 'SECTION_NOT_IN_PERSONA_TYPE';
+
+/** The refusal for a section write into a section the persona's current type
+ * hides. An editor opened before a type change (`changeKind` raises
+ * `edit_version`) sends the version it loaded, so a stale version gets the
+ * 409 `PERSONA_EDIT_CONFLICT` and the client's Reload flow. A current or
+ * missing version gets the coded 400. */
+function sectionNotInPersonaTypeException(
+  persona: Pick<Subprofile, 'kind' | 'editVersion'>,
+  section: string,
+  expectedEditVersion: number | undefined,
+): ConflictException | BadRequestException {
+  if (
+    expectedEditVersion !== undefined &&
+    expectedEditVersion !== persona.editVersion
+  ) {
+    return new PersonaEditConflictException(persona.editVersion);
+  }
+  return new BadRequestException({
+    code: SECTION_NOT_IN_PERSONA_TYPE_CODE,
+    message: `Section "${section}" is not valid for kind "${persona.kind}"`,
+    section,
+    kind: persona.kind,
+  });
 }
 
 /** The 409 a write gets when the persona's link state, status or handle moved
@@ -1507,6 +1545,87 @@ export class SubprofilesService {
     return this.ownerDTO(sp);
   }
 
+  /**
+   * `POST /subprofiles/:id/kind`: switches the persona's type within its
+   * family (a `generic` persona may enter any family), under the persona row
+   * lock. Refusals are 422s carrying a reason code (`persona-kind-change.ts`).
+   *
+   * The switch raises `edit_version` by exactly 1 over the locked row, as a
+   * PATCH save does (ENG-451). An editor still open on the old type that
+   * saves into a section the new type keeps gets the existing 409
+   * `PERSONA_EDIT_CONFLICT` from the locked version check. A save into a
+   * section the new type hides stops at the unlocked section pre-check
+   * (`sectionNotInPersonaTypeException`), which answers the same 409 when
+   * the sent version is stale and a 400 `SECTION_NOT_IN_PERSONA_TYPE`
+   * otherwise.
+   *
+   * The targeted update leaves `availability` and `availabilityUpdatedAt`
+   * alone (C7), and it touches no item row (C5): items outside the new type's
+   * sections stay stored and come back if the persona switches back.
+   *
+   * Residual race: `StudioReleasesService.create` reads the persona kind
+   * without this row lock, so a draft created during a switch can land after
+   * the count. Publish still requires a Studio artist kind.
+   */
+  async changeKind(
+    userId: string,
+    id: string,
+    requestedKind: SubprofileKind,
+  ): Promise<SubprofileView> {
+    // Same 403/404 as PATCH, before any transaction.
+    await this.getOwned(userId, id);
+    const hasTouchedStudioArtistKind = await this.dataSource.transaction(
+      async (manager) => {
+        const current = await this.lockCurrentSubprofile(manager, id, {
+          editorUserId: userId,
+        });
+        const kindRuleRejection = personaKindRuleRejection(
+          current.kind,
+          requestedKind,
+        );
+        if (kindRuleRejection) {
+          throw personaKindChangeException(kindRuleRejection);
+        }
+        if (hasStudioFormatChange(current.kind, requestedKind)) {
+          const releaseCounts = await countStudioReleasesByStatus(manager, id);
+          const releaseRejection = studioReleaseRejection(
+            requestedKind,
+            releaseCounts,
+          );
+          if (releaseRejection) {
+            throw personaKindChangeException(releaseRejection);
+          }
+        }
+        const nextSkinData = skinDataAfterKindSwitch(
+          requestedKind,
+          current.skinData,
+          current.availability,
+        );
+        await manager.update(
+          Subprofile,
+          { id },
+          {
+            kind: requestedKind,
+            editVersion: current.editVersion + 1,
+            ...(nextSkinData !== current.skinData
+              ? { skinData: nextSkinData }
+              : {}),
+          },
+        );
+        return (
+          isStudioArtistPersonaKind(current.kind) ||
+          isStudioArtistPersonaKind(requestedKind)
+        );
+      },
+    );
+    if (hasTouchedStudioArtistKind) {
+      // After the commit, so a Studio landing rebuilt during the switch is
+      // dropped.
+      invalidateStudioLandingMemo();
+    }
+    return this.getOwnedDTO(userId, id);
+  }
+
   async replaceSection(
     userId: string,
     id: string,
@@ -1523,9 +1642,7 @@ export class SubprofilesService {
     }
     const sectionEnum = section as SubprofileSection;
     if (!isSectionAllowed(sp.kind, sectionEnum)) {
-      throw new BadRequestException(
-        `Section "${section}" is not valid for kind "${sp.kind}"`,
-      );
+      throw sectionNotInPersonaTypeException(sp, section, expectedEditVersion);
     }
     if (items.length > MAX_ITEMS_PER_SECTION) {
       throw new BadRequestException(
@@ -1924,11 +2041,17 @@ export class SubprofilesService {
     if (
       section === SubprofileSection.Links ||
       section === SubprofileSection.Gallery ||
-      isTattooItemSection(section) ||
-      !isSectionAllowed(sp.kind, section)
+      isTattooItemSection(section)
     ) {
       throw new BadRequestException(
         `Section "${section}" is not valid for kind "${sp.kind}"`,
+      );
+    }
+    if (!isSectionAllowed(sp.kind, section)) {
+      throw sectionNotInPersonaTypeException(
+        sp,
+        section,
+        options.expectedEditVersion,
       );
     }
     const sectionTitlesBefore = await this.updates.snapshotSectionTitles(

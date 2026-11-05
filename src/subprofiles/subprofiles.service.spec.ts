@@ -80,11 +80,16 @@ import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofileCreditsService } from './subprofile-credits.service';
 import { SubprofileUpdatesService } from './subprofile-updates.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
-import { editableSnapshot, SubprofilesService } from './subprofiles.service';
+import {
+  editableSnapshot,
+  SECTION_NOT_IN_PERSONA_TYPE_CODE,
+  SubprofilesService,
+} from './subprofiles.service';
 import { SUBPROFILE_DELETED } from './subprofile.events';
 import { STUDIO_PURCHASE_EXPIRED } from '../studio/studio-purchase.events';
 import { UNLINK_PENDING_EXPIRE_SQL } from '../studio/studio-purchases-unlink';
 import { studioLandingMemoGeneration } from '../studio/studio-landing-memo';
+import { STUDIO_RELEASE_COUNTS_SQL } from './persona-kind-change';
 import type { FlashDayEventRef } from './flash-day-event-links';
 import { TATTOO_ITEM_SECTIONS } from './tattoo-artist-vocab';
 
@@ -2981,9 +2986,99 @@ describe('SubprofilesService', () => {
         ).rejects.toBeInstanceOf(BadRequestException);
       },
     );
+
+    // A section the persona's type hides (the beforeEach persona is a
+    // developer, which has no discography) gets a coded 400, so the client
+    // can name the reason.
+    it('refuses a section the persona type hides with SECTION_NOT_IN_PERSONA_TYPE', async () => {
+      const selectCandidates = jest.fn();
+      const rejection = service.insertItemsAtTop(
+        'user-1',
+        'sp-1',
+        SubprofileSection.Discography,
+        { expectedEditVersion: 4, selectCandidates, onInserted: jest.fn() },
+      );
+      await expect(rejection).rejects.toBeInstanceOf(BadRequestException);
+      await rejection.catch((error: BadRequestException) => {
+        expect(error.getResponse()).toMatchObject({
+          code: SECTION_NOT_IN_PERSONA_TYPE_CODE,
+          message: 'Section "discography" is not valid for kind "developer"',
+          section: 'discography',
+          kind: 'developer',
+        });
+      });
+      expect(selectCandidates).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('answers a stale version into a hidden section with the edit conflict', async () => {
+      const rejection = service.insertItemsAtTop(
+        'user-1',
+        'sp-1',
+        SubprofileSection.Discography,
+        {
+          expectedEditVersion: 3,
+          selectCandidates: jest.fn(),
+          onInserted: jest.fn(),
+        },
+      );
+      await expect(rejection).rejects.toBeInstanceOf(ConflictException);
+      await rejection.catch((error: ConflictException) => {
+        expect(error.getResponse()).toMatchObject({
+          code: 'PERSONA_EDIT_CONFLICT',
+          currentEditVersion: 4,
+        });
+      });
+    });
   });
 
   describe('replaceSection', () => {
+    // An editor opened before a type change (`changeKind` raises
+    // `edit_version`) saving a section the new type hides gets the 409 its
+    // Reload flow already handles, carrying the stored version.
+    it('answers a stale version into a hidden section with the edit conflict', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Developer, editVersion: 5 }),
+      );
+      const rejection = service.replaceSection(
+        'user-1',
+        'sp-1',
+        'discography',
+        [{ title: 'x' }],
+        4,
+      );
+      await expect(rejection).rejects.toBeInstanceOf(ConflictException);
+      await rejection.catch((error: ConflictException) => {
+        expect(error.getResponse()).toMatchObject({
+          code: 'PERSONA_EDIT_CONFLICT',
+          currentEditVersion: 5,
+        });
+      });
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses a current version into a hidden section with SECTION_NOT_IN_PERSONA_TYPE', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Developer, editVersion: 5 }),
+      );
+      const rejection = service.replaceSection(
+        'user-1',
+        'sp-1',
+        'discography',
+        [{ title: 'x' }],
+        5,
+      );
+      await expect(rejection).rejects.toBeInstanceOf(BadRequestException);
+      await rejection.catch((error: BadRequestException) => {
+        expect(error.getResponse()).toMatchObject({
+          code: SECTION_NOT_IN_PERSONA_TYPE_CODE,
+          message: 'Section "discography" is not valid for kind "developer"',
+          section: 'discography',
+          kind: 'developer',
+        });
+      });
+    });
+
     it('rejects a section that is not allowed for the kind', async () => {
       subprofiles.findOne.mockResolvedValue(
         makeSubprofile({ kind: SubprofileKind.Developer }),
@@ -3092,6 +3187,49 @@ describe('SubprofilesService', () => {
         { title: 'Keep me' }, // unchanged content at position 0
       ]);
       expect(manager.remove).toHaveBeenCalledWith([drop]);
+    });
+
+    // A kind change keeps every stored item, so a section save must never
+    // reach the rows of a section the persona's type hides.
+    it('reads and removes only rows of the section it names', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Musician }),
+      );
+      const gigRow = makeItem({
+        id: 'it-gig',
+        section: SubprofileSection.Gigs,
+        position: 0,
+      });
+      const otherSectionRow = makeItem({
+        id: 'it-other-section',
+        section: SubprofileSection.Projects,
+        position: 0,
+      });
+      manager.find.mockImplementation(
+        (entity: unknown, options?: { where?: { section?: unknown } }) => {
+          if (entity !== SubprofileItem) {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve(
+            options?.where?.section === SubprofileSection.Gigs
+              ? [gigRow]
+              : [otherSectionRow],
+          );
+        },
+      );
+
+      await service.replaceSection('user-1', 'sp-1', 'gigs', []);
+
+      expect(manager.find).toHaveBeenCalledWith(
+        SubprofileItem,
+        expect.objectContaining({
+          where: { subprofileId: 'sp-1', section: SubprofileSection.Gigs },
+        }),
+      );
+      expect(manager.remove).toHaveBeenCalledWith([gigRow]);
+      expect(manager.remove).not.toHaveBeenCalledWith(
+        expect.arrayContaining([otherSectionRow]),
+      );
     });
 
     // Personas redesign Phase 0 round-trip (design plan Task 7 Step 4): the
@@ -6648,6 +6786,296 @@ describe('SubprofilesService', () => {
     });
   });
 
+  // `POST /subprofiles/:id/kind`. Each test stages the unlocked `getOwned`
+  // load (`subprofiles.findOne`) and the row read under the lock
+  // (`manager.findOne`).
+  describe('changeKind', () => {
+    const musicianPersona = () =>
+      makeSubprofile({ kind: SubprofileKind.Musician, editVersion: 4 });
+
+    // The owner view after the switch reloads through `getOwned`, so every
+    // load after the first returns `rowAfterSwitch`. `releaseRows` answers
+    // the Studio release count query.
+    const stagePersona = (
+      lockedRow: Subprofile,
+      {
+        rowAfterSwitch = lockedRow,
+        releaseRows = [],
+      }: {
+        rowAfterSwitch?: Subprofile;
+        releaseRows?: { status: string; count: number | string }[];
+      } = {},
+    ) => {
+      subprofiles.findOne
+        .mockResolvedValueOnce({ ...lockedRow })
+        .mockResolvedValue({ ...rowAfterSwitch });
+      manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity === Subprofile ? { ...lockedRow } : null),
+      );
+      manager.query.mockImplementation((sql: unknown) =>
+        Promise.resolve(
+          sql === STUDIO_RELEASE_COUNTS_SQL ? releaseRows : undefined,
+        ),
+      );
+    };
+
+    const subprofileUpdatePayloads = () =>
+      manager.update.mock.calls
+        .filter(([entity]: unknown[]) => entity === Subprofile)
+        .map(([, , payload]: unknown[]) => payload as Record<string, unknown>);
+
+    const releaseCountQueries = () =>
+      (manager.query.mock.calls as unknown[][]).filter(
+        ([sql]: unknown[]) => sql === STUDIO_RELEASE_COUNTS_SQL,
+      );
+
+    const rejectionOf = (requestedKind: SubprofileKind): Promise<unknown> =>
+      service.changeKind('user-1', 'sp-1', requestedKind).then(
+        () => undefined,
+        (rejection: unknown) => rejection,
+      );
+
+    const expectKindRejection = (
+      error: unknown,
+      expectedBody: Record<string, unknown>,
+    ) => {
+      expect(error).toBeInstanceOf(UnprocessableEntityException);
+      expect((error as UnprocessableEntityException).getResponse()).toEqual({
+        message: expect.any(String) as unknown,
+        ...expectedBody,
+      });
+    };
+
+    it('writes kind and editVersion + 1 under the row lock and returns the owner view', async () => {
+      stagePersona(musicianPersona(), {
+        rowAfterSwitch: makeSubprofile({
+          kind: SubprofileKind.Dj,
+          editVersion: 5,
+        }),
+      });
+
+      const result = await service.changeKind(
+        'user-1',
+        'sp-1',
+        SubprofileKind.Dj,
+      );
+
+      expect(manager.findOne).toHaveBeenCalledWith(Subprofile, {
+        where: { id: 'sp-1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(manager.update).toHaveBeenCalledWith(
+        Subprofile,
+        { id: 'sp-1' },
+        { kind: SubprofileKind.Dj, editVersion: 5 },
+      );
+      const lockOrder = manager.findOne.mock.invocationCallOrder[0] ?? 0;
+      const updateOrder = manager.update.mock.invocationCallOrder[0] ?? 0;
+      expect(lockOrder).toBeLessThan(updateOrder);
+      expect(result.kind).toBe('dj');
+      expect(result.editVersion).toBe(5);
+    });
+
+    it('makes an editor still open on the old type get PERSONA_EDIT_CONFLICT on its next save', async () => {
+      const loadedRow = musicianPersona();
+      stagePersona(loadedRow);
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.Dj);
+      const [switchPayload] = subprofileUpdatePayloads();
+      const rowAfterSwitch: Subprofile = { ...loadedRow, ...switchPayload };
+      expect(rowAfterSwitch.kind).toBe(SubprofileKind.Dj);
+      expect(rowAfterSwitch.editVersion).toBe(5);
+      subprofiles.findOne.mockResolvedValue({ ...rowAfterSwitch });
+      manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity === Subprofile ? { ...rowAfterSwitch } : null),
+      );
+
+      // The stale editor still holds version 4.
+      const error: unknown = await service
+        .replaceSection('user-1', 'sp-1', 'gigs', [], 4)
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        code: 'PERSONA_EDIT_CONFLICT',
+        currentEditVersion: 5,
+      });
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses the same kind with PERSONA_KIND_UNCHANGED and writes nothing', async () => {
+      stagePersona(musicianPersona());
+
+      const error = await rejectionOf(SubprofileKind.Musician);
+
+      expectKindRejection(error, { code: 'PERSONA_KIND_UNCHANGED' });
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a cross-family switch with PERSONA_KIND_OTHER_FAMILY and both families', async () => {
+      stagePersona(musicianPersona());
+
+      const error = await rejectionOf(SubprofileKind.Developer);
+
+      expectKindRejection(error, {
+        code: 'PERSONA_KIND_OTHER_FAMILY',
+        currentFamily: 'stage',
+        requestedFamily: 'workshop',
+      });
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('lets a generic persona switch into another family', async () => {
+      stagePersona(
+        makeSubprofile({ kind: SubprofileKind.Generic, editVersion: 2 }),
+      );
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.Musician);
+
+      expect(subprofileUpdatePayloads()).toEqual([
+        { kind: SubprofileKind.Musician, editVersion: 3 },
+      ]);
+    });
+
+    it('reads no Studio releases when the format stays the same', async () => {
+      stagePersona(musicianPersona());
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.Dj);
+
+      expect(releaseCountQueries()).toHaveLength(0);
+    });
+
+    it('refuses with PERSONA_KIND_STUDIO_RELEASES when releases exist and the format changes', async () => {
+      stagePersona(musicianPersona(), {
+        releaseRows: [{ status: 'published', count: '2' }],
+      });
+
+      const error = await rejectionOf(SubprofileKind.Drag);
+
+      expectKindRejection(error, {
+        code: 'PERSONA_KIND_STUDIO_RELEASES',
+        releaseCount: 2,
+        requestedHasStudio: true,
+      });
+      expect(releaseCountQueries()).toEqual([
+        [STUDIO_RELEASE_COUNTS_SQL, ['sp-1']],
+      ]);
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses with PERSONA_KIND_STUDIO_TAKEN_DOWN when a release was taken down', async () => {
+      stagePersona(musicianPersona(), {
+        releaseRows: [
+          { status: 'published', count: 3 },
+          { status: 'taken_down', count: 1 },
+        ],
+      });
+
+      const error = await rejectionOf(SubprofileKind.Drag);
+
+      expectKindRejection(error, {
+        code: 'PERSONA_KIND_STUDIO_TAKEN_DOWN',
+        takenDownCount: 1,
+      });
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('switches musician to drag when the persona has no release', async () => {
+      stagePersona(musicianPersona(), { releaseRows: [] });
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.Drag);
+
+      expect(releaseCountQueries()).toHaveLength(1);
+      expect(subprofileUpdatePayloads()).toEqual([
+        { kind: SubprofileKind.Drag, editVersion: 5 },
+      ]);
+    });
+
+    it('rewrites the tattoo status from availability and never writes availability or its stamp', async () => {
+      stagePersona(
+        makeSubprofile({
+          kind: SubprofileKind.Illustrator,
+          editVersion: 4,
+          availability: 'booking',
+          skinData: { tattoo: { status: 'closed' } } as unknown as SkinData,
+        }),
+      );
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.TattooArtist);
+
+      const [switchPayload] = subprofileUpdatePayloads();
+      expect(switchPayload).toEqual({
+        kind: SubprofileKind.TattooArtist,
+        editVersion: 5,
+        skinData: { tattoo: { status: 'waitlist' } },
+      });
+      expect(switchPayload).not.toHaveProperty('availability');
+      expect(switchPayload).not.toHaveProperty('availabilityUpdatedAt');
+    });
+
+    it('rewrites the therapist status when a coach becomes a therapist', async () => {
+      stagePersona(
+        makeSubprofile({
+          kind: SubprofileKind.Coach,
+          editVersion: 4,
+          availability: 'open_to_collabs',
+          skinData: { therapist: { status: 'closed' } } as unknown as SkinData,
+        }),
+      );
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.Therapist);
+
+      expect(subprofileUpdatePayloads()).toEqual([
+        {
+          kind: SubprofileKind.Therapist,
+          editVersion: 5,
+          skinData: { therapist: { status: 'open' } },
+        },
+      ]);
+    });
+
+    it('refuses an editor whose membership row is gone, under the lock', async () => {
+      stagePersona(musicianPersona());
+      manager.count.mockResolvedValue(0);
+
+      const error = await rejectionOf(SubprofileKind.Dj);
+
+      expect(error).toBeInstanceOf(ForbiddenException);
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('deletes no item, sends no notification and emits no event', async () => {
+      stagePersona(musicianPersona());
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.Dj);
+
+      expect(manager.delete).not.toHaveBeenCalled();
+      expect(manager.remove).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('drops the Studio landing memo after a switch that involves a Studio artist kind', async () => {
+      stagePersona(musicianPersona());
+      const generationBefore = studioLandingMemoGeneration();
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.Dj);
+
+      expect(studioLandingMemoGeneration()).toBe(generationBefore + 1);
+    });
+
+    it('leaves the Studio landing memo alone when neither kind is a Studio artist kind', async () => {
+      stagePersona(makeSubprofile({ kind: SubprofileKind.Illustrator }));
+      const generationBefore = studioLandingMemoGeneration();
+
+      await service.changeKind('user-1', 'sp-1', SubprofileKind.TattooArtist);
+
+      expect(studioLandingMemoGeneration()).toBe(generationBefore);
+    });
+  });
+
   // Personas redesign Phase 0 round-trip (design plan Task 7 Step 4): the new
   // fields, once on the entity, surface unchanged through the owner AND
   // public mappers — the same `SubprofileItem`/`Subprofile` shape the write
@@ -6665,7 +7093,9 @@ describe('SubprofilesService', () => {
         gigState: 'sold_out',
         structured,
       });
+      // A Gigs item shows only on a kind whose sections include Gigs.
       const sp = makeSubprofile({
+        kind: SubprofileKind.Musician,
         skinData: {
           booker: {
             fee: '$800',

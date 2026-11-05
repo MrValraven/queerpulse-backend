@@ -2,8 +2,11 @@ import {
   DOCUMENT_UPLOAD_TYPES,
   IMAGE_UPLOAD_TYPES,
   STUDIO_AUDIO_UPLOAD_TYPES,
+  VJ_CLIP_UPLOAD_TYPES,
+  VJ_THUMBNAIL_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKindSpec } from './upload-kinds';
+import type { VjClipMimeType } from '../vj/vj.contract';
 
 // The single authority on what a storage key looks like. Both alternations are
 // derived from the tables that already own them, so adding an upload kind or an
@@ -19,8 +22,17 @@ import { UPLOAD_KIND_SPECS, UploadKindSpec } from './upload-kinds';
 // serves them (a track streams through a presigned GET after the grant
 // check), and their middle segment is random, so the ownership check below
 // must never read it as a user id. `isStudioAudioKey` is their shape check.
+//
+// VJ keys (`vj-clips/...`, `vj-thumbnails/...`) are left out for the same
+// reason: they carry two random segments, so the owner check must never read
+// the middle one.
 const UPLOAD_PREFIXES = Object.values(UPLOAD_KIND_SPECS)
-  .filter((spec) => spec !== UPLOAD_KIND_SPECS.studio_audio)
+  .filter(
+    (spec) =>
+      spec !== UPLOAD_KIND_SPECS.studio_audio &&
+      spec !== UPLOAD_KIND_SPECS.vj_clip &&
+      spec !== UPLOAD_KIND_SPECS.vj_thumbnail,
+  )
   .map((spec) => spec.prefix);
 
 const IMAGE_EXTENSIONS = Object.values(IMAGE_UPLOAD_TYPES).map(
@@ -171,6 +183,51 @@ export function isStudioLandingScopedKey(value: string): boolean {
   );
 }
 
+const VJ_CLIP_EXTENSIONS = Object.values(VJ_CLIP_UPLOAD_TYPES).map(
+  (spec) => spec.extension,
+);
+
+const VJ_THUMBNAIL_EXTENSIONS = Object.values(VJ_THUMBNAIL_UPLOAD_TYPES).map(
+  (spec) => spec.extension,
+);
+
+/** `vj-clips/<uuid>/<uuid>.mp4|.webm|.gif`, as `presignVjUpload` mints it. */
+export const VJ_CLIP_KEY_PATTERN = new RegExp(
+  `^${escapeForRegex(UPLOAD_KIND_SPECS.vj_clip.prefix)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${VJ_CLIP_EXTENSIONS.map(escapeForRegex).join('|')})$`,
+);
+
+/** `vj-thumbnails/<uuid>/<uuid>.webp`, as `presignVjUpload` mints it. */
+export const VJ_THUMBNAIL_KEY_PATTERN = new RegExp(
+  `^${escapeForRegex(UPLOAD_KIND_SPECS.vj_thumbnail.prefix)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${VJ_THUMBNAIL_EXTENSIONS.map(escapeForRegex).join('|')})$`,
+);
+
+/** Whether a value is a VJ clip key. */
+export function isVjClipKey(value: string): boolean {
+  return typeof value === 'string' && VJ_CLIP_KEY_PATTERN.test(value);
+}
+
+/** Whether a value is a VJ thumbnail key. */
+export function isVjThumbnailKey(value: string): boolean {
+  return typeof value === 'string' && VJ_THUMBNAIL_KEY_PATTERN.test(value);
+}
+
+/** Whether a value is a VJ clip key or a VJ thumbnail key. */
+export function isVjKey(value: string): boolean {
+  return isVjClipKey(value) || isVjThumbnailKey(value);
+}
+
+/** The content type a VJ clip key's extension stands for, or null. */
+export function vjClipContentTypeForKey(value: string): VjClipMimeType | null {
+  if (!isVjClipKey(value)) {
+    return null;
+  }
+  const extension = value.slice(value.lastIndexOf('.'));
+  const matchingEntry = Object.entries(VJ_CLIP_UPLOAD_TYPES).find(
+    ([, spec]) => spec.extension === extension,
+  );
+  return matchingEntry ? (matchingEntry[0] as VjClipMimeType) : null;
+}
+
 /**
  * Resolves a storage key to the upload kind that owns it, or `null` when the
  * value is not a well-formed key for a known kind. A persona-scoped key
@@ -189,6 +246,12 @@ export function parseStorageKey(value: string): UploadKindSpec | null {
   }
   if (STUDIO_LANDING_SCOPED_KEY_PATTERN.test(value)) {
     return STUDIO_LANDING_SCOPED_KIND_SPEC;
+  }
+  if (VJ_CLIP_KEY_PATTERN.test(value)) {
+    return UPLOAD_KIND_SPECS.vj_clip;
+  }
+  if (VJ_THUMBNAIL_KEY_PATTERN.test(value)) {
+    return UPLOAD_KIND_SPECS.vj_thumbnail;
   }
   const match = STORAGE_KEY_PATTERN.exec(value);
   if (!match) {

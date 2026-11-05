@@ -24,6 +24,8 @@ import {
   IMAGE_UPLOAD_TYPES,
   LISTING_MENU_UPLOAD_TYPES,
   STUDIO_AUDIO_UPLOAD_TYPES,
+  VJ_CLIP_UPLOAD_TYPES,
+  VJ_THUMBNAIL_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import {
@@ -38,10 +40,13 @@ import {
   isStudioDownloadableAudioKey,
   isStudioLandingScopedKey,
   isStudioSceneScopedKey,
+  isVjClipKey,
   parseStorageKey,
   storageKeyOwnerId,
 } from './storage-key';
 import { STUDIO_PURCHASE_LIMITS } from '../studio/studio-purchase-rules';
+import { VJ_LIMITS, VjClipMimeType } from '../vj/vj.contract';
+import { vjError } from '../vj/vj.constants';
 import {
   attachmentContentDisposition,
   sanitizeDownloadFileName,
@@ -131,6 +136,8 @@ export class StorageService {
   private static contentTypeTableFor(
     kind: UploadKind,
   ): Readonly<Record<string, { extension: string }>> {
+    if (kind === 'vj_clip') return VJ_CLIP_UPLOAD_TYPES;
+    if (kind === 'vj_thumbnail') return VJ_THUMBNAIL_UPLOAD_TYPES;
     if (kind === 'studio_audio') return STUDIO_AUDIO_UPLOAD_TYPES;
     if (kind === 'listing-menu') return LISTING_MENU_UPLOAD_TYPES;
     return StorageService.DOCUMENT_KINDS.has(kind)
@@ -168,6 +175,13 @@ export class StorageService {
     // `StudioAudioUploadsService`).
     if (kind === 'studio_audio') {
       throw new BadRequestException('Studio audio is presigned for a persona');
+    }
+    // VJ media is platform artwork under keys that name nobody, so it has its
+    // own admin-only presign.
+    if (kind === 'vj_clip' || kind === 'vj_thumbnail') {
+      throw new BadRequestException(
+        'VJ uploads are presigned by presignVjUpload',
+      );
     }
     const contentTypeTable = StorageService.contentTypeTableFor(kind);
     const typeSpec = contentTypeTable[contentType];
@@ -322,6 +336,65 @@ export class StorageService {
       Bucket: this.requireConfig('storage.bucket'),
       Key: key,
       ResponseContentType: contentType,
+      ResponseContentDisposition: 'inline',
+      ResponseCacheControl: `private, max-age=${expirySeconds}`,
+    });
+    const url = await getSignedUrl(this.presigningClient(), command, {
+      expiresIn: expirySeconds,
+    });
+    return { url, expiresAt };
+  }
+
+  /**
+   * VJ (contract 3.2): presign a clip or thumbnail upload under
+   * `<prefix>/<uuid>/<uuid><ext>`, both segments random, so the key names no
+   * member and account erasure never reaches the shared library. The caller
+   * has already checked the Admin role. A content type outside the kind's
+   * table answers `VJ_UPLOAD_TYPE_UNSUPPORTED` and an over-cap size
+   * `VJ_UPLOAD_TOO_LARGE`, in that order.
+   */
+  async presignVjUpload(params: {
+    kind: 'vj_clip' | 'vj_thumbnail';
+    contentType: string;
+    byteSize: number;
+  }): Promise<PresignedUpload> {
+    const { kind, contentType, byteSize } = params;
+    const typeSpec = StorageService.contentTypeTableFor(kind)[contentType];
+    if (!typeSpec) {
+      throw vjError('VJ_UPLOAD_TYPE_UNSUPPORTED', { kind });
+    }
+    const kindSpec = UPLOAD_KIND_SPECS[kind];
+    if (byteSize > kindSpec.maxBytes) {
+      throw vjError('VJ_UPLOAD_TOO_LARGE', {
+        kind,
+        maxBytes: kindSpec.maxBytes,
+      });
+    }
+    const key = `${kindSpec.prefix}/${randomUUID()}/${randomUUID()}${typeSpec.extension}`;
+    return this.createPresignedUpload(key, contentType, byteSize);
+  }
+
+  /**
+   * VJ (contract 3.5): a presigned GET for one VJ clip, valid
+   * `VJ_LIMITS.mediaUrlTtlSeconds`, the projector screen's preload source.
+   * The stored type is signed in with an inline disposition. `expiresAt` is
+   * read before signing, so it never runs past the URL's real expiry. The
+   * screen fetches the URL uncredentialed, which the bucket's wildcard CORS
+   * rule allows.
+   */
+  async createPresignedVjClipDownload(
+    key: string,
+    mimeType: VjClipMimeType,
+  ): Promise<{ url: string; expiresAt: string }> {
+    if (!isVjClipKey(key)) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const expirySeconds = VJ_LIMITS.mediaUrlTtlSeconds;
+    const expiresAt = new Date(Date.now() + expirySeconds * 1000).toISOString();
+    const command = new GetObjectCommand({
+      Bucket: this.requireConfig('storage.bucket'),
+      Key: key,
+      ResponseContentType: mimeType,
       ResponseContentDisposition: 'inline',
       ResponseCacheControl: `private, max-age=${expirySeconds}`,
     });
@@ -726,8 +799,9 @@ export class StorageService {
   ): Promise<'valid' | 'mismatch' | 'indeterminate'> {
     const contentType = contentTypeForStorageKey(key);
     if (!contentType) {
-      // A key whose extension is not one of the four minted image types can
-      // never be a legitimate object — treat as a definite mismatch.
+      // A key whose extension names none of the served content types
+      // (images, documents and VJ clips, `contentTypeForStorageKey`) can
+      // never be a legitimate object, so it is a definite mismatch.
       return 'mismatch';
     }
     let prefixBytes: Uint8Array;
@@ -736,7 +810,7 @@ export class StorageService {
         new GetObjectCommand({
           Bucket: this.requireConfig('storage.bucket'),
           Key: key,
-          Range: `bytes=0-${MAGIC_BYTE_PREFIX_LENGTH - 1}`,
+          Range: StorageService.MAGIC_BYTE_RANGE,
         }),
       );
       if (!response.Body) {
@@ -752,6 +826,33 @@ export class StorageService {
     return magicBytesMatchContentType(prefixBytes, contentType)
       ? 'valid'
       : 'mismatch';
+  }
+
+  // The ranged read both magic-byte checks share: the first
+  // MAGIC_BYTE_PREFIX_LENGTH bytes of an object.
+  private static readonly MAGIC_BYTE_RANGE = `bytes=0-${MAGIC_BYTE_PREFIX_LENGTH - 1}`;
+
+  /**
+   * VJ (contract 5.3): the first {@link MAGIC_BYTE_PREFIX_LENGTH} bytes of an
+   * object, one ranged GET. The VJ clip create reads the brand itself to name
+   * a MOV (`isQuickTimeBrand`), which the verdict of
+   * {@link validateImageMagicBytes} cannot tell apart from any other
+   * mismatch. An object with no body answers an empty array. A failed read,
+   * a missing object included, rethrows the SDK error; callers test it with
+   * `StorageService.isMissingObjectError`.
+   */
+  async readObjectPrefixBytes(key: string): Promise<Uint8Array> {
+    const response = await this.storageClient().send(
+      new GetObjectCommand({
+        Bucket: this.requireConfig('storage.bucket'),
+        Key: key,
+        Range: StorageService.MAGIC_BYTE_RANGE,
+      }),
+    );
+    if (!response.Body) {
+      return new Uint8Array(0);
+    }
+    return response.Body.transformToByteArray();
   }
 
   /**

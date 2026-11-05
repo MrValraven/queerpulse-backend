@@ -2,8 +2,10 @@
 // mirrored verbatim in the frontend repo (`queerpulse/src/features/subprofiles/
 // subprofile-kinds.ts`, which adds icons/labels). The string values here are
 // identical to the `SubprofileKind` / `SubprofileSection` entity enums so the
-// DB, the API, and the UI never drift. The backend uses this only to validate
-// that a `section` belongs to a `kind`; field descriptors live on the FE.
+// DB, the API, and the UI never drift. The backend uses this to validate that
+// a `section` belongs to a `kind`, to decide at read time which stored sections
+// a persona shows, and to hold the family map that kind changes are checked
+// against. Field descriptors live on the FE.
 
 // kind enum values
 export type SubprofileKind =
@@ -442,6 +444,163 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   game_critic: ['reviews', 'publications'],
 };
 
+/** The page families. A member never picks one: it is derived from `kind`. */
+export type SkinFamily =
+  | 'stage'
+  | 'studio'
+  | 'page'
+  | 'workshop'
+  | 'practice'
+  | 'table'
+  | 'chart'
+  | 'chair'
+  | 'runway'
+  | 'gallery'
+  | 'history'
+  | 'collective'
+  | 'classroom'
+  | 'quest';
+
+// kind -> page family. Total over SubprofileKind. Copied value for value from
+// the frontend `SKIN_OF` in `queerpulse/src/features/subprofiles/subprofile-skins.ts`;
+// `queerpulse/scripts/check-work-taxonomy.mjs` parses this literal, so keep one
+// `kind: 'family',` entry per line. A kind change is only allowed inside a family.
+export const FAMILY_OF_KIND: Record<SubprofileKind, SkinFamily> = {
+  drag: 'stage',
+  dj: 'stage',
+  dancer: 'stage',
+  performer: 'stage',
+  musician: 'stage',
+  visual_artist: 'studio',
+  photographer: 'studio',
+  filmmaker: 'studio',
+  videomaker: 'studio',
+  video_creator: 'studio',
+  short_form_creator: 'studio',
+  designer: 'studio',
+  writer: 'page',
+  developer: 'workshop',
+  maker: 'workshop',
+  generic: 'workshop',
+  therapist: 'practice',
+  chef: 'table',
+  mixologist: 'table',
+  astrologer: 'chart',
+  // stage (new kinds)
+  comedian: 'stage',
+  vocalist: 'stage',
+  burlesque: 'stage',
+  circus: 'stage',
+  spoken_word: 'stage',
+  host: 'stage',
+  voguer: 'stage',
+  pole_dancer: 'stage',
+  // studio (new kinds)
+  illustrator: 'studio',
+  tattoo_artist: 'studio',
+  animator: 'studio',
+  comic_artist: 'studio',
+  game_designer: 'quest', // moved from studio (Quest personas)
+  artist_3d: 'studio',
+  printmaker: 'studio',
+  architect: 'studio',
+  // page (new kinds)
+  journalist: 'page',
+  poet: 'page',
+  editor: 'page',
+  screenwriter: 'page',
+  translator: 'page',
+  zinester: 'page',
+  academic: 'page',
+  // workshop (new kinds)
+  ceramicist: 'workshop',
+  jeweler: 'workshop',
+  textile_artist: 'workshop',
+  woodworker: 'workshop',
+  florist: 'workshop',
+  data_scientist: 'workshop',
+  // practice (new kinds)
+  coach: 'practice',
+  bodyworker: 'practice',
+  yoga_teacher: 'practice',
+  nutritionist: 'practice',
+  doula: 'practice',
+  personal_trainer: 'practice',
+  sex_educator: 'practice',
+  peer_support: 'practice',
+  // table (new kinds)
+  baker: 'table',
+  barista: 'table',
+  brewer: 'table',
+  sommelier: 'table',
+  caterer: 'table',
+  // chair (new family)
+  hair_stylist: 'chair',
+  barber: 'chair',
+  makeup_artist: 'chair',
+  nail_artist: 'chair',
+  esthetician: 'chair',
+  piercer: 'chair',
+  // runway (new family)
+  fashion_designer: 'runway',
+  stylist: 'runway',
+  model: 'runway',
+  costume_designer: 'runway',
+  // gallery (new family)
+  curator: 'gallery',
+  gallerist: 'gallery',
+  art_dealer: 'gallery',
+  archivist: 'gallery',
+  conservator: 'gallery',
+  registrar: 'gallery',
+  exhibition_designer: 'gallery',
+  art_critic: 'gallery',
+  docent: 'gallery',
+  preparator: 'gallery',
+  // history (new family, the Record)
+  historian: 'history',
+  art_historian: 'history',
+  oral_historian: 'history',
+  genealogist: 'history',
+  heritage: 'history',
+  archival_researcher: 'history',
+  memory_keeper: 'history',
+  // collective (new family, the Poster)
+  organizer: 'collective',
+  activist: 'collective',
+  event_producer: 'collective',
+  promoter: 'collective',
+  // classroom (new family)
+  teacher: 'classroom',
+  facilitator: 'classroom',
+  tutor: 'classroom',
+  lecturer: 'classroom',
+  // Quest personas (+20): the quest family, plus two new stage kinds and
+  // two new page kinds.
+  game_master: 'quest',
+  ttrpg_designer: 'quest',
+  board_game_reviewer: 'quest',
+  game_night_host: 'quest',
+  larp_organizer: 'quest',
+  miniature_painter: 'quest',
+  cartographer: 'quest',
+  dice_maker: 'quest',
+  tournament_organizer: 'quest',
+  actual_play: 'quest',
+  streamer: 'quest',
+  speedrunner: 'quest',
+  modder: 'quest',
+  cosplayer: 'quest',
+  prop_maker: 'quest',
+  puzzle_designer: 'quest',
+  podcaster: 'stage',
+  podcast_producer: 'stage',
+  radio_host: 'stage',
+  voice_actor: 'stage',
+  fanfic_writer: 'page',
+  game_critic: 'page',
+};
+
 // helpers (both repos)
 // Appends the universal 'gallery' section. ('links' is a retired section — the
 // enum value stays as a harmless tombstone but it is no longer produced here.)
@@ -455,3 +614,21 @@ export const isSectionAllowed = (
 ): boolean => sectionsForKind(k).includes(s);
 export const isContentSection = (s: SubprofileSection): boolean =>
   s !== 'links';
+
+/**
+ * Whether a stored section shows for a persona of this kind. `gallery` passes
+ * because `sectionsForKind` appends it. `links` passes explicitly because
+ * `sectionsForKind` leaves out the retired `links` tombstone, while the
+ * frontend adds it back on top of `sectionsForKind`.
+ */
+export const isSectionVisibleForKind = (
+  kind: SubprofileKind,
+  section: SubprofileSection,
+): boolean => section === 'links' || sectionsForKind(kind).includes(section);
+
+/** Keeps the items whose section shows for the kind, in input order, as a new array. */
+export function visibleItemsForKind<
+  Item extends { section: SubprofileSection },
+>(kind: SubprofileKind, items: readonly Item[]): Item[] {
+  return items.filter((item) => isSectionVisibleForKind(kind, item.section));
+}

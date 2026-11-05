@@ -24,6 +24,7 @@ import { StorageService, PresignedUpload } from './storage.service';
 import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
 import { UserRole } from '../users/entities/user.entity';
+import { vjError } from '../vj/vj.constants';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
@@ -123,6 +124,10 @@ export class UploadsController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
+  @ApiForbiddenResponse({
+    description:
+      'A sticker or VJ upload by a caller who is not an admin (VJ_UPLOAD_NOT_ADMIN for vj_clip and vj_thumbnail).',
+  })
   presign(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignRequestDto,
@@ -134,6 +139,22 @@ export class UploadsController {
     // lives here rather than there.
     if (dto.kind === 'sticker' && (user.role as UserRole) !== UserRole.Admin) {
       throw new ForbiddenException('Only an admin may upload a sticker');
+    }
+    // VJ media is platform artwork under keys that name nobody, admin only.
+    if (dto.kind === 'vj_clip' || dto.kind === 'vj_thumbnail') {
+      if ((user.role as UserRole) !== UserRole.Admin) {
+        throw vjError('VJ_UPLOAD_NOT_ADMIN');
+      }
+      if (dto.subprofileId !== undefined) {
+        throw new BadRequestException(
+          'subprofileId is accepted for studio_audio uploads only',
+        );
+      }
+      return this.storage.presignVjUpload({
+        kind: dto.kind,
+        contentType: dto.contentType,
+        byteSize: dto.byteSize,
+      });
     }
     // Studio v1: a track's audio is presigned for a persona under a key that
     // names nobody. `StudioAudioUploadsService` checks the Studio grant, the

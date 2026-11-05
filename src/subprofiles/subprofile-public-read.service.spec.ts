@@ -695,7 +695,11 @@ describe('SubprofilePublicReadService', () => {
         ]),
       );
       items.find.mockResolvedValue([
-        { subprofileId: 'sp-a', tags: ['queer', 'art'] },
+        {
+          subprofileId: 'sp-a',
+          section: SubprofileSection.Projects,
+          tags: ['queer', 'art'],
+        },
       ]);
       profiles.find.mockResolvedValue([
         {
@@ -744,6 +748,43 @@ describe('SubprofilePublicReadService', () => {
       // Composed from the profile's name parts, exactly like the public DTO's
       // `SubprofileOwnerRef.name`.
       expect(starletCard?.ownerName).toBe('Ana Reis');
+    });
+
+    it('builds card tags only from sections the persona kind shows', async () => {
+      const djRow = makeSubprofile({ id: 'sp-a', kind: SubprofileKind.Dj });
+      const qb = makeSubprofilesQueryBuilderStub([djRow]);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+      items.find.mockResolvedValue([
+        {
+          subprofileId: 'sp-a',
+          section: SubprofileSection.Discography,
+          tags: ['vinyl'],
+        },
+        {
+          subprofileId: 'sp-a',
+          section: SubprofileSection.Gigs,
+          tags: ['club'],
+        },
+        {
+          subprofileId: 'sp-a',
+          section: SubprofileSection.Mixes,
+          tags: ['house'],
+        },
+        {
+          subprofileId: 'sp-a',
+          section: SubprofileSection.Gallery,
+          tags: ['photo'],
+        },
+      ]);
+
+      const result = await service.directory({}, 'viewer-1');
+
+      expect(result.items[0]?.tags).toEqual(['club', 'house', 'photo']);
+      expect(items.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: { subprofileId: true, section: true, tags: true },
+        }),
+      );
     });
 
     it('orders by display name then id when no sort is asked for', async () => {
@@ -1239,6 +1280,41 @@ describe('SubprofilePublicReadService', () => {
       );
       expect(queryBuilder.addOrderBy).toHaveBeenCalledWith('sp.id', 'ASC');
       expect(queryBuilder.limit).toHaveBeenCalledWith(20);
+    });
+  });
+
+  describe('searchPersonasByHandlePrefix', () => {
+    it('matches a handle prefix over the base set with no block filter and persona columns only', async () => {
+      const personaRows = [
+        makeSubprofile({ id: 'sp-a', handle: 'ana_poet', displayName: 'Ana' }),
+      ];
+      const queryBuilder = makeSubprofilesQueryBuilderStub(personaRows);
+      subprofiles.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      const result = await service.searchPersonasByHandlePrefix('ana_', 20);
+
+      expect(result).toEqual(personaRows);
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        "lower(sp.handle) LIKE lower(:handlePrefix) || '%' ESCAPE '\\'",
+        { handlePrefix: 'ana\\_' },
+      );
+      expect(queryBuilder.select).toHaveBeenCalledWith([
+        'sp.id',
+        'sp.handle',
+        'sp.displayName',
+        'sp.kind',
+        'sp.avatarUrl',
+        'sp.coverUrl',
+        'sp.accent',
+      ]);
+      expect(queryBuilder.orderBy).toHaveBeenCalledWith(
+        'sp.displayName',
+        'ASC',
+      );
+      expect(queryBuilder.addOrderBy).toHaveBeenCalledWith('sp.id', 'ASC');
+      expect(queryBuilder.limit).toHaveBeenCalledWith(20);
+      expect(blockFilter.excludeBlocked).not.toHaveBeenCalled();
+      expect(queryBuilder.leftJoin).not.toHaveBeenCalled();
     });
   });
 

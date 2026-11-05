@@ -50,6 +50,8 @@ import {
   isCreatorDraftRequest,
   redactCreatorDraftPath,
 } from './creator-drafts/creator-draft-request-log';
+import { isLeadsRequest, redactLeadsPath } from './leads/leads-request-log';
+import { isVjRequest, redactVjPath } from './vj/vj-request-log';
 import { isLandingVisitBeacon } from './landing/landing-visit-request-log';
 import { isStudioLandingPublicRequest } from './studio/studio-landing-request-log';
 import { CommunitiesModule } from './communities/communities.module';
@@ -65,6 +67,8 @@ import { PressKitModule } from './press-kit/press-kit.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
 import { MusicEventsModule } from './music-events/music-events.module';
+import { LeadsModule } from './leads/leads.module';
+import { VjModule } from './vj/vj.module';
 import { AdminDsarModule } from './admin-dsar/admin-dsar.module';
 import { AdminStatusModule } from './admin-status/admin-status.module';
 import { StatusModule } from './status/status.module';
@@ -191,6 +195,10 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
             ignore: (req: IncomingMessage) =>
               isStudioListeningRequest(req.url, req.method) ||
               isCreatorDraftRequest(req.url) ||
+              // Leads routes carry lead names, emails and notes.
+              isLeadsRequest(req.url) ||
+              // VJ routes carry clip titles and pack names.
+              isVjRequest(req.url) ||
               // The landing visit beacon is an anonymous counter.
               isLandingVisitBeacon(req.url, req.method) ||
               // The Studio page reads are served to strangers and record nothing.
@@ -243,9 +251,15 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
               id: req.id,
               method: req.method,
               // A preview token in the path is a bearer credential too, and a
-              // creator draft path names a draft kind, id or listing ref.
+              // creator draft path names a draft kind, id or listing ref, and a
+              // leads path names a lead or a search, and a VJ path names a pack or
+              // a clip.
               url: redactSensitiveQueryParameters(
-                redactCreatorDraftPath(redactStudioPreviewToken(req.url)),
+                redactVjPath(
+                  redactLeadsPath(
+                    redactCreatorDraftPath(redactStudioPreviewToken(req.url)),
+                  ),
+                ),
               ),
             }),
             res: (res: ServerResponse) => ({ statusCode: res.statusCode }),
@@ -396,6 +410,8 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     AdminCommunitiesModule,
     AdminMembersModule,
     MusicEventsModule,
+    LeadsModule,
+    VjModule,
     AdminInvitesModule,
     // A privacy-preserving signal that a new account may belong to someone
     // already removed (TS-05). Read-only: it raises a flag for a human

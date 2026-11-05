@@ -8,9 +8,13 @@ import {
   isStudioDownloadableAudioKey,
   isStudioKeptAudioKey,
   isStudioLandingScopedKey,
+  isVjClipKey,
+  isVjKey,
+  isVjThumbnailKey,
   parseStorageKey,
   storageKeyOwnerId,
   studioAudioContentTypeForKey,
+  vjClipContentTypeForKey,
 } from './storage-key';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
 
@@ -252,5 +256,80 @@ describe('landing-scoped keys', () => {
     `studio-landing/${UUID}/${UUID}.JPG`,
   ])('refuses %s', (value) => {
     expect(isStudioLandingScopedKey(value)).toBe(false);
+  });
+});
+
+// VJ: clips and thumbnails live under `vj-clips/<uuid>/<uuid><ext>` and
+// `vj-thumbnails/<uuid>/<uuid>.webp`, where neither segment names anyone.
+describe('VJ keys', () => {
+  const FIRST_UUID = '0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b';
+  const SECOND_UUID = '5d1e7c90-2a3b-4c4d-8e5f-6a7b8c9d0e1f';
+  const clipKeyWithExtension = (extension: string) =>
+    `vj-clips/${FIRST_UUID}/${SECOND_UUID}${extension}`;
+  const THUMBNAIL_KEY = `vj-thumbnails/${FIRST_UUID}/${SECOND_UUID}.webp`;
+
+  it('parses clip and thumbnail keys to their kinds', () => {
+    for (const extension of ['.mp4', '.webm', '.gif']) {
+      const key = clipKeyWithExtension(extension);
+      expect(parseStorageKey(key)).toBe(UPLOAD_KIND_SPECS.vj_clip);
+      expect(isStorageKey(key)).toBe(true);
+    }
+    expect(parseStorageKey(THUMBNAIL_KEY)).toBe(UPLOAD_KIND_SPECS.vj_thumbnail);
+    expect(isStorageKey(THUMBNAIL_KEY)).toBe(true);
+  });
+
+  it('refuses odd VJ shapes', () => {
+    const oddKeys = [
+      clipKeyWithExtension('.mov'),
+      clipKeyWithExtension('.MP4'),
+      clipKeyWithExtension('.webp'),
+      `vj-thumbnails/${FIRST_UUID}/${SECOND_UUID}.jpg`,
+      `vj-clips/${FIRST_UUID}.mp4`,
+      'vj-clips/../x.mp4',
+      `vj-clips/not-a-uuid/${SECOND_UUID}.mp4`,
+      `vj-clips/${FIRST_UUID}/zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz.mp4`,
+    ];
+    for (const key of oddKeys) {
+      expect(parseStorageKey(key)).toBeNull();
+      expect(isVjKey(key)).toBe(false);
+    }
+  });
+
+  it('keeps VJ keys out of the owner pattern', () => {
+    expect(storageKeyOwnerId(clipKeyWithExtension('.mp4'))).toBeNull();
+    expect(storageKeyOwnerId(THUMBNAIL_KEY)).toBeNull();
+  });
+
+  it('reads the content type from a clip key', () => {
+    expect(vjClipContentTypeForKey(clipKeyWithExtension('.mp4'))).toBe(
+      'video/mp4',
+    );
+    expect(vjClipContentTypeForKey(clipKeyWithExtension('.webm'))).toBe(
+      'video/webm',
+    );
+    expect(vjClipContentTypeForKey(clipKeyWithExtension('.gif'))).toBe(
+      'image/gif',
+    );
+    expect(vjClipContentTypeForKey(THUMBNAIL_KEY)).toBeNull();
+    expect(vjClipContentTypeForKey(clipKeyWithExtension('.mov'))).toBeNull();
+  });
+
+  it('tells clip and thumbnail keys apart', () => {
+    const clipKey = clipKeyWithExtension('.mp4');
+    expect([
+      isVjClipKey(clipKey),
+      isVjThumbnailKey(clipKey),
+      isVjKey(clipKey),
+    ]).toEqual([true, false, true]);
+    expect([
+      isVjClipKey(THUMBNAIL_KEY),
+      isVjThumbnailKey(THUMBNAIL_KEY),
+      isVjKey(THUMBNAIL_KEY),
+    ]).toEqual([false, true, true]);
+    expect([
+      isVjClipKey(VALID_AVATAR_KEY),
+      isVjThumbnailKey(VALID_AVATAR_KEY),
+      isVjKey(VALID_AVATAR_KEY),
+    ]).toEqual([false, false, false]);
   });
 });

@@ -20,7 +20,9 @@ export type UploadKind =
   | 'message-document'
   | 'forum-photo'
   | 'sticker'
-  | 'studio_audio';
+  | 'studio_audio'
+  | 'vj_clip'
+  | 'vj_thumbnail';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -288,6 +290,15 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   studio_audio: {
     prefix: 'studio-audio',
     maxBytes: 50 * MB,
+    requiresSession: true,
+  },
+  // VJ: a clip (MP4, WebM or GIF) in the admin VJ library. Platform artwork,
+  // admin only, presigned under a key with two random segments.
+  vj_clip: { prefix: 'vj-clips', maxBytes: 100 * MB, requiresSession: true },
+  // VJ: the WebP still the browser cuts from a clip at upload time.
+  vj_thumbnail: {
+    prefix: 'vj-thumbnails',
+    maxBytes: 256 * 1024,
     requiresSession: true,
   },
 };

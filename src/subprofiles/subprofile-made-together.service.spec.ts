@@ -13,6 +13,10 @@ import {
   MADE_TOGETHER_WINDOW,
   SubprofileMadeTogetherService,
 } from './subprofile-made-together.service';
+import {
+  VISIBLE_SECTIONS_BY_KIND_JSON,
+  visibleSectionSql,
+} from './subprofile-visible-sections-sql';
 
 // Stubs the fluent `createQueryBuilder('item')` window scan. Every chained
 // method returns the builder; `getMany` answers with the rows the test set.
@@ -440,6 +444,13 @@ describe('SubprofileMadeTogetherService.list', () => {
       };
       expect([...bound.excludedSections].sort()).toEqual(
         ['cover_ups', 'healed', 'in_progress', 'links', 'scar_work'].sort(),
+      );
+    });
+
+    it("keeps only items in sections the author's current kind shows", () => {
+      expect(scan.andWhere).toHaveBeenCalledWith(
+        visibleSectionSql('"item"."section"', '"sp"."kind"'),
+        { visibleSectionsByKind: VISIBLE_SECTIONS_BY_KIND_JSON },
       );
     });
 

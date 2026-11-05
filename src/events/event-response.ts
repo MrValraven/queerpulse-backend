@@ -126,7 +126,8 @@ export interface EventSummary {
   // The neighbourhood rides on the CARD, not just the detail: it is the
   // filter a member browses by ("what is on near Arroios") and the one piece
   // of location a non-attendee is always allowed. The exact `address` is
-  // detail-only AND attendee-only — see `EventDetail.address`.
+  // detail-only, and attendee-only unless it is a public business address:
+  // see `EventDetail.address`.
   neighbourhood: string | null;
   /** The gathering's format: a curated catalog key ("supper-club"), the host's
    *  own words, or null for an event created before the field existed. The
@@ -235,7 +236,8 @@ export interface EventDetail extends EventSummary {
    * `address`, and gated identically (PRD-182).
    *
    * `null` for anyone who is not an organiser or a confirmed 'going' attendee,
-   * exactly as the street address is. It used to be sent to every reader of
+   * the gate a host-typed street address has. It stays gated when `address`
+   * is a public business address. It used to be sent to every reader of
    * the detail, which would have published a Zoom/Meet link on a public page
    * the moment the frontend started rendering it — the same "a house party has
    * to be listable without its door being public" rule, applied to the door
@@ -413,13 +415,25 @@ export interface EventDetail extends EventSummary {
    * address on `venueListing.address`, which every reader may see because the
    * venue's directory page already shows it.
    *
+   * PUBLIC BUSINESS ADDRESS. Every reader gets this field, and
+   * `locationPrecision` reads 'exact', when it is the street line the
+   * directory page of the venue listing or of the "Run by" listing already
+   * prints for every member. The comparison ignores case and extra
+   * whitespace, and a listing's address counts only while its page shows it
+   * (the rule `venueListing.address` follows: the listing is live, its owner
+   * has it switched on, moderators left it up, it has premises, and its
+   * address has text; a permanently closed business keeps it). A mobile "Run by" business counts with its meeting
+   * point, which its page prints. A host-typed address that differs stays
+   * gated as above. See `EventsService.buildDetail`.
+   *
    * `locationPrecision` tells the client which of the two it is holding, so
    * the page can honestly say "the address is shared once you RSVP" rather
    * than rendering an empty line.
    */
   address: string | null;
   /** The host's arrival directions ("through the courtyard, second door,
-   *  ring twice"), gated exactly like `address`. */
+   *  ring twice"). Organisers and confirmed 'going' attendees only, also
+   *  when `address` is a public business address. */
   arrivalNotes: string | null;
   locationPrecision: 'venue' | 'exact';
   /** "PT / EN bilingual", "Portuguese only", ... or null. */

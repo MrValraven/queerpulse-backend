@@ -1,6 +1,7 @@
 import { ForbiddenException, RequestMethod } from '@nestjs/common';
 import {
   GUARDS_METADATA,
+  HTTP_CODE_METADATA,
   METHOD_METADATA,
   PATH_METADATA,
 } from '@nestjs/common/constants';
@@ -11,14 +12,18 @@ import {
   NotRestrictedGuard,
 } from '../auth/guards/not-restricted.guard';
 import type { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
-import { SubprofileVisibility } from './entities/subprofile.entity';
+import {
+  SubprofileKind,
+  SubprofileVisibility,
+} from './entities/subprofile.entity';
 import { SubprofilesController } from './subprofiles.controller';
 
 type GuardedHandlerName =
   | 'replaceSection'
   | 'replaceSocialLinks'
   | 'replaceAffiliations'
-  | 'acceptInvite';
+  | 'acceptInvite'
+  | 'changeKind';
 
 type OpenHandlerName =
   | 'unpublish'
@@ -67,6 +72,7 @@ describe('SubprofilesController write-gate guards (ENG-448)', () => {
     'replaceSocialLinks',
     'replaceAffiliations',
     'acceptInvite',
+    'changeKind',
   ];
 
   it.each(guardedHandlers)('guards %s with NotRestrictedGuard', (name) => {
@@ -476,5 +482,46 @@ describe('SubprofilesController persona wall route', () => {
       RequestMethod.GET,
     );
     expect(Reflect.getMetadata(IS_PUBLIC_KEY, handler)).toBeUndefined();
+  });
+});
+
+describe('SubprofilesController.changeKind', () => {
+  it('serves POST :id/kind with 200', () => {
+    const handler = (
+      SubprofilesController.prototype as unknown as Record<
+        'changeKind',
+        () => unknown
+      >
+    ).changeKind;
+
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(':id/kind');
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(
+      RequestMethod.POST,
+    );
+    expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(200);
+  });
+
+  it('passes the caller, the id and the kind to changeKind', async () => {
+    const ownerView = { id: 'sp1', kind: SubprofileKind.Dj };
+    const subprofilesService = {
+      changeKind: jest.fn().mockResolvedValue(ownerView),
+    };
+    const controller = new SubprofilesController(
+      subprofilesService as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await expect(
+      controller.changeKind({ userId: 'u1' } as CurrentUserData, 'sp1', {
+        kind: SubprofileKind.Dj,
+      }),
+    ).resolves.toBe(ownerView);
+    expect(subprofilesService.changeKind).toHaveBeenCalledWith(
+      'u1',
+      'sp1',
+      SubprofileKind.Dj,
+    );
   });
 });

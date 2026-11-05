@@ -1,6 +1,7 @@
 import {
   contentTypeForStorageKey,
   inlineContentDispositionForStorageKey,
+  isQuickTimeBrand,
   magicBytesMatchContentType,
 } from './served-object';
 
@@ -91,5 +92,48 @@ describe('magicBytesMatchContentType', () => {
     expect(magicBytesMatchContentType(BINARY_WITH_NUL, 'text/plain')).toBe(
       false,
     );
+  });
+});
+
+// VJ: MP4 is an ISO base media file (`ftyp` box), WebM an EBML file.
+describe('VJ video signatures', () => {
+  // size 0x20, `ftyp`, major brand `isom`.
+  const MP4_ISOM = Uint8Array.from([
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
+    0x00, 0x00, 0x02, 0x00,
+  ]);
+  // The same box with major brand `qt  `: a QuickTime MOV.
+  const MOV_QUICKTIME = Uint8Array.from([
+    0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20,
+    0x00, 0x00, 0x00, 0x00,
+  ]);
+  const WEBM_EBML = Uint8Array.from([
+    0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81,
+  ]);
+
+  it('matches MP4 and WebM signatures and refuses a QuickTime brand', () => {
+    expect(magicBytesMatchContentType(MP4_ISOM, 'video/mp4')).toBe(true);
+    expect(magicBytesMatchContentType(MOV_QUICKTIME, 'video/mp4')).toBe(false);
+    expect(isQuickTimeBrand(MOV_QUICKTIME)).toBe(true);
+    expect(isQuickTimeBrand(MP4_ISOM)).toBe(false);
+    expect(magicBytesMatchContentType(WEBM_EBML, 'video/webm')).toBe(true);
+    expect(magicBytesMatchContentType(MP4_ISOM, 'video/webm')).toBe(false);
+    expect(magicBytesMatchContentType(WEBM_EBML, 'video/mp4')).toBe(false);
+    expect(magicBytesMatchContentType(GIF89, 'video/mp4')).toBe(false);
+    expect(magicBytesMatchContentType(GIF89, 'video/webm')).toBe(false);
+  });
+
+  it('serves .mp4 and .webm keys as video', () => {
+    const FIRST_UUID = '0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b';
+    const SECOND_UUID = '5d1e7c90-2a3b-4c4d-8e5f-6a7b8c9d0e1f';
+    expect(
+      contentTypeForStorageKey(`vj-clips/${FIRST_UUID}/${SECOND_UUID}.mp4`),
+    ).toBe('video/mp4');
+    expect(
+      contentTypeForStorageKey(`vj-clips/${FIRST_UUID}/${SECOND_UUID}.webm`),
+    ).toBe('video/webm');
+    expect(
+      contentTypeForStorageKey(`vj-clips/${FIRST_UUID}/${SECOND_UUID}.gif`),
+    ).toBe('image/gif');
   });
 });

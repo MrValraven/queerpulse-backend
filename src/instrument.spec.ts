@@ -228,6 +228,90 @@ describe('scrubSensitiveQueryParameters creator drafts', () => {
   });
 });
 
+describe('scrubSensitiveQueryParameters leads', () => {
+  it('drops the url, query string and body of a lead save', () => {
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      request: {
+        url: 'https://api.queerpulse.test/v1/admin/leads',
+        method: 'POST',
+        data: '{"name":"Ana","email":"ana@example.org"}',
+        query_string: 'q=ana',
+      },
+    });
+    expect(event.request).toEqual({ method: 'POST' });
+  });
+
+  it('drops a referer naming the leads page', () => {
+    const event = scrubSensitiveQueryParameters(
+      eventWithHeaders({
+        referer: 'https://queerpulse.test/admin/leads/abc',
+      }),
+    );
+    expect(event.request?.headers).toEqual({});
+  });
+
+  it('removes breadcrumbs that name a leads route and keeps the rest', () => {
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      breadcrumbs: [
+        {
+          category: 'http',
+          data: { url: 'https://api.queerpulse.test/v1/admin/leads?q=ana' },
+        },
+        {
+          category: 'http',
+          data: { url: 'https://storage.test/object?X-Amz-Signature=secret' },
+        },
+      ],
+    });
+    expect(event.breadcrumbs).toHaveLength(1);
+    expect(event.breadcrumbs?.[0]?.data?.url).not.toContain('admin/leads');
+  });
+});
+
+describe('scrubSensitiveQueryParameters vj', () => {
+  it('drops the url, query string and body of a clip save', () => {
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      request: {
+        url: 'https://api.queerpulse.test/v1/admin/vj/clips',
+        method: 'POST',
+        data: '{"title":"Secret title","packId":null}',
+        query_string: 'clipIds=a',
+      },
+    });
+    expect(event.request).toEqual({ method: 'POST' });
+  });
+
+  it('drops a referer naming the VJ remote page', () => {
+    const event = scrubSensitiveQueryParameters(
+      eventWithHeaders({
+        referer: 'https://queerpulse.test/admin/vj/remote',
+      }),
+    );
+    expect(event.request?.headers).toEqual({});
+  });
+
+  it('removes breadcrumbs that name a VJ route and keeps the rest', () => {
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      breadcrumbs: [
+        {
+          category: 'http',
+          data: { url: 'https://api.queerpulse.test/v1/admin/vj/packs' },
+        },
+        {
+          category: 'http',
+          data: { url: 'https://storage.test/object?X-Amz-Signature=secret' },
+        },
+      ],
+    });
+    expect(event.breadcrumbs).toHaveLength(1);
+    expect(event.breadcrumbs?.[0]?.data?.url).not.toContain('admin/vj');
+  });
+});
+
 describe('scrubSensitiveQueryParameters Pulse Live body', () => {
   const JOIN_BODY = '{"code":"ABCD","screenName":"Lua"}';
 

@@ -83,3 +83,25 @@ export const STUDIO_AUDIO_UPLOAD_TYPES: Readonly<
 export const ALLOWED_STUDIO_AUDIO_TYPES: readonly string[] = Object.keys(
   STUDIO_AUDIO_UPLOAD_TYPES,
 );
+
+/** VJ: the file extension a VJ library upload's key ends in. */
+export interface VjUploadSpec {
+  extension: string;
+}
+
+/** VJ: the clip formats the admin library accepts (MP4, WebM and GIF). */
+export const VJ_CLIP_UPLOAD_TYPES: Readonly<Record<string, VjUploadSpec>> = {
+  'video/mp4': { extension: '.mp4' },
+  'video/webm': { extension: '.webm' },
+  'image/gif': { extension: '.gif' },
+};
+
+/** The content types a VJ clip upload may declare. */
+export const ALLOWED_VJ_CLIP_TYPES: readonly string[] =
+  Object.keys(VJ_CLIP_UPLOAD_TYPES);
+
+/** VJ: the single format of a clip thumbnail, a WebP still. */
+export const VJ_THUMBNAIL_UPLOAD_TYPES: Readonly<Record<string, VjUploadSpec>> =
+  {
+    'image/webp': { extension: '.webp' },
+  };

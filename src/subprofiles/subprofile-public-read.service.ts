@@ -76,6 +76,7 @@ import {
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { kindsMatchingSearch } from './subprofile-kind-search';
+import { isSectionVisibleForKind } from './subprofile-kinds';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { PublishUnmetCode, validatePublish } from './subprofile-validation';
 import {
@@ -1391,7 +1392,7 @@ export class SubprofilePublicReadService {
       creditsById,
     ] = await Promise.all([
       this.loadSocialCountsFor(rowIds),
-      this.loadContentTagsFor(rowIds),
+      this.loadContentTagsFor(rows),
       this.followersService.loadFollowerCountsFor(rowIds),
       linkedUserIds.length > 0
         ? this.profiles.find({
@@ -1570,6 +1571,27 @@ export class SubprofilePublicReadService {
     limit: number,
   ): Promise<PersonaWallPersonaRow[]> {
     return this.directoryBaseQuery({ query: term }, null)
+      .select(PERSONA_WALL_PERSONA_FIELDS.map((field) => `sp.${field}`))
+      .orderBy('sp.displayName', 'ASC')
+      .addOrderBy('sp.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * The leads persona picker's `@handle` search: a handle prefix over the
+   * directory base set, read as no particular member (no block filter), with
+   * persona columns only.
+   */
+  async searchPersonasByHandlePrefix(
+    handlePrefix: string,
+    limit: number,
+  ): Promise<PersonaWallPersonaRow[]> {
+    return this.directoryBaseQuery({}, null)
+      .andWhere(
+        "lower(sp.handle) LIKE lower(:handlePrefix) || '%' ESCAPE '\\'",
+        { handlePrefix: escapeLikeTerm(handlePrefix) },
+      )
       .select(PERSONA_WALL_PERSONA_FIELDS.map((field) => `sp.${field}`))
       .orderBy('sp.displayName', 'ASC')
       .addOrderBy('sp.id', 'ASC')
@@ -2217,31 +2239,39 @@ export class SubprofilePublicReadService {
     return socialCountsBySubprofileId;
   }
 
-  // Batches distinct, non-links content tags per subprofile into ONE query
-  // (mirrors `loadSocialCountsFor`) — avoids an N+1 in `directory`. Caps each
-  // subprofile's tag list at 12, deduped.
+  // Batches distinct content tags per subprofile into ONE query (mirrors
+  // `loadSocialCountsFor`) to avoid an N+1 in `directory`. Only items in a
+  // section the persona's kind shows contribute, so a section left behind by a
+  // kind change never reaches the card. Caps each subprofile's tag list at 12,
+  // deduped.
   private async loadContentTagsFor(
-    subprofileIds: string[],
+    rows: Pick<Subprofile, 'id' | 'kind'>[],
   ): Promise<Map<string, string[]>> {
     const tagsBySubprofileId = new Map<string, string[]>();
-    if (!subprofileIds.length) {
+    if (!rows.length) {
       return tagsBySubprofileId;
     }
-    const rows = await this.items.find({
+    const rowIds = rows.map((row) => row.id);
+    const kindById = new Map(rows.map((row) => [row.id, row.kind]));
+    const itemRows = await this.items.find({
       where: {
-        subprofileId: In(subprofileIds),
+        subprofileId: In(rowIds),
         section: Not(SubprofileSection.Links),
       },
-      select: { subprofileId: true, tags: true },
+      select: { subprofileId: true, section: true, tags: true },
     });
-    for (const row of rows) {
-      const existing = tagsBySubprofileId.get(row.subprofileId) ?? [];
-      for (const tag of row.tags ?? []) {
+    for (const itemRow of itemRows) {
+      const kind = kindById.get(itemRow.subprofileId);
+      if (!kind || !isSectionVisibleForKind(kind, itemRow.section)) {
+        continue;
+      }
+      const existing = tagsBySubprofileId.get(itemRow.subprofileId) ?? [];
+      for (const tag of itemRow.tags ?? []) {
         if (existing.length < 12 && !existing.includes(tag)) {
           existing.push(tag);
         }
       }
-      tagsBySubprofileId.set(row.subprofileId, existing);
+      tagsBySubprofileId.set(itemRow.subprofileId, existing);
     }
     return tagsBySubprofileId;
   }

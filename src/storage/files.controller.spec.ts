@@ -1131,4 +1131,70 @@ describe('FilesController', () => {
       expect(response.redirect).not.toHaveBeenCalled();
     });
   });
+
+  // VJ keys name nobody and are served to admins only, as a 404 to everyone
+  // else so the route never reveals which keys exist.
+  describe('VJ keys', () => {
+    const VJ_CLIP_KEY = `vj-clips/${USER_SEGMENT}/${FILE_SEGMENT}.mp4`;
+    const VJ_THUMBNAIL_KEY = `vj-thumbnails/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
+    // The admin's id is the key's middle segment, so a pass cannot come from
+    // the uploader-only fallback.
+    const ADMIN = { ...LOGGED_IN, role: 'admin' };
+    const MODERATOR = { ...OTHER_MEMBER, role: 'moderator' };
+    const MEMBER = { ...OTHER_MEMBER, role: 'member' };
+
+    it('serves a VJ key to an admin and 404s it for a moderator', async () => {
+      for (const key of [VJ_CLIP_KEY, VJ_THUMBNAIL_KEY]) {
+        response.redirect.mockClear();
+        response.setHeader.mockClear();
+        await serve(key, { ...OTHER_MEMBER, role: 'admin' });
+        expect(storage.createPresignedDownload).toHaveBeenLastCalledWith(key, {
+          asAttachment: false,
+        });
+        expect(response.setHeader).toHaveBeenCalledWith(
+          'Cache-Control',
+          'private, no-store',
+        );
+        expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+      }
+
+      storage.createPresignedDownload.mockClear();
+      for (const key of [VJ_CLIP_KEY, VJ_THUMBNAIL_KEY]) {
+        await expect(serve(key, MODERATOR)).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        await expect(serve(key, MEMBER)).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        await expect(serve(key, null)).rejects.toBeInstanceOf(
+          UnauthorizedException,
+        );
+      }
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+      expect(storage.validateImageMagicBytes).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses a member whose id is the middle segment of the key', async () => {
+      await expect(
+        serve(VJ_CLIP_KEY, { ...LOGGED_IN, role: 'member' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await serve(VJ_CLIP_KEY, ADMIN);
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('skips the suspension lookup for VJ keys', async () => {
+      await serve(VJ_CLIP_KEY, { ...OTHER_MEMBER, role: 'admin' });
+      await serve(VJ_THUMBNAIL_KEY, { ...OTHER_MEMBER, role: 'admin' });
+      expect(users.findOne).not.toHaveBeenCalled();
+    });
+
+    it('404s a .mp4 key whose bytes are no MP4', async () => {
+      storage.validateImageMagicBytes.mockResolvedValue('mismatch');
+      await expect(
+        serve(VJ_CLIP_KEY, { ...OTHER_MEMBER, role: 'admin' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(storage.validateImageMagicBytes).toHaveBeenCalledWith(VJ_CLIP_KEY);
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+  });
 });

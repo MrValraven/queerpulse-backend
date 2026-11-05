@@ -1,17 +1,21 @@
 import { ConfigService } from '@nestjs/config';
 import {
   BadRequestException,
+  HttpException,
   InternalServerErrorException,
   PayloadTooLargeException,
 } from '@nestjs/common';
 import {
   CopyObjectCommand,
+  GetObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
 import { StorageService, studioStreamExpirySeconds } from './storage.service';
 import {
   STUDIO_AUDIO_KEY_PATTERN,
+  VJ_CLIP_KEY_PATTERN,
+  VJ_THUMBNAIL_KEY_PATTERN,
   isStudioLandingScopedKey,
 } from './storage-key';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
@@ -729,6 +733,229 @@ describe('StorageService', () => {
         ),
       ).rejects.toThrow(new BadRequestException('Invalid storage key'));
       expect(send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('VJ uploads', () => {
+    const VJ_CLIP_KEY =
+      'vj-clips/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp4';
+    const VJ_THUMBNAIL_KEY =
+      'vj-thumbnails/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.webp';
+
+    // The refusal a VJ presign throws, read as status plus body.
+    async function vjRefusalOf(
+      pending: Promise<unknown>,
+    ): Promise<{ status: number; body: Record<string, unknown> }> {
+      const error: unknown = await pending.then(
+        () => undefined,
+        (rejection: unknown) => rejection,
+      );
+      expect(error).toBeInstanceOf(HttpException);
+      const httpError = error as HttpException;
+      return {
+        status: httpError.getStatus(),
+        body: httpError.getResponse() as Record<string, unknown>,
+      };
+    }
+
+    it('mints VJ keys with two random segments', async () => {
+      const service = buildService();
+      const createPresignedUpload = jest.spyOn(
+        service,
+        'createPresignedUpload',
+      );
+      const firstClip = await service.presignVjUpload({
+        kind: 'vj_clip',
+        contentType: 'video/webm',
+        byteSize: 10,
+      });
+      const secondClip = await service.presignVjUpload({
+        kind: 'vj_clip',
+        contentType: 'video/webm',
+        byteSize: 10,
+      });
+      expect(firstClip.key).toMatch(VJ_CLIP_KEY_PATTERN);
+      expect(firstClip.key.endsWith('.webm')).toBe(true);
+      // The method takes no user id, so the middle segment is minted fresh
+      // on every call and names nobody.
+      const [, firstMiddleSegment] = firstClip.key.split('/');
+      const [, secondMiddleSegment] = secondClip.key.split('/');
+      expect(firstMiddleSegment).not.toBe(secondMiddleSegment);
+      expect(firstClip.key).not.toContain('user-1');
+      expect(createPresignedUpload).toHaveBeenCalledWith(
+        firstClip.key,
+        'video/webm',
+        10,
+      );
+      expect(
+        new URL(firstClip.uploadUrl).searchParams.get('X-Amz-SignedHeaders'),
+      ).toContain('content-length');
+      expect(firstClip.expiresIn).toBe(300);
+
+      const thumbnail = await service.presignVjUpload({
+        kind: 'vj_thumbnail',
+        contentType: 'image/webp',
+        byteSize: 2048,
+      });
+      expect(thumbnail.key).toMatch(VJ_THUMBNAIL_KEY_PATTERN);
+    });
+
+    it('answers the VJ codes for a wrong type or an oversize file', async () => {
+      const service = buildService();
+      const pngAsClip = await vjRefusalOf(
+        service.presignVjUpload({
+          kind: 'vj_clip',
+          contentType: 'image/png',
+          byteSize: 10,
+        }),
+      );
+      expect(pngAsClip.status).toBe(400);
+      expect(pngAsClip.body).toEqual(
+        expect.objectContaining({
+          code: 'VJ_UPLOAD_TYPE_UNSUPPORTED',
+          kind: 'vj_clip',
+        }),
+      );
+
+      const videoAsThumbnail = await vjRefusalOf(
+        service.presignVjUpload({
+          kind: 'vj_thumbnail',
+          contentType: 'video/mp4',
+          byteSize: 10,
+        }),
+      );
+      expect(videoAsThumbnail.status).toBe(400);
+      expect(videoAsThumbnail.body).toEqual(
+        expect.objectContaining({
+          code: 'VJ_UPLOAD_TYPE_UNSUPPORTED',
+          kind: 'vj_thumbnail',
+        }),
+      );
+
+      const oversizeClip = await vjRefusalOf(
+        service.presignVjUpload({
+          kind: 'vj_clip',
+          contentType: 'video/mp4',
+          byteSize: 104857601,
+        }),
+      );
+      expect(oversizeClip.status).toBe(413);
+      expect(oversizeClip.body).toEqual(
+        expect.objectContaining({
+          code: 'VJ_UPLOAD_TOO_LARGE',
+          kind: 'vj_clip',
+          maxBytes: 104857600,
+        }),
+      );
+
+      const oversizeThumbnail = await vjRefusalOf(
+        service.presignVjUpload({
+          kind: 'vj_thumbnail',
+          contentType: 'image/webp',
+          byteSize: 262145,
+        }),
+      );
+      expect(oversizeThumbnail.status).toBe(413);
+      expect(oversizeThumbnail.body).toEqual(
+        expect.objectContaining({
+          code: 'VJ_UPLOAD_TOO_LARGE',
+          kind: 'vj_thumbnail',
+          maxBytes: 262144,
+        }),
+      );
+
+      await expect(
+        service.presignVjUpload({
+          kind: 'vj_clip',
+          contentType: 'video/mp4',
+          byteSize: 104857600,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ expiresIn: 300 }));
+    });
+
+    it('refuses VJ kinds on the image presign', async () => {
+      await expect(
+        buildService().presignImageUpload({
+          kind: 'vj_clip',
+          userId: 'user-1',
+          contentType: 'video/mp4',
+          byteSize: 1024,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        buildService().presignImageUpload({
+          kind: 'vj_thumbnail',
+          userId: 'user-1',
+          contentType: 'image/webp',
+          byteSize: 1024,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('signs a 900 second clip GET with the stored type', async () => {
+      const startedAt = Date.now();
+      const download = await buildService().createPresignedVjClipDownload(
+        VJ_CLIP_KEY,
+        'video/mp4',
+      );
+      const signedUrl = new URL(download.url);
+      expect(signedUrl.pathname.endsWith(VJ_CLIP_KEY)).toBe(true);
+      expect(signedUrl.searchParams.get('X-Amz-Expires')).toBe('900');
+      expect(signedUrl.searchParams.get('response-content-type')).toBe(
+        'video/mp4',
+      );
+      expect(signedUrl.searchParams.get('response-content-disposition')).toBe(
+        'inline',
+      );
+      expect(signedUrl.searchParams.get('response-cache-control')).toBe(
+        'private, max-age=900',
+      );
+      const expiresAtMilliseconds = new Date(download.expiresAt).getTime();
+      expect(expiresAtMilliseconds).toBeGreaterThanOrEqual(startedAt + 900_000);
+      expect(expiresAtMilliseconds).toBeLessThanOrEqual(Date.now() + 900_000);
+
+      await expect(
+        buildService().createPresignedVjClipDownload(
+          VJ_THUMBNAIL_KEY,
+          'video/mp4',
+        ),
+      ).rejects.toThrow(new BadRequestException('Invalid storage key'));
+    });
+
+    describe('readObjectPrefixBytes', () => {
+      let send: jest.SpiedFunction<S3Client['send']>;
+
+      afterEach(() => {
+        send.mockRestore();
+      });
+
+      it('reads the first sixteen bytes of an object', async () => {
+        const prefixBytes = Uint8Array.from([
+          0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20, 0, 0,
+          0, 0,
+        ]);
+        send = jest.spyOn(S3Client.prototype, 'send').mockResolvedValue({
+          Body: { transformToByteArray: () => Promise.resolve(prefixBytes) },
+        } as never);
+        await expect(
+          buildService().readObjectPrefixBytes(VJ_CLIP_KEY),
+        ).resolves.toEqual(prefixBytes);
+        const [command] = send.mock.calls[0] as unknown as [GetObjectCommand];
+        expect(command).toBeInstanceOf(GetObjectCommand);
+        expect(command.input).toEqual({
+          Bucket: 'queerpulse-prod',
+          Key: VJ_CLIP_KEY,
+          Range: 'bytes=0-15',
+        });
+
+        const missingObjectError = Object.assign(new Error('NoSuchKey'), {
+          name: 'NoSuchKey',
+        });
+        send.mockRejectedValueOnce(missingObjectError as never);
+        await expect(
+          buildService().readObjectPrefixBytes(VJ_CLIP_KEY),
+        ).rejects.toBe(missingObjectError);
+      });
     });
   });
 

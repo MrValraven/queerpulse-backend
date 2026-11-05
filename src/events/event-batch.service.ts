@@ -30,7 +30,11 @@ import {
   type ResolvedEventBatchTemplate,
 } from './event-batch-template.service';
 import { eventScheduleProblem } from './event-schedule-rules';
-import { EventsService, type CreateEventInput } from './events.service';
+import {
+  EventsService,
+  isVenueTheRunByListing,
+  type CreateEventInput,
+} from './events.service';
 import { seatHostAsGoing } from './host-seat';
 
 /** Whether `description` tags anyone (`@member`, `c/`, `b/`, `e/`, `t/`),
@@ -154,9 +158,14 @@ export class EventBatchService {
     const visibilityReachesVenuePage =
       template.visibility === EventVisibility.Public ||
       template.visibility === EventVisibility.Members;
+    // A venue that is also the "Run by" listing is confirmed on every row by
+    // `buildNewEventEntity`, since the host runs that business, so its owner
+    // is never asked.
+    const runByListingId = resolved.runByListing?.id ?? null;
     const shouldAskVenueOwner =
       venueListing !== null &&
       venueListing.ownerId !== null &&
+      !isVenueTheRunByListing(venueListing.id, runByListingId) &&
       visibilityReachesVenuePage;
     const venueOwnerNotifiedAt = shouldAskVenueOwner ? now : null;
 
@@ -182,7 +191,7 @@ export class EventBatchService {
               status: EventStatus.Published,
               communityId: resolved.community?.id ?? null,
               listingId: venueListing?.id ?? null,
-              runByListingId: resolved.runByListing?.id ?? null,
+              runByListingId,
               venueOwnerNotifiedAt,
               seriesId: null,
               seriesIndex: null,

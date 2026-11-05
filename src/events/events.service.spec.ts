@@ -2235,9 +2235,10 @@ describe('EventsService', () => {
       expect((await service.getBySlug('x', 'u1')).runByListing).toEqual(
         RUN_BY_REF,
       );
-      expect(runByListings.resolveForDisplay).toHaveBeenCalledWith([
-        'listing-walk',
-      ]);
+      expect(runByListings.resolveForDisplay).toHaveBeenCalledWith(
+        ['listing-walk'],
+        { shouldIncludePublicAddress: true },
+      );
 
       runByListings.resolveForDisplay.mockResolvedValue(new Map());
       expect((await service.getBySlug('x', 'u1')).runByListing).toBeNull();

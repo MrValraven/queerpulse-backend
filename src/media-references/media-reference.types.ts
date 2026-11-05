@@ -39,7 +39,9 @@ export type MediaReferenceType =
   | 'persona-post' // SubprofilePost.imageKey
   | 'quizshow-question' // QuizshowQuestion.mediaRef and an open session's quiz snapshot, for an event quiz
   | 'quizshow-game-question' // the same image in a member's game (a quiz with no event); entityId is the game id
-  | 'quizshow-template-question'; // the same image in a staff quiz template; entityId is the template id
+  | 'quizshow-template-question' // the same image in a staff quiz template; entityId is the template id
+  | 'vj-clip' // VjClip.storageKey
+  | 'vj-thumbnail'; // VjClip.thumbnailStorageKey
 
 export interface MediaReference {
   type: MediaReferenceType;

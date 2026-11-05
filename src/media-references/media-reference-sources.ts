@@ -42,6 +42,7 @@ import { PressContact } from '../press-kit/entities/press-contact.entity';
 import { Sticker } from '../stickers/entities/sticker.entity';
 import { StudioRelease } from '../studio/entities/studio-release.entity';
 import { SubprofilePost } from '../subprofile-posts/entities/subprofile-post.entity';
+import { VjClip } from '../vj/entities/vj-clip.entity';
 import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
 import { storageKeyOwnerId } from '../storage/storage-key';
 
@@ -416,6 +417,25 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     column: 'storageKey',
     idColumn: 'id',
     labelColumns: ['label'],
+  }),
+  plainSource({
+    // A VJ clip (admin VJ library). Platform artwork with no member page.
+    // Without this source the orphan sweep reads a live clip as unreferenced.
+    type: 'vj-clip',
+    field: 'VjClip.storageKey',
+    entity: VjClip,
+    column: 'storageKey',
+    idColumn: 'id',
+    labelColumns: ['title'],
+  }),
+  plainSource({
+    // The clip's preview image, kept referenced for the same reason.
+    type: 'vj-thumbnail',
+    field: 'VjClip.thumbnailStorageKey',
+    entity: VjClip,
+    column: 'thumbnailStorageKey',
+    idColumn: 'id',
+    labelColumns: ['title'],
   }),
 ];
 

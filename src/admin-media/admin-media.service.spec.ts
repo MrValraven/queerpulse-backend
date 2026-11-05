@@ -28,6 +28,10 @@ const avatarKey = `avatars/${ownerId}/33333333-3333-3333-3333-333333333333.jpg`;
 const communityAvatarKey = `community-avatars/${ownerId}/66666666-6666-6666-6666-666666666666.png`;
 const messageImageKey = `message-images/${ownerId}/44444444-4444-4444-4444-444444444444.jpg`;
 const messageDocumentKey = `message-documents/${ownerId}/55555555-5555-5555-5555-555555555555.pdf`;
+const vjClipKey =
+  'vj-clips/88888888-8888-4888-8888-888888888888/99999999-9999-4999-8999-999999999999.mp4';
+const vjThumbnailKey =
+  'vj-thumbnails/88888888-8888-4888-8888-888888888888/99999999-9999-4999-8999-999999999999.webp';
 
 const publicPrefixes = [
   ...Object.values(UPLOAD_KIND_SPECS)
@@ -321,22 +325,36 @@ describe('AdminMediaService.list', () => {
     );
   });
 
-  it.each(['message-images', 'message-documents', 'studio-audio'])(
-    'rejects the %s prefix filter as an unknown kind',
-    async (prefix) => {
-      const { service, storage } = await makeService();
+  it.each([
+    'message-images',
+    'message-documents',
+    'studio-audio',
+    'vj-clips',
+    'vj-thumbnails',
+  ])('rejects the %s prefix filter as an unknown kind', async (prefix) => {
+    const { service, storage } = await makeService();
 
-      await expect(service.list({ prefix })).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
-      expect(storage.listObjects).not.toHaveBeenCalled();
-    },
-  );
+    await expect(service.list({ prefix })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(storage.listObjects).not.toHaveBeenCalled();
+  });
 });
 
 describe('AdminMediaService.head', () => {
   it.each([messageImageKey, messageDocumentKey])(
     '404s a private message key without touching the bucket (%s)',
+    async (key) => {
+      const { service, storage } = await makeService();
+
+      await expect(service.head(key)).rejects.toBeInstanceOf(NotFoundException);
+      expect(storage.headObject).not.toHaveBeenCalled();
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([vjClipKey, vjThumbnailKey])(
+    '404s a VJ key without touching the bucket (%s)',
     async (key) => {
       const { service, storage } = await makeService();
 
@@ -358,6 +376,27 @@ describe('AdminMediaService.head', () => {
 });
 
 describe('AdminMediaService.delete', () => {
+  // VJ media is managed at admin/vj. A console delete would orphan the clip
+  // row, and its reference report would carry the clip title into a log line.
+  it.each([
+    [vjClipKey, false],
+    [vjClipKey, true],
+    [vjThumbnailKey, false],
+    [vjThumbnailKey, true],
+  ])(
+    '404s a VJ key without touching the bucket (%s, forced %p)',
+    async (key, force) => {
+      const { service, storage, modAudit, references } = await makeService();
+
+      await expect(service.delete(key, actorId, force)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+      expect(references.resolve).not.toHaveBeenCalled();
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    },
+  );
+
   // T17: a persona-scoped key is served only while its registry row exists,
   // so the row (and any crop) goes with the object.
   it.each([

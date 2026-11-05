@@ -5,6 +5,10 @@ import {
 } from './subprofile-unlink-rekey';
 import { FORGET_PERSONA_WALL_PICK_SQL } from './persona-wall-unlink';
 import {
+  FORGET_LEAD_ENTRY_PERSONA_SQL,
+  FORGET_LEAD_LINK_SQL,
+} from '../leads/lead-persona-unlink';
+import {
   UNLINK_KEEP_TRACKS_SQL,
   UNLINK_PAYMENT_METHODS_DELETE_SQL,
   UNLINK_PENDING_EXPIRE_SQL,
@@ -449,6 +453,50 @@ describe('issueFreshPersonaId', () => {
     expect(moveIndex).toBeGreaterThan(-1);
     expect(wallIndex).toBeGreaterThan(moveIndex);
     expect(rekeyCalls()[wallIndex]?.[1]).toEqual([freshId]);
+  });
+
+  // Leads: the staff lead lets go of the persona and its history stops
+  // naming it, once the row (and both cascaded keys) moved.
+  it('forgets the lead link and the entry persona references once the row has moved', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const moveIndex = rekeyCalls().findIndex(([sql]) =>
+      sql.startsWith('UPDATE "subprofiles" SET "id"'),
+    );
+    const wallIndex = rekeyCalls().findIndex(
+      ([sql]) => sql === FORGET_PERSONA_WALL_PICK_SQL,
+    );
+    const leadLinkIndex = rekeyCalls().findIndex(
+      ([sql]) => sql === FORGET_LEAD_LINK_SQL,
+    );
+    const leadEntryIndex = rekeyCalls().findIndex(
+      ([sql]) => sql === FORGET_LEAD_ENTRY_PERSONA_SQL,
+    );
+    expect(moveIndex).toBeGreaterThan(-1);
+    expect(wallIndex).toBeGreaterThan(moveIndex);
+    expect(leadLinkIndex).toBeGreaterThan(wallIndex);
+    expect(leadEntryIndex).toBeGreaterThan(leadLinkIndex);
+    expect(rekeyCalls()[leadLinkIndex]?.[1]).toEqual([freshId]);
+    expect(rekeyCalls()[leadEntryIndex]?.[1]).toEqual([freshId]);
+  });
+
+  it('leaves the lead timeline untouched on unlink', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    expect(FORGET_LEAD_LINK_SQL).not.toContain('updated_at');
+    expect(FORGET_LEAD_ENTRY_PERSONA_SQL).not.toContain('updated_at');
+    const leadStatements = query.mock.calls
+      .map(([sql]) => sql)
+      .filter(
+        (sql) => sql.includes('"leads"') || sql.includes('"lead_entries"'),
+      );
+    expect(leadStatements).toEqual([
+      FORGET_LEAD_LINK_SQL,
+      FORGET_LEAD_ENTRY_PERSONA_SQL,
+    ]);
+    for (const sql of leadStatements) {
+      expect(sql.trimStart().toUpperCase().startsWith('INSERT')).toBe(false);
+    }
   });
 
   // Studio purchases (contract 4.7): the payment methods, prices and pending

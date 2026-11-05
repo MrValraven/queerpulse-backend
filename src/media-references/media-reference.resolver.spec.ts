@@ -10,6 +10,7 @@ import {
   CardIssuerType,
   CommunityCard,
 } from '../membership-cards/entities/community-card.entity';
+import { VjClip } from '../vj/entities/vj-clip.entity';
 
 /** A repository stub covering both call shapes `MediaReferenceSource`s use:
  *  plain-column sources call `repository.find(...)`; structured/array
@@ -473,5 +474,40 @@ describe('MediaReferenceResolver', () => {
         slug: '',
       },
     ]);
+  });
+
+  it('keeps a VJ clip and its thumbnail referenced', async () => {
+    const CLIP_ID = 'clip-1';
+    const CLIP_KEY = 'vj-clips/aaaaaaaa/bbbbbbbb.mp4';
+    const THUMB_KEY = 'vj-thumbnails/cccccccc/dddddddd.png';
+    const dataSource = createMockDataSource([
+      [
+        VjClip,
+        makeMockRepository({
+          findRows: [
+            {
+              id: CLIP_ID,
+              storageKey: CLIP_KEY,
+              thumbnailStorageKey: THUMB_KEY,
+              title: 'Loop',
+            },
+          ],
+        }),
+      ],
+    ]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references, degraded } = await resolver.resolve([
+      CLIP_KEY,
+      THUMB_KEY,
+    ]);
+
+    expect(references.get(CLIP_KEY)).toEqual([
+      { type: 'vj-clip', entityId: CLIP_ID, label: 'Loop' },
+    ]);
+    expect(references.get(THUMB_KEY)).toEqual([
+      { type: 'vj-thumbnail', entityId: CLIP_ID, label: 'Loop' },
+    ]);
+    expect(degraded).toBe(false);
   });
 });

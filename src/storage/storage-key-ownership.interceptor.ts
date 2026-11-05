@@ -13,11 +13,13 @@ import {
   allowsSharedUploads,
   allowsStudioLandingScopedKeys,
   allowsStudioSceneScopedKeys,
+  allowsVjKeys,
 } from './shared-upload-handlers';
 import {
   isPersonaScopedKey,
   isStudioLandingScopedKey,
   isStudioSceneScopedKey,
+  isVjKey,
   storageKeyOwnerId,
 } from './storage-key';
 
@@ -86,6 +88,8 @@ interface UploadAllowances {
   /** Studio landing v2: a landing-scoped key, see
    *  `STUDIO_LANDING_SCOPED_KEY_HANDLERS`. */
   studioLandingScopedKeys: boolean;
+  /** VJ: a clip or thumbnail key, see `VJ_KEY_HANDLERS`. */
+  vjKeys: boolean;
 }
 
 @Injectable()
@@ -131,6 +135,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
         controllerName,
         handlerName,
       ),
+      vjKeys: allowsVjKeys(controllerName, handlerName),
     };
 
     if (typeof body === 'string') {
@@ -189,6 +194,15 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
     // whose service keeps it only as the slot's stored photo.
     if (isStudioLandingScopedKey(normalized)) {
       if (requesterUserId && allowances.studioLandingScopedKeys) {
+        return normalized;
+      }
+      throw new ForbiddenException('Referenced upload does not belong to you');
+    }
+    // VJ: a clip or thumbnail key names no uploader either. It is refused on
+    // every route except `VJ_KEY_HANDLERS`, whose service checks the key's
+    // shape, existence and magic bytes itself.
+    if (isVjKey(normalized)) {
+      if (requesterUserId && allowances.vjKeys) {
         return normalized;
       }
       throw new ForbiddenException('Referenced upload does not belong to you');

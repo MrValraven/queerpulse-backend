@@ -19,6 +19,7 @@ import {
 import { IMAGE_UPLOAD_TYPES } from '../storage/upload-content-types';
 import {
   PERSONA_SCOPED_PREFIX,
+  isVjKey,
   parseStorageKey,
   storageKeyOwnerId,
 } from '../storage/storage-key';
@@ -88,14 +89,18 @@ const MAX_LIMIT = 200;
  *  conversation participants (`PRIVATE_MESSAGE_PREFIXES`), so the console never
  *  lists, signs, inspects or deletes them. Studio audio is left out too:
  *  staff act on a release through the Studio takedown, and an audio object
- *  has no thumbnail to show. */
+ *  has no thumbnail to show. VJ clips and thumbnails are left out as well:
+ *  VJ media is managed at `admin/vj`, where a delete also removes the clip
+ *  row. */
 const KNOWN_PREFIXES: ReadonlySet<string> = new Set([
   ...Object.values(UPLOAD_KIND_SPECS)
     .map((spec) => spec.prefix)
     .filter(
       (prefix) =>
         !PRIVATE_MESSAGE_PREFIXES.has(prefix) &&
-        prefix !== UPLOAD_KIND_SPECS.studio_audio.prefix,
+        prefix !== UPLOAD_KIND_SPECS.studio_audio.prefix &&
+        prefix !== UPLOAD_KIND_SPECS.vj_clip.prefix &&
+        prefix !== UPLOAD_KIND_SPECS.vj_thumbnail.prefix,
     ),
   // T17: unlinked persona images (`persona/<uuid>/<uuid><ext>`). Not an
   // upload kind (nothing presigns under it), but staff browse and moderate
@@ -164,9 +169,11 @@ export class AdminMediaService {
    *  (same authority as `GET /files/*`). 404 (not 403) on a malformed/unknown
    *  key, matching the don't-leak posture of the file route. A private
    *  message key 404s the same way, so the console cannot probe whether a DM
-   *  attachment exists. */
+   *  attachment exists. A VJ key 404s too: VJ media is managed at `admin/vj`,
+   *  where a delete also removes the clip row, and a reference report on a VJ
+   *  key would carry the clip title into the force-delete log line. */
   assertKnownKey(key: string): void {
-    if (!parseStorageKey(key) || isPrivateMessageKey(key)) {
+    if (!parseStorageKey(key) || isPrivateMessageKey(key) || isVjKey(key)) {
       throw new NotFoundException();
     }
   }

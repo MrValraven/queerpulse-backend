@@ -131,7 +131,7 @@ describe('touchesPrivateParameterTable', () => {
     ).toBe(false);
   });
 
-  it('names the draft, quiz show and sign-in code challenge tables', () => {
+  it('names the draft, quiz show, sign-in code challenge, leads and VJ tables', () => {
     expect([...PRIVATE_PARAMETER_TABLES]).toEqual([
       'creator_drafts',
       'listing_drafts',
@@ -146,7 +146,47 @@ describe('touchesPrivateParameterTable', () => {
       'quizshow_sessions',
       'email_sign_in_challenges',
       'quizshow_templates',
+      'leads',
+      'lead_entries',
+      'vj_clips',
+      'vj_packs',
     ]);
+  });
+
+  it('matches the VJ tables quoted or bare', () => {
+    expect(
+      touchesPrivateParameterTable(
+        'SELECT "clip"."title" FROM "vj_clips" "clip"',
+      ),
+    ).toBe(true);
+    expect(touchesPrivateParameterTable('UPDATE vj_packs SET name = $1')).toBe(
+      true,
+    );
+    expect(touchesPrivateParameterTable('SELECT * FROM "vj_pack_clips"')).toBe(
+      false,
+    );
+  });
+
+  it('matches the leads table as the quoted identifier TypeORM writes', () => {
+    expect(
+      touchesPrivateParameterTable('SELECT "lead"."id" FROM "leads" "lead"'),
+    ).toBe(true);
+    expect(touchesPrivateParameterTable('SELECT * FROM "LEADS"')).toBe(true);
+    expect(touchesPrivateParameterTable(`SELECT 'leads'`)).toBe(false);
+    expect(touchesPrivateParameterTable('SELECT * FROM "leads_archive"')).toBe(
+      false,
+    );
+  });
+
+  it('matches the lead entries table quoted or bare', () => {
+    expect(
+      touchesPrivateParameterTable(
+        'INSERT INTO "lead_entries" ("body") VALUES ($1)',
+      ),
+    ).toBe(true);
+    expect(
+      touchesPrivateParameterTable('select * from lead_entries where 1=1'),
+    ).toBe(true);
   });
 });
 
@@ -182,6 +222,32 @@ describe('PrivateParametersLogger', () => {
     );
     const messages = logger.written[0]?.messages ?? [];
     expect(JSON.stringify(messages)).not.toContain('Freddie');
+    expect(messages[1]?.message).toBe(900);
+  });
+
+  it('drops the parameters of a slow query on the leads table and keeps the time', () => {
+    const logger = new CapturingLogger(['error', 'warn']);
+    logger.logQuerySlow(
+      900,
+      'SELECT "lead"."id" FROM "leads" "lead" WHERE "lead"."email" = $1',
+      ['ana@example.org'],
+    );
+    const messages = logger.written[0]?.messages ?? [];
+    expect(sqlMessage(logger)?.parameters).toBeUndefined();
+    expect(JSON.stringify(messages)).not.toContain('ana@example.org');
+    expect(messages[1]?.message).toBe(900);
+  });
+
+  it('drops the parameters of a slow query on vj_clips and keeps the time', () => {
+    const logger = new CapturingLogger(['error', 'warn']);
+    logger.logQuerySlow(
+      900,
+      'SELECT "clip"."id" FROM "vj_clips" "clip" WHERE "clip"."title" = $1',
+      ['Secret title'],
+    );
+    const messages = logger.written[0]?.messages ?? [];
+    expect(sqlMessage(logger)?.parameters).toBeUndefined();
+    expect(JSON.stringify(messages)).not.toContain('Secret title');
     expect(messages[1]?.message).toBe(900);
   });
 

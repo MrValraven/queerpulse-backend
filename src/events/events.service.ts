@@ -346,6 +346,23 @@ export interface ResolvedNewEventFields {
   seriesIndex: number | null;
 }
 
+/**
+ * Whether a gathering's venue is the same listing it names as "Run by".
+ * Storing a `runByListingId` requires that the host owns or co-manages that
+ * business (`ListingRunByService.assertCanRunGatherings`, and
+ * `clearUnmanagedFutureRunByLinks` once they stop), so the host has already
+ * shown they speak for the venue. Such an attachment is confirmed when it is
+ * written, and its owner is never asked to consent to their own gathering
+ * (`EventVenueConfirmation`). Shared by `create`, `update` and
+ * `EventBatchService.createBatch`.
+ */
+export function isVenueTheRunByListing(
+  listingId: string | null,
+  runByListingId: string | null,
+): boolean {
+  return listingId !== null && listingId === runByListingId;
+}
+
 export type UpdateEventInput = Partial<Omit<CreateEventInput, 'recurrence'>>;
 export type EventListFilter =
   'upcoming' | 'going' | 'hosting' | 'waitlisted' | 'past' | 'saved';
@@ -565,10 +582,13 @@ export class EventsService {
     // The ask is raised once, for the whole create call. A weekly series
     // creates twelve rows, and twelve bells for one decision is not an ask,
     // it is a flood, so every occurrence is stamped as already-asked and one
-    // notification names the first of them.
+    // notification names the first of them. A venue the host also names as
+    // "Run by" is confirmed on the row itself (`isVenueTheRunByListing`), so
+    // there is nobody left to ask.
     const shouldAskVenueOwner =
       venueListing !== null &&
       venueListing.ownerId !== null &&
+      !isVenueTheRunByListing(listingId, runByListingId) &&
       status === EventStatus.Published &&
       visibilityReachesVenuePage;
 
@@ -691,9 +711,19 @@ export class EventsService {
       runByListingId: resolved.runByListingId,
       // LOC-16, see `EventVenueConfirmation`. Set explicitly so the
       // in-memory row and the stored row agree from the first line of code
-      // that reads either, whatever the column default is.
-      venueConfirmation: EventVenueConfirmation.Pending,
-      venueOwnerNotifiedAt: resolved.venueOwnerNotifiedAt,
+      // that reads either, whatever the column default is. A venue that is
+      // also the "Run by" listing starts confirmed: the caller already
+      // checked that the host runs that business.
+      ...(isVenueTheRunByListing(resolved.listingId, resolved.runByListingId)
+        ? {
+            venueConfirmation: EventVenueConfirmation.Confirmed,
+            venueConfirmedAt: new Date(),
+            venueOwnerNotifiedAt: null,
+          }
+        : {
+            venueConfirmation: EventVenueConfirmation.Pending,
+            venueOwnerNotifiedAt: resolved.venueOwnerNotifiedAt,
+          }),
       isOnline: dto.isOnline ?? false,
       onlineUrl: dto.onlineUrl ?? null,
       capacity: dto.capacity ?? null,
@@ -1137,6 +1167,30 @@ export class EventsService {
         : null;
     }
 
+    // LOC-16, and "Run by". A venue that is (or becomes) the business this
+    // gathering names as "Run by" is confirmed here, with no ask: the host
+    // runs that business, so the owner would be asked to consent to their
+    // own gathering. That covers a new venue, and a pending venue the edit
+    // now names as "Run by". An attachment already confirmed keeps its
+    // stamp. Any other new venue resets to pending, as above.
+    const shouldConfirmVenueAsRunBy =
+      isVenueTheRunByListing(listingId, runByListingId) &&
+      (isNewVenue ||
+        event.venueConfirmation === EventVenueConfirmation.Pending);
+    const venueConfirmationFields: Partial<Event> = shouldConfirmVenueAsRunBy
+      ? {
+          venueConfirmation: EventVenueConfirmation.Confirmed,
+          venueConfirmedAt: new Date(),
+          ...(isNewVenue ? { venueOwnerNotifiedAt: null } : {}),
+        }
+      : isNewVenue
+        ? {
+            venueConfirmation: EventVenueConfirmation.Pending,
+            venueConfirmedAt: null,
+            venueOwnerNotifiedAt: null,
+          }
+        : {};
+
     const oldStartAt = event.startAt;
     const oldCapacity = event.capacity;
     // Read before the patch lands, so the mention fan-out can tell a publish
@@ -1181,13 +1235,7 @@ export class EventsService {
       ...(dto.venue !== undefined ? { venue: dto.venue ?? null } : {}),
       ...(dto.listingId !== undefined ? { listingId } : {}),
       ...(dto.runByListingId !== undefined ? { runByListingId } : {}),
-      ...(isNewVenue
-        ? {
-            venueConfirmation: EventVenueConfirmation.Pending,
-            venueConfirmedAt: null,
-            venueOwnerNotifiedAt: null,
-          }
-        : {}),
+      ...venueConfirmationFields,
       ...(dto.isOnline !== undefined ? { isOnline: dto.isOnline } : {}),
       ...(dto.onlineUrl !== undefined
         ? { onlineUrl: dto.onlineUrl ?? null }
@@ -3772,11 +3820,26 @@ export class EventsService {
         take: EventsService.ANNOUNCEMENT_DETAIL_LIMIT,
       }),
       // "Run by": the same batched read the list uses, for one event. No
-      // query at all when the gathering names no business.
+      // query at all when the gathering names no business. The same read
+      // also brings the business's public directory address, which the
+      // address rule below compares against.
       this.runByListings.resolveForDisplay(
         event.runByListingId ? [event.runByListingId] : [],
+        { shouldIncludePublicAddress: true },
       ),
     ]);
+    const runByListingWithPublicAddress = event.runByListingId
+      ? (runByListingsById.get(event.runByListingId) ?? null)
+      : null;
+    // The response carries the plain "Run by" line, the same shape every list
+    // row carries. The public address only feeds the address rule below.
+    const runByListing: RunByListingRef | null = runByListingWithPublicAddress
+      ? {
+          ref: runByListingWithPublicAddress.ref,
+          slug: runByListingWithPublicAddress.slug,
+          name: runByListingWithPublicAddress.name,
+        }
+      : null;
     const myRsvp = preview
       ? previewRsvpRow(preview.rsvpStatus, waitlistCount)
       : storedRsvp;
@@ -3831,7 +3894,7 @@ export class EventsService {
         null,
         series ?? undefined,
         seatCounts.seatsTaken,
-        EventsService.runByListingOf(event, runByListingsById),
+        runByListing,
         // The detail's own lead lookup, under the same withholding rule.
         hostingCommunity && event.communityId
           ? {
@@ -3852,8 +3915,28 @@ export class EventsService {
     // the same shape `toHousingListingDTO` applies to a home's precise point,
     // for the same reason: a house party has to be listable without its
     // address being public.
+    //
+    // A PUBLIC BUSINESS ADDRESS goes to every reader. When the gathering's
+    // own address is the street line the directory page of its venue listing
+    // or of its "Run by" listing already prints for every member, withholding
+    // it hides nothing, and a guest of a public bar should not have to RSVP
+    // to learn where the bar is. Both public addresses follow the directory
+    // page's own rule (`VenueListingRef.address`,
+    // `RunByListingWithPublicAddress.publicAddress`): null for a paused,
+    // hidden, removed or online-only listing, or one with no address. Only
+    // `address` and `locationPrecision` follow it. `arrivalNotes` and
+    // `onlineUrl` stay with organisers and confirmed attendees, and a
+    // host-typed address that differs from both stays gated.
     const hasConfirmedRsvp = myRsvp?.status === RsvpStatus.Going;
     const seesExactLocation = isOrganizer || hasConfirmedRsvp;
+    const isPublicBusinessAddress = EventsService.matchesPublicBusinessAddress(
+      event.address,
+      [
+        venueListing?.address ?? null,
+        runByListingWithPublicAddress?.publicAddress ?? null,
+      ],
+    );
+    const seesAddress = seesExactLocation || isPublicBusinessAddress;
 
     // Announcements reach the people they were addressed to: organisers, and
     // anyone holding a live RSVP of any kind (going, maybe or waitlisted —
@@ -3873,7 +3956,7 @@ export class EventsService {
     return {
       ...summary,
       description: event.description,
-      // The join link rides the SAME gate as the street address (PRD-182):
+      // The join link rides the attendee gate the arrival notes use (PRD-182):
       // organisers and confirmed attendees only. A video link handed to every
       // reader of a public page is a room anyone can walk into.
       onlineUrl: seesExactLocation ? event.onlineUrl : null,
@@ -3886,10 +3969,10 @@ export class EventsService {
       paymentUrl: event.costKind === 'free' ? null : (event.paymentUrl ?? null),
       paymentInstructions:
         event.costKind === 'free' ? null : (event.paymentInstructions ?? null),
-      address: seesExactLocation ? event.address : null,
+      address: seesAddress ? event.address : null,
       arrivalNotes: seesExactLocation ? event.arrivalNotes : null,
       locationPrecision:
-        seesExactLocation && event.address !== null ? 'exact' : 'venue',
+        seesAddress && event.address !== null ? 'exact' : 'venue',
       language: event.language,
       accessibilityAnswers: normalizeAccessibilityAnswers(
         event.accessibilityAnswers,
@@ -3936,6 +4019,34 @@ export class EventsService {
       goingAttendeesPreviewTotal: attendeesPreview.total,
       quizshow,
     };
+  }
+
+  /**
+   * Whether a gathering's own `address` is one of the public business
+   * addresses given (its venue listing's and its "Run by" listing's, as their
+   * directory pages print them). Compared after trimming, collapsing runs of
+   * whitespace and ignoring case, so "Rua  da Rosa 12 " matches
+   * "rua da rosa 12". A null address, or a null public address, matches
+   * nothing.
+   */
+  private static matchesPublicBusinessAddress(
+    eventAddress: string | null,
+    publicBusinessAddresses: readonly (string | null)[],
+  ): boolean {
+    if (eventAddress === null) return false;
+    const normalizedEventAddress =
+      EventsService.normalizeAddressForComparison(eventAddress);
+    if (normalizedEventAddress.length === 0) return false;
+    return publicBusinessAddresses.some(
+      (publicAddress) =>
+        publicAddress !== null &&
+        EventsService.normalizeAddressForComparison(publicAddress) ===
+          normalizedEventAddress,
+    );
+  }
+
+  private static normalizeAddressForComparison(address: string): string {
+    return address.trim().replace(/\s+/g, ' ').toLowerCase();
   }
 
   /** An event's resolved "Run by" line out of a batched lookup, or null. */

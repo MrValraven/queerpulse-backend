@@ -9,6 +9,8 @@ import { Observable } from 'rxjs';
 import { FEATURE_KEY } from '../common/feature.decorator';
 import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-log';
 import { FeatureKey } from '../launchedFeatures';
+import { isLeadsRequest } from '../leads/leads-request-log';
+import { isVjRequest } from '../vj/vj-request-log';
 import { isStudioLandingPublicRequest } from '../studio/studio-landing-request-log';
 import { isTrackedFeature } from './feature-depth';
 import { FeatureUsageTallyService } from './feature-usage-tally.service';
@@ -76,6 +78,12 @@ export class FeatureUsageInterceptor implements NestInterceptor {
     const isCreatorDraftSurface = isCreatorDraftRequest(
       request.originalUrl ?? request.url,
     );
+    // The `Admin` class prefix already keeps the leads controller out; this
+    // explicit check keeps it out if the class is ever renamed or tagged.
+    const isLeadsSurface = isLeadsRequest(request.originalUrl ?? request.url);
+    // The `Admin` class prefix already keeps the VJ controller out; this
+    // explicit check keeps it out if the class is ever renamed or tagged.
+    const isVjSurface = isVjRequest(request.originalUrl ?? request.url);
     const isProfileEventsSurface = isProfileEventsRequest(
       request.originalUrl ?? request.url,
     );
@@ -88,6 +96,8 @@ export class FeatureUsageInterceptor implements NestInterceptor {
       featureKey &&
       !isStaffSurface &&
       !isCreatorDraftSurface &&
+      !isLeadsSurface &&
+      !isVjSurface &&
       !isProfileEventsSurface &&
       !isStudioLandingPublicSurface &&
       isTrackedFeature(featureKey)

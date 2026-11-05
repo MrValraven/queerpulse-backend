@@ -647,6 +647,65 @@ describe('SubprofileFeedsService', () => {
   });
 
   describe('syncFeed', () => {
+    beforeEach(() => {
+      // Feeds here import into `episodes`, which the podcaster kind has.
+      subprofileRepo.findOne.mockResolvedValue({
+        ...makePersona(),
+        kind: SubprofileKind.Podcaster,
+      });
+    });
+
+    it('skips a feed whose persona kind no longer has its section', async () => {
+      subprofileRepo.findOne.mockResolvedValue({
+        ...makePersona(),
+        kind: SubprofileKind.Musician,
+      });
+      fetcher.fetchFeed.mockResolvedValue({
+        notModified: false,
+        xml: rss(item('fresh', 'Tue, 02 Jan 2024 00:00:00 GMT')),
+        finalUrl: 'https://feeds.example/show',
+        etag: null,
+        lastModified: null,
+      });
+
+      const outcome = await service.syncFeed(
+        makeFeed(),
+        { kind: 'scheduled' },
+        NOW,
+      );
+
+      expect(outcome).toEqual({ newEntryCount: 0, newPendingCount: 0 });
+      expect(fetcher.fetchFeed).not.toHaveBeenCalled();
+      expect(insertedValues).toEqual([]);
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+      expect(feeds.update).toHaveBeenCalledTimes(1);
+      expect(feeds.update).toHaveBeenCalledWith(
+        { id: FEED_ID },
+        { nextCheckAt: new Date(NOW.getTime() + 3 * 60 * 60 * 1000) },
+      );
+    });
+
+    it('still syncs a feed whose persona kind has its section', async () => {
+      fetcher.fetchFeed.mockResolvedValue({
+        notModified: false,
+        xml: rss(item('fresh', 'Tue, 02 Jan 2024 00:00:00 GMT')),
+        finalUrl: 'https://feeds.example/show',
+        etag: null,
+        lastModified: null,
+      });
+      entries.count.mockResolvedValue(1);
+
+      const outcome = await service.syncFeed(
+        makeFeed(),
+        { kind: 'scheduled' },
+        NOW,
+      );
+
+      expect(outcome).toEqual({ newEntryCount: 1, newPendingCount: 1 });
+      expect(insertedValues.map((row) => row.guid)).toEqual(['fresh']);
+      expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
+    });
+
     it('records a failure with exponential backoff and the error code', async () => {
       fetcher.fetchFeed.mockRejectedValue(new FeedFetchError('timeout'));
       await service.syncFeed(

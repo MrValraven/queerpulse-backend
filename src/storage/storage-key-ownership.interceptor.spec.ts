@@ -483,4 +483,79 @@ describe('StorageKeyOwnershipInterceptor', () => {
       ).toThrow(ForbiddenException);
     });
   });
+
+  // VJ: a clip or thumbnail key names no uploader, so it is refused
+  // everywhere but the clip create.
+  describe('VJ keys', () => {
+    const CLIP_KEY = `vj-clips/${FILE_SEGMENT}/${FILE_SEGMENT}.mp4`;
+    const THUMB_KEY = `vj-thumbnails/${FILE_SEGMENT}/${FILE_SEGMENT}.webp`;
+    const clipCreate = {
+      controller: 'AdminVjController',
+      method: 'createClip',
+    };
+
+    it('lets the clip create carry VJ keys and refuses them everywhere else', () => {
+      const passedBody = {
+        storageKey: CLIP_KEY,
+        thumbnailStorageKey: THUMB_KEY,
+      };
+      interceptor.intercept(
+        httpContext('POST', passedBody, { userId: OWN_USER_ID }, clipCreate),
+        nextHandler(),
+      );
+      expect(passedBody.storageKey).toBe(CLIP_KEY);
+      expect(passedBody.thumbnailStorageKey).toBe(THUMB_KEY);
+
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'PATCH',
+            { storageKey: CLIP_KEY, thumbnailStorageKey: THUMB_KEY },
+            { userId: OWN_USER_ID },
+            { controller: 'AdminVjController', method: 'updateClip' },
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'PATCH',
+            { storageKey: CLIP_KEY, thumbnailStorageKey: THUMB_KEY },
+            { userId: OWN_USER_ID },
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'POST',
+            { storageKey: CLIP_KEY, thumbnailStorageKey: THUMB_KEY },
+            undefined,
+            clipCreate,
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+    });
+
+    it('normalizes the files URL form to the bare key on the clip create', () => {
+      setImageUrlBase('http://localhost:3000');
+      try {
+        const body = {
+          storageKey: `http://localhost:3000/files/${CLIP_KEY}`,
+          thumbnailStorageKey: `http://localhost:3000/files/${THUMB_KEY}`,
+        };
+        interceptor.intercept(
+          httpContext('POST', body, { userId: OWN_USER_ID }, clipCreate),
+          nextHandler(),
+        );
+        expect(body.storageKey).toBe(CLIP_KEY);
+        expect(body.thumbnailStorageKey).toBe(THUMB_KEY);
+      } finally {
+        resetImageUrlBaseForTesting();
+      }
+    });
+  });
 });

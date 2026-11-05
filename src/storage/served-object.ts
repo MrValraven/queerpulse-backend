@@ -6,6 +6,7 @@
 import {
   DOCUMENT_UPLOAD_TYPES,
   IMAGE_UPLOAD_TYPES,
+  VJ_CLIP_UPLOAD_TYPES,
 } from './upload-content-types';
 import { parseStorageKey } from './storage-key';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
@@ -24,12 +25,17 @@ const CONTENT_TYPE_BY_EXTENSION: Readonly<Record<string, string>> =
       spec.extension,
       contentType,
     ]),
+    ...Object.entries(VJ_CLIP_UPLOAD_TYPES).map(([contentType, spec]) => [
+      spec.extension,
+      contentType,
+    ]),
   ]);
 
 // The number of leading bytes the magic-byte check needs. WEBP is the widest
 // image signature: `RIFF....WEBP` spans bytes 0-11, so 16 is a comfortable
 // margin for every image AND document type below (PDF's `%PDF-` and the ZIP
-// local-file-header XLSX carries both fit well inside it too).
+// local-file-header XLSX carries both fit well inside it too, and both video
+// signatures).
 export const MAGIC_BYTE_PREFIX_LENGTH = 16;
 
 /**
@@ -210,7 +216,42 @@ export function magicBytesMatchContentType(
         bytes[10] === 0x42 &&
         bytes[11] === 0x50
       );
+    case 'video/mp4':
+      // ISO base media: `ftyp` at bytes 4..7, and a major brand that is not
+      // `qt  ` (a QuickTime MOV carries the same box).
+      return hasFtypBox(bytes) && !isQuickTimeBrand(bytes);
+    case 'video/webm':
+      // EBML header: 1A 45 DF A3. A Matroska file carries the same header.
+      return (
+        bytes[0] === 0x1a &&
+        bytes[1] === 0x45 &&
+        bytes[2] === 0xdf &&
+        bytes[3] === 0xa3
+      );
     default:
       return false;
   }
+}
+
+function hasFtypBox(bytes: Uint8Array): boolean {
+  return (
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  );
+}
+
+/**
+ * Whether the first bytes are an ISO base media header whose major brand is
+ * `qt  ` (a QuickTime MOV). The VJ clip create uses it to name the MOV format.
+ */
+export function isQuickTimeBrand(bytes: Uint8Array): boolean {
+  return (
+    hasFtypBox(bytes) &&
+    bytes[8] === 0x71 &&
+    bytes[9] === 0x74 &&
+    bytes[10] === 0x20 &&
+    bytes[11] === 0x20
+  );
 }

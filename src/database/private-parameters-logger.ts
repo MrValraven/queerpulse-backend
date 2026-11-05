@@ -8,7 +8,10 @@ import { AdvancedConsoleLogger, type QueryRunner } from 'typeorm';
  * players' answers, votes and team names, and the quiz, round, question and
  * session tables carry game titles and question text, the template table
  * carries template card text and staff notes, and sign-in code
- * challenges carry email addresses. A failed or slow query on any of
+ * challenges carry email addresses. Leads and lead entries carry the names,
+ * emails, phones, links and notes staff keep about the people they reach out
+ * to. VJ clips and packs carry the titles and names admins give their visuals.
+ * A failed or slow query on any of
  * them logs its SQL text, its error and its timing as usual, with the
  * parameters left out.
  */
@@ -26,6 +29,10 @@ export const PRIVATE_PARAMETER_TABLES = [
   'quizshow_sessions',
   'email_sign_in_challenges',
   'quizshow_templates',
+  'leads',
+  'lead_entries',
+  'vj_clips',
+  'vj_packs',
 ] as const;
 
 /**

@@ -77,6 +77,13 @@ export enum EventStatus {
  * blanked from the venue page", and `confirmed` + a timestamp means "an owner
  * pressed the button at that instant". Nothing branches on the difference; it
  * is there so the data never claims a consent that was never given.
+ *
+ * SELF-ATTACHMENT. A gathering whose venue `listingId` is also its
+ * `runByListingId` is written `confirmed`, with `venueConfirmedAt` set to the
+ * write and no owner notification, at create, at update and in a batch
+ * (`isVenueTheRunByListing` in `events.service.ts`). Naming a "Run by" listing
+ * already requires that the host owns or co-manages the business, so the
+ * consent this enum records has been given by the person who would be asked.
  */
 export enum EventVenueConfirmation {
   Pending = 'pending',
@@ -299,6 +306,16 @@ export class Event {
   // gets the street and the "ring the bell on the left" note. `venue` and
   // `neighbourhood` stay public because they are what makes a gathering
   // findable at all.
+  //
+  // ONE EXCEPTION, for a public business. When `address` is the street line
+  // the directory page of the gathering's venue listing (`listingId`) or of
+  // its "Run by" listing (`runByListingId`) already prints for every member,
+  // every reader of the detail gets it, since withholding it hides nothing.
+  // The match ignores case and extra whitespace, and the listing's address
+  // counts only while its page shows it (the listing is live, its owner has
+  // it switched on, moderators left it up, it has premises, and its address
+  // has text; a permanently closed business keeps it). A host who types a different address keeps it gated,
+  // and `arrivalNotes` is always gated. See `EventsService.buildDetail`.
   @Column({ type: 'varchar', length: 300, nullable: true })
   address!: string | null;
 

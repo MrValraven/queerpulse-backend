@@ -3,6 +3,11 @@ import type { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
 import type { SubprofileKind } from './entities/subprofile.entity';
 import { SubprofileSection } from './entities/subprofile-item.entity';
 import {
+  VISIBLE_SECTIONS_BY_KIND_JSON,
+  VISIBLE_SECTIONS_PARAMETER,
+  visibleSectionSql,
+} from './subprofile-visible-sections-sql';
+import {
   QUEST_KINDS,
   type TableChipFormat,
   type TableVibe,
@@ -58,13 +63,15 @@ const TABLE_FORMAT = `(${TABLE_BLOCK} ->> 'format')`;
 const TABLE_VIBES_ARRAY = `(${TABLE_BLOCK} -> 'vibe')`;
 const IS_QUEST_PERSONA = `"sp"."kind" IN (:...tableQuestKinds)`;
 
-/** A persona whose non-links items carry any of the tags bound to `param`
- *  (a text array). Needs `tagLinksSection` bound. */
+/** A persona whose non-links items, in sections its kind shows, carry any of
+ *  the tags bound to `param` (a text array). Needs `tagLinksSection` and
+ *  `visibleSectionsByKind` bound. */
 export function tagsOverlapClause(param: string): string {
   return `EXISTS (
     SELECT 1 FROM "subprofile_items" "tag_item"
     WHERE "tag_item"."subprofile_id" = "sp"."id"
       AND "tag_item"."section" <> :tagLinksSection
+      AND ${visibleSectionSql('"tag_item"."section"', '"sp"."kind"')}
       AND "tag_item"."tags" && :${param}
   )`;
 }
@@ -94,6 +101,7 @@ export function bindRefinementParameters<Entity extends ObjectLiteral>(
 ): void {
   qb.setParameter('tagLinksSection', SubprofileSection.Links);
   qb.setParameter('tableQuestKinds', [...QUEST_KINDS]);
+  qb.setParameter(VISIBLE_SECTIONS_PARAMETER, VISIBLE_SECTIONS_BY_KIND_JSON);
 }
 
 /**

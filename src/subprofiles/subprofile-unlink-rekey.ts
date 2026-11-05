@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
+import { forgetLeadLinkOfPersona } from '../leads/lead-persona-unlink';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { releasePlaylistCreditsOfPersona } from '../studio/studio-playlist-credit-release';
 import { forgetTeamLinksOfPersona } from '../listings/listing-team-unlink';
@@ -88,6 +89,9 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  *
  * Persona wall: the persona's place on the directory wall is deleted
  * (`forgetWallPickOfPersona`).
+ *
+ * Leads: the staff lead linked to the persona lets go of it, and its history
+ * stops naming it (`forgetLeadLinkOfPersona`).
  *
  * Three references hold the persona id with no foreign key and are moved
  * here:
@@ -330,6 +334,9 @@ export async function issueFreshPersonaId(
   // Persona wall: the pick goes too, so the slot the named persona held on
   // the directory wall never shows the pseudonymous persona.
   await forgetWallPickOfPersona(manager, freshSubprofileId);
+  // Leads: the staff lead that pointed at the named persona lets go of it,
+  // and its history stops naming it.
+  await forgetLeadLinkOfPersona(manager, freshSubprofileId);
   return freshSubprofileId;
 }
 

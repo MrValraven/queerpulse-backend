@@ -2,15 +2,24 @@ import { In } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandleOwnerKind } from '../handles/entities/handle.entity';
 import { BlockFilterService } from '../social/block-filter.service';
-import { SubprofileLinkVisibility } from './entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileLinkVisibility,
+} from './entities/subprofile.entity';
 import { SubprofileCreditGraphService } from './subprofile-credit-graph.service';
 import type { CreditSubject } from './subprofile-credit-graph';
+import {
+  VISIBLE_SECTIONS_BY_KIND_JSON,
+  VISIBLE_SECTIONS_PARAMETER,
+  visibleSectionSql,
+} from './subprofile-visible-sections-sql';
 
 // Stubs the fluent `createQueryBuilder('item')` chain each credited-item scan
 // builds. Every chained method returns the builder; `getMany` answers with
 // the rows the test set for that scan.
 interface ItemScanStub {
   select: jest.Mock;
+  innerJoin: jest.Mock;
   where: jest.Mock;
   andWhere: jest.Mock;
   orderBy: jest.Mock;
@@ -23,6 +32,7 @@ function makeItemScanStub(): ItemScanStub {
   const scan = {} as ItemScanStub;
   for (const method of [
     'select',
+    'innerJoin',
     'where',
     'andWhere',
     'orderBy',
@@ -149,6 +159,26 @@ describe('SubprofileCreditGraphService.loadCardCreditsFor', () => {
     // Both scans use the partial-index predicate.
     for (const scan of scans) {
       expect(whereCalls(scan)).toContainEqual(["item.collaborators <> '{}'"]);
+    }
+  });
+
+  it('joins every scanned item to its author and keeps sections the author kind shows', async () => {
+    await service.loadCardCreditsFor(
+      [linkedSubject, unlinkedSubject],
+      'viewer-1',
+    );
+
+    expect(scans).toHaveLength(2);
+    for (const scan of scans) {
+      expect(scan.innerJoin).toHaveBeenCalledWith(
+        Subprofile,
+        'author',
+        'author.id = item.subprofileId',
+      );
+      expect(scan.andWhere).toHaveBeenCalledWith(
+        visibleSectionSql('"item"."section"', '"author"."kind"'),
+        { [VISIBLE_SECTIONS_PARAMETER]: VISIBLE_SECTIONS_BY_KIND_JSON },
+      );
     }
   });
 

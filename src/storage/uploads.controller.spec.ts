@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, HttpException } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
@@ -34,9 +34,16 @@ const STUDIO_PRESIGNED: PresignedUpload = {
 };
 const PERSONA_ID = '7a000000-0000-4000-8000-000000000001';
 
+const VJ_PRESIGNED: PresignedUpload = {
+  uploadUrl:
+    'https://queerpulse-prod.storage.railway.app/vj-clips/key?X-Amz-Signature=abc',
+  key: 'vj-clips/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp4',
+  expiresIn: 300,
+};
+
 describe('UploadsController', () => {
   let controller: UploadsController;
-  let storage: { presignImageUpload: jest.Mock };
+  let storage: { presignImageUpload: jest.Mock; presignVjUpload: jest.Mock };
   let studioAudioUploads: { presign: jest.Mock };
   let mediaCropService: { upsert: jest.Mock };
   let personaImageKeys: { isMemberOfKeyPersona: jest.Mock };
@@ -44,6 +51,7 @@ describe('UploadsController', () => {
   beforeEach(() => {
     storage = {
       presignImageUpload: jest.fn().mockResolvedValue(PRESIGNED),
+      presignVjUpload: jest.fn().mockResolvedValue(VJ_PRESIGNED),
     };
     studioAudioUploads = {
       presign: jest.fn().mockResolvedValue(STUDIO_PRESIGNED),
@@ -300,6 +308,74 @@ describe('UploadsController', () => {
         }),
       ).toThrow(BadRequestException);
       expect(storage.presignImageUpload).not.toHaveBeenCalled();
+    });
+  });
+
+  // VJ media is admin only, with a coded refusal the frontend can name.
+  describe('VJ presign', () => {
+    const moderator: CurrentUserData = { ...user, role: 'moderator' };
+    const admin: CurrentUserData = { ...user, role: 'admin' };
+
+    it('refuses a VJ presign for a moderator with VJ_UPLOAD_NOT_ADMIN', () => {
+      for (const caller of [moderator, user]) {
+        for (const request of [
+          { kind: 'vj_clip' as const, contentType: 'video/mp4' },
+          { kind: 'vj_thumbnail' as const, contentType: 'image/webp' },
+        ]) {
+          let refusal: unknown;
+          try {
+            void controller.presign(caller, { ...request, byteSize: 4096 });
+          } catch (error) {
+            refusal = error;
+          }
+          expect(refusal).toBeInstanceOf(HttpException);
+          expect((refusal as HttpException).getStatus()).toBe(403);
+          expect((refusal as HttpException).getResponse()).toEqual(
+            expect.objectContaining({ code: 'VJ_UPLOAD_NOT_ADMIN' }),
+          );
+        }
+      }
+      expect(storage.presignVjUpload).not.toHaveBeenCalled();
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
+    });
+
+    it('passes an admin VJ presign to presignVjUpload', async () => {
+      const result = await controller.presign(admin, {
+        kind: 'vj_clip',
+        contentType: 'video/webm',
+        byteSize: 4096,
+      });
+      expect(storage.presignVjUpload).toHaveBeenCalledWith({
+        kind: 'vj_clip',
+        contentType: 'video/webm',
+        byteSize: 4096,
+      });
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
+      expect(studioAudioUploads.presign).not.toHaveBeenCalled();
+      expect(result).toBe(VJ_PRESIGNED);
+
+      await controller.presign(admin, {
+        kind: 'vj_thumbnail',
+        contentType: 'image/webp',
+        byteSize: 2048,
+      });
+      expect(storage.presignVjUpload).toHaveBeenLastCalledWith({
+        kind: 'vj_thumbnail',
+        contentType: 'image/webp',
+        byteSize: 2048,
+      });
+    });
+
+    it('refuses a subprofileId on a VJ presign', () => {
+      expect(() =>
+        controller.presign(admin, {
+          kind: 'vj_clip',
+          contentType: 'video/mp4',
+          byteSize: 4096,
+          subprofileId: PERSONA_ID,
+        }),
+      ).toThrow(BadRequestException);
+      expect(storage.presignVjUpload).not.toHaveBeenCalled();
     });
   });
 

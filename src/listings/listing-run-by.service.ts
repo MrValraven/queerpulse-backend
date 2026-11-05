@@ -28,6 +28,29 @@ export interface RunnableListingRef extends RunByListingRef {
   id: string;
 }
 
+/**
+ * The "Run by" line plus the business's PUBLIC directory address, for the one
+ * reader that needs it: a gathering's detail, which shows the gathering's own
+ * address to every reader when it is this public address
+ * (`EventsService.buildDetail`).
+ *
+ * `publicAddress` follows `VenueListingRef.address` in
+ * `listing-lookup.service.ts`: the listing's `address` column, trimmed, and
+ * null when its directory page does not print one. The page does not render
+ * for a paused, hidden or removed listing, and `resolveForDisplay` already
+ * leaves those out. An online-only listing has no premises and reads null. A
+ * mobile listing keeps its meeting point, which the listing write rules store
+ * in `address` only when the owner placed one, and which its directory page
+ * prints for every member. A permanently closed business keeps its address.
+ *
+ * Kept OFF `RunByListingRef`, which every summary and detail carries as
+ * `runByListing`: the caller strips `publicAddress` before it reaches a
+ * response.
+ */
+export interface RunByListingWithPublicAddress extends RunByListingRef {
+  publicAddress: string | null;
+}
+
 /** The coded 403 for a member who names a listing they do not run. */
 export const RUN_BY_NOT_MANAGER_CODE = 'RUN_BY_NOT_MANAGER';
 
@@ -104,29 +127,71 @@ export class ListingRunByService {
    * its owner paused, or that a moderator hid or removed is left out, and the
    * gathering reads `runByListing: null`. A permanently closed business keeps
    * its line: its page stays up.
+   *
+   * With `{ shouldIncludePublicAddress: true }` each line also carries the
+   * business's public directory address (`RunByListingWithPublicAddress`),
+   * read by the same single listing query.
    */
   async resolveForDisplay(
     listingIds: readonly string[],
-  ): Promise<Map<string, RunByListingRef>> {
-    const refsById = new Map<string, RunByListingRef>();
+  ): Promise<Map<string, RunByListingRef>>;
+  async resolveForDisplay(
+    listingIds: readonly string[],
+    options: { shouldIncludePublicAddress: true },
+  ): Promise<Map<string, RunByListingWithPublicAddress>>;
+  async resolveForDisplay(
+    listingIds: readonly string[],
+    options: { shouldIncludePublicAddress?: boolean } = {},
+  ): Promise<Map<string, RunByListingRef | RunByListingWithPublicAddress>> {
+    const refsById = new Map<
+      string,
+      RunByListingRef | RunByListingWithPublicAddress
+    >();
     const uniqueListingIds = [...new Set(listingIds)];
     if (uniqueListingIds.length === 0) return refsById;
+    const shouldIncludePublicAddress =
+      options.shouldIncludePublicAddress === true;
     const rows = await this.listings.find({
       where: {
         id: In(uniqueListingIds),
         status: ListingStatus.Live,
         isHiddenByOwner: false,
       },
-      select: { id: true, ref: true, slug: true, name: true },
+      select: {
+        id: true,
+        ref: true,
+        slug: true,
+        name: true,
+        ...(shouldIncludePublicAddress ? { online: true, address: true } : {}),
+      },
     });
     const moderatedSlugs = await this.moderatedSlugs(
       rows.map((row) => row.slug),
     );
     for (const row of rows) {
       if (moderatedSlugs.has(row.slug)) continue;
-      refsById.set(row.id, { ref: row.ref, slug: row.slug, name: row.name });
+      const displayRef = { ref: row.ref, slug: row.slug, name: row.name };
+      refsById.set(
+        row.id,
+        shouldIncludePublicAddress
+          ? {
+              ...displayRef,
+              publicAddress: ListingRunByService.publicAddressOf(row),
+            }
+          : displayRef,
+      );
     }
     return refsById;
+  }
+
+  /** The address the listing's directory page prints, trimmed, or null. See
+   *  `RunByListingWithPublicAddress` for the rule. */
+  private static publicAddressOf(
+    listing: Pick<Listing, 'online' | 'address'>,
+  ): string | null {
+    if (listing.online) return null;
+    const trimmedAddress = (listing.address ?? '').trim();
+    return trimmedAddress.length > 0 ? trimmedAddress : null;
   }
 
   /**

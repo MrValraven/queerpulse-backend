@@ -480,3 +480,96 @@ describe('tattoo item view shaping', () => {
     expect(flashDayItem).toEqual(storedFlashDayCopy);
   });
 });
+
+describe('hidden sections (persona type change)', () => {
+  // A published unlinked persona of the given kind, with only the fields the
+  // mappers read.
+  const personaOfKind = (
+    kind: SubprofileKind,
+    skinData: Subprofile['skinData'] = null,
+  ): Subprofile =>
+    Object.assign(new Subprofile(), {
+      id: `sp-${kind}-1`,
+      kind,
+      slug: 'nightform',
+      handle: 'nightform',
+      displayName: 'Nightform',
+      avatarUrl: null,
+      tagline: null,
+      bio: null,
+      coverUrl: null,
+      accent: null,
+      availability: null,
+      ctaLabel: null,
+      ctaUrl: null,
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+      visibility: SubprofileVisibility.Open,
+      status: SubprofileStatus.Published,
+      position: 0,
+      skinData,
+      editVersion: 1,
+    });
+
+  const sectionItem = (section: SubprofileSection): SubprofileItem =>
+    Object.assign(new SubprofileItem(), {
+      id: `item-${section}`,
+      section,
+      title: 'Saturday set',
+      subtitle: null,
+      description: null,
+      url: null,
+      imageUrl: null,
+      date: null,
+      meta: null,
+      tags: [],
+      isFeatured: false,
+      collaborators: [],
+      position: 0,
+      structured: null,
+      createdAt: new Date('2026-10-01T10:00:00.000Z'),
+    });
+
+  const djPersona = personaOfKind(SubprofileKind.Dj);
+  const items = [
+    sectionItem(SubprofileSection.Discography),
+    sectionItem(SubprofileSection.Mixes),
+    sectionItem(SubprofileSection.Gigs),
+    sectionItem(SubprofileSection.Gallery),
+    sectionItem(SubprofileSection.Links),
+  ];
+  const illustratorWithTattooKeys = personaOfKind(SubprofileKind.Illustrator, {
+    coverBleed: true,
+    studioHero: 'banner',
+    tattoo: { status: 'open' },
+    tattooStudio: { city: 'Lisbon' },
+  });
+
+  it('leaves sections the current kind does not use out of the public view, keeping gallery and links', () =>
+    expect(
+      toPublicDTO(djPersona, items).items.map((item) => item.section),
+    ).toEqual(['gallery', 'gigs', 'links', 'mixes']));
+
+  it('leaves them out of the owner view too', () =>
+    expect(
+      toSubprofileDTO(djPersona, items).items.map((item) => item.section),
+    ).toEqual(['gallery', 'gigs', 'links', 'mixes']));
+
+  it('shows them again after a switch back', () =>
+    expect(
+      toPublicDTO(
+        { ...djPersona, kind: SubprofileKind.Musician },
+        items,
+      ).items.map((item) => item.section),
+    ).toContain('discography'));
+
+  it('strips tattoo keys from the public view of an illustrator', () =>
+    expect(toPublicDTO(illustratorWithTattooKeys, []).skinData).toEqual({
+      coverBleed: true,
+      studioHero: 'banner',
+    }));
+
+  it('keeps skinData whole on the owner view', () =>
+    expect(toSubprofileDTO(illustratorWithTattooKeys, []).skinData).toEqual(
+      illustratorWithTattooKeys.skinData,
+    ));
+});

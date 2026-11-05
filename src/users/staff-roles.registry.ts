@@ -223,6 +223,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       'NOT co-host: the grant never seats its holder, another holder, or a moderator or admin as a co-host',
       'Curate Studio home (admin/studio/curation, admin/studio/scenes, admin/studio/spotlight): the featured release, Staff picks, New this week, Local scenes, Artist of the month, New stars',
       'NOT the Studio page, founding artists, Waiting for Studio, or any Studio moderation queue',
+      'Keep the leads directory (admin/leads): add, edit and delete leads, their links, notes and follow-ups, and link a lead to a persona',
     ],
   },
 };

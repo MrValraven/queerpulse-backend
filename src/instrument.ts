@@ -21,6 +21,14 @@ import {
   isCreatorDraftRequest,
 } from './creator-drafts/creator-draft-request-log';
 // Also import-free, for the same reason.
+import {
+  dropLeadsReferer,
+  dropLeadsUrl,
+  isLeadsRequest,
+} from './leads/leads-request-log';
+// Also import-free, for the same reason.
+import { dropVjReferer, dropVjUrl, isVjRequest } from './vj/vj-request-log';
+// Also import-free, for the same reason.
 import { dropLandingVisitRequest } from './landing/landing-visit-request-log';
 // Also import-free, for the same reason.
 import { dropStudioLandingPublicRequest } from './studio/studio-landing-request-log';
@@ -104,6 +112,8 @@ export function scrubSensitiveQueryParameters(
   // The Referer header can name the same listening page the URL would.
   dropStudioListeningReferer(request);
   dropCreatorDraftReferer(request);
+  dropLeadsReferer(request);
+  dropVjReferer(request);
   // A referer that survives can still carry an invite code or a token.
   redactKeptReferer(request);
   // Studio records nothing about what a member listens to, so the URL and
@@ -115,6 +125,10 @@ export function scrubSensitiveQueryParameters(
     request &&
     !dropStudioListeningUrl(request) &&
     !dropCreatorDraftUrl(request) &&
+    // Lead names, emails and notes ride in leads bodies and query strings.
+    !dropLeadsUrl(request) &&
+    // Clip titles and pack names ride in VJ bodies.
+    !dropVjUrl(request) &&
     // The landing visit beacon is an anonymous counter: no URL, body, headers or cookies.
     !dropLandingVisitRequest(request) &&
     // The Studio page reads are served to strangers and record nothing.
@@ -146,7 +160,10 @@ export function scrubSensitiveQueryParameters(
   }
 
   event.breadcrumbs = event.breadcrumbs?.filter(
-    (breadcrumb) => !isCreatorDraftBreadcrumb(breadcrumb),
+    (breadcrumb) =>
+      !isCreatorDraftBreadcrumb(breadcrumb) &&
+      !isLeadsBreadcrumb(breadcrumb) &&
+      !isVjBreadcrumb(breadcrumb),
   );
   for (const breadcrumb of event.breadcrumbs ?? []) {
     const url: unknown = breadcrumb.data?.url;
@@ -161,6 +178,16 @@ export function scrubSensitiveQueryParameters(
 function isCreatorDraftBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {
   const url: unknown = breadcrumb.data?.url;
   return typeof url === 'string' && isCreatorDraftRequest(url);
+}
+
+function isLeadsBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {
+  const url: unknown = breadcrumb.data?.url;
+  return typeof url === 'string' && isLeadsRequest(url);
+}
+
+function isVjBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {
+  const url: unknown = breadcrumb.data?.url;
+  return typeof url === 'string' && isVjRequest(url);
 }
 
 /**

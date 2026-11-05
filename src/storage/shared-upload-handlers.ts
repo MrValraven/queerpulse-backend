@@ -204,6 +204,24 @@ export function allowsStudioLandingScopedKeys(
   );
 }
 
+/** Handlers whose body may carry a VJ key (`vj-clips/...`, `vj-thumbnails/...`).
+ *  The service checks shape, existence and magic bytes itself. */
+export const VJ_KEY_HANDLERS: ReadonlySet<string> = new Set([
+  'AdminVjController.createClip',
+]);
+
+/** Whether this controller+handler pair may carry a VJ key. Unknown pairs
+ *  may not. */
+export function allowsVjKeys(
+  controllerName: string | undefined,
+  handlerName: string | undefined,
+): boolean {
+  if (!controllerName || !handlerName) {
+    return false;
+  }
+  return VJ_KEY_HANDLERS.has(`${controllerName}.${handlerName}`);
+}
+
 /** Whether this controller+handler pair may carry a persona-scoped key.
  *  Unknown pairs may not. */
 export function allowsPersonaScopedKeys(

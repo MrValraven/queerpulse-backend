@@ -105,6 +105,37 @@ describe('FeatureUsageInterceptor', () => {
     expect(tally.drain().size).toBe(0);
   });
 
+  it('records nothing for a leads route on a tagged member controller', () => {
+    class LeadsController {}
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue('events');
+
+    interceptor.intercept(
+      contextFor('http', LeadsController, '/v1/admin/leads'),
+      next,
+    );
+    expect(tally.drain().size).toBe(0);
+
+    interceptor.intercept(
+      contextFor('http', LeadsController, '/v1/events'),
+      next,
+    );
+    expect(tally.drain().get('events')).toBe(1);
+  });
+
+  it('records nothing for a VJ route on a tagged member controller', () => {
+    class VjController {}
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue('events');
+
+    interceptor.intercept(
+      contextFor('http', VjController, '/v1/admin/vj/packs'),
+      next,
+    );
+    expect(tally.drain().size).toBe(0);
+
+    interceptor.intercept(contextFor('http', VjController, '/v1/events'), next);
+    expect(tally.drain().get('events')).toBe(1);
+  });
+
   it('records nothing for the Events section of a member profile', () => {
     class ProfilesController {}
     jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue('events');

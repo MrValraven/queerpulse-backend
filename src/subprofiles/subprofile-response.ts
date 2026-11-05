@@ -30,6 +30,8 @@ import type { ListingWorksAt } from '../listings/listing-team-response';
 import type { FlashDayEventRef } from './flash-day-event-links';
 import { mapItemImageRefs } from './subprofile-item-images';
 import { isTattooBodyPhotoSection } from './tattoo-artist-vocab';
+import { visibleItemsForKind } from './subprofile-kinds';
+import { publicSkinDataFor } from './skin-data-key-owner';
 
 export interface SubprofileItemView {
   id: string;
@@ -571,7 +573,9 @@ export function toSubprofileDTO(
     visibility: subprofile.visibility,
     status: subprofile.status,
     position: memberPosition ?? subprofile.position,
-    items: sortItems(items).map((item) =>
+    // Stored items keep their section, and a section the current kind does
+    // not use is hidden here, so every persona view agrees (C5).
+    items: sortItems(visibleItemsForKind(subprofile.kind, items)).map((item) =>
       toItemView(item, collaboratorsByHandle, crops, ownerReadContext),
     ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
@@ -641,7 +645,9 @@ export function toPublicDTO(
     linkVisibility: subprofile.linkVisibility,
     visibility: subprofile.visibility,
     status: subprofile.status,
-    items: sortItems(items).map((item) =>
+    // Stored items keep their section, and a section the current kind does
+    // not use is hidden here, so every persona view agrees (C5).
+    items: sortItems(visibleItemsForKind(subprofile.kind, items)).map((item) =>
       toItemView(item, collaboratorsByHandle, crops, visitorReadContext),
     ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
@@ -658,7 +664,7 @@ export function toPublicDTO(
     worksAt,
     viewerIsMember,
     isFoundingArtist,
-    skinData: subprofile.skinData ?? null,
+    skinData: publicSkinDataFor(subprofile.kind, subprofile.skinData),
   };
   // Owner identity is exposed ONLY for linked personas — never leak the tie for
   // an unlinked (pseudonymous) persona (design spec §4).
