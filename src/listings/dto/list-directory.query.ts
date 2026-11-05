@@ -12,6 +12,7 @@ import {
   MaxLength,
 } from 'class-validator';
 import { MAX_PAGE } from '../../common/pagination';
+import { ALL_LISTING_CATEGORY_SLUGS } from '../listing-categories';
 import {
   LISTING_ACCESSIBILITY_QUESTION_SLUGS,
   ListingAccessibilityQuestionSlug,
@@ -84,11 +85,28 @@ function toOwnedByList(value: unknown): unknown {
  * set), so both are honored: omitting these returns every live listing.
  */
 export class ListListingDirectoryQuery {
-  /** Category slug — matches when present in the listing's `cats`. */
+  /**
+   * Categories, as the chip ids of the tab the request is for. Repeatable, and
+   * also accepted comma-joined, like `access`. Several values are an OR: a
+   * place has one primary category, so someone picking Food and Nightlife
+   * wants both kinds of place.
+   *
+   * A listing matches when its PRIMARY category (the first of `cats`, the one
+   * its card shows) reads as one of them in the request's vocabulary: the
+   * online one with `online=true` and on `GET /directory/adult`, the place
+   * types otherwise. The two vocabularies meet through the same pairs the
+   * frontend reads (`design` finds an online-only `handmade` shop on the List
+   * tab, and the other way round on the Online tab), and a legacy display
+   * label sits under the chip it heals to (`directory-category-filter.ts`).
+   * An unknown slug is a 400. Applied in the query, so the paged `total`
+   * counts only matching rows.
+   */
   @IsOptional()
-  @IsString()
-  @MaxLength(40)
-  cat?: string;
+  @Transform(({ value }) => toQueryValueList(value))
+  @IsArray()
+  @ArrayMaxSize(ALL_LISTING_CATEGORY_SLUGS.length)
+  @IsIn(ALL_LISTING_CATEGORY_SLUGS, { each: true })
+  cat?: string[];
 
   /** Free-text search over name / blurb / hood. */
   @IsOptional()
@@ -224,6 +242,16 @@ export class ListListingDirectoryQuery {
   @IsOptional()
   @IsIn(['true'])
   online?: 'true';
+
+  /**
+   * `true` narrows the grid to listings that are out and about (`mobile`):
+   * businesses with no premises, which go to people or meet at a point.
+   * Applied in the query, so the paged `total` and the facets count only
+   * matching rows. Only the literal `true` is accepted, like `online`.
+   */
+  @IsOptional()
+  @IsIn(['true'])
+  mobile?: 'true';
 }
 
 /**

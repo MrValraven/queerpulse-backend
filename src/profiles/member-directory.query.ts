@@ -91,7 +91,18 @@ export interface DirectoryFacetCounts {
   /** One count per focus-area key, each assuming `ambassador=1`: "how many
    *  visible ambassadors would I get if I also picked this focus area". */
   ambassador: Record<string, number>;
+  /** The "Ambassadors" switch's own count: visible ambassadors under every
+   *  other filter, with the switch and its focus areas lifted. Each member
+   *  counts once, so it stays a distinct total even where the focus areas
+   *  above overlap (an ambassador can hold several). */
+  ambassadorsOnly: number;
 }
+
+/** The extra option the ambassador scan counts alongside the focus areas: no
+ *  focus-area clause, so it reads as the switch's distinct total. Kept out of
+ *  `AMBASSADOR_FOCUS_AREAS` (snake_case keys, so it cannot collide) and split
+ *  back out of the per-focus record before it is returned. */
+const AMBASSADORS_ONLY_OPTION = 'ambassadorsOnly';
 
 /** The frontend's "show every neighbourhood" row. It is chrome: the FE strips
  *  it from `?hoods=` before the request reaches the wire (see
@@ -123,6 +134,7 @@ export function zeroedFacetCounts(): DirectoryFacetCounts {
     languages: zero(LANGUAGE_CODES),
     hoods: zero(HOOD_FACET_IDS),
     ambassador: zero(AMBASSADOR_FOCUS_AREAS),
+    ambassadorsOnly: 0,
   };
 }
 
@@ -515,7 +527,7 @@ export async function countDirectoryFacets(
     disciplines,
     professions,
     languages,
-    ambassador,
+    ambassadorCounts,
   ] = await Promise.all([
     countByFilterClauses(
       base('openTo'),
@@ -582,19 +594,24 @@ export async function countDirectoryFacets(
     // applies (see `applyDirectoryFilters`). It is the same predicate either
     // way, per this file's header. The staff parameters go on the builder
     // first, because `countByFilterClauses` binds only the per-option one.
+    // The switch's own total rides the same scan as one more column with the
+    // focus-area clause dropped; the EXISTS keeps it one row per member, so
+    // an ambassador holding several focus areas still counts once.
     countByFilterClauses(
       base('ambassador').setParameters(NOT_BADGED_STAFF_PARAMETERS),
-      AMBASSADOR_FOCUS_AREAS,
-      (param) =>
+      [...AMBASSADOR_FOCUS_AREAS, AMBASSADORS_ONLY_OPTION],
+      (param, option) =>
         `"p"."is_ambassador_tag_visible" = true AND EXISTS (
             SELECT 1 FROM "ambassadors" "ambCount"
             WHERE "ambCount"."user_id" = "p"."user_id"
               AND "ambCount"."revoked_at" IS NULL
-              AND "ambCount"."focus_area" = :${param}
+              ${option === AMBASSADORS_ONLY_OPTION ? '' : `AND "ambCount"."focus_area" = :${param}`}
           ) AND ${notBadgedStaffClause('"p"."user_id"')}`,
       (option) => option,
     ),
   ]);
+  const { [AMBASSADORS_ONLY_OPTION]: ambassadorsOnly = 0, ...ambassador } =
+    ambassadorCounts;
   return {
     ...zeroedFacetCounts(),
     openTo,
@@ -604,5 +621,6 @@ export async function countDirectoryFacets(
     professions,
     languages,
     ambassador,
+    ambassadorsOnly,
   };
 }

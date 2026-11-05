@@ -54,6 +54,10 @@ import {
 import { Throttle, seconds } from '@nestjs/throttler';
 import { Response } from 'express';
 import { FundingLookupQuery } from './dto/funding-lookup.query';
+import { CursorPage } from '../common/cursor-pagination';
+import { isFundingCategory } from './forum-funding';
+import { ForumFundingFacets } from './forum-funding-facets';
+import { ForumThreadResponse } from './forum-response';
 
 @Feature('forum')
 @ApiTags('Forum')
@@ -72,26 +76,50 @@ export class ForumController {
 
   @Get('threads')
   @ApiOperation({ summary: 'List forum threads (cursor-paginated)' })
-  @ApiOkResponse({ description: 'A page of forum threads.' })
-  listThreads(
+  @ApiOkResponse({
+    description:
+      'A page of forum threads. The first page of `category=funding` also carries `fundingFacets`, how many threads each view, eligibility and scope chip would list.',
+  })
+  async listThreads(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListThreadsQuery,
-  ) {
-    return this.threadsService.list(
-      user.userId,
-      query.category,
-      query.cursor,
-      query.limit,
-      query.sort,
-      query.tag,
-      query.q,
-      isModeratorRole(user.role),
-      {
-        view: query.fundingView,
-        eligibility: query.eligibility,
-        scope: query.scope,
-      },
-    );
+  ): Promise<
+    CursorPage<ForumThreadResponse> & { fundingFacets?: ForumFundingFacets }
+  > {
+    const viewerIsModerator = isModeratorRole(user.role);
+    const fundingFilter = {
+      view: query.fundingView,
+      eligibility: query.eligibility,
+      scope: query.scope,
+    };
+    // The chips sit above the list, so their counts ride on the first page
+    // only: a "Load more" page answers the same question again for nothing.
+    const shouldCountFundingFacets =
+      !!query.category && isFundingCategory(query.category) && !query.cursor;
+    const [page, fundingFacets] = await Promise.all([
+      this.threadsService.list(
+        user.userId,
+        query.category,
+        query.cursor,
+        query.limit,
+        query.sort,
+        query.tag,
+        query.q,
+        viewerIsModerator,
+        fundingFilter,
+      ),
+      shouldCountFundingFacets
+        ? this.threadsService.fundingFacets(
+            user.userId,
+            query.q,
+            query.tag,
+            query.sort,
+            viewerIsModerator,
+            fundingFilter,
+          )
+        : undefined,
+    ]);
+    return fundingFacets ? { ...page, fundingFacets } : page;
   }
 
   // Declared BEFORE `threads/:slug` so Express doesn't route `counts` as a slug.

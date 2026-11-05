@@ -135,6 +135,16 @@ export interface JoinRequestView {
   /** ISO-serialisable expiry of that invite, or null when it has none. */
   inviteExpiresAt: Date | null;
   /**
+   * How many welcome emails a reviewer sent for this request that Resend
+   * accepted. A reissue of the invite keeps the count. STAFF ONLY:
+   * `PublicJoinRequestStatusView`, `SubmittedJoinRequestView` and the member
+   * data export leave it out. 0 when none went out.
+   */
+  welcomeEmailSendCount: number;
+  /** ISO 8601 moment of the latest counted welcome email, or null when none
+   *  went out. STAFF ONLY, like the count above. */
+  welcomeEmailLastSentAt: string | null;
+  /**
    * Confidence-tiered triage signals computed at read time from the current
    * fetched batch (see `computeBatchFlags`) — never persisted, never used to
    * auto-accept/reject. Empty for a single just-reviewed row returned by
@@ -338,6 +348,9 @@ export function toJoinRequestView(
     inviteCode: invite?.code ?? null,
     inviteStatus: invite?.status ?? null,
     inviteExpiresAt: invite?.expiresAt ?? null,
+    welcomeEmailSendCount: request.welcomeEmailSendCount,
+    welcomeEmailLastSentAt:
+      request.welcomeEmailLastSentAt?.toISOString() ?? null,
     flags,
     priorDeclineCount,
     referenceMemberName,

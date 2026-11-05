@@ -37,9 +37,14 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
+  countOpportunityCauseFacets,
+  countOpportunityCommitFacets,
+} from './opportunity-board-facets';
+import {
   CommunityRef,
   MyOpportunitySummary,
   MyVolunteerContributionDTO,
+  OpportunityBoardFacetCounts,
   VolunteerHoursByCommunityDTO,
   VolunteerHoursByOpportunityDTO,
   VolunteerHoursTotalsDTO,
@@ -369,15 +374,55 @@ export class VolunteeringService {
     throw new ConflictException('Could not allocate a unique opportunity slug');
   }
 
+  /**
+   * `GET /volunteering`: one page of board cards, plus `facets`, how many
+   * opportunities each time commitment and each cause would yield under the
+   * rest of this request's filters (see `OpportunityBoardFacetCounts`).
+   */
   async list(
     query: OpportunityListQuery,
-  ): Promise<Paginated<OpportunityCardDTO>> {
+  ): Promise<
+    Paginated<OpportunityCardDTO> & { facets: OpportunityBoardFacetCounts }
+  > {
     const page = normalizePage(query.page);
-    const qb = this.opportunities
-      .createQueryBuilder('o')
-      .orderBy('o.created_at', 'DESC');
+    const opportunitiesQuery = this.boardBaseQuery(query, null).orderBy(
+      'o.created_at',
+      'DESC',
+    );
 
-    if (query.cause) {
+    // The page and the three facet reads are independent, so they go out
+    // together in one Promise.all. Each facet group gets its own base, with
+    // its own filter lifted. `allCauses` is a plain count over the same
+    // cause-lifted base: causes overlap, so the per-cause counts cannot be
+    // summed into it.
+    const [pageOfCards, commit, cause, allCauses] = await Promise.all([
+      paginate(opportunitiesQuery, page, (rows) => this.toCards(rows)),
+      countOpportunityCommitFacets(this.boardBaseQuery(query, 'commit')),
+      countOpportunityCauseFacets(
+        this.boardBaseQuery(query, 'cause'),
+        this.dataSource,
+      ),
+      this.boardBaseQuery(query, 'cause').getCount(),
+    ]);
+    return { ...pageOfCards, facets: { commit, cause, allCauses } };
+  }
+
+  /**
+   * The public board's filters and visibility gates, shared by the page and
+   * its facet counts so the numbers on the chips can never drift from the
+   * cards they lead to. `lift` leaves that one filter's own predicate OFF, so
+   * this query can count that group's facets (the communities browse's
+   * `browseBaseQuery(viewer, query, skip)` is the same contract). The two
+   * visibility gates are never lifted: a takedown or a private attribution
+   * must not leak through a count either.
+   */
+  private boardBaseQuery(
+    query: OpportunityListQuery,
+    lift: 'commit' | 'cause' | null,
+  ): SelectQueryBuilder<VolunteerOpportunity> {
+    const qb = this.opportunities.createQueryBuilder('o');
+
+    if (lift !== 'cause' && query.cause) {
       // Array overlap, served by `IDX_volunteer_opportunities_causes` (GIN).
       // The explicit cast is required: without it Postgres cannot infer the
       // element type of the bound array literal and rejects the `&&`.
@@ -386,13 +431,13 @@ export class VolunteeringService {
         { cause: query.cause },
       );
     }
-    if (query.commit) {
+    if (lift !== 'commit' && query.commit) {
       qb.andWhere('o.commit = :commit', { commit: query.commit });
     }
     this.excludeModeratedOpportunities(qb);
     this.excludePrivateAttributedOpportunities(qb);
 
-    return paginate(qb, page, (rows) => this.toCards(rows));
+    return qb;
   }
 
   // The public board reaches every visitor, and a `private` community's

@@ -17,6 +17,17 @@ import {
   toFlatmateProfileDTO,
 } from './flatmate-profile-response';
 import { MatchResult, scoreMatch } from './flatmate-match';
+import {
+  budgetBandClause,
+  countFlatmateBudgetFacets,
+  countFlatmateMoveInFacets,
+  countFlatmateNeighbourhoodFacets,
+  countFlatmateTagFacets,
+  countFlatmateTypeFacets,
+  type FlatmateDirectoryFacets,
+  type FlatmateFacetGroup,
+  moveInWindowClause,
+} from './flatmate-directory-facets';
 
 // Match ranking is computed in-memory (a JS score can't be an ORDER BY), so the
 // ranked path bounds how many candidates it pulls. Ample for launch scale; the
@@ -105,11 +116,30 @@ export class FlatmateDirectoryService {
     );
   }
 
+  /**
+   * One page of the board. Page 1 also carries `facets`, the sidebar's
+   * availability counts (`FlatmateDirectoryFacets`): every page of one filter
+   * run shares them, so later pages skip the five aggregate reads.
+   */
   async browse(
     viewerId: string,
     query: BrowseFlatmateProfilesQuery,
-  ): Promise<Paginated<FlatmateProfileDTO>> {
+  ): Promise<
+    Paginated<FlatmateProfileDTO> & { facets?: FlatmateDirectoryFacets }
+  > {
     const page = normalizePage(query.page);
+    const [pageOfProfiles, facets] = await Promise.all([
+      this.browsePage(viewerId, query, page),
+      page === 1 ? this.countFacets(viewerId, query) : undefined,
+    ]);
+    return facets ? { ...pageOfProfiles, facets } : pageOfProfiles;
+  }
+
+  private async browsePage(
+    viewerId: string,
+    query: BrowseFlatmateProfilesQuery,
+    page: number,
+  ): Promise<Paginated<FlatmateProfileDTO>> {
     const viewer = await this.flatmates.findOne({
       where: { ownerId: viewerId },
     });
@@ -237,6 +267,50 @@ export class FlatmateDirectoryService {
     );
   }
 
+  // --- facets ---
+
+  /**
+   * The sidebar's counts. Each group reads its own base from `filteredQb`
+   * with that group lifted, so the counts run the list's exact predicates
+   * (visibility gates included, which are never lifted). Ranking reorders
+   * the list and never drops a row, so it plays no part here.
+   *
+   * Lifestyle tags under `tagMatch=all` count against the full filter set,
+   * selected tags included: adding a tag narrows, so "how many would I get
+   * with this one too" is the count over the current results. The legacy
+   * `any` reading widens instead, so there the tag group is lifted.
+   */
+  private async countFacets(
+    viewerId: string,
+    query: BrowseFlatmateProfilesQuery,
+  ): Promise<FlatmateDirectoryFacets> {
+    const tagBaseLift: FlatmateFacetGroup | null =
+      query.tagMatch === 'all' ? null : 'tags';
+    const [types, neighbourhoods, budgets, moveIns, tags] = await Promise.all([
+      countFlatmateTypeFacets(this.filteredQb(viewerId, query, 'type')),
+      countFlatmateNeighbourhoodFacets(
+        this.filteredQb(viewerId, query, 'neighbourhood'),
+      ),
+      countFlatmateBudgetFacets(this.filteredQb(viewerId, query, 'budget')),
+      countFlatmateMoveInFacets(this.filteredQb(viewerId, query, 'moveIn')),
+      countFlatmateTagFacets(
+        this.filteredQb(viewerId, query, tagBaseLift),
+        this.flatmates.manager,
+      ),
+    ]);
+    return {
+      type: types.counts,
+      allTypes: types.total,
+      neighbourhood: neighbourhoods.counts,
+      allNeighbourhoods: neighbourhoods.total,
+      budget: budgets.counts,
+      allBudgets: budgets.total,
+      moveIn: moveIns.counts,
+      allMoveIns: moveIns.total,
+      tags,
+    };
+  }
+
   // --- ranking ---
 
   /** Pull a bounded candidate set, score the opposite-type ones and sort
@@ -311,8 +385,11 @@ export class FlatmateDirectoryService {
       query.type ?? null,
       query.neighbourhood?.toLowerCase() ?? null,
       query.budgetMax ?? null,
+      query.budgetBand ?? null,
       query.moveInBy ?? null,
+      query.moveIn ?? null,
       [...(query.tags ?? [])].sort(),
+      query.tagMatch ?? 'any',
     ]);
   }
 
@@ -347,36 +424,59 @@ export class FlatmateDirectoryService {
 
   // --- internals ---
 
+  /**
+   * The board's filters and visibility gates, shared by the page, the ranked
+   * candidate fetch and the facet counts so a count can never drift from the
+   * cards it leads to. `lift` leaves one filter group's own predicates off
+   * (budget lifts `budgetMax` and `budgetBand` together, move-in lifts
+   * `moveInBy` and `moveIn`), which is what a facet count needs. The viewer
+   * exclusion and the block and takedown gates are never lifted.
+   */
   private filteredQb(
     viewerId: string,
     query: BrowseFlatmateProfilesQuery,
+    lift: FlatmateFacetGroup | null = null,
   ): SelectQueryBuilder<FlatmateProfile> {
     const qb = this.flatmates
       .createQueryBuilder('p')
       .where('p.owner_id != :viewerId', { viewerId });
 
-    if (query.type) {
+    if (lift !== 'type' && query.type) {
       qb.andWhere('p.type = :type', { type: query.type });
     }
-    if (query.neighbourhood) {
+    if (lift !== 'neighbourhood' && query.neighbourhood) {
       qb.andWhere('LOWER(p.neighbourhood) = LOWER(:neighbourhood)', {
         neighbourhood: query.neighbourhood,
       });
     }
-    if (query.budgetMax !== undefined) {
-      qb.andWhere('p.budget_euros <= :budgetMax', {
-        budgetMax: query.budgetMax,
-      });
+    if (lift !== 'budget') {
+      if (query.budgetMax !== undefined) {
+        qb.andWhere('p.budget_euros <= :budgetMax', {
+          budgetMax: query.budgetMax,
+        });
+      }
+      if (query.budgetBand) {
+        qb.andWhere(budgetBandClause(query.budgetBand));
+      }
     }
-    if (query.moveInBy) {
-      qb.andWhere('(p.move_in_from IS NULL OR p.move_in_from <= :moveInBy)', {
-        moveInBy: query.moveInBy,
-      });
+    if (lift !== 'moveIn') {
+      if (query.moveInBy) {
+        qb.andWhere('(p.move_in_from IS NULL OR p.move_in_from <= :moveInBy)', {
+          moveInBy: query.moveInBy,
+        });
+      }
+      if (query.moveIn) {
+        qb.andWhere(moveInWindowClause(query.moveIn));
+      }
     }
-    if (query.tags && query.tags.length) {
-      // Postgres array overlap: at least one shared tag. node-postgres binds a
-      // JS string[] as a text[] literal.
-      qb.andWhere('p.lifestyle_tags && :tags', { tags: query.tags });
+    if (lift !== 'tags' && query.tags && query.tags.length) {
+      // `all` is array containment (every chosen tag), the default `any` is
+      // array overlap (at least one shared tag). node-postgres binds a JS
+      // string[] as a text[] literal.
+      const tagOperator = query.tagMatch === 'all' ? '@>' : '&&';
+      qb.andWhere(`p.lifestyle_tags ${tagOperator} :tags`, {
+        tags: query.tags,
+      });
     }
     // Hide profiles of members blocked either way (and muted, one-way) — same
     // severance `detail()` applies via `isBlockedEitherWay`, applied in-query so

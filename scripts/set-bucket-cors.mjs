@@ -8,7 +8,9 @@
 //  AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY first, then run without --env-file)
 //
 // The allowed browser origins are read from FRONTEND_URL (the same allowlist the
-// API uses for CORS), so keep that set in the env you point this at.
+// API uses for CORS), so keep that set in the env you point this at. A second,
+// read-only rule (GET/HEAD from any origin) covers crossOrigin reads that reach
+// the bucket through the API's /files redirect with `Origin: null`.
 //
 // Re-running is safe: PutBucketCors replaces the whole policy each time.
 import {
@@ -101,6 +103,26 @@ await client.send(
           AllowedHeaders: ['*'],
           // Studio listening: the upload page measures saved tracks through
           // Range requests and reads where each slice sits in the file.
+          ExposeHeaders: [
+            'ETag',
+            'Content-Range',
+            'Accept-Ranges',
+            'Content-Length',
+          ],
+          MaxAgeSeconds: 3600,
+        },
+        // Read-only fallback. A crossOrigin read (cover tint, Web Audio) that
+        // follows the API's /files 302 reaches the bucket with `Origin: null`,
+        // because the browser taints a cross-origin redirect, and no exact
+        // origin can match null. The first matching rule wins, so FRONTEND_URL
+        // origins still get the rule above. Safe because every GET is a
+        // presigned URL carrying its own short-lived signature and no cookies:
+        // a wildcard read lets no one fetch anything that URL did not already
+        // grant. Uploads (PUT) stay limited to FRONTEND_URL.
+        {
+          AllowedOrigins: ['*'],
+          AllowedMethods: ['GET', 'HEAD'],
+          AllowedHeaders: ['*'],
           ExposeHeaders: [
             'ETag',
             'Content-Range',

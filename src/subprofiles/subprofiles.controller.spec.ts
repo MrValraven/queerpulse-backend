@@ -134,6 +134,7 @@ describe('SubprofilesController.update restriction gate (M3, fix round 2)', () =
     const controller = new SubprofilesController(
       subprofilesService as never,
       {} as never,
+      {} as never,
     );
     return {
       controller,
@@ -320,6 +321,7 @@ describe('SubprofilesController replace-all PUTs pass expectedEditVersion (ENG-4
     const controller = new SubprofilesController(
       subprofilesService as never,
       {} as never,
+      {} as never,
     );
     return { controller, subprofilesService };
   }
@@ -397,6 +399,7 @@ describe('SubprofilesController.listFlashDayEventOptions', () => {
     };
     const controller = new SubprofilesController(
       subprofilesService as never,
+      {} as never,
       {} as never,
     );
 

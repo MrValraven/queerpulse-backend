@@ -171,6 +171,33 @@ describe('SubprofileFollowersService.follow', () => {
     expect(transactionManager.insert).not.toHaveBeenCalled();
   });
 
+  // The follow button names the reason from these codes; the message text
+  // stays as it always was.
+  it('sends the PERSONA_SELF_FOLLOW code when an owner follows their own persona', async () => {
+    const error = await service.follow(CREATOR_ID, PERSONA_ID).then(
+      () => null,
+      (rejection: unknown) => rejection,
+    );
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).getResponse()).toEqual({
+      code: 'PERSONA_SELF_FOLLOW',
+      message: 'You cannot follow your own persona',
+    });
+  });
+
+  it('sends the PERSONA_NOT_FOLLOWABLE code when the persona cannot be followed', async () => {
+    subprofiles.findOne.mockResolvedValue(null);
+    const error = await service.follow(VISITOR_ID, PERSONA_ID).then(
+      () => null,
+      (rejection: unknown) => rejection,
+    );
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect((error as NotFoundException).getResponse()).toEqual({
+      code: 'PERSONA_NOT_FOLLOWABLE',
+      message: 'Subprofile not found',
+    });
+  });
+
   it('ignores a slug-keyed row, which may belong to a persona of the same slug', async () => {
     contentModeration.stateFor.mockImplementation(
       (subjectType: string, subjectId: string) =>

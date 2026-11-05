@@ -90,8 +90,10 @@ export class CommunitiesController {
   @ApiOkResponse({
     description:
       'A paginated page of community cards, plus `facets` — how many ' +
-      'communities each curated tag (`facets.tags`), the open-to-all filter ' +
-      '(`facets.openToAll`) and the busy filter (`facets.busy`) would yield ' +
+      'communities each curated tag (`facets.tags`), each category ' +
+      '(`facets.types`, with `facets.allTypes` for all categories), the ' +
+      'open-to-all filter (`facets.openToAll`) and the busy filter ' +
+      '(`facets.busy`) would yield ' +
       "under the rest of this request's filters, each with its own predicate " +
       'lifted, so the browse can number its chips and toggles and grey out ' +
       'the ones that lead nowhere.',

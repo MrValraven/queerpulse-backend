@@ -22,6 +22,8 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { DIRECTORY_MAX_LIMIT } from './dto/list-directory.query';
+import { SubprofileCreditGraphService } from './subprofile-credit-graph.service';
+import type { CardCreditsView } from './subprofile-credits-response';
 import {
   Subprofile,
   SubprofileKind,
@@ -187,6 +189,15 @@ interface DirectoryQueryBuilderStub {
   limit: jest.Mock<DirectoryQueryBuilderStub, [number]>;
   getMany: jest.Mock<Promise<Subprofile[]>, []>;
   getCount: jest.Mock<Promise<number>, []>;
+  // The page-1 facet counts (`countSubprofileDirectoryFacets`) run grouped and
+  // aggregate reads over fresh builders from the same factory, and bind the
+  // refinement's shared parameters on every builder.
+  addSelect: jest.Mock<DirectoryQueryBuilderStub, [string, string?]>;
+  groupBy: jest.Mock<DirectoryQueryBuilderStub, [string]>;
+  setParameter: jest.Mock<DirectoryQueryBuilderStub, [string, unknown]>;
+  getRawMany: jest.Mock<Promise<unknown[]>, []>;
+  getRawOne: jest.Mock<Promise<unknown>, []>;
+  getQueryAndParameters: jest.Mock<[string, unknown[]], []>;
 }
 function makeSubprofilesQueryBuilderStub(
   rows: Subprofile[],
@@ -226,6 +237,24 @@ function makeSubprofilesQueryBuilderStub(
   queryBuilder.getCount = jest
     .fn<Promise<number>, []>()
     .mockResolvedValue(count);
+  queryBuilder.addSelect = jest
+    .fn<DirectoryQueryBuilderStub, [string, string?]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.groupBy = jest
+    .fn<DirectoryQueryBuilderStub, [string]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.setParameter = jest
+    .fn<DirectoryQueryBuilderStub, [string, unknown]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.getRawMany = jest
+    .fn<Promise<unknown[]>, []>()
+    .mockResolvedValue([]);
+  queryBuilder.getRawOne = jest
+    .fn<Promise<unknown>, []>()
+    .mockResolvedValue(undefined);
+  queryBuilder.getQueryAndParameters = jest
+    .fn<[string, unknown[]], []>()
+    .mockReturnValue(['SELECT "sp"."id" FROM "subprofiles" "sp"', []]);
   return queryBuilder;
 }
 
@@ -283,6 +312,10 @@ describe('SubprofilePublicReadService', () => {
   };
   let contentModeration: { stateFor: jest.Mock; statesFor: jest.Mock };
   let membership: { isMember: jest.Mock };
+  // The `subprofile_members` repository: the directory's viewerIsMember read.
+  let members: { find: jest.Mock };
+  // The directory's card credits. Defaults to "nobody credited".
+  let creditGraph: { loadCardCreditsFor: jest.Mock };
   // "Part of" eligibility. Defaults to "no owners, nothing eligible", which
   // only matters to a test that resolves affiliation rows.
   let affiliationEligibility: {
@@ -342,6 +375,12 @@ describe('SubprofilePublicReadService', () => {
       statesFor: jest.fn().mockResolvedValue(new Map()),
     };
     membership = { isMember: jest.fn().mockResolvedValue(false) };
+    members = { find: jest.fn().mockResolvedValue([]) };
+    creditGraph = {
+      loadCardCreditsFor: jest
+        .fn()
+        .mockResolvedValue(new Map<string, CardCreditsView>()),
+    };
     affiliationEligibility = {
       ownerIdsFor: jest.fn().mockResolvedValue(new Map<string, string[]>()),
       eligibleTargetKeys: jest.fn().mockResolvedValue(new Set<string>()),
@@ -361,10 +400,7 @@ describe('SubprofilePublicReadService', () => {
           provide: getRepositoryToken(SubprofileAffiliation),
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
-        {
-          provide: getRepositoryToken(SubprofileMember),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
-        },
+        { provide: getRepositoryToken(SubprofileMember), useValue: members },
         {
           provide: getRepositoryToken(Event),
           useValue: { find: jest.fn().mockResolvedValue([]) },
@@ -404,6 +440,7 @@ describe('SubprofilePublicReadService', () => {
           provide: SubprofileAffiliationEligibilityService,
           useValue: affiliationEligibility,
         },
+        { provide: SubprofileCreditGraphService, useValue: creditGraph },
       ],
     }).compile();
 
@@ -700,6 +737,132 @@ describe('SubprofilePublicReadService', () => {
       // Composed from the profile's name parts, exactly like the public DTO's
       // `SubprofileOwnerRef.name`.
       expect(starletCard?.ownerName).toBe('Ana Reis');
+    });
+
+    it('orders by display name then id when no sort is asked for', async () => {
+      const qb = makeSubprofilesQueryBuilderStub([
+        makeSubprofile({ id: 'sp-a' }),
+      ]);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({}, 'viewer-1');
+
+      expect(qb.orderBy).toHaveBeenCalledWith('sp.displayName', 'ASC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('sp.id', 'ASC');
+    });
+
+    it('orders sort=recent by updatedAt DESC with the id tiebreak', async () => {
+      const qb = makeSubprofilesQueryBuilderStub([
+        makeSubprofile({ id: 'sp-a' }),
+      ]);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({ sort: 'recent' }, 'viewer-1');
+
+      expect(qb.orderBy).toHaveBeenCalledWith('sp.updatedAt', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('sp.id', 'ASC');
+      expect(qb.orderBy).not.toHaveBeenCalledWith('sp.displayName', 'ASC');
+    });
+
+    it('orders sort=followed by a follower-count alias, then name, then id', async () => {
+      const qb = makeSubprofilesQueryBuilderStub([
+        makeSubprofile({ id: 'sp-a' }),
+      ]);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({ sort: 'followed' }, 'viewer-1');
+
+      const rankSelect = qb.addSelect.mock.calls.find(
+        (call) => call[1] === 'follower_rank',
+      );
+      expect(rankSelect).toBeDefined();
+      expect(rankSelect![0]).toContain('"subprofile_followers"');
+      expect(rankSelect![0]).toContain(
+        '"follower"."subprofile_id" = "sp"."id"',
+      );
+      expect(qb.orderBy).toHaveBeenCalledWith('follower_rank', 'DESC');
+      expect(qb.addOrderBy.mock.calls).toEqual([
+        ['sp.displayName', 'ASC'],
+        ['sp.id', 'ASC'],
+      ]);
+      // The rank is added after the count, so `total` never pays for it.
+      expect(qb.getCount.mock.invocationCallOrder[0]!).toBeLessThan(
+        qb.orderBy.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('carries id, viewerFollowing, viewerIsMember and credits on each card from batched reads', async () => {
+      const followedRow = makeSubprofile({ id: 'sp-a', handle: 'nightform' });
+      const ownedRow = makeSubprofile({
+        id: 'sp-b',
+        handle: 'starlet',
+        displayName: 'Starlet',
+      });
+      const qb = makeSubprofilesQueryBuilderStub([followedRow, ownedRow]);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+      followersService.viewerFollowingFor.mockResolvedValue(new Set(['sp-a']));
+      members.find.mockResolvedValue([{ subprofileId: 'sp-b' }]);
+      const nightformCredits: CardCreditsView = {
+        count: 2,
+        faces: [
+          {
+            kind: 'persona',
+            name: 'Ember',
+            avatarUrl: null,
+            accent: 'coral',
+          },
+        ],
+      };
+      creditGraph.loadCardCreditsFor.mockResolvedValue(
+        new Map([['sp-a', nightformCredits]]),
+      );
+
+      const result = await service.directory({}, 'viewer-1');
+
+      expect(followersService.viewerFollowingFor).toHaveBeenCalledTimes(1);
+      expect(followersService.viewerFollowingFor).toHaveBeenCalledWith(
+        'viewer-1',
+        ['sp-a', 'sp-b'],
+      );
+      expect(members.find).toHaveBeenCalledWith({
+        where: { subprofileId: In(['sp-a', 'sp-b']), userId: 'viewer-1' },
+        select: { subprofileId: true },
+      });
+      expect(creditGraph.loadCardCreditsFor).toHaveBeenCalledTimes(1);
+      expect(creditGraph.loadCardCreditsFor).toHaveBeenCalledWith(
+        [followedRow, ownedRow],
+        'viewer-1',
+      );
+
+      const [nightformCard, starletCard] = result.items;
+      expect(nightformCard).toMatchObject({
+        id: 'sp-a',
+        viewerFollowing: true,
+        viewerIsMember: false,
+        credits: nightformCredits,
+      });
+      // A row the credit graph left out falls back to "nobody credited".
+      expect(starletCard).toMatchObject({
+        id: 'sp-b',
+        viewerFollowing: false,
+        viewerIsMember: true,
+        credits: { count: 0, faces: [] },
+      });
+    });
+
+    it('still serves the page with empty credits when the credit graph fails', async () => {
+      const qb = makeSubprofilesQueryBuilderStub([
+        makeSubprofile({ id: 'sp-a' }),
+      ]);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+      creditGraph.loadCardCreditsFor.mockRejectedValue(
+        new Error('credit graph unavailable'),
+      );
+
+      const result = await service.directory({}, 'viewer-1');
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]!.credits).toEqual({ count: 0, faces: [] });
     });
   });
 

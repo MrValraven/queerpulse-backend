@@ -202,7 +202,7 @@ export class DirectoryController {
   @ApiOperation({ summary: 'List the public directory of live listings' })
   @ApiOkResponse({
     description:
-      'Matching directory cards — a bare array by default, or a `{items,total,page,pageSize}` page when `page` is given.',
+      'Matching directory cards: a bare array by default, or a `{items,total,page,pageSize}` page when `page` is given. Page 1 also carries `facets`: how many listings each filter option would show under the rest of the request (`DirectoryFacetCounts`).',
   })
   listDirectory(@Query() query: ListListingDirectoryQuery) {
     return query.page

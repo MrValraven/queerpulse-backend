@@ -22,12 +22,16 @@ import {
   HousingListingStatus,
 } from './entities/housing-listing.entity';
 import {
-  HOUSING_FURNISHED_FEATURE,
-  HOUSING_PETS_WELCOME_FEATURE,
-  normalizeHousingFeature,
-} from './housing-features';
+  activeMustHaveFlags,
+  countHousingAreaFacets,
+  countHousingBedroomFacets,
+  countHousingMustHaveFacets,
+  countHousingTypeFacets,
+  mustHavePredicate,
+  type HousingBoardFacetCounts,
+  type HousingFacetGroup,
+} from './housing-board-facets';
 import { HousingListerLookup } from './housing-lister-lookup';
-import { VERIFIED_LISTING_MAX_RISK } from './housing-verified';
 import {
   HousingListingDTO,
   HousingLocationUnlock,
@@ -75,26 +79,6 @@ export class HousingDirectoryService {
   // `HousingListingsService` routes, which don't re-check this state.
   private static readonly SUBJECT_TYPE = 'housing';
 
-  /**
-   * "This listing's `features` array carries the chip bound to `parameter`",
-   * as SQL. `features` is a `text[]`, so this unnests it and compares each
-   * entry whole, case-insensitively: the exact contract
-   * `hasHousingFeature`/`normalizeHousingFeature` implement in memory for the
-   * saved-search alert fan-out. The two must keep agreeing, or an alert fires
-   * for a listing the board would not show.
-   *
-   * `= ANY(:array)` (the shape the `areas` multi-select uses) is deliberately
-   * NOT the operator here: that tests one scalar column against a list of
-   * candidate values, where this tests one candidate value against a list held
-   * in the column.
-   */
-  private featurePredicate(parameter: string): string {
-    return `EXISTS (
-      SELECT 1 FROM unnest(l.features) AS listing_feature
-      WHERE lower(btrim(listing_feature)) = :${parameter}
-    )`;
-  }
-
   // NOT EXISTS predicate dropping any listing under a `housing` takedown
   // (hidden OR removed) from a listing query builder (alias `l`), in-query so
   // the paginated/capped result stays consistent. Mirrors
@@ -114,37 +98,84 @@ export class HousingDirectoryService {
   }
 
   /**
+   * `GET /housing-directory`: one page of live listings, plus `facets`, how
+   * many listings each sidebar option would leave under the rest of this
+   * request's filters (see `HousingBoardFacetCounts`).
+   *
    * @param viewerId The member browsing. When present, homes listed by anyone
    *   blocked either way with them, or muted by them, are dropped in-query
-   *   (ENG-470), so the page and its total stay consistent.
+   *   (ENG-470), so the page, its total and every count stay consistent.
    */
   async browse(
     query: BrowseHousingListingsQuery,
     viewerId?: string,
-  ): Promise<Paginated<HousingListingDTO>> {
+  ): Promise<
+    Paginated<HousingListingDTO> & { facets: HousingBoardFacetCounts }
+  > {
     const page = normalizePage(query.page);
+    const listingsQuery = this.browseBaseQuery(query, viewerId, null).orderBy(
+      'l.created_at',
+      'DESC',
+    );
+
+    // The page and the four facet reads are independent, so they go out
+    // together. Each facet group gets its own base, with its own filter
+    // lifted and every other filter still applied.
+    const [pageOfListings, typeFacets, areas, bedroomFacets, mustHave] =
+      await Promise.all([
+        paginate(listingsQuery, page, (rows) => this.toListingDTOs(rows)),
+        countHousingTypeFacets(this.browseBaseQuery(query, viewerId, 'type')),
+        countHousingAreaFacets(this.browseBaseQuery(query, viewerId, 'area')),
+        countHousingBedroomFacets(
+          this.browseBaseQuery(query, viewerId, 'bedrooms'),
+        ),
+        countHousingMustHaveFacets(
+          this.browseBaseQuery(query, viewerId, 'mustHave'),
+          query,
+        ),
+      ]);
+    return {
+      ...pageOfListings,
+      facets: { ...typeFacets, areas, ...bedroomFacets, mustHave },
+    };
+  }
+
+  /**
+   * The board's filters and visibility gates, shared by the page and its
+   * facet counts so the numbers in the sidebar can never drift from the
+   * listings they lead to. `lift` leaves that one group's own predicates OFF,
+   * so the query can count that group's options (the volunteer board's
+   * `boardBaseQuery` is the same contract). The visibility gates (live, not
+   * filled or expired, no takedown, no blocked or muted lister) are never
+   * lifted: a hidden listing must not leak through a count either.
+   */
+  private browseBaseQuery(
+    query: BrowseHousingListingsQuery,
+    viewerId: string | undefined,
+    lift: HousingFacetGroup | null,
+  ): SelectQueryBuilder<HousingListing> {
     const qb = this.listings
       .createQueryBuilder('l')
       .where('l.status = :live', { live: HousingListingStatus.Live })
       // HSG-1 / HSG-3: a member-filled ("found a place") or expired listing is
-      // withheld from public browse — checked here (not just left to the daily
+      // withheld from public browse, checked here (not just left to the daily
       // sweep) so there is never a same-day lag where a stale listing still
       // shows. Backed by IDX_housing_listings_status_expires_at.
       .andWhere('l.filled_at IS NULL')
       .andWhere('l.expires_at > :now', { now: new Date() });
 
-    if (query.type) {
+    if (lift !== 'type' && query.type) {
       qb.andWhere('l.type = :type', { type: query.type });
     }
     if (query.city) {
       // LOWER(city) matches the functional index added in the filter migration.
       qb.andWhere('LOWER(l.city) = LOWER(:city)', { city: query.city });
     }
-    if (query.area) {
+    if (lift !== 'area' && query.area) {
       // Same case-insensitive equality as city, backed by LOWER(area) index.
       qb.andWhere('LOWER(l.area) = LOWER(:area)', { area: query.area });
     }
-    if (query.areas?.length) {
+    if (lift !== 'area' && query.areas?.length) {
       // Neighbourhood multi-select: OR across the chosen areas, still backed by
       // the LOWER(area) functional index. Independent of the legacy single
       // `area` above (the UI sends only `areas`).
@@ -158,29 +189,19 @@ export class HousingDirectoryService {
     if (query.priceMax !== undefined) {
       qb.andWhere('l.rent_euros <= :priceMax', { priceMax: query.priceMax });
     }
-    if (query.bedroomsMin !== undefined) {
+    if (lift !== 'bedrooms' && query.bedroomsMin !== undefined) {
       // A listing with no bedroom count set can't satisfy a minimum-beds filter.
       qb.andWhere('l.bedrooms >= :bedroomsMin', {
         bedroomsMin: query.bedroomsMin,
       });
     }
-    if (query.billsIncluded) {
-      qb.andWhere('l.bills_included = true');
-    }
-    if (query.hasAccessibilityInfo) {
-      qb.andWhere("l.accessibility_info <> ''");
-    }
-    if (query.furnished) {
-      qb.andWhere(this.featurePredicate('furnishedFeature'), {
-        furnishedFeature: normalizeHousingFeature(HOUSING_FURNISHED_FEATURE),
-      });
-    }
-    if (query.petsWelcome) {
-      qb.andWhere(this.featurePredicate('petsWelcomeFeature'), {
-        petsWelcomeFeature: normalizeHousingFeature(
-          HOUSING_PETS_WELCOME_FEATURE,
-        ),
-      });
+    if (lift !== 'mustHave') {
+      // Bills, access info, furnished, pets and verified, each the predicate
+      // its facet count reuses (`mustHavePredicate`).
+      for (const flag of activeMustHaveFlags(query)) {
+        const predicate = mustHavePredicate(flag);
+        qb.andWhere(predicate.clause, predicate.parameters);
+      }
     }
     if (query.depositMax !== undefined) {
       // A listing with no stated deposit can't satisfy a deposit cap. Spelled
@@ -189,22 +210,6 @@ export class HousingDirectoryService {
       qb.andWhere(
         '(l.deposit_euros IS NOT NULL AND l.deposit_euros <= :depositMax)',
         { depositMax: query.depositMax },
-      );
-    }
-    if (query.verifiedOnly) {
-      // The public "verified listing" derivation, expressed in-query: status is
-      // already `live` above, so verified reduces to a low pre-publish risk
-      // score AND an id-verified lister. Kept in lockstep with
-      // `deriveListingVerified` (housing-verified.ts).
-      qb.andWhere('l.risk_score < :maxRisk', {
-        maxRisk: VERIFIED_LISTING_MAX_RISK,
-      }).andWhere(
-        `EXISTS (
-          SELECT 1 FROM "member_verifications" "mv"
-          WHERE "mv"."user_id" = l.owner_id
-            AND "mv"."level" = :idVerifiedLevel
-        )`,
-        { idVerifiedLevel: VerificationLevel.IdVerified },
       );
     }
     if (query.availableBy) {
@@ -220,31 +225,34 @@ export class HousingDirectoryService {
       // Raw column reference in the DB's snake_case (SnakeNamingStrategy).
       this.blockFilter.excludeHidden(qb, viewerId, '"l"."owner_id"');
     }
-    qb.orderBy('l.created_at', 'DESC');
+    return qb;
+  }
 
-    return paginate(qb, page, async (rows) => {
-      if (!rows.length) return [];
-      // NULL for a listing whose lister erased their account
-      // (`SetNullContentAuthorFksOnUserErasure1794610000000`). The row keeps
-      // its reviews and viewings; it just has no lister to name, and
-      // `ContentOwnerErasureService` has already marked it filled so it is
-      // off the market.
-      const ownerIds = presentActorIds(rows.map((r) => r.ownerId));
-      // `HousingListerLookup` is the same single `profiles.find` MemberLookup
-      // issues, mapped to the richer lister block (member-since + bio) the
-      // housing card and detail actually render.
-      const refs = await new HousingListerLookup(this.profiles).byUserIds(
-        ownerIds,
-      );
-      const levels = await this.verification.levelsForUsers(ownerIds);
-      return rows.map((r) =>
-        toHousingListingDTO(
-          r,
-          actorFromLookup(refs, r.ownerId) ?? null,
-          actorFromLookup(levels, r.ownerId) ?? VerificationLevel.Email,
-        ),
-      );
-    });
+  /** One browse page's rows as DTOs, with their listers hydrated. */
+  private async toListingDTOs(
+    rows: HousingListing[],
+  ): Promise<HousingListingDTO[]> {
+    if (!rows.length) return [];
+    // NULL for a listing whose lister erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`). The row keeps
+    // its reviews and viewings; it just has no lister to name, and
+    // `ContentOwnerErasureService` has already marked it filled so it is
+    // off the market.
+    const ownerIds = presentActorIds(rows.map((r) => r.ownerId));
+    // `HousingListerLookup` is the same single `profiles.find` MemberLookup
+    // issues, mapped to the richer lister block (member-since + bio) the
+    // housing card and detail actually render.
+    const refs = await new HousingListerLookup(this.profiles).byUserIds(
+      ownerIds,
+    );
+    const levels = await this.verification.levelsForUsers(ownerIds);
+    return rows.map((r) =>
+      toHousingListingDTO(
+        r,
+        actorFromLookup(refs, r.ownerId) ?? null,
+        actorFromLookup(levels, r.ownerId) ?? VerificationLevel.Email,
+      ),
+    );
   }
 
   // Cross-entity global search (SearchService) — LIVE listings only (mirrors

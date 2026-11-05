@@ -19,6 +19,7 @@ describe('ForumController', () => {
   let controller: ForumController;
   let threadsService: {
     list: jest.Mock;
+    fundingFacets: jest.Mock;
     counts: jest.Mock;
     getBySlug: jest.Mock;
     create: jest.Mock;
@@ -43,6 +44,11 @@ describe('ForumController', () => {
   beforeEach(async () => {
     threadsService = {
       list: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
+      fundingFacets: jest.fn().mockResolvedValue({
+        view: {},
+        eligibility: null,
+        scope: null,
+      }),
       counts: jest.fn().mockResolvedValue({ all: 0 }),
       getBySlug: jest.fn().mockResolvedValue({}),
       create: jest.fn().mockResolvedValue({}),

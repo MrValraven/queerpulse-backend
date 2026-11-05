@@ -1,7 +1,7 @@
 import { type ObjectLiteral, type SelectQueryBuilder } from 'typeorm';
 import { countByFilterClauses } from '../common/facet-counts';
 import { COMMUNITY_TAGS } from './community-tags';
-import { AccessTier } from './entities/community.entity';
+import { AccessTier, CommunityType } from './entities/community.entity';
 
 /**
  * Per-tag availability counts for the communities browse, over the base query
@@ -29,6 +29,43 @@ export async function countCommunityTagFacets(
     (param) => `"c"."tags" && :${param}`,
     (option) => [option],
   );
+}
+
+const COMMUNITY_TYPES: readonly CommunityType[] = Object.values(CommunityType);
+
+/**
+ * Per-category availability counts for the browse's Category radio group, over
+ * the base query with the `type` filter itself lifted (`browseBaseQuery`'s
+ * `skip: 'type'`). So each number answers "how many would I get if I switched
+ * to this category, given the search, toggles and tags already applied", and
+ * the row for the category currently picked keeps telling the truth about its
+ * neighbours.
+ *
+ * Every type in the enum comes back, zeros included, for the same reason the
+ * tag counts do: an empty category is a real answer, and it is the one that
+ * greys a row out.
+ *
+ * `allTypes` is the "All communities" row: the lifted base's own total. A
+ * community carries exactly ONE type (`communities.type` is a non-null enum
+ * column), so the per-type counts partition the base and their sum is a
+ * distinct total that counts every community once.
+ *
+ * Mutates the builder it is handed, so pass a fresh one.
+ */
+export async function countCommunityTypeFacets(
+  base: SelectQueryBuilder<ObjectLiteral>,
+): Promise<{ types: Record<string, number>; allTypes: number }> {
+  const types = await countByFilterClauses(
+    base,
+    COMMUNITY_TYPES,
+    (param) => `"c"."type" = :${param}`,
+    (option) => option,
+  );
+  const allTypes = Object.values(types).reduce(
+    (runningTotal, typeCount) => runningTotal + typeCount,
+    0,
+  );
+  return { types, allTypes };
 }
 
 /**

@@ -137,16 +137,21 @@ describe('DirectoryService public reads', () => {
   const makeQueryBuilder = () => {
     const chain: Record<string, jest.Mock> = {};
     for (const method of [
+      'select',
       'addSelect',
       'where',
       'andWhere',
       'orderBy',
       'addOrderBy',
       'take',
+      'setParameter',
     ]) {
       chain[method] = jest.fn().mockReturnValue(chain);
     }
     chain.getMany = jest.fn().mockResolvedValue([]);
+    // The first page's facet scans (`countDirectoryFacets`) read one
+    // aggregate row each; none means every count is 0.
+    chain.getRawOne = jest.fn().mockResolvedValue(undefined);
     return chain;
   };
 
@@ -913,7 +918,7 @@ describe('DirectoryService public reads', () => {
     });
 
     it('keeps only 18+ listings on the members’ list, capped at 100', async () => {
-      await service.listAdultDirectory({ cat: 'intimacy' });
+      await service.listAdultDirectory({ cat: ['intimacy'] });
 
       expect(andWhereCalls()).toContainEqual([
         ONLY_ADULT_PREDICATE,

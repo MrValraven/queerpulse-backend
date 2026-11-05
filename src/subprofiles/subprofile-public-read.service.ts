@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -36,9 +37,19 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import {
   DIRECTORY_DEFAULT_LIMIT,
+  DIRECTORY_DEFAULT_SORT,
   DIRECTORY_MAX_LIMIT,
+  type DirectorySort,
   ListSubprofileDirectoryQuery,
 } from './dto/list-directory.query';
+import {
+  countSubprofileDirectoryFacets,
+  type SubprofileDirectoryFacets,
+} from './subprofile-directory-facets';
+import {
+  applyDirectoryRefinement,
+  toDirectoryRefinement,
+} from './subprofile-directory-refinement';
 import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import {
@@ -57,6 +68,11 @@ import {
 } from './entities/subprofile-item.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
+import { SubprofileCreditGraphService } from './subprofile-credit-graph.service';
+import {
+  emptyCardCredits,
+  type CardCreditsView,
+} from './subprofile-credits-response';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { kindsMatchingSearch } from './subprofile-kind-search';
@@ -117,6 +133,20 @@ const OWNER_SEARCH_HAYSTACK = foldedHaystack(
 // accent-folded blob, so "Principe" finds "Príncipe" and "sao" finds "São".
 const PERSONA_SEARCH_HAYSTACK = foldedHaystack('sp', SUBPROFILE_SEARCH_COLUMNS);
 
+// The `followed` sort's per-persona follower count, selected under this alias
+// and ordered by it. Lower snake case so the unquoted ORDER BY matches the
+// quoted select alias.
+const DIRECTORY_FOLLOWER_RANK_ALIAS = 'follower_rank';
+
+/** One page of `GET /subprofiles/directory`. `facets` rides on page 1 only. */
+export interface SubprofileDirectoryResponse {
+  items: SubprofileCardView[];
+  total: number;
+  page: number;
+  limit: number;
+  facets?: SubprofileDirectoryFacets;
+}
+
 // The public/card read surface for personas: the profile-nested list, the
 // by-handle + by-slug single fetches, the directory browse, cross-entity
 // search, and the sitemap handle enumeration — plus every batched resolver
@@ -125,6 +155,8 @@ const PERSONA_SEARCH_HAYSTACK = foldedHaystack('sp', SUBPROFILE_SEARCH_COLUMNS);
 // membership gate and never back on the write/orchestration facade.
 @Injectable()
 export class SubprofilePublicReadService {
+  private readonly logger = new Logger(SubprofilePublicReadService.name);
+
   constructor(
     @InjectRepository(Subprofile)
     private readonly subprofiles: Repository<Subprofile>,
@@ -165,6 +197,9 @@ export class SubprofilePublicReadService {
     // "Part of" eligibility: `resolveAffiliationsFor` drops a link once none
     // of the persona's owners belongs to its target any more.
     private readonly affiliationEligibility: SubprofileAffiliationEligibilityService,
+    // Directory card credits: who each persona on the page has been credited
+    // with. A leaf service that never depends back on this one.
+    private readonly creditGraph: SubprofileCreditGraphService,
   ) {}
 
   // A persona is reported (and taken down) under the `subprofile` subject code,
@@ -1159,18 +1194,17 @@ export class SubprofilePublicReadService {
     );
   }
 
-  // Directory of standalone (unlinked + published + open) personas.
+  // Directory of published, open personas, standalone and linked, narrowed by
+  // the sidebar's filters server-side and paged. Page 1 also carries the
+  // sidebar's `facets` (`countSubprofileDirectoryFacets`); later pages leave
+  // them out, since "Show more" changes no filter and the client reads the
+  // block off its first page.
   async directory(
     query: ListSubprofileDirectoryQuery,
     viewerId: string,
-  ): Promise<{
-    items: SubprofileCardView[];
-    total: number;
-    page: number;
-    limit: number;
-  }> {
-    const qb = this.subprofiles
-      .createQueryBuilder('sp')
+  ): Promise<SubprofileDirectoryResponse> {
+    const refinement = toDirectoryRefinement(query);
+    const qb = this.directoryBaseQuery(query, viewerId)
       // Project only what `toCardDTO` (plus the id used to key the batched
       // social-count/tag/follower lookups below) actually reads — this list is
       // now offset-paginated (see below) but was still hydrating full rows,
@@ -1196,7 +1230,218 @@ export class SubprofilePublicReadService {
         'sp.slug',
         'sp.linkVisibility',
         'sp.userId',
-      ])
+      ]);
+    // Every sidebar group narrows the WHOLE table before paging, so `total` and
+    // the pages are the exact answer (they used to narrow only the pages the
+    // browser had loaded).
+    applyDirectoryRefinement(qb, refinement);
+
+    // Offset pagination (replaces the fixed `take: DIRECTORY_RESULT_CAP`
+    // full-catalogue materialisation): 1-based `page`, `limit` bounded by the
+    // DTO's `@Max(DIRECTORY_MAX_LIMIT)` and defaulted, so a browse never pulls
+    // the whole table (plus its per-row social-count/tag/follower fan-out) into
+    // one response. `displayName ASC` is stable enough to page over for this
+    // ordered browse.
+    const page = query.page ?? 1;
+    const limit = Math.min(
+      query.limit ?? DIRECTORY_DEFAULT_LIMIT,
+      DIRECTORY_MAX_LIMIT,
+    );
+    // Total matching the SAME filtered query (block filter + kind/text + removed/
+    // moderated exclusions) BEFORE the page window, so the FE can loop pages
+    // using `total` instead of assuming it received the whole set (the bug this
+    // fixes). `getCount()` ignores `orderBy`/`offset`/`limit`, so it is computed
+    // here, before those are applied, purely for readability. The facet
+    // counts run alongside it, each on its own fresh builder.
+    const [total, facets] = await Promise.all([
+      qb.getCount(),
+      page === 1
+        ? countSubprofileDirectoryFacets({
+            refinedBase: (lift) => {
+              const facetQb = this.directoryBaseQuery(query, viewerId);
+              applyDirectoryRefinement(facetQb, refinement, lift);
+              return facetQb;
+            },
+            visibleScope: () => this.directoryBaseQuery(query, viewerId, false),
+            manager: this.subprofiles.manager,
+            selectedTags: refinement.tags,
+          })
+        : Promise.resolve(undefined),
+    ]);
+    // Applied after `getCount()` so the follower rank never reaches the count.
+    this.applyDirectorySort(qb, query.sort ?? DIRECTORY_DEFAULT_SORT);
+    qb.offset((page - 1) * limit).limit(limit);
+    const rows = await qb.getMany();
+    const rowIds = rows.map((row) => row.id);
+    // Inc2 Task A: the directory now includes linked rows, so resolve the
+    // owner's profile slug for those — ONE grouped query over the page's
+    // linked userIds (never per-card), mirroring the socialCount/tags/
+    // followerCount batches below. Skipped entirely when the page has no
+    // linked rows.
+    const linkedUserIds = [
+      ...new Set(
+        rows
+          .filter(
+            (row) => row.linkVisibility === SubprofileLinkVisibility.Linked,
+          )
+          .map((row) => row.userId),
+      ),
+    ];
+    // The per-page fan-out reads are mutually independent, batched into one
+    // round trip. Each is ONE grouped query (or, for the credits, a fixed
+    // handful) over the page's ids, never a per-card read (Personas redesign
+    // Phase 4, design plan Decision §3).
+    const [
+      socialCountsById,
+      tagsById,
+      followerCountsById,
+      ownerProfiles,
+      crops,
+      tableSummariesById,
+      viewerFollowingIds,
+      viewerMemberRows,
+      creditsById,
+    ] = await Promise.all([
+      this.loadSocialCountsFor(rowIds),
+      this.loadContentTagsFor(rowIds),
+      this.followersService.loadFollowerCountsFor(rowIds),
+      linkedUserIds.length > 0
+        ? this.profiles.find({
+            where: { userId: In(linkedUserIds) },
+            // The name parts ride along for the card's "Owner Name | Poet"
+            // title on a persona still named after its profession — two extra
+            // columns on the query that already resolves `ownerSlug`, never a
+            // new read. Composed exactly like `SubprofileOwnerRef.name` above.
+            select: ['userId', 'slug', 'firstName', 'lastName'],
+          })
+        : Promise.resolve([]),
+      // ONE batched crop lookup for every card's avatar AND banner on the page
+      // — never a per-card query, and one call for both keys rather than two.
+      this.mediaCropService.getMany(
+        rows.flatMap((row) =>
+          [row.avatarUrl, row.coverUrl].filter((key): key is string =>
+            Boolean(key),
+          ),
+        ),
+      ),
+      this.loadTableSummariesFor(rows),
+      this.followersService.viewerFollowingFor(viewerId, rowIds),
+      // ONE roster query for the viewer's own memberships on this page.
+      rowIds.length > 0
+        ? this.members.find({
+            where: { subprofileId: In(rowIds), userId: viewerId },
+            select: { subprofileId: true },
+          })
+        : Promise.resolve([] as SubprofileMember[]),
+      this.loadCardCreditsOrEmpty(rows, viewerId),
+    ]);
+    const viewerMemberIds = new Set(
+      viewerMemberRows.map((memberRow) => memberRow.subprofileId),
+    );
+    const ownerSlugByUserId = new Map(
+      ownerProfiles.map((profile) => [profile.userId, profile.slug]),
+    );
+    // An owner with both name parts blank composes to "", which would title a
+    // card as " | Poet" — normalised to null so the persona keeps its bare name.
+    const ownerNameByUserId = new Map(
+      ownerProfiles.map((profile) => [
+        profile.userId,
+        `${profile.firstName} ${profile.lastName}`.trim() || null,
+      ]),
+    );
+    return {
+      items: rows.map((row) =>
+        toCardDTO(
+          row,
+          socialCountsById.get(row.id) ?? 0,
+          tagsById.get(row.id) ?? [],
+          followerCountsById.get(row.id) ?? 0,
+          ownerSlugByUserId.get(row.userId) ?? null,
+          crops,
+          ownerNameByUserId.get(row.userId) ?? null,
+          tableSummariesById.get(row.id),
+          {
+            viewerFollowing: viewerFollowingIds.has(row.id),
+            viewerIsMember: viewerMemberIds.has(row.id),
+            credits: creditsById.get(row.id) ?? emptyCardCredits(),
+          },
+        ),
+      ),
+      total,
+      page,
+      limit,
+      ...(facets ? { facets } : {}),
+    };
+  }
+
+  /**
+   * Card credits are a garnish on the directory: a credit-graph failure is
+   * logged and every card falls back to "nobody credited", so the page itself
+   * still loads.
+   */
+  private async loadCardCreditsOrEmpty(
+    rows: Subprofile[],
+    viewerId: string,
+  ): Promise<Map<string, CardCreditsView>> {
+    try {
+      return await this.creditGraph.loadCardCreditsFor(rows, viewerId);
+    } catch (error) {
+      this.logger.error(
+        `Directory card credits failed, cards show no credits: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return new Map();
+    }
+  }
+
+  /**
+   * Orders the directory page query. Every order ends on `sp.id`, which is
+   * unique, so an OFFSET page boundary inside a tie never repeats or skips a
+   * persona (same tiebreak as `CommunitiesService.list`'s 'name' sort).
+   * - `name`: display name, the server default.
+   * - `recent`: most recently updated first.
+   * - `followed`: most followers first, then name. The count rides as a
+   *   correlated grouped subquery alias, so the page query joins nothing and
+   *   its row count stays one per persona.
+   */
+  private applyDirectorySort(
+    qb: SelectQueryBuilder<Subprofile>,
+    sort: DirectorySort,
+  ): void {
+    if (sort === 'recent') {
+      qb.orderBy('sp.updatedAt', 'DESC').addOrderBy('sp.id', 'ASC');
+      return;
+    }
+    if (sort === 'followed') {
+      qb.addSelect(
+        `(SELECT COUNT(*) FROM "subprofile_followers" "follower"
+          WHERE "follower"."subprofile_id" = "sp"."id")`,
+        DIRECTORY_FOLLOWER_RANK_ALIAS,
+      )
+        .orderBy(DIRECTORY_FOLLOWER_RANK_ALIAS, 'DESC')
+        .addOrderBy('sp.displayName', 'ASC')
+        .addOrderBy('sp.id', 'ASC');
+      return;
+    }
+    qb.orderBy('sp.displayName', 'ASC').addOrderBy('sp.id', 'ASC');
+  }
+
+  /**
+   * The directory's base set as a FRESH builder aliased `sp`: published, open,
+   * not removed, nobody blocked either way, no takedown, the `kind` scope, and
+   * (unless `isSearchApplied` is false) the free-text search. The page query
+   * and every facet count start from here, so they cannot drift apart on what
+   * the directory contains.
+   */
+  private directoryBaseQuery(
+    query: ListSubprofileDirectoryQuery,
+    viewerId: string,
+    isSearchApplied = true,
+  ): SelectQueryBuilder<Subprofile> {
+    const qb = this.subprofiles
+      .createQueryBuilder('sp')
       .where('sp.status = :published', {
         published: SubprofileStatus.Published,
       })
@@ -1204,7 +1449,7 @@ export class SubprofilePublicReadService {
         open: SubprofileVisibility.Open,
       })
       // A removed persona is withheld from the directory too (Personas
-      // redesign Phase 1b) — only owner-facing reads skip this check.
+      // redesign Phase 1b); only owner-facing reads skip this check.
       .andWhere('sp.removedAt IS NULL');
 
     // Hide personas of members blocked either way (design spec §4). The raw
@@ -1217,12 +1462,12 @@ export class SubprofilePublicReadService {
     if (query.kind) {
       qb.andWhere('sp.kind = :kind', { kind: query.kind });
     }
-    if (query.query) {
+    if (isSearchApplied && query.query) {
       // Escape LIKE metacharacters so the term matches literally.
       const term = `%${query.query.replace(/[\\%_]/g, '\\$&')}%`;
       // The directory carries LINKED personas as well as standalone ones, and
       // a linked card is titled by its owner ("Ana Silva | Poet"), so the name
-      // on screen has to be searchable — looking up the poet you met by the
+      // on screen has to be searchable: looking up the poet you met by the
       // name you know them under is the directory's most obvious question, and
       // before this it returned nothing.
       //
@@ -1236,7 +1481,7 @@ export class SubprofilePublicReadService {
       // making it matchable here would leak that tie back out through the
       // result set: search "Ana Silva", get the anonymous persona she runs.
       //
-      // Folded rather than a bare ILIKE (`foldedHaystack` — the member
+      // Folded rather than a bare ILIKE (`foldedHaystack`, the member
       // directory's own vocabulary), because this audience writes Portuguese
       // and "Joao"/"Ines" have to find "João"/"Inês". First name, last name and
       // profile slug are concatenated into ONE haystack, so a full name typed
@@ -1267,113 +1512,7 @@ export class SubprofilePublicReadService {
         },
       );
     }
-
-    // Offset pagination (replaces the fixed `take: DIRECTORY_RESULT_CAP`
-    // full-catalogue materialisation): 1-based `page`, `limit` bounded by the
-    // DTO's `@Max(DIRECTORY_MAX_LIMIT)` and defaulted, so a browse never pulls
-    // the whole table (plus its per-row social-count/tag/follower fan-out) into
-    // one response. `displayName ASC` is stable enough to page over for this
-    // ordered browse.
-    const page = query.page ?? 1;
-    const limit = Math.min(
-      query.limit ?? DIRECTORY_DEFAULT_LIMIT,
-      DIRECTORY_MAX_LIMIT,
-    );
-    // Total matching the SAME filtered query (block filter + kind/text + removed/
-    // moderated exclusions) BEFORE the page window, so the FE can loop pages
-    // using `total` instead of assuming it received the whole set (the bug this
-    // fixes). `getCount()` ignores `orderBy`/`offset`/`limit`, so it is computed
-    // here — before those are applied — purely for readability.
-    const total = await qb.getCount();
-    // Display names are not unique, so an OFFSET page boundary landing inside a
-    // tie repeats or skips a persona. `sp.id` is unique and makes the total
-    // order deterministic across pages (same tiebreak as
-    // `CommunitiesService.list`'s 'name' sort). Both are entity property paths
-    // on the selected alias, never an `addSelect` alias, so TypeORM quotes the
-    // snake_case columns itself.
-    qb.orderBy('sp.displayName', 'ASC')
-      .addOrderBy('sp.id', 'ASC')
-      .offset((page - 1) * limit)
-      .limit(limit);
-    const rows = await qb.getMany();
-    const rowIds = rows.map((row) => row.id);
-    // Inc2 Task A: the directory now includes linked rows, so resolve the
-    // owner's profile slug for those — ONE grouped query over the page's
-    // linked userIds (never per-card), mirroring the socialCount/tags/
-    // followerCount batches below. Skipped entirely when the page has no
-    // linked rows.
-    const linkedUserIds = [
-      ...new Set(
-        rows
-          .filter(
-            (row) => row.linkVisibility === SubprofileLinkVisibility.Linked,
-          )
-          .map((row) => row.userId),
-      ),
-    ];
-    // The six per-page fan-out reads are mutually independent, batched into
-    // one round trip. Each is ONE grouped query over the page's ids
-    // (Personas redesign Phase 4, design plan Decision §3).
-    const [
-      socialCountsById,
-      tagsById,
-      followerCountsById,
-      ownerProfiles,
-      crops,
-      tableSummariesById,
-    ] = await Promise.all([
-      this.loadSocialCountsFor(rowIds),
-      this.loadContentTagsFor(rowIds),
-      this.followersService.loadFollowerCountsFor(rowIds),
-      linkedUserIds.length > 0
-        ? this.profiles.find({
-            where: { userId: In(linkedUserIds) },
-            // The name parts ride along for the card's "Owner Name | Poet"
-            // title on a persona still named after its profession — two extra
-            // columns on the query that already resolves `ownerSlug`, never a
-            // new read. Composed exactly like `SubprofileOwnerRef.name` above.
-            select: ['userId', 'slug', 'firstName', 'lastName'],
-          })
-        : Promise.resolve([]),
-      // ONE batched crop lookup for every card's avatar AND banner on the page
-      // — never a per-card query, and one call for both keys rather than two.
-      this.mediaCropService.getMany(
-        rows.flatMap((row) =>
-          [row.avatarUrl, row.coverUrl].filter((key): key is string =>
-            Boolean(key),
-          ),
-        ),
-      ),
-      this.loadTableSummariesFor(rows),
-    ]);
-    const ownerSlugByUserId = new Map(
-      ownerProfiles.map((profile) => [profile.userId, profile.slug]),
-    );
-    // An owner with both name parts blank composes to "", which would title a
-    // card as " | Poet" — normalised to null so the persona keeps its bare name.
-    const ownerNameByUserId = new Map(
-      ownerProfiles.map((profile) => [
-        profile.userId,
-        `${profile.firstName} ${profile.lastName}`.trim() || null,
-      ]),
-    );
-    return {
-      items: rows.map((row) =>
-        toCardDTO(
-          row,
-          socialCountsById.get(row.id) ?? 0,
-          tagsById.get(row.id) ?? [],
-          followerCountsById.get(row.id) ?? 0,
-          ownerSlugByUserId.get(row.userId) ?? null,
-          crops,
-          ownerNameByUserId.get(row.userId) ?? null,
-          tableSummariesById.get(row.id),
-        ),
-      ),
-      total,
-      page,
-      limit,
-    };
+    return qb;
   }
 
   // Cross-entity global search (SearchService) — standalone personas only

@@ -40,6 +40,11 @@ import {
 // `page`/`limit`), but a single page never exceeds this cap.
 const FOLLOWERS_LIST_CAP = 50;
 
+// Reason codes the follow button reads to name why a follow failed. The
+// message text stays as it always was; only the code is new.
+export const PERSONA_SELF_FOLLOW_CODE = 'PERSONA_SELF_FOLLOW';
+export const PERSONA_NOT_FOLLOWABLE_CODE = 'PERSONA_NOT_FOLLOWABLE';
+
 // Owns the follow / unfollow behaviour plus the batched count/viewer-state
 // derivations the persona read paths consume. Extracted from
 // `SubprofilesService` (which now delegates to it) so the follower concern is
@@ -82,7 +87,10 @@ export class SubprofileFollowersService {
       persona.userId === followerId ||
       (await this.membership.isMember(followerId, persona.id))
     ) {
-      throw new BadRequestException('You cannot follow your own persona');
+      throw new BadRequestException({
+        code: PERSONA_SELF_FOLLOW_CODE,
+        message: 'You cannot follow your own persona',
+      });
     }
 
     // Following is a one-way, instant toggle with no note/soft-withdraw (see
@@ -418,16 +426,25 @@ export class SubprofileFollowersService {
       },
     });
     if (!persona) {
-      throw new NotFoundException('Subprofile not found');
+      throw new NotFoundException({
+        code: PERSONA_NOT_FOLLOWABLE_CODE,
+        message: 'Subprofile not found',
+      });
     }
     // A moderator takedown withholds the persona from every public read path
     // (`dropModeratedSubprofiles` / `excludeModeratedSubprofiles`), so it has
     // to close the write path too. Same predicate, one shared spelling.
     if (await isSubprofileUnderTakedown(this.contentModeration, persona.id)) {
-      throw new NotFoundException('Subprofile not found');
+      throw new NotFoundException({
+        code: PERSONA_NOT_FOLLOWABLE_CODE,
+        message: 'Subprofile not found',
+      });
     }
     if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {
-      throw new NotFoundException('Subprofile not found');
+      throw new NotFoundException({
+        code: PERSONA_NOT_FOLLOWABLE_CODE,
+        message: 'Subprofile not found',
+      });
     }
     return persona;
   }

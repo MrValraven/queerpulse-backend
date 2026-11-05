@@ -19,6 +19,17 @@ import {
 import { WelcomeInviteMailer } from './welcome-invite.mailer';
 
 /**
+ * The 200 body of `POST /admin/join-requests/:id/invite/email`: the send
+ * record as stored after this send, so the queue can show it without a
+ * refetch. `welcomeEmailLastSentAt` is ISO 8601.
+ */
+export interface WelcomeEmailSendResult {
+  sent: true;
+  welcomeEmailSendCount: number;
+  welcomeEmailLastSentAt: string;
+}
+
+/**
  * Sends the welcome email for an approved join request, only when a reviewer
  * clicks "Send welcome email": `POST /admin/join-requests/:id/invite/email`.
  *
@@ -48,12 +59,15 @@ export class WelcomeInviteService {
    *  - `welcome_email_rejected` (502): Resend refused the email;
    *  - `welcome_email_unavailable` (503): Resend was down or timed out through
    *    every retry.
+   *
+   * A refusal records nothing. Only a send Resend accepted bumps
+   * `welcomeEmailSendCount` and stamps `welcomeEmailLastSentAt`.
    */
   async sendWelcomeEmail(
     joinRequestId: string,
     reviewerId: string,
     locale: WelcomeInviteLocale,
-  ): Promise<{ sent: true }> {
+  ): Promise<WelcomeEmailSendResult> {
     const request = await this.joinRequests.findOne({
       where: { id: joinRequestId },
     });
@@ -85,6 +99,7 @@ export class WelcomeInviteService {
 
     const frontendOrigin =
       this.config.get<string>('app.frontendUrl') ?? DEFAULT_FRONTEND_ORIGIN;
+    const countReadAtStart = request.welcomeEmailSendCount;
     const result = await this.mailer.sendWelcomeInvite({
       to: request.email,
       locale,
@@ -94,10 +109,13 @@ export class WelcomeInviteService {
         expiresOn: formatExpiresOn(invite.expiresAt, locale),
       },
       joinRequestId,
-      // One email per invite, language and expiry. A reissue moves the expiry,
-      // which changes the payload, so it gets a fresh key; a double click keeps
-      // the same key and Resend returns the first send instead of a second.
-      idempotencyKey: `welcome-invite/${invite.id}/${locale}/${Math.floor(invite.expiresAt.getTime() / 1000)}`,
+      // One email per invite, language, expiry and send count. A reissue moves
+      // the expiry, which changes the payload, so it gets a fresh key. Two
+      // concurrent clicks read the same count and share a key, so Resend sends
+      // once and hands the second call the first send. A later deliberate
+      // resend reads the count the first send bumped and gets a fresh key, so
+      // that email really goes out.
+      idempotencyKey: `welcome-invite/${invite.id}/${locale}/${Math.floor(invite.expiresAt.getTime() / 1000)}/${countReadAtStart}`,
     });
 
     if (!result.delivered) {
@@ -111,9 +129,39 @@ export class WelcomeInviteService {
       );
     }
 
-    this.logger.log(
-      `Reviewer ${reviewerId} sent the ${locale} welcome email on join request ${joinRequestId}`,
+    // Counted only when the row still holds the count this call read. A
+    // concurrent call with the same key got the same email back from Resend,
+    // so when it already bumped the count (0 rows affected here) this send is
+    // that one and counts no second time.
+    const counted = await this.joinRequests.update(
+      { id: joinRequestId, welcomeEmailSendCount: countReadAtStart },
+      {
+        welcomeEmailSendCount: () => 'welcome_email_send_count + 1',
+        welcomeEmailLastSentAt: () => 'now()',
+      },
     );
-    return { sent: true };
+
+    this.logger.log(
+      `Reviewer ${reviewerId} sent the ${locale} welcome email on join request ${joinRequestId} (counted=${counted.affected === 1})`,
+    );
+
+    const stored = await this.joinRequests.findOne({
+      select: {
+        id: true,
+        welcomeEmailSendCount: true,
+        welcomeEmailLastSentAt: true,
+      },
+      where: { id: joinRequestId },
+    });
+    // The email went out, so a row deleted between the update and this read
+    // still answers with the send this call made.
+    return {
+      sent: true,
+      welcomeEmailSendCount:
+        stored?.welcomeEmailSendCount ?? countReadAtStart + 1,
+      welcomeEmailLastSentAt: (
+        stored?.welcomeEmailLastSentAt ?? new Date()
+      ).toISOString(),
+    };
   }
 }

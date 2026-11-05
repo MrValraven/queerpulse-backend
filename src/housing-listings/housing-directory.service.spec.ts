@@ -19,8 +19,9 @@ import {
 type RepoMock = Record<string, jest.Mock>;
 type QueryBuilderStub = Record<string, jest.Mock>;
 
-/** Fluent builder covering both the paginated browse (`getManyAndCount`) and
- *  the capped search (`getMany`) terminals. */
+/** Fluent builder covering the paginated browse (`getManyAndCount`), its
+ *  facet counts (`getRawOne`, `getRawMany`) and the capped search
+ *  (`getMany`) terminals. */
 function makeBuilder(
   terminals: {
     getManyAndCount?: [unknown[], number];
@@ -28,13 +29,26 @@ function makeBuilder(
   } = {},
 ): QueryBuilderStub {
   const builder: QueryBuilderStub = {};
-  for (const method of ['where', 'andWhere', 'orderBy', 'skip', 'take']) {
+  for (const method of [
+    'where',
+    'andWhere',
+    'orderBy',
+    'skip',
+    'take',
+    'select',
+    'addSelect',
+    'setParameter',
+    'setParameters',
+    'groupBy',
+  ]) {
     builder[method] = jest.fn().mockReturnValue(builder);
   }
   builder.getManyAndCount = jest
     .fn()
     .mockResolvedValue(terminals.getManyAndCount ?? [[], 0]);
   builder.getMany = jest.fn().mockResolvedValue(terminals.getMany ?? []);
+  builder.getRawOne = jest.fn().mockResolvedValue(undefined);
+  builder.getRawMany = jest.fn().mockResolvedValue([]);
   return builder;
 }
 

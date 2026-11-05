@@ -50,6 +50,8 @@ const qbStub = () => {
     'addOrderBy',
     'skip',
     'take',
+    'from',
+    'setParameters',
     'update',
     'set',
     'execute',
@@ -59,8 +61,13 @@ const qbStub = () => {
   qb.getRawMany = jest.fn().mockResolvedValue([]);
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+  qb.getCount = jest.fn().mockResolvedValue(0);
   qb.getExists = jest.fn().mockResolvedValue(false);
   qb.execute = jest.fn().mockResolvedValue({ affected: 0 });
+  // The cause facet wraps its base builder as a subquery
+  // (`countOpportunityCauseFacets`), reading its SQL and bound parameters.
+  qb.getQuery = jest.fn().mockReturnValue('SELECT 1');
+  qb.getParameters = jest.fn().mockReturnValue({});
   return qb;
 };
 
@@ -231,6 +238,8 @@ describe('VolunteeringService', () => {
       transaction: jest.fn(
         async (cb: (m: typeof manager) => Promise<unknown>) => cb(manager),
       ),
+      // The outer builder of the board's cause facet.
+      createQueryBuilder: jest.fn(() => qbStub()),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -1940,7 +1949,14 @@ describe('VolunteeringService', () => {
           typeof clause === 'string' &&
           clause.includes('"attributed_community"'),
       );
-      expect(tierCalls).toHaveLength(1);
+      // Once per builder: the page and its three facet reads share
+      // `boardBaseQuery`, and the stubbed repository hands back one builder.
+      expect(tierCalls).toHaveLength(4);
+      for (const [, tierParameters] of tierCalls as [string, object][]) {
+        expect(tierParameters).toEqual({
+          privateAccessTier: AccessTier.Private,
+        });
+      }
       const [clause, parameters] = tierCalls[0] as [string, object];
       expect(parameters).toEqual({ privateAccessTier: AccessTier.Private });
       expect(Object.values(parameters)).not.toContain(AccessTier.Request);

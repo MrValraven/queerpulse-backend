@@ -23,9 +23,27 @@ function makeBuilder(terminals: {
   getCount?: number;
 }): QueryBuilderStub {
   const builder: QueryBuilderStub = {};
-  for (const method of ['where', 'andWhere', 'orderBy', 'skip', 'take']) {
+  // The chain methods include the ones the page-1 facet counts call
+  // (`flatmate-directory-facets.ts`), which read no rows in these tests.
+  for (const method of [
+    'where',
+    'andWhere',
+    'orderBy',
+    'skip',
+    'take',
+    'select',
+    'addSelect',
+    'setParameter',
+    'setParameters',
+    'groupBy',
+    'from',
+  ]) {
     builder[method] = jest.fn().mockReturnValue(builder);
   }
+  builder.getRawOne = jest.fn().mockResolvedValue(undefined);
+  builder.getRawMany = jest.fn().mockResolvedValue([]);
+  builder.getQuery = jest.fn().mockReturnValue('SELECT 1');
+  builder.getParameters = jest.fn().mockReturnValue({});
   builder.getManyAndCount = jest
     .fn()
     .mockResolvedValue(terminals.getManyAndCount ?? [[], 0]);
@@ -66,7 +84,11 @@ describe('FlatmateDirectoryService', () => {
   // Declared with the exact method shape (rather than the bare `RepoMock`
   // index-signature alias) so `flatmates.findOne.mockResolvedValue(...)`-style
   // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
-  let flatmates: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
+  let flatmates: {
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+    manager: { createQueryBuilder: jest.Mock };
+  };
   let profiles: RepoMock;
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeHidden: jest.Mock };
   let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };
@@ -77,6 +99,8 @@ describe('FlatmateDirectoryService', () => {
     flatmates = {
       findOne: jest.fn().mockResolvedValue(null),
       createQueryBuilder: jest.fn(() => makeBuilder({})),
+      // The lifestyle tag facets group over a subquery on a bare builder.
+      manager: { createQueryBuilder: jest.fn(() => makeBuilder({})) },
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     blockFilter = {

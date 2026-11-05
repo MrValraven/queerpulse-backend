@@ -16,6 +16,7 @@ import { WelcomeInviteMailer } from './welcome-invite.mailer';
 import { WelcomeInviteService } from './welcome-invite.service';
 
 const FUTURE_EXPIRY = new Date('2099-11-05T10:00:00Z');
+const STORED_SENT_AT = new Date('2026-11-04T09:30:00Z');
 
 function buildRequest(
   overrides: Partial<PlatformJoinRequest> = {},
@@ -26,8 +27,33 @@ function buildRequest(
     name: 'Sam <b>"Rivera"</b> & Co',
     status: PlatformJoinRequestStatus.Approved,
     inviteId: 'invite-1',
+    welcomeEmailSendCount: 2,
+    welcomeEmailLastSentAt: new Date('2026-11-01T08:00:00Z'),
     ...overrides,
   } as PlatformJoinRequest;
+}
+
+type UpdateCall = [
+  Record<string, unknown>,
+  { welcomeEmailSendCount: () => string; welcomeEmailLastSentAt: () => string },
+];
+
+function updateCalls(update: jest.Mock): UpdateCall[] {
+  return update.mock.calls as UpdateCall[];
+}
+
+function updateCallAt(update: jest.Mock, index: number): UpdateCall {
+  const call = updateCalls(update)[index];
+  if (!call) throw new Error(`Expected update call ${index}`);
+  return call;
+}
+
+function idempotencyKeyOfCall(sendWelcomeInvite: jest.Mock, index: number) {
+  return (
+    (sendWelcomeInvite.mock.calls as unknown[][])[index]?.[0] as {
+      idempotencyKey: string;
+    }
+  ).idempotencyKey;
 }
 
 function buildInvite(overrides: Partial<Invite> = {}): Invite {
@@ -51,7 +77,7 @@ async function reasonOf(promise: Promise<unknown>): Promise<string> {
 }
 
 describe('WelcomeInviteService', () => {
-  let joinRequests: { findOne: jest.Mock };
+  let joinRequests: { findOne: jest.Mock; update: jest.Mock };
   let invites: { findOne: jest.Mock };
   let mailer: { isConfiguredFor: jest.Mock; sendWelcomeInvite: jest.Mock };
   let service: WelcomeInviteService;
@@ -59,7 +85,22 @@ describe('WelcomeInviteService', () => {
   beforeEach(() => {
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
-    joinRequests = { findOne: jest.fn().mockResolvedValue(buildRequest()) };
+    // The first read loads the whole row. The read after the send selects the
+    // two stored send columns, and answers with the values the update wrote.
+    joinRequests = {
+      findOne: jest.fn((options: { select?: unknown }) =>
+        Promise.resolve(
+          options.select
+            ? {
+                id: 'request-1',
+                welcomeEmailSendCount: 3,
+                welcomeEmailLastSentAt: STORED_SENT_AT,
+              }
+            : buildRequest(),
+        ),
+      ),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
     invites = { findOne: jest.fn().mockResolvedValue(buildInvite()) };
     mailer = {
       isConfiguredFor: jest.fn().mockReturnValue(true),
@@ -89,7 +130,11 @@ describe('WelcomeInviteService', () => {
       'en',
     );
 
-    expect(result).toEqual({ sent: true });
+    expect(result).toEqual({
+      sent: true,
+      welcomeEmailSendCount: 3,
+      welcomeEmailLastSentAt: STORED_SENT_AT.toISOString(),
+    });
     expect(mailer.sendWelcomeInvite).toHaveBeenCalledTimes(1);
     const sent = (
       mailer.sendWelcomeInvite.mock.calls as unknown[][]
@@ -107,8 +152,80 @@ describe('WelcomeInviteService', () => {
     );
     expect(sent.variables.expiresOn).toBe('5 November 2099');
     expect(sent.idempotencyKey).toBe(
-      `welcome-invite/invite-1/en/${FUTURE_EXPIRY.getTime() / 1000}`,
+      `welcome-invite/invite-1/en/${FUTURE_EXPIRY.getTime() / 1000}/2`,
     );
+  });
+
+  it('counts the send with one conditional update on the count it read, after Resend accepted it', async () => {
+    await service.sendWelcomeEmail('request-1', 'reviewer-1', 'en');
+
+    expect(joinRequests.update).toHaveBeenCalledTimes(1);
+    const [criteria, values] = updateCallAt(joinRequests.update, 0);
+    expect(criteria).toEqual({ id: 'request-1', welcomeEmailSendCount: 2 });
+    expect(values.welcomeEmailSendCount()).toBe('welcome_email_send_count + 1');
+    expect(values.welcomeEmailLastSentAt()).toBe('now()');
+    const sendOrder = mailer.sendWelcomeInvite.mock.invocationCallOrder[0];
+    const updateOrder = joinRequests.update.mock.invocationCallOrder[0];
+    expect(sendOrder).toBeDefined();
+    expect(updateOrder).toBeDefined();
+    expect(sendOrder ?? 0).toBeLessThan(updateOrder ?? 0);
+  });
+
+  it('answers with the stored values when a concurrent call with the same key already counted the email', async () => {
+    joinRequests.update.mockResolvedValue({ affected: 0 });
+
+    const result = await service.sendWelcomeEmail(
+      'request-1',
+      'reviewer-1',
+      'en',
+    );
+
+    expect(joinRequests.update).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      sent: true,
+      welcomeEmailSendCount: 3,
+      welcomeEmailLastSentAt: STORED_SENT_AT.toISOString(),
+    });
+  });
+
+  it('gives a deliberate resend a fresh idempotency key built from the bumped count', async () => {
+    joinRequests.findOne
+      .mockResolvedValueOnce(buildRequest({ welcomeEmailSendCount: 0 }))
+      .mockResolvedValueOnce({
+        id: 'request-1',
+        welcomeEmailSendCount: 1,
+        welcomeEmailLastSentAt: STORED_SENT_AT,
+      })
+      .mockResolvedValueOnce(buildRequest({ welcomeEmailSendCount: 1 }));
+
+    await service.sendWelcomeEmail('request-1', 'reviewer-1', 'en');
+    await service.sendWelcomeEmail('request-1', 'reviewer-1', 'en');
+
+    const expirySeconds = FUTURE_EXPIRY.getTime() / 1000;
+    expect(idempotencyKeyOfCall(mailer.sendWelcomeInvite, 0)).toBe(
+      `welcome-invite/invite-1/en/${expirySeconds}/0`,
+    );
+    expect(idempotencyKeyOfCall(mailer.sendWelcomeInvite, 1)).toBe(
+      `welcome-invite/invite-1/en/${expirySeconds}/1`,
+    );
+    expect(updateCallAt(joinRequests.update, 1)[0]).toEqual({
+      id: 'request-1',
+      welcomeEmailSendCount: 1,
+    });
+  });
+
+  it('shares one idempotency key between two concurrent clicks that read the same count', async () => {
+    await Promise.all([
+      service.sendWelcomeEmail('request-1', 'reviewer-1', 'en'),
+      service.sendWelcomeEmail('request-1', 'reviewer-1', 'en'),
+    ]);
+
+    expect(idempotencyKeyOfCall(mailer.sendWelcomeInvite, 0)).toBe(
+      idempotencyKeyOfCall(mailer.sendWelcomeInvite, 1),
+    );
+    for (const [criteria] of updateCalls(joinRequests.update)) {
+      expect(criteria).toEqual({ id: 'request-1', welcomeEmailSendCount: 2 });
+    }
   });
 
   it('formats the date in Portuguese', async () => {
@@ -129,6 +246,7 @@ describe('WelcomeInviteService', () => {
       await reasonOf(service.sendWelcomeEmail('missing', 'reviewer-1', 'en')),
     ).toBe('join_request_not_found');
     expect(mailer.sendWelcomeInvite).not.toHaveBeenCalled();
+    expect(joinRequests.update).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -164,6 +282,7 @@ describe('WelcomeInviteService', () => {
         ),
       ).toBe('invite_not_usable');
       expect(mailer.sendWelcomeInvite).not.toHaveBeenCalled();
+      expect(joinRequests.update).not.toHaveBeenCalled();
     },
   );
 
@@ -175,19 +294,26 @@ describe('WelcomeInviteService', () => {
     ).toBe('welcome_email_not_configured');
     expect(mailer.isConfiguredFor).toHaveBeenCalledWith('pt');
     expect(mailer.sendWelcomeInvite).not.toHaveBeenCalled();
+    expect(joinRequests.update).not.toHaveBeenCalled();
   });
 
   it.each([
     ['resend_rejected', 'welcome_email_rejected'],
     ['resend_unavailable', 'welcome_email_unavailable'],
     ['not_configured', 'welcome_email_not_configured'],
-  ])('maps the mailer failure %s to %s', async (failure, reason) => {
-    mailer.sendWelcomeInvite.mockResolvedValue({ delivered: false, failure });
+  ])(
+    'maps the mailer failure %s to %s and counts no send',
+    async (failure, reason) => {
+      mailer.sendWelcomeInvite.mockResolvedValue({ delivered: false, failure });
 
-    expect(
-      await reasonOf(service.sendWelcomeEmail('request-1', 'reviewer-1', 'en')),
-    ).toBe(reason);
-  });
+      expect(
+        await reasonOf(
+          service.sendWelcomeEmail('request-1', 'reviewer-1', 'en'),
+        ),
+      ).toBe(reason);
+      expect(joinRequests.update).not.toHaveBeenCalled();
+    },
+  );
 
   it('answers each reason with its own HTTP status', () => {
     expect(

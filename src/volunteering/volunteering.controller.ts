@@ -80,9 +80,17 @@ export class VolunteeringController {
   })
   @ApiOkResponse({
     description:
-      'Opportunity cards matching the query. `OpportunityCardDTO` carries ' +
-      'no caller-specific field, so the anonymous and member responses are ' +
-      'identical.',
+      'A paginated page of opportunity cards matching the query, plus ' +
+      '`facets`: how many opportunities each time commitment ' +
+      '(`facets.commit`) and each cause (`facets.cause`) would yield under ' +
+      "the rest of this request's filters, each with its own filter lifted, " +
+      'so the board can number its chips and grey out the ones that lead ' +
+      'nowhere. Every enum value is present, zeros included. An opportunity ' +
+      'counts once under each of its causes, so `facets.allCauses` carries ' +
+      'the "Any cause" count: every opportunity under the commit filter with ' +
+      'the cause filter lifted, each counted once. `OpportunityCardDTO` and the ' +
+      'counts carry no caller-specific field, so the anonymous and member ' +
+      'responses are identical.',
   })
   list(@Query() query: ListOpportunitiesQuery) {
     return this.volunteeringService.list(query);

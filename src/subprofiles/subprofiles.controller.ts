@@ -32,6 +32,7 @@ import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
 import { ListAudienceQuery } from './dto/list-audience.query';
 import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
 import { ListFollowingQuery } from './dto/list-following.query';
+import { ListMadeTogetherQuery } from './dto/list-made-together.query';
 import { ReorderSubprofilesDTO } from './dto/reorder-subprofiles.dto';
 import { ReplaceAffiliationsDTO } from './dto/replace-affiliations.dto';
 import { ReplaceItemsDTO } from './dto/replace-items.dto';
@@ -39,6 +40,7 @@ import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofileVisibility } from './entities/subprofile.entity';
 import { SubprofileInvitesService } from './subprofile-invites.service';
+import { SubprofileMadeTogetherService } from './subprofile-made-together.service';
 import { SubprofilesService } from './subprofiles.service';
 import {
   ApiBadRequestResponse,
@@ -95,6 +97,7 @@ export class SubprofilesController {
   constructor(
     private readonly subprofilesService: SubprofilesService,
     private readonly subprofileInvitesService: SubprofileInvitesService,
+    private readonly madeTogetherService: SubprofileMadeTogetherService,
   ) {}
 
   // --- literal routes first, so 'mine'/'directory'/'by-handle' are never
@@ -146,7 +149,11 @@ export class SubprofilesController {
 
   @Get('directory')
   @ApiOperation({ summary: 'Browse the public subprofile directory' })
-  @ApiOkResponse({ description: 'Directory cards matching the query.' })
+  @ApiOkResponse({
+    description:
+      'Directory cards matching the query and the sidebar filters; page 1 ' +
+      'also carries the facet counts for every filter option.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -155,6 +162,34 @@ export class SubprofilesController {
     @Query() query: ListSubprofileDirectoryQuery,
   ) {
     return this.subprofilesService.directory(query, user.userId);
+  }
+
+  // "Made together" strip: recent work where one persona credited another.
+  // A literal route, so it sits up here with `directory` and is never
+  // swallowed by the `:id` param route below. Members only (the class-level
+  // `ActiveMemberGuard`, no `@Public()`), viewer-dependent because blocks
+  // change what a viewer may see, so it carries no shared cache interceptor.
+  @Get('made-together')
+  @ApiOperation({
+    summary: 'Recent work where one persona credited another',
+  })
+  @ApiOkResponse({
+    description:
+      '`{ items }`: up to `limit` (default 8, max 12) cards, newest first, ' +
+      'one per pair of personas and at most two per persona. Each card ' +
+      'names both personas by display name and handle only.',
+  })
+  @ApiBadRequestResponse({
+    description: '`limit` is not an integer from 1 to 12.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  madeTogether(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListMadeTogetherQuery,
+  ) {
+    return this.madeTogetherService.list(user.userId, query.limit);
   }
 
   // The viewer's OWN following list (PRD-208). A literal route, so it sits up

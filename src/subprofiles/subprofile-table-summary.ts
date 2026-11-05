@@ -23,7 +23,16 @@ export interface CardTableSummary {
 }
 
 const TABLE_FORMATS: readonly TableFormat[] = ['online', 'in_person', 'both'];
-const TABLE_VIBES: readonly TableVibe[] = [
+
+/** The format chips the directory's "At the table" filter offers. `both` is
+ *  stored but never a chip: a `both` table matches either chip. */
+export type TableChipFormat = Exclude<TableFormat, 'both'>;
+export const TABLE_CHIP_FORMATS: readonly TableChipFormat[] = [
+  'online',
+  'in_person',
+];
+
+export const TABLE_VIBES: readonly TableVibe[] = [
   'queer_led',
   'trans_led',
   'beginner_friendly',

@@ -75,7 +75,10 @@ import { SubprofileUpdatesService } from './subprofile-updates.service';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
-import { SubprofilePublicReadService } from './subprofile-public-read.service';
+import {
+  SubprofilePublicReadService,
+  type SubprofileDirectoryResponse,
+} from './subprofile-public-read.service';
 import { isSectionAllowed } from './subprofile-kinds';
 import { availabilityUpdatedAtAfterSave } from './subprofile-availability-stamp';
 import { assertValidTattooSkinData } from './tattoo-skin-data-validation';
@@ -129,7 +132,6 @@ import {
   EndorserView,
   FollowerView,
   imageKeysFor,
-  SubprofileCardView,
   SubprofilePublicView,
   SubprofileSearchRow,
   SubprofileView,
@@ -2665,12 +2667,7 @@ export class SubprofilesService {
   directory(
     query: ListSubprofileDirectoryQuery,
     viewerId: string,
-  ): Promise<{
-    items: SubprofileCardView[];
-    total: number;
-    page: number;
-    limit: number;
-  }> {
+  ): Promise<SubprofileDirectoryResponse> {
     return this.publicRead.directory(query, viewerId);
   }
 

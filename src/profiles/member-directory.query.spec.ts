@@ -378,6 +378,10 @@ describe('countDirectoryFacets', () => {
     expect(Object.keys(counts.professions).length).toBeGreaterThan(0);
     for (const focusArea of AMBASSADOR_FOCUS_AREAS)
       expect(counts.ambassador[focusArea]).toBe(0);
+    // The switch's total is its own field, split back out of the per-focus
+    // record it is counted alongside.
+    expect(counts.ambassadorsOnly).toBe(0);
+    expect(counts.ambassador).not.toHaveProperty('ambassadorsOnly');
   });
 
   it('gives each group its own builder with its own group skipped', async () => {
@@ -429,12 +433,16 @@ describe('countDirectoryFacets', () => {
       spies.get('hoods')!.parameters[`facetOption${NEIGHBOURHOODS.length}`],
     ).toBe('%');
     // Ambassador binds one clause per focus-area key, each carrying the
-    // visible-tag gate and the same active-ambassador EXISTS the filter uses.
-    expect(spies.get('ambassador')!.selects).toHaveLength(
-      AMBASSADOR_FOCUS_AREAS.length,
-    );
+    // visible-tag gate and the same active-ambassador EXISTS the filter uses,
+    // plus one last clause for the switch's own total with no focus area.
+    const ambassadorSelects = spies.get('ambassador')!.selects;
+    expect(ambassadorSelects).toHaveLength(AMBASSADOR_FOCUS_AREAS.length + 1);
     expect(spies.get('ambassador')!.parameters.facetOption0).toBe(
       AMBASSADOR_FOCUS_AREAS[0],
+    );
+    expect(ambassadorSelects[0]![0]).toContain('focus_area');
+    expect(ambassadorSelects[AMBASSADOR_FOCUS_AREAS.length]![0]).not.toContain(
+      'focus_area',
     );
   });
 
@@ -479,6 +487,7 @@ describe('zeroedFacetCounts', () => {
   it('covers every counted group', () => {
     expect(Object.keys(zeroedFacetCounts()).sort()).toEqual([
       'ambassador',
+      'ambassadorsOnly',
       'disciplines',
       'hoods',
       'identities',

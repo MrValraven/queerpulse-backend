@@ -310,8 +310,11 @@ invalid-index sweep safe: a healthy concurrent build is indistinguishable in the
 catalog from the debris of a dead one for almost all of its life.
 
 `storage:cors` applies the object-storage bucket's CORS policy (so the browser
-can PUT directly to presigned upload URLs). It's a provisioning step, not app
-logic — it runs once per deploy with bucket-admin credentials, **not** on every
+can PUT directly to presigned upload URLs and read files with `crossOrigin`).
+A second rule allows read-only GET/HEAD from any origin: a crossOrigin read
+that follows the API's `/files` redirect arrives with `Origin: null`, and every
+GET is a short-lived presigned URL, so the wildcard grants nothing new. It's
+a provisioning step outside app logic: it runs once per deploy with bucket-admin credentials, **not** on every
 server boot, so the running app never needs `PutBucketCors` rights. It's
 idempotent (re-applying replaces the whole policy) and reads its allowed origins
 from `FRONTEND_URL`, the same allowlist the API uses for CORS — so the two can

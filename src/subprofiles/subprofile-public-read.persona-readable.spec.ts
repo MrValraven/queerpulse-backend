@@ -68,6 +68,8 @@ describe('SubprofilePublicReadService.resolveReadablePersona', () => {
       membership as unknown as SubprofileMembershipService,
       unused,
       unused,
+      // The credit graph, read only by `directory()`.
+      unused,
     );
   });
 

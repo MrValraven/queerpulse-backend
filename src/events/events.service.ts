@@ -131,6 +131,23 @@ import {
 } from './hidden-event-communities.sql';
 import { ENDED_SQL, UPCOMING_OR_UNDERWAY_SQL } from './event-schedule-sql';
 import {
+  countCostFacets,
+  countFamilyFacets,
+  countHoodFacets,
+  countTypeFacets,
+  countWhenFacets,
+  discoveryFromSql,
+  discoveryToSql,
+  FAMILY_FACET_KEY_SQL,
+  FREE_COST_SQL,
+  HOOD_FACET_KEY_SQL,
+  PAID_COST_SQL,
+  TYPE_FACET_KEY_SQL,
+  type EventBrowseFacetGroup,
+  type EventBrowseFacets,
+  type EventWhenWindow,
+} from './event-browse-facets';
+import {
   HOSTED_OR_COHOSTED_BY_MEMBER_SQL,
   MEMBER_PROFILE_PAST_LIMIT,
   MEMBER_PROFILE_UPCOMING_LIMIT,
@@ -358,6 +375,27 @@ export interface EventListOptions {
 interface LeadCommunityVisibility {
   refById: ReadonlyMap<string, CommunityTierRef>;
   withheldEventIds: ReadonlySet<string>;
+}
+
+/** What `buildUpcomingBrowseQuery` is scoped by besides the filters, read
+ *  once per request by `resolveUpcomingBrowseScope`. `hostId` is set only
+ *  for a `hostSlug` request. */
+interface UpcomingBrowseScope {
+  now: Date;
+  visibilityClause: string;
+  visibilityParams: Record<string, unknown>;
+  hostId?: string;
+  hiddenCommunityIds: string[];
+}
+
+/** `GET /events?facets=true`: one upcoming browse page with its honest
+ *  `total`, and `facets` on the first page (`EventsService.listBrowsePage`). */
+export interface EventBrowsePage {
+  items: EventSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+  facets?: EventBrowseFacets;
 }
 
 const PAGE_SIZE = 20;
@@ -1927,7 +1965,7 @@ export class EventsService {
    * which are already scoped by the viewer's own relationship to the event.
    *
    * The 'upcoming' branch also leaves out the events whose every hosting
-   * community the viewer hid (`excludeHiddenCommunities`), unless
+   * community the viewer hid (`resolveUpcomingBrowseScope`), unless
    * `options.includeHidden` is set. No other branch reads the hidden list:
    * a member's own RSVPs, hosting and saved events stay whole.
    */
@@ -2035,53 +2073,10 @@ export class EventsService {
       // gatherings the viewer's own gate admits (invite_only still surfaces
       // only via going/hosting/invited contexts, not the general browse; see
       // `EventAudienceGateService.scopedVisibilityWhere` for why
-      // extended_network stays excluded too).
-      const { clause: visibilityClause, params: visibilityParams } =
-        await this.audienceGate.scopedVisibilityWhere(userId);
-      const upcomingQb = this.events
-        .createQueryBuilder('e')
-        .where('e.status = :status', { status: EventStatus.Published })
-        // A gathering that is UNDERWAY is still upcoming: an overnight 23:00
-        // to 04:00 night out used to vanish from browse at midnight, and a
-        // three-day festival at the end of its first evening.
-        //
-        // The disjunct is deliberate, and the honest reading of it TODAY is
-        // that it scans: `IDX_events_status_start_at` is a plain
-        // `(status, start_at)` index (migration 1782692700000) and nothing
-        // indexes `end_at` at all, so the planner has no second index to
-        // combine the two arms with. What the shape buys is the option. The
-        // first arm stays exactly as index-shaped as it was, so adding a
-        // partial `(status, end_at) WHERE end_at IS NOT NULL` index later
-        // would let the planner serve the second arm and OR the two results
-        // together; that index is out of scope here (no migration in this
-        // work). A `COALESCE(end_at, start_at) >= :now` formulation would
-        // close that door on BOTH arms at once, which is the reason to write
-        // it this way rather than that way. The 'past' branch above carries
-        // the exact logical inverse of this predicate.
-        .andWhere(UPCOMING_OR_UNDERWAY_SQL, { now })
-        .andWhere(visibilityClause, visibilityParams);
-      this.excludeModeratedEvents(upcomingQb);
-      if (options?.hostSlug) {
-        const hostProfile = await this.profiles.findOne({
-          where: { slug: options.hostSlug },
-        });
-        // No such member -> a uuid that can never match, so the filter fails
-        // closed (an empty result) instead of silently falling back to the
-        // unfiltered upcoming feed.
-        upcomingQb.andWhere('e.host_id = :hostId', {
-          hostId: hostProfile?.userId ?? '00000000-0000-0000-0000-000000000000',
-        });
-      }
-      if (options?.excludeSlug) {
-        upcomingQb.andWhere('e.slug != :excludeSlug', {
-          excludeSlug: options.excludeSlug,
-        });
-      }
-      this.applyDiscoveryFilters(upcomingQb, options ?? {});
-      if (!options?.includeHidden) {
-        await this.excludeHiddenCommunities(upcomingQb, userId);
-      }
-      events = await upcomingQb
+      // extended_network stays excluded too). Built by
+      // `buildUpcomingBrowseQuery`, which the browse facet counts share.
+      const scope = await this.resolveUpcomingBrowseScope(userId, now, options);
+      events = await this.buildUpcomingBrowseQuery(scope, options ?? {}, null)
         // Sorting on the start alone puts a gathering that is ALREADY UNDER
         // WAY at the top of its window, above everything starting later, since
         // it started first. That is deliberate: a festival happening right now
@@ -2101,22 +2096,150 @@ export class EventsService {
   }
 
   /**
-   * Drops the events whose every hosting community this viewer hid
-   * (`keepUnlessEveryHostHiddenSql`). One read of the viewer's hidden ids per
-   * request, and no predicate at all when they hid nothing.
+   * `GET /events?facets=true` on the upcoming browse: one page of `list`
+   * plus the honest `total` (every filter applied, so the client knows when
+   * to stop paging) and, on the first page, `facets`: per filter option, how
+   * many events picking it would give, counted with that option's group
+   * lifted and every other filter plus the search applied. Every count runs
+   * over `buildUpcomingBrowseQuery`, the builder the list itself uses, so the
+   * two cannot drift. Later pages skip the facet scans: one filter run shares
+   * them, and the client reads them off its first page.
    */
-  private async excludeHiddenCommunities(
-    queryBuilder: SelectQueryBuilder<Event>,
-    viewerId: string,
-  ): Promise<void> {
-    const hiddenCommunityIds = await hiddenCommunityIdsFor(
-      this.events.manager,
-      viewerId,
+  async listBrowsePage(
+    userId: string,
+    page: number,
+    options: EventListOptions,
+    whenWindows: readonly EventWhenWindow[],
+  ): Promise<EventBrowsePage> {
+    const scope = await this.resolveUpcomingBrowseScope(
+      userId,
+      new Date(),
+      options,
     );
-    if (!hiddenCommunityIds.length) return;
-    queryBuilder.andWhere(keepUnlessEveryHostHiddenSql(), {
+    const baseFor = (lift: EventBrowseFacetGroup | null) =>
+      this.buildUpcomingBrowseQuery(scope, options, lift);
+    const [items, total, facets] = await Promise.all([
+      this.list(userId, 'upcoming', page, options),
+      baseFor(null).getCount(),
+      page === 1
+        ? this.countBrowseFacets(baseFor, whenWindows)
+        : Promise.resolve(undefined),
+    ]);
+    return {
+      items,
+      total,
+      page,
+      pageSize: PAGE_SIZE,
+      ...(facets ? { facets } : {}),
+    };
+  }
+
+  /** The five facet groups, each over a fresh base with its own group
+   *  lifted. See `event-browse-facets.ts` for each group's semantics. */
+  private async countBrowseFacets(
+    baseFor: (lift: EventBrowseFacetGroup) => SelectQueryBuilder<Event>,
+    whenWindows: readonly EventWhenWindow[],
+  ): Promise<EventBrowseFacets> {
+    const [family, when, hood, type, cost] = await Promise.all([
+      countFamilyFacets(baseFor('family')),
+      countWhenFacets(baseFor('when'), whenWindows),
+      countHoodFacets(baseFor('hood')),
+      countTypeFacets(baseFor('type')),
+      countCostFacets(baseFor('cost'), EventsService.FREE_COST_LABELS),
+    ]);
+    return { family, when, hood, type, cost };
+  }
+
+  /**
+   * What scopes the upcoming browse besides its filters, read once per
+   * request so the list and each facet count build from one answer: the
+   * viewer's audience gate, the "more from this host" host, and the hidden
+   * communities (none read under `includeHidden`).
+   */
+  private async resolveUpcomingBrowseScope(
+    userId: string,
+    now: Date,
+    options: EventListOptions | undefined,
+  ): Promise<UpcomingBrowseScope> {
+    const { clause: visibilityClause, params: visibilityParams } =
+      await this.audienceGate.scopedVisibilityWhere(userId);
+    let hostId: string | undefined;
+    if (options?.hostSlug) {
+      const hostProfile = await this.profiles.findOne({
+        where: { slug: options.hostSlug },
+      });
+      // No such member -> a uuid that can never match, so the filter fails
+      // closed (an empty result) instead of silently falling back to the
+      // unfiltered upcoming feed.
+      hostId = hostProfile?.userId ?? '00000000-0000-0000-0000-000000000000';
+    }
+    // The events whose every hosting community this viewer hid
+    // (`keepUnlessEveryHostHiddenSql`) leave the browse. One read of the
+    // viewer's hidden ids per request, and no predicate at all when they hid
+    // nothing.
+    const hiddenCommunityIds = options?.includeHidden
+      ? []
+      : await hiddenCommunityIdsFor(this.events.manager, userId);
+    return {
+      now,
+      visibilityClause,
+      visibilityParams,
+      hostId,
       hiddenCommunityIds,
-    });
+    };
+  }
+
+  /**
+   * The upcoming browse query, unsorted and unpaginated: `list` sorts and
+   * pages it, and the facet counts aggregate over it with one group's
+   * discovery predicate lifted (`lift`). Everything else, the schedule, the
+   * audience gate, moderation, the host scope and the hidden communities, is
+   * never lifted. No joins, so a `COUNT(*)` over it counts each event once.
+   */
+  private buildUpcomingBrowseQuery(
+    scope: UpcomingBrowseScope,
+    options: EventListOptions,
+    lift: EventBrowseFacetGroup | null,
+  ): SelectQueryBuilder<Event> {
+    const { now, visibilityClause, visibilityParams } = scope;
+    const upcomingQb = this.events
+      .createQueryBuilder('e')
+      .where('e.status = :status', { status: EventStatus.Published })
+      // A gathering that is UNDERWAY is still upcoming: an overnight 23:00
+      // to 04:00 night out used to vanish from browse at midnight, and a
+      // three-day festival at the end of its first evening.
+      //
+      // The disjunct is deliberate, and the honest reading of it TODAY is
+      // that it scans: `IDX_events_status_start_at` is a plain
+      // `(status, start_at)` index (migration 1782692700000) and nothing
+      // indexes `end_at` at all, so the planner has no second index to
+      // combine the two arms with. What the shape buys is the option. The
+      // first arm stays exactly as index-shaped as it was, so adding a
+      // partial `(status, end_at) WHERE end_at IS NOT NULL` index later
+      // would let the planner serve the second arm and OR the two results
+      // together; that index is out of scope here (no migration in this
+      // work). A `COALESCE(end_at, start_at) >= :now` formulation would
+      // close that door on BOTH arms at once, which is the reason to write
+      // it this way rather than that way. The 'past' branch above carries
+      // the exact logical inverse of this predicate.
+      .andWhere(UPCOMING_OR_UNDERWAY_SQL, { now })
+      .andWhere(visibilityClause, visibilityParams);
+    this.excludeModeratedEvents(upcomingQb);
+    if (scope.hostId) {
+      upcomingQb.andWhere('e.host_id = :hostId', { hostId: scope.hostId });
+    }
+    if (options.excludeSlug) {
+      upcomingQb.andWhere('e.slug != :excludeSlug', {
+        excludeSlug: options.excludeSlug,
+      });
+    }
+    this.applyDiscoveryFilters(upcomingQb, options, lift);
+    if (scope.hiddenCommunityIds.length) {
+      upcomingQb.andWhere(keepUnlessEveryHostHiddenSql(), {
+        hiddenCommunityIds: scope.hiddenCommunityIds,
+      });
+    }
+    return upcomingQb;
   }
 
   /**
@@ -2140,6 +2263,12 @@ export class EventsService {
    * agree, or a card would carry a "free" chip that the free filter excludes.
    * `NULL`/empty counts as free: every gathering created before the column
    * existed was free as far as this platform ever knew.
+   *
+   * `lift` leaves one group's predicate off, so a browse facet count can ask
+   * "how many would this group's options give, the rest applied"
+   * (`buildUpcomingBrowseQuery`). `q` is never lifted. The predicates
+   * themselves are spelled in `event-browse-facets.ts`, which the counts
+   * group by, so the filter and its count compare the same expression.
    */
   private applyDiscoveryFilters(
     qb: SelectQueryBuilder<Event>,
@@ -2152,6 +2281,7 @@ export class EventsService {
       q?: string;
       cost?: EventCostFilter;
     },
+    lift: EventBrowseFacetGroup | null = null,
   ): void {
     // `from` / `to` describe a WINDOW, so the question is interval
     // intersection rather than where a single instant falls. A gathering
@@ -2174,36 +2304,33 @@ export class EventsService {
     // against `start_at`, so a partial `(status, end_at)` index added later
     // could serve the second one, while a COALESCE would close that door on
     // both arms at once.
-    if (options.from) {
+    if (options.from && lift !== 'when') {
       const from = new Date(options.from);
       if (!Number.isNaN(from.getTime())) {
-        qb.andWhere(
-          '(e.start_at >= :discoveryFrom OR (e.end_at IS NOT NULL AND e.end_at >= :discoveryFrom))',
-          { discoveryFrom: from },
-        );
+        qb.andWhere(discoveryFromSql('discoveryFrom'), { discoveryFrom: from });
       }
     }
-    if (options.to) {
+    if (options.to && lift !== 'when') {
       const to = new Date(options.to);
       if (!Number.isNaN(to.getTime())) {
-        qb.andWhere('e.start_at <= :discoveryTo', { discoveryTo: to });
+        qb.andWhere(discoveryToSql('discoveryTo'), { discoveryTo: to });
       }
     }
-    if (options.hood) {
-      qb.andWhere('lower(e.neighbourhood) = lower(:discoveryHood)', {
+    if (options.hood && lift !== 'hood') {
+      qb.andWhere(`${HOOD_FACET_KEY_SQL} = lower(:discoveryHood)`, {
         discoveryHood: options.hood.trim(),
       });
     }
     // The browse board's primary facet. An exact enum match, unlike the
     // case-insensitive `type` predicate below: this column is a closed
     // vocabulary the client sends verbatim, so there is no casing to forgive.
-    if (options.family) {
-      qb.andWhere('e.gathering_family = :discoveryFamily', {
+    if (options.family && lift !== 'family') {
+      qb.andWhere(`${FAMILY_FACET_KEY_SQL} = :discoveryFamily`, {
         discoveryFamily: options.family,
       });
     }
-    if (options.type) {
-      qb.andWhere('lower(e.event_type) = lower(:discoveryType)', {
+    if (options.type && lift !== 'type') {
+      qb.andWhere(`${TYPE_FACET_KEY_SQL} = lower(:discoveryType)`, {
         discoveryType: options.type.trim(),
       });
     }
@@ -2214,16 +2341,15 @@ export class EventsService {
         { discoveryPattern: `%${escapeLikeTerm(term)}%` },
       );
     }
+    if (lift === 'cost') return;
     if (options.cost === 'free') {
-      qb.andWhere(
-        `(e.cost IS NULL OR btrim(e.cost) = '' OR lower(btrim(e.cost)) = ANY(:freeCostLabels))`,
-        { freeCostLabels: EventsService.FREE_COST_LABELS },
-      );
+      qb.andWhere(FREE_COST_SQL, {
+        freeCostLabels: EventsService.FREE_COST_LABELS,
+      });
     } else if (options.cost === 'paid') {
-      qb.andWhere(
-        `(e.cost IS NOT NULL AND btrim(e.cost) <> '' AND NOT (lower(btrim(e.cost)) = ANY(:freeCostLabels)))`,
-        { freeCostLabels: EventsService.FREE_COST_LABELS },
-      );
+      qb.andWhere(PAID_COST_SQL, {
+        freeCostLabels: EventsService.FREE_COST_LABELS,
+      });
     }
   }
 

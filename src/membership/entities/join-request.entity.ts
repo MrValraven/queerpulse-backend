@@ -264,6 +264,31 @@ export class PlatformJoinRequest extends QueueAssignmentColumns {
   @Column({ type: 'integer', default: 0 })
   inviteRefreshCount!: number;
 
+  /**
+   * How many welcome emails a reviewer sent for this request through
+   * `POST /admin/join-requests/:id/invite/email`. STAFF-ONLY: the public
+   * status view, the submit response and the member data export map their
+   * fields explicitly and leave it out.
+   *
+   * Counts only the sends Resend accepted, so a refused or failed attempt
+   * leaves it as it was. A reissue of the invite keeps the count. The send
+   * path folds the value into the Resend idempotency key and bumps it with a
+   * conditional `welcome_email_send_count = :countReadAtStart` update, so two
+   * concurrent clicks count one email. 0 on every row older than
+   * `AddJoinRequestWelcomeEmailSends1838800000000`.
+   */
+  @Column({ type: 'integer', default: 0 })
+  welcomeEmailSendCount!: number;
+
+  /**
+   * STAFF-ONLY. When the latest counted welcome email went out, set by the
+   * same update that bumps `welcomeEmailSendCount`. A reissue keeps it. Null
+   * until the first accepted send, and on every row older than
+   * `AddJoinRequestWelcomeEmailSends1838800000000`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  welcomeEmailLastSentAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

@@ -62,6 +62,16 @@ import {
 } from './dto/list-directory.query';
 import { ListingAccessibilityAnswer } from './listing-accessibility';
 import {
+  directoryCategoryMatch,
+  primaryCategoryClause,
+  type DirectoryCategoryScope,
+} from './directory-category-filter';
+import {
+  countDirectoryFacets,
+  type DirectoryFacetCounts,
+  type DirectoryFacetLift,
+} from './directory-facets';
+import {
   ADULT_LISTING_CATEGORY_SLUG,
   isAdultListing,
 } from './listing-categories';
@@ -158,6 +168,35 @@ export const ADULT_DIRECTORY_LIMIT = 100;
  * starts within the last 180 days, or later.
  */
 export const HOSTED_GATHERING_LOOKBACK_DAYS = 180;
+
+/** The filters `buildDirectoryQuery` reads off a directory request. */
+type DirectoryFilterQuery = Pick<
+  ListListingDirectoryQuery,
+  | 'cat'
+  | 'q'
+  | 'safe'
+  | 'owned'
+  | 'access'
+  | 'online'
+  | 'mobile'
+  | 'attr'
+  | 'entry'
+  | 'pay'
+  | 'lang'
+  | 'practice'
+>;
+
+/** The vocabulary a request's categories read in: online for the Online tab
+ *  (`online=true`) and for the 18+ list, which is online only; the place
+ *  types otherwise. */
+function directoryCategoryScope(
+  query: Pick<ListListingDirectoryQuery, 'online'>,
+  adultListings: 'exclude' | 'only',
+): DirectoryCategoryScope {
+  return query.online === 'true' || adultListings === 'only'
+    ? 'online'
+    : 'place';
+}
 
 /**
  * Public, read-only views over the `listings` (businesses) table for the
@@ -592,39 +631,70 @@ export class DirectoryService {
   }
 
   /**
-   * Builds the shared `WHERE`/`ORDER BY` for the public directory grid — cat/
-   * q/safe filters, the moderation takedown exclusion, and the
-   * verified-safe-space-first ordering — factored out so both the bare
+   * Builds the shared `WHERE`/`ORDER BY` for the public directory grid (the
+   * filters and visibility gates of `buildDirectoryFilters`, then the
+   * verified-safe-space-first ordering), factored out so both the bare
    * (`listDirectory`) and paginated (`listDirectoryPage`) read paths apply
    * IDENTICAL filtering/ordering and only differ in how the result set is
    * bounded (`take` vs `paginate`'s `skip`/`take`).
    */
   private buildDirectoryQuery(
-    query: Pick<
-      ListListingDirectoryQuery,
-      | 'cat'
-      | 'q'
-      | 'safe'
-      | 'owned'
-      | 'access'
-      | 'online'
-      | 'attr'
-      | 'entry'
-      | 'pay'
-      | 'lang'
-      | 'practice'
-    >,
+    query: DirectoryFilterQuery,
     // `exclude` for every public read, which is anonymous-readable and
     // CDN-cached. `only` for the members-only `GET /directory/adult`.
     adultListings: 'exclude' | 'only' = 'exclude',
+  ): SelectQueryBuilder<Listing> {
+    const qb = this.buildDirectoryFilters(query, adultListings, null);
+
+    // Verified safe spaces surface first regardless of `safe` filter (a
+    // no-op when `safe=verified` already restricts the set to verified-only,
+    // but keeps the default/unfiltered grid boosting them ahead of the
+    // existing name order, which remains the tiebreaker). Boost happens in
+    // the SQL `ORDER BY`, so it stays correct across `take`/pagination.
+    //
+    // A SUSPENDED badge does not earn the boost. Promoting a space the platform
+    // has just stopped vouching for to the top of the grid is the loudest
+    // possible version of the claim this whole mechanism exists to withdraw.
+    // The suspension probe sits after the cheap column test in the same `AND`,
+    // so the planner only runs it for rows that actually carry a badge.
+    return qb
+      .orderBy(DirectoryService.VERIFIED_BADGE_FIRST, 'ASC')
+      .addOrderBy('listing.name', 'ASC');
+  }
+
+  /**
+   * The grid's `WHERE` alone: every filter and visibility gate
+   * `buildDirectoryQuery` applies, with no ordering, so the facet counts
+   * (`countDirectoryFacets`) aggregate over exactly the rows the cards come
+   * from. `lift` leaves that one filter group's own predicate off, so its
+   * options can be counted "as if picked" under every other filter (the
+   * volunteering board's `boardBaseQuery` is the same contract). The
+   * visibility gates (live, takedowns, closed or paused, 18+) are never
+   * lifted: a hidden listing must not leak through a count either.
+   */
+  private buildDirectoryFilters(
+    query: DirectoryFilterQuery,
+    adultListings: 'exclude' | 'only',
+    lift: DirectoryFacetLift | null,
   ): SelectQueryBuilder<Listing> {
     const qb = this.listings
       .createQueryBuilder('listing')
       .where('listing.status = :status', { status: ListingStatus.Live });
 
-    if (query.cat) {
-      // `cats` is a text[] column — match when the category is one of its values.
-      qb.andWhere(':cat = ANY(listing.cats)', { cat: query.cat });
+    if (lift !== 'cat' && query.cat?.length) {
+      // The primary category, read in the tab's vocabulary; several chips
+      // are an OR (see `ListListingDirectoryQuery.cat`).
+      const categoryMatch = directoryCategoryMatch(
+        query.cat,
+        directoryCategoryScope(query, adultListings),
+      );
+      qb.andWhere(
+        primaryCategoryClause('categoryValues', 'categoryLegacyValues'),
+        {
+          categoryValues: categoryMatch.storedValues,
+          categoryLegacyValues: categoryMatch.foldedLegacyValues,
+        },
+      );
     }
 
     if (query.q) {
@@ -649,7 +719,7 @@ export class DirectoryService {
       qb.andWhere(`NOT ${DirectoryService.OPEN_BADGE_SUSPENSION_EXISTS}`);
     }
 
-    if (query.owned?.length) {
+    if (lift !== 'owned' && query.owned?.length) {
       // Array overlap (`&&`): a listing matches when its owner declared ANY of
       // the requested values, so several values are an OR. Self-declared by
       // the owner, never verified. Filtered in the query so
@@ -670,7 +740,7 @@ export class DirectoryService {
       );
     }
 
-    if (query.entry) {
+    if (lift !== 'entry' && query.entry) {
       qb.andWhere('"listing"."entry_mode" = :entryModeFilter', {
         entryModeFilter: query.entry,
       });
@@ -683,7 +753,7 @@ export class DirectoryService {
       });
     }
 
-    if (query.lang?.length) {
+    if (lift !== 'lang' && query.lang?.length) {
       // Overlap (`&&`): any requested language is enough, so several are an OR.
       qb.andWhere('"listing"."langs" && CAST(:languageFilter AS text[])', {
         languageFilter: query.lang,
@@ -732,6 +802,12 @@ export class DirectoryService {
       );
     }
 
+    if (query.mobile === 'true') {
+      // "Out and about": no premises. Never online as well
+      // (`CHK_listings_not_online_and_mobile`).
+      qb.andWhere('"listing"."mobile" = true');
+    }
+
     // The 18+ category stays off every public grid. This query backs
     // CDN-cached reads served to everybody from one stored copy, so it carries
     // no per-caller variant; signed-in members ask `GET /directory/adult`,
@@ -751,21 +827,7 @@ export class DirectoryService {
     // counts only what a visitor can actually reach.
     this.excludeHiddenFromDirectory(qb);
 
-    // Verified safe spaces surface first regardless of `safe` filter (a
-    // no-op when `safe=verified` already restricts the set to verified-only,
-    // but keeps the default/unfiltered grid boosting them ahead of the
-    // existing name order, which remains the tiebreaker). Boost happens in
-    // the SQL `ORDER BY` — not a JS re-sort — so it stays correct across
-    // `take`/pagination.
-    //
-    // A SUSPENDED badge does not earn the boost. Promoting a space the platform
-    // has just stopped vouching for to the top of the grid is the loudest
-    // possible version of the claim this whole mechanism exists to withdraw.
-    // The suspension probe sits after the cheap column test in the same `AND`,
-    // so the planner only runs it for rows that actually carry a badge.
-    return qb
-      .orderBy(DirectoryService.VERIFIED_BADGE_FIRST, 'ASC')
-      .addOrderBy('listing.name', 'ASC');
+    return qb;
   }
 
   /**
@@ -899,14 +961,31 @@ export class DirectoryService {
    * pagination via the shared `paginate()` helper, with an honest `total`
    * across every matching row (not the old silent `DEFAULT_LIST_LIMIT` cap).
    * Same filters/ordering as `listDirectory` (shared `buildDirectoryQuery`).
+   * The first page also carries `facets` (`DirectoryFacetCounts`), the
+   * availability count of every filter option.
    */
   async listDirectoryPage(
     query: ListListingDirectoryQuery,
-  ): Promise<Paginated<DirectoryCardDTO>> {
-    const qb = this.buildDirectoryQuery(query);
-    return paginate(qb, normalizePage(query.page), (rows) =>
-      this.toDirectoryCards(rows),
+  ): Promise<Paginated<DirectoryCardDTO> & { facets?: DirectoryFacetCounts }> {
+    const page = normalizePage(query.page);
+    const pageOfCards = paginate(
+      this.buildDirectoryQuery(query),
+      page,
+      (rows) => this.toDirectoryCards(rows),
     );
+    // The facets ride the FIRST page alone: every later page of one filter
+    // run shares them, and the Map and Online tabs pull every page, so
+    // counting again per page would only repeat five scans. The page and the
+    // facet scans are independent, so they go out together.
+    if (page !== 1) return pageOfCards;
+    const [cards, facets] = await Promise.all([
+      pageOfCards,
+      countDirectoryFacets(
+        (lift) => this.buildDirectoryFilters(query, 'exclude', lift),
+        directoryCategoryScope(query, 'exclude'),
+      ),
+    ]);
+    return { ...cards, facets };
   }
 
   /**

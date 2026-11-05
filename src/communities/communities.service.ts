@@ -18,6 +18,7 @@ import {
   BUSY_THRESHOLD,
   countCommunityTagFacets,
   countCommunityToggleFacets,
+  countCommunityTypeFacets,
 } from './community-browse-facets';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
@@ -738,8 +739,9 @@ export class CommunitiesService {
     // reused to count that group's facets. 'toggles' lifts BOTH scalar toggles
     // (`access` and `busy`) at once — `countCommunityToggleFacets` re-applies
     // the other one inline, which costs one scan for two numbers rather than a
-    // lifted base and a scan per toggle.
-    skip?: 'tags' | 'toggles',
+    // lifted base and a scan per toggle. 'type' lifts the category filter for
+    // `countCommunityTypeFacets`.
+    skip?: 'tags' | 'toggles' | 'type',
   ): SelectQueryBuilder<Community> {
     const filter = query.filter ?? 'discover';
 
@@ -769,7 +771,7 @@ export class CommunitiesService {
         });
     }
 
-    if (query.type) {
+    if (skip !== 'type' && query.type) {
       communitiesQuery.andWhere('c.type = :type', { type: query.type });
     }
     if (skip !== 'toggles' && query.access) {
@@ -891,12 +893,12 @@ export class CommunitiesService {
       communitiesQuery.orderBy('c.createdAt', 'DESC').addOrderBy('c.id', 'ASC');
     }
 
-    // The page and the two facet aggregates are independent reads of the same
-    // committed snapshot, so they go out together rather than in series. Two
-    // aggregates and not three: the toggles share a scan (see
-    // `countCommunityToggleFacets`), the tags cannot join them because their
-    // lifted base is a different one.
-    const [pageOfCards, tags, toggles] = await Promise.all([
+    // The page and the three facet aggregates are independent reads of the
+    // same committed snapshot, so they go out together in one Promise.all.
+    // Three aggregates and not four: the toggles share a scan (see
+    // `countCommunityToggleFacets`); the tags and the categories cannot join
+    // them because each lifts a different filter, so each has its own base.
+    const [pageOfCards, tags, toggles, typeFacets] = await Promise.all([
       paginate(communitiesQuery, page, async (rows) => {
         if (!rows.length) return [];
         const communityIds = rows.map((community) => community.id);
@@ -917,8 +919,12 @@ export class CommunitiesService {
         this.browseBaseQuery(viewerId, query, 'toggles'),
         query,
       ),
+      countCommunityTypeFacets(this.browseBaseQuery(viewerId, query, 'type')),
     ]);
-    return { ...pageOfCards, facets: { tags, ...toggles } };
+    return {
+      ...pageOfCards,
+      facets: { tags, ...toggles, ...typeFacets },
+    };
   }
 
   /**

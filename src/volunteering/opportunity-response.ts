@@ -67,6 +67,35 @@ export interface OpportunityCardDTO {
   createdAt: string;
 }
 
+/**
+ * Availability counts for the board's two chip rows, returned alongside every
+ * `GET /volunteering` page (`opportunity-board-facets.ts`). Taken over the
+ * page's own visibility gates with the counted group's filter lifted, so each
+ * number answers "how many would I get if I picked this one, given the other
+ * filter I have already chosen". Every enum value is present, zeros included:
+ * a 0 is what greys a chip out.
+ */
+export interface OpportunityBoardFacetCounts {
+  /**
+   * How many opportunities each time commitment would yield, taken with the
+   * `commit` filter lifted and the `cause` filter still applied.
+   */
+  commit: Record<OpportunityCommitLevel, number>;
+  /**
+   * How many opportunities each cause would yield, taken with the `cause`
+   * filter lifted and the `commit` filter still applied. An opportunity lists
+   * one to three causes, so it counts once under each of its causes, and the
+   * values can sum past the total.
+   */
+  cause: Record<OpportunityCause, number>;
+  /**
+   * How many opportunities the board holds with the `cause` filter lifted and
+   * the `commit` filter still applied, each one counted once. The count behind
+   * the "Any cause" chip, which `cause` cannot give because causes overlap.
+   */
+  allCauses: number;
+}
+
 export interface OpportunityDetailDTO extends OpportunityCardDTO {
   why: string[];
   tasks: OpportunityTask[];

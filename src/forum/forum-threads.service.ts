@@ -75,9 +75,9 @@ import {
   ASK_AUTO_END_MS,
   AskEndedReason,
   CALL_CLOSING_WINDOW_MS,
+  FUNDING_CATEGORY,
   FundingListFilter,
   OPEN_CALL_TAG,
-  ROLLING_CALL_STALE_MS,
   ResolvedFundingFields,
   fundingException,
   isFundingCategory,
@@ -85,6 +85,12 @@ import {
   normalizeFundingLink,
   withServerOwnedFundingTag,
 } from './forum-funding';
+import {
+  OPEN_CALL_STATE_SQL,
+  countFundingFacets,
+  openCallStateParameters,
+  type ForumFundingFacets,
+} from './forum-funding-facets';
 import {
   ForumFundingReviewFacts,
   ForumFundingService,
@@ -458,25 +464,6 @@ function normalizeTag(tag: string): string {
 // The `open`, `closing` and `asks` funding views answer one page of at most
 // this many rows with no cursor (Funding & Grants plan, delta 7).
 const FUNDING_VIEW_MAX_ROWS = 100;
-
-// "Open or closing" for a call, shared by the `open` view and the duplicate
-// lookup so the two agree on which calls still count (`deriveCallState` is
-// the row-level twin): a dated call whose deadline has not passed, or a
-// rolling call edited within the stale window. Both boundaries use the
-// comparisons `deriveCallState` uses, so a call exactly 183 days old or due
-// this instant reads open in SQL and in the view alike.
-const OPEN_CALL_STATE_SQL =
-  '(("funding"."deadline" IS NULL AND "funding"."updated_at" >= :rollingFreshAfter) OR "funding"."deadline" >= :fundingNow)';
-
-function openCallStateParameters(now: Date): {
-  rollingFreshAfter: Date;
-  fundingNow: Date;
-} {
-  return {
-    rollingFreshAfter: new Date(now.getTime() - ROLLING_CALL_STALE_MS),
-    fundingNow: now,
-  };
-}
 
 /** `GET /forum/funding/lookup`'s 200 body. */
 export interface FundingLookupResult {
@@ -895,6 +882,47 @@ export class ForumThreadsService {
       all += count;
     }
     return { ...perCategory, all };
+  }
+
+  // `fundingFacets` for GET /forum/threads?category=funding (first page only,
+  // see `ForumController.listThreads`): how many threads each Funding &
+  // Grants chip would list. The base is `list()`'s, gate for gate and in the
+  // same order, up to its view branch; the view, eligibility and scope rows
+  // are then counted with their own filter lifted (`countFundingFacets`).
+  async fundingFacets(
+    viewerId: string,
+    q: string | undefined,
+    tag: string | undefined,
+    sort: ThreadSort | undefined,
+    viewerIsModerator: boolean,
+    fundingFilter: FundingListFilter,
+  ): Promise<ForumFundingFacets> {
+    const qb = this.threads.createQueryBuilder('t');
+    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.applyCommunityAccessFilter(qb, viewerId);
+    this.excludeDeletedThreads(qb, viewerIsModerator);
+    this.applyPublishedThreadGate(qb, viewerIsModerator);
+    qb.andWhere('t.category = :category', { category: FUNDING_CATEGORY });
+    this.applyTextAndTagFilters(qb, q, tag);
+    if (sort === 'unanswered') {
+      qb.andWhere('t.accepted_post_id IS NULL');
+    }
+    // LEFT, so a thread with no call or ask behind it (a discussion) stays in
+    // the scan; `thread_id` is the side table's primary key, so no fan-out.
+    qb.leftJoin(
+      ForumThreadFunding,
+      'funding',
+      '"funding"."thread_id" = "t"."id"',
+    );
+    return countFundingFacets(
+      qb,
+      fundingFilter,
+      {
+        opNotTakenDownSql: forumOpNotTakenDownSql('"t"'),
+        approvedReviewState: REVIEW_STATE_APPROVED,
+      },
+      new Date(),
+    );
   }
 
   /**

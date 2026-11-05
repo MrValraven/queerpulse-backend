@@ -51,7 +51,7 @@ export class FlatmateDirectoryController {
   })
   @ApiOkResponse({
     description:
-      'Paginated flatmate profiles, best match first when applicable.',
+      'Paginated flatmate profiles, best match first when applicable. Page 1 also carries `facets`: per-option availability counts for type, neighbourhood, budget band, move-in window and lifestyle tags, each group counted with its own filter lifted.',
   })
   browse(
     @CurrentUser() user: CurrentUserData,

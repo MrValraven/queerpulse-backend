@@ -22,6 +22,10 @@ import {
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import type { CardTableSummary } from './subprofile-table-summary';
+import {
+  emptyCardCredits,
+  type CardCreditsView,
+} from './subprofile-credits-response';
 import type { ListingWorksAt } from '../listings/listing-team-response';
 import type { FlashDayEventRef } from './flash-day-event-links';
 import { mapItemImageRefs } from './subprofile-item-images';
@@ -255,6 +259,8 @@ export interface SubprofilePublicView {
 
 // Directory / list card.
 export interface SubprofileCardView {
+  /** The persona uuid, non-identifying, so the card can follow by id. */
+  id: string;
   handle: string;
   kind: SubprofileKind;
   displayName: string;
@@ -299,6 +305,19 @@ export interface SubprofileCardView {
   slug: string;
   /** Quest personas only: cleaned "At the table" summary for the card line and Refine filters. */
   table?: CardTableSummary;
+  /** Whether the viewer follows this persona (one batched lookup per page). */
+  viewerFollowing: boolean;
+  /** Whether the viewer holds a `subprofile_members` row for this persona. */
+  viewerIsMember: boolean;
+  /** Who this persona has been credited with, as the viewer may see it. */
+  credits: CardCreditsView;
+}
+
+/** Per-viewer card state `toCardDTO` takes as its trailing options. */
+export interface CardViewerOptions {
+  viewerFollowing?: boolean;
+  viewerIsMember?: boolean;
+  credits?: CardCreditsView;
 }
 
 export interface SubprofileOwnerRef {
@@ -688,8 +707,16 @@ export function toCardDTO(
   // Left out of the object for a non-Quest persona or a block that cleaned
   // to nothing.
   table?: CardTableSummary,
+  // Per-viewer state batched by `directory()`. Every field defaults to the
+  // "nothing known" answer so callers that predate it keep compiling.
+  {
+    viewerFollowing = false,
+    viewerIsMember = false,
+    credits = emptyCardCredits(),
+  }: CardViewerOptions = {},
 ): SubprofileCardView {
   return {
+    id: subprofile.id,
     handle: subprofile.handle ?? '',
     kind: subprofile.kind,
     displayName: subprofile.displayName,
@@ -718,5 +745,8 @@ export function toCardDTO(
         ? ownerName
         : null,
     ...(table ? { table } : {}),
+    viewerFollowing,
+    viewerIsMember,
+    credits,
   };
 }

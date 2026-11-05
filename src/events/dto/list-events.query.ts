@@ -1,5 +1,7 @@
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsEnum,
   IsIn,
@@ -12,6 +14,7 @@ import {
   Min,
 } from 'class-validator';
 import { MAX_PAGE } from '../../common/pagination';
+import { EVENT_WHEN_FACET_KEYS } from '../event-browse-facets';
 import { EventListFilter } from '../events.service';
 import { GatheringFamily } from '../gathering-family';
 
@@ -127,4 +130,29 @@ export class ListEventsQuery {
   @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
   includeHidden?: boolean;
+
+  /** `true` answers the upcoming browse as a page envelope, `{ items, total,
+   *  page, pageSize }`, with `facets` on the first page: per filter option,
+   *  how many events picking it would give (`EventsService.listBrowsePage`).
+   *  Honoured on `filter=upcoming` only; without it every branch keeps its
+   *  bare array. Any value other than `true` leaves it off. */
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  facets?: boolean;
+
+  /** The date chips' windows the `when` facet counts, repeated once per chip
+   *  as `key,fromIso,toIso` (`today`, `weekend`, `week`, `month`). The client
+   *  sends the bounds the chip itself would send as `from`/`to`, so a count
+   *  and the list behind it read one window. A malformed entry leaves that
+   *  chip uncounted (`parseWhenWindows`). Read only with `facets=true`. */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    Array.isArray(value) ? (value as unknown[]) : [value],
+  )
+  @IsArray()
+  @ArrayMaxSize(EVENT_WHEN_FACET_KEYS.length)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  whenWindow?: string[];
 }

@@ -28,7 +28,10 @@ import { SampleJoinRequestsQuery } from './dto/sample-join-requests.query';
 import { UpdateJoinRequestNoteDto } from './dto/update-join-request-note.dto';
 import { JoinRequestView } from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
-import { WelcomeInviteService } from './welcome-invite.service';
+import {
+  WelcomeEmailSendResult,
+  WelcomeInviteService,
+} from './welcome-invite.service';
 import {
   ApiBadGatewayResponse,
   ApiConflictResponse,
@@ -187,11 +190,20 @@ export class AdminJoinRequestsController {
    * `join_request_not_found` (404), `invite_not_usable` (409),
    * `welcome_email_not_configured` (503), `welcome_email_rejected` (502) or
    * `welcome_email_unavailable` (503).
+   *
+   * The 200 body is `{ sent: true, welcomeEmailSendCount,
+   * welcomeEmailLastSentAt }`: the send record as stored after this send, with
+   * the timestamp in ISO 8601. Each click is a real send, and two concurrent
+   * clicks share one Resend idempotency key, so they deliver and count one
+   * email.
    */
   @Post(':id/invite/email')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Email the welcome message with the invite link' })
-  @ApiOkResponse({ description: 'The email was accepted: `{ sent: true }`.' })
+  @ApiOkResponse({
+    description:
+      'The email was accepted: `{ sent: true, welcomeEmailSendCount: number, welcomeEmailLastSentAt: string }`, the stored send count and the ISO 8601 time of the latest counted send.',
+  })
   @ApiNotFoundResponse({ description: 'Reason `join_request_not_found`.' })
   @ApiConflictResponse({
     description:
@@ -208,7 +220,7 @@ export class AdminJoinRequestsController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
     @Body() dto: SendWelcomeInviteEmailDto,
-  ): Promise<{ sent: true }> {
+  ): Promise<WelcomeEmailSendResult> {
     return this.welcomeInviteService.sendWelcomeEmail(
       id,
       user.userId,

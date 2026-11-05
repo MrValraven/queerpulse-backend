@@ -97,6 +97,19 @@ export interface CommunityBrowseFacetCounts {
    * week — the count behind the "Busy this week" pill.
    */
   busy: number;
+  /**
+   * `CommunityType` to how many communities carry it, counted with the `type`
+   * filter itself lifted: the numbers behind the Category radio rows. Every
+   * type is present, zeros included; a type MISSING from this map was not
+   * counted, which must never be rendered as a 0.
+   */
+  types: Record<string, number>;
+  /**
+   * The "All communities" row: every community under the rest of this
+   * request's filters, the `type` filter lifted. Each community has exactly
+   * one type, so this is a distinct total and equals the sum of `types`.
+   */
+  allTypes: number;
 }
 
 export interface CommunityCardDTO {

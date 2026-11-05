@@ -642,6 +642,51 @@ describe('toCardDTO', () => {
     expect(card.ownerName).toBeNull();
     expect(card.ownerSlug).toBeNull();
   });
+
+  // The Credits directory: the card carries its persona id and the viewer's
+  // own state, defaulted when a caller passes no trailing options.
+  it('emits the persona id and safe per-viewer defaults', () => {
+    const sp = makeSubprofile({ id: 'sp-card-1', handle: 'nightform' });
+    const card = toCardDTO(sp);
+    expect(card.id).toBe('sp-card-1');
+    expect(card.viewerFollowing).toBe(false);
+    expect(card.viewerIsMember).toBe(false);
+    expect(card.credits).toEqual({ count: 0, faces: [] });
+  });
+
+  it('carries the per-viewer options through, and still nulls the owner tie when unlinked', () => {
+    const sp = makeSubprofile({
+      handle: 'nightform',
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    });
+    const credits = {
+      count: 1,
+      faces: [
+        {
+          kind: 'persona' as const,
+          name: 'Ember',
+          avatarUrl: null,
+          accent: null,
+        },
+      ],
+    };
+    const card = toCardDTO(
+      sp,
+      0,
+      [],
+      0,
+      'ana',
+      new Map(),
+      'Ana Reis',
+      undefined,
+      { viewerFollowing: true, viewerIsMember: true, credits },
+    );
+    expect(card.viewerFollowing).toBe(true);
+    expect(card.viewerIsMember).toBe(true);
+    expect(card.credits).toEqual(credits);
+    expect(card.ownerName).toBeNull();
+    expect(card.ownerSlug).toBeNull();
+  });
 });
 
 // --- typed mock helpers ------------------------------------------------------

@@ -47,6 +47,7 @@ import { EventBatchService } from './event-batch.service';
 import { EventBatchTemplateService } from './event-batch-template.service';
 import { EventBatchThrottlerGuard } from './event-batch-throttler.guard';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { parseWhenWindows } from './event-browse-facets';
 import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
@@ -111,27 +112,44 @@ export class EventsController {
       '`filter=past`). `filter=hosting` honours `to` alone, as an upper ' +
       'bound on the start, so a host can ask for the events they have ' +
       'already started. `filter=upcoming` leaves out events whose every ' +
-      'hosting community the caller hid; `includeHidden=true` lists them too.',
+      'hosting community the caller hid; `includeHidden=true` lists them too. ' +
+      '`facets=true` on `filter=upcoming` answers with a page envelope ' +
+      '`{ items, total, page, pageSize }` plus, on page 1, `facets`: for ' +
+      'every family, `whenWindow` date chip, neighbourhood, format and cost, ' +
+      'how many events picking it would give, counted with its own group ' +
+      'lifted and every other filter applied, and each group `all` total.',
   })
-  @ApiOkResponse({ description: 'Event summaries for the requested filter.' })
+  @ApiOkResponse({
+    description:
+      'Event summaries for the requested filter; a page envelope with ' +
+      '`facets` under `facets=true` on the upcoming browse.',
+  })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListEventsQuery) {
-    return this.eventsService.list(
-      user.userId,
-      query.filter ?? 'upcoming',
-      query.page ?? 1,
-      {
-        hostSlug: query.hostSlug,
-        excludeSlug: query.excludeSlug,
-        from: query.from,
-        to: query.to,
-        hood: query.hood,
-        family: query.family,
-        type: query.type,
-        q: query.q,
-        cost: query.cost,
-        includeHidden: query.includeHidden,
-      },
-    );
+    const filter = query.filter ?? 'upcoming';
+    const page = query.page ?? 1;
+    const options = {
+      hostSlug: query.hostSlug,
+      excludeSlug: query.excludeSlug,
+      from: query.from,
+      to: query.to,
+      hood: query.hood,
+      family: query.family,
+      type: query.type,
+      q: query.q,
+      cost: query.cost,
+      includeHidden: query.includeHidden,
+    };
+    // Only the browse board asks for counts. Every other caller, and every
+    // other branch, keeps the bare array it has always read.
+    if (query.facets && filter === 'upcoming') {
+      return this.eventsService.listBrowsePage(
+        user.userId,
+        page,
+        options,
+        parseWhenWindows(query.whenWindow),
+      );
+    }
+    return this.eventsService.list(user.userId, filter, page, options);
   }
 
   @Post()
