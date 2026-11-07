@@ -5,6 +5,17 @@ import {
   validatePieceBrief,
   validatePieceCare,
 } from './piece-jsonb.validation';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
+
+/** What `run` throws, or `undefined`, so a spec can assert its body `code`. */
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
 
 const VALID_BRIEF = {
   angle: 'A retrospective on the first decade of the club.',
@@ -53,34 +64,49 @@ describe('validatePieceBrief', () => {
   });
 
   it('throws when the input is not an object', () => {
-    expect(() => validatePieceBrief('not-an-object')).toThrow(
-      BadRequestException,
-    );
+    expect(thrownBy(() => validatePieceBrief('not-an-object'))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID },
+    });
   });
 
   it('throws when the input is an array', () => {
-    expect(() => validatePieceBrief([])).toThrow(BadRequestException);
+    expect(thrownBy(() => validatePieceBrief([]))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID },
+    });
   });
 
   it('throws when wants is not a string array', () => {
-    expect(() =>
-      validatePieceBrief({
-        ...VALID_BRIEF,
-        wants: 'founding member interview',
-      }),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validatePieceBrief({
+          ...VALID_BRIEF,
+          wants: 'founding member interview',
+        }),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID },
+    });
   });
 
   it('throws when wants contains a non-string entry', () => {
-    expect(() =>
-      validatePieceBrief({ ...VALID_BRIEF, wants: ['ok', 42] }),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() => validatePieceBrief({ ...VALID_BRIEF, wants: ['ok', 42] })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID },
+    });
   });
 
   it('throws when a required string field is missing', () => {
     const withoutAngle: Record<string, unknown> = { ...VALID_BRIEF };
     delete withoutAngle.angle;
-    expect(() => validatePieceBrief(withoutAngle)).toThrow(BadRequestException);
+    expect(thrownBy(() => validatePieceBrief(withoutAngle))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID },
+    });
   });
 
   it('accepts wordCount/filedWords as null', () => {
@@ -90,9 +116,12 @@ describe('validatePieceBrief', () => {
   });
 
   it('throws when wordCount is not a number or null', () => {
-    expect(() =>
-      validatePieceBrief({ ...VALID_BRIEF, wordCount: '1800' }),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() => validatePieceBrief({ ...VALID_BRIEF, wordCount: '1800' })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID },
+    });
   });
 });
 
@@ -125,57 +154,86 @@ describe('validatePieceCare', () => {
   });
 
   it('throws when the input is not an object', () => {
-    expect(() => validatePieceCare(42)).toThrow(BadRequestException);
+    expect(thrownBy(() => validatePieceCare(42))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID },
+    });
   });
 
   it('throws when the input is an array', () => {
-    expect(() => validatePieceCare([])).toThrow(BadRequestException);
+    expect(thrownBy(() => validatePieceCare([]))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID },
+    });
   });
 
   it('throws when a subject has an out-of-union consent value', () => {
-    expect(() =>
-      validatePieceCare({
-        ...VALID_CARE,
-        subjects: [{ ...VALID_CARE.subjects[0], consent: 'maybe' }],
-      }),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validatePieceCare({
+          ...VALID_CARE,
+          subjects: [{ ...VALID_CARE.subjects[0], consent: 'maybe' }],
+        }),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID },
+    });
   });
 
   it('throws when subjects is not an array', () => {
-    expect(() => validatePieceCare({ ...VALID_CARE, subjects: {} })).toThrow(
-      BadRequestException,
-    );
+    expect(
+      thrownBy(() => validatePieceCare({ ...VALID_CARE, subjects: {} })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID },
+    });
   });
 
   it('throws when contentNotes is not a string array', () => {
-    expect(() =>
-      validatePieceCare({ ...VALID_CARE, contentNotes: [true] }),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validatePieceCare({ ...VALID_CARE, contentNotes: [true] }),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID },
+    });
   });
 
   it('throws when a flag is missing a required field', () => {
-    expect(() =>
-      validatePieceCare({
-        ...VALID_CARE,
-        flags: [{ key: 'medical', on: true }],
-      }),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validatePieceCare({
+          ...VALID_CARE,
+          flags: [{ key: 'medical', on: true }],
+        }),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID },
+    });
   });
 
   it('throws when read is present but missing a required field', () => {
-    expect(() =>
-      validatePieceCare({
-        ...VALID_CARE,
-        read: {
-          reader: 'Priya Nair',
-          role: 'sensitivity_reader',
-          status: 'in_progress',
-          askedOn: '2026-07-10',
-          dueOn: '2026-07-20',
-          checks: 'not-an-array',
-        },
-      }),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validatePieceCare({
+          ...VALID_CARE,
+          read: {
+            reader: 'Priya Nair',
+            role: 'sensitivity_reader',
+            status: 'in_progress',
+            askedOn: '2026-07-10',
+            dueOn: '2026-07-20',
+            checks: 'not-an-array',
+          },
+        }),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID },
+    });
   });
 });
 

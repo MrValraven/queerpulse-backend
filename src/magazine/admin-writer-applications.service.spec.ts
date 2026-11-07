@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { AdminMembersService } from '../admin-members/admin-members.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -8,6 +12,7 @@ import {
   MagazineWriterApplication,
   WriterApplicationStatus,
 } from './entities/magazine-writer-application.entity';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 function makeApplication(
   overrides: Partial<MagazineWriterApplication> = {},
@@ -79,7 +84,10 @@ describe('AdminWriterApplicationsService', () => {
       );
       await expect(
         service.triage('admin-1', 'missing', { status: 'approved' }),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.WRITER_APPLICATION_NOT_FOUND },
+      });
     });
 
     it('throws ConflictException when already resolved', async () => {
@@ -93,7 +101,30 @@ describe('AdminWriterApplicationsService', () => {
       );
       await expect(
         service.triage('admin-1', 'app-1', { status: 'declined' }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_RESOLVED,
+        },
+      });
+    });
+
+    it('refuses an editor triaging their own application with a coded 403', async () => {
+      const service = new AdminWriterApplicationsService(
+        makeApplicationsRepo(makeApplication({ userId: 'admin-1' })),
+        makeProfilesRepo(),
+        makeAdminMembers(),
+        makeNotifications(),
+      );
+      await expect(
+        service.triage('admin-1', 'app-1', { status: 'approved' }),
+      ).rejects.toMatchObject({
+        constructor: ForbiddenException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.WRITER_APPLICATION_SELF_REVIEW,
+          message: 'Someone else has to review your own writer application',
+        },
+      });
     });
 
     it('grants magazine_writer and notifies on approve', async () => {
@@ -156,7 +187,12 @@ describe('AdminWriterApplicationsService', () => {
       );
       await expect(
         service.triage('admin-1', 'app-1', { status: 'approved' }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_RESOLVED,
+        },
+      });
     });
   });
 });

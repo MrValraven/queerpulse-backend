@@ -93,11 +93,11 @@ describe('CreatorDraftsExportContributor', () => {
       (registered) => registered.name,
     );
     expect(keys.indexOf('CreatorDraftsExportContributor')).toBe(
-      keys.indexOf('StudioCopyrightClaimsExportContributor') + 1,
+      keys.indexOf('StudioAccessRequestExportContributor') + 1,
     );
     const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
     expect(csvKeys.indexOf('creatorDrafts')).toBe(
-      csvKeys.indexOf('studioCopyrightClaims') + 1,
+      csvKeys.indexOf('studioAccessRequest') + 1,
     );
   });
 });

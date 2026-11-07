@@ -19,13 +19,14 @@ import {
   toMadeTogetherView,
 } from './subprofile-credits-response';
 
-// Real storage-key shape: `toImageUrl` drops anything that does not parse as
+// Real persona-scoped storage-key shape (`persona/<uuid>/<uuid><ext>`), the
+// shape a persona image carries: `toImageUrl` drops anything that does not parse as
 // one, so a loose stand-in would make the URL assertions pass for the wrong
 // reason.
 const AVATAR_KEY =
-  'work-image/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222.jpg';
+  'persona/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222.jpg';
 const ITEM_IMAGE_KEY =
-  'work-image/11111111-1111-1111-1111-111111111111/33333333-3333-3333-3333-333333333333.jpg';
+  'persona/11111111-1111-1111-1111-111111111111/33333333-3333-3333-3333-333333333333.jpg';
 
 function counterpart(
   overrides: Partial<CreditCounterpart> & { identityKey: string },

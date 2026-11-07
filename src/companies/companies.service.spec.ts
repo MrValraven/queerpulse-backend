@@ -425,17 +425,8 @@ describe('CompaniesService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
-    it('creates a review and resolves the author MemberRef', async () => {
+    it("creates a review, flags it as the viewer's own and carries no author object", async () => {
       companies.findOne.mockResolvedValue({ id: 'co-1', slug: 'x' });
-      profiles.find.mockResolvedValue([
-        {
-          userId: 'author-1',
-          slug: 'jo',
-          firstName: 'Jo',
-          lastName: 'D',
-          avatarUrl: null,
-        },
-      ]);
 
       const res = await service.createReview('x', 'author-1', {
         title: 'Great place',
@@ -445,7 +436,70 @@ describe('CompaniesService', () => {
       });
 
       expect(res.stars).toBe(5);
-      expect(res.author?.slug).toBe('jo');
+      expect(res.isViewerAuthor).toBe(true);
+      expect(res).not.toHaveProperty('author');
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listReviews (author is never sent)', () => {
+    const storedReview = (authorId: string | null) => ({
+      id: '33333333-3333-4333-8333-333333333333',
+      companyId: 'co-1',
+      authorId,
+      title: 'Good place, slow payroll',
+      stars: 4,
+      byline: 'Former employee',
+      body: ['Payroll was late twice.'],
+      ownerReplyText: null as string | null,
+      ownerRepliedAt: null as Date | null,
+      editedAt: null as Date | null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    const listAs = async (viewerId: string, authorId: string | null) => {
+      companies.findOne.mockResolvedValue({
+        id: 'co-1',
+        slug: 'x',
+        ownerId: 'owner-1',
+      });
+      const queryBuilder = qbStub();
+      queryBuilder.getManyAndCount!.mockResolvedValue([
+        [storedReview(authorId)],
+        1,
+      ]);
+      reviews.createQueryBuilder.mockReturnValue(queryBuilder);
+      return service.listReviews('x', {}, viewerId);
+    };
+
+    it('omits the author for a member who did not write the review', async () => {
+      const page = await listAs('someone-else', 'author-1');
+
+      expect(page.items).toHaveLength(1);
+      expect(page.items[0]).not.toHaveProperty('author');
+      expect(page.items[0]!.isViewerAuthor).toBe(false);
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+
+    it('omits the author for the company owner reading the reviews', async () => {
+      const page = await listAs('owner-1', 'author-1');
+
+      expect(page.items[0]).not.toHaveProperty('author');
+      expect(page.items[0]!.isViewerAuthor).toBe(false);
+    });
+
+    it("marks the review as the viewer's own for its author, still with no author object", async () => {
+      const page = await listAs('author-1', 'author-1');
+
+      expect(page.items[0]).not.toHaveProperty('author');
+      expect(page.items[0]!.isViewerAuthor).toBe(true);
+    });
+
+    it("treats a review whose author erased their account as nobody's own", async () => {
+      const page = await listAs('author-1', null);
+
+      expect(page.items[0]!.isViewerAuthor).toBe(false);
+      expect(page.items[0]).not.toHaveProperty('author');
     });
   });
   // PRD-47: the employer's right of reply, and what a later edit by the
@@ -543,6 +597,22 @@ describe('CompaniesService', () => {
       );
       expect(dto.ownerReply?.text).toBe('Payroll moved to the 25th in March.');
       expect(dto.isEditedAfterOwnerReply).toBe(false);
+    });
+
+    it('does not identify the reviewer to the employer who is replying', async () => {
+      companies.findOne.mockResolvedValue(claimed);
+      reviews.findOne.mockResolvedValue(freshReview());
+
+      const dto = await service.replyToReview(
+        'x',
+        'owner-1',
+        freshReview().id,
+        { text: 'Thanks for the feedback.' },
+      );
+
+      expect(dto).not.toHaveProperty('author');
+      expect(dto.isViewerAuthor).toBe(false);
+      expect(profiles.find).not.toHaveBeenCalled();
     });
 
     it('overwrites an existing reply rather than threading a second one', async () => {
@@ -659,6 +729,27 @@ describe('CompaniesService', () => {
 
       expect(dto.editedAt).not.toBeNull();
       expect(dto.isEditedAfterOwnerReply).toBe(true);
+    });
+
+    it("returns the edited review as the author's own, with no author object", async () => {
+      companies.findOne.mockResolvedValue(company);
+      reviews.findOne.mockResolvedValue(repliedReview());
+
+      const dto = await service.updateReview(
+        'x',
+        repliedReview().id,
+        'author-1',
+        {
+          title: 'Good place, slow payroll',
+          stars: 3,
+          byline: 'Former employee',
+          body: ['Payroll was late three times.'],
+        },
+      );
+
+      expect(dto.isViewerAuthor).toBe(true);
+      expect(dto).not.toHaveProperty('author');
+      expect(profiles.find).not.toHaveBeenCalled();
     });
 
     it('does NOT stamp an edit when nothing actually changed, so an identical re-save cannot manufacture the flag', async () => {

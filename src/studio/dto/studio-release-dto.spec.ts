@@ -94,7 +94,7 @@ describe('Studio release bodies', () => {
   it('takes up to five listed genres, each picked once', async () => {
     expect(
       await errorsFor(UpdateStudioReleaseDto, {
-        genres: ['fado', 'folk', 'pop', 'house', 'ambient'],
+        genres: ['fado', 'folk', 'pop', 'electronic', 'ambient'],
       }),
     ).toEqual([]);
     expect(
@@ -102,7 +102,7 @@ describe('Studio release bodies', () => {
     ).toEqual(['genres']);
     expect(
       await errorsFor(UpdateStudioReleaseDto, {
-        genres: ['fado', 'folk', 'pop', 'house', 'ambient', 'jazz'],
+        genres: ['fado', 'folk', 'pop', 'electronic', 'ambient', 'jazz'],
       }),
     ).toEqual(['genres']);
     expect(
@@ -130,7 +130,14 @@ describe('Studio release bodies', () => {
         .flatMap((error) => Object.values(error.constraints ?? {}))
         .sort();
     expect(
-      await messagesOf(['fado', 'folk', 'pop', 'house', 'ambient', 'jazz']),
+      await messagesOf([
+        'fado',
+        'folk',
+        'pop',
+        'electronic',
+        'ambient',
+        'jazz',
+      ]),
     ).toEqual(['A release can carry up to 5 genres']);
     expect(await messagesOf(['fado', 'fado'])).toEqual([
       'Each genre can be picked once',

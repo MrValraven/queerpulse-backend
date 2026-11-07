@@ -45,6 +45,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 type RepositoryMock = {
   find: jest.Mock;
@@ -567,7 +568,10 @@ describe('MagazinePieceService', () => {
       const dto: UpdatePieceDto = { brief: { angle: 'missing fields' } };
       await expect(
         service.updatePiece('piece-1', dto, 'editor-1'),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({
+        constructor: BadRequestException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID },
+      });
       expect(pieces.save).not.toHaveBeenCalled();
     });
 
@@ -582,7 +586,12 @@ describe('MagazinePieceService', () => {
       const dto: UpdatePieceDto = { stage: 'ready' };
       await expect(
         service.updatePiece('piece-1', dto, 'editor-1'),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_PUBLISHED_STAGE_LOCKED,
+        },
+      });
       expect(pieces.save).not.toHaveBeenCalled();
       expect(pieceEvents.create).not.toHaveBeenCalled();
     });
@@ -733,9 +742,10 @@ describe('MagazinePieceService', () => {
   describe('getPieceById', () => {
     it('throws NotFoundException when the piece does not exist', async () => {
       pieces.findOne.mockResolvedValue(null);
-      await expect(service.getPieceById('missing')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getPieceById('missing')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+      });
     });
   });
 
@@ -800,7 +810,10 @@ describe('MagazinePieceService', () => {
 
       await expect(
         service.triagePitch('pitch-1', { verdict: 'maybe' }, 'editor-1'),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_ALREADY_TRIAGED },
+      });
     });
 
     it('rings the submitter of a workspace pitch when it is passed on, with no actor', async () => {
@@ -893,7 +906,10 @@ describe('MagazinePieceService', () => {
 
       await expect(
         service.triagePitch('pitch-1', dto, 'editor-1'),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_ALREADY_TRIAGED },
+      });
       expect(pieces.save).not.toHaveBeenCalled();
       expect(pitches.save).not.toHaveBeenCalled();
     });
@@ -1305,9 +1321,12 @@ describe('MagazinePieceService', () => {
   describe('getPieceRecordFull', () => {
     it('throws NotFoundException when the piece does not exist', async () => {
       pieces.findOne.mockResolvedValue(null);
-      await expect(
-        service.getPieceRecordFull('missing'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.getPieceRecordFull('missing')).rejects.toMatchObject(
+        {
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+        },
+      );
     });
 
     it('returns a null payment when none has been recorded yet', async () => {
@@ -1331,7 +1350,10 @@ describe('MagazinePieceService', () => {
       const dto: UpdatePaymentDto = { fee: '420' };
       await expect(
         service.upsertPayment('missing', dto, 'editor-1'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+      });
     });
 
     it('creates the payment row when none exists yet', async () => {
@@ -1494,9 +1516,10 @@ describe('MagazinePieceService', () => {
 
     it('throws NotFoundException when the piece does not exist', async () => {
       pieces.findOne.mockResolvedValue(null);
-      await expect(service.getArticleDraft('missing')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getArticleDraft('missing')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+      });
     });
   });
 
@@ -1512,7 +1535,12 @@ describe('MagazinePieceService', () => {
 
       await expect(
         service.updateArticleDraft('piece-1', dto, 'editor-1'),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({
+        constructor: BadRequestException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+        },
+      });
       expect(articles.save).not.toHaveBeenCalled();
       expect(pieceEvents.create).not.toHaveBeenCalled();
     });
@@ -1606,7 +1634,12 @@ describe('MagazinePieceService', () => {
           { expectedVersion: 5, blocks: [] },
           'editor-1',
         ),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_DRAFT_VERSION_CONFLICT,
+        },
+      });
       // Nothing is written and no audit noise is left behind by the loser.
       expect(articles.save).not.toHaveBeenCalled();
       expect(pieceEvents.create).not.toHaveBeenCalled();
@@ -1627,7 +1660,12 @@ describe('MagazinePieceService', () => {
           { blocks: [{ id: 'b1', kind: 'paragraph', html: 'Mine.' }] },
           'editor-1',
         ),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_DRAFT_VERSION_CONFLICT,
+        },
+      });
       expect(articles.save).not.toHaveBeenCalled();
     });
 
@@ -1944,9 +1982,10 @@ describe('MagazinePieceService', () => {
     it('throws NotFoundException when the piece does not exist', async () => {
       pieces.findOne.mockResolvedValue(null);
       const dto: CreateLetterDto = { who: 'Cláudia, 58', body: 'Thank you.' };
-      await expect(service.addLetter('missing', dto)).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.addLetter('missing', dto)).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+      });
     });
 
     it('creates and returns a letter', async () => {
@@ -2001,7 +2040,10 @@ describe('MagazinePieceService', () => {
       letters.findOne.mockResolvedValue(null);
       await expect(
         service.updateLetter('piece-1', 'missing', true),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_LETTER_NOT_FOUND },
+      });
     });
 
     it('throws NotFoundException when the letter belongs to a different piece', async () => {
@@ -2011,7 +2053,10 @@ describe('MagazinePieceService', () => {
       });
       await expect(
         service.updateLetter('piece-1', 'letter-1', true),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_LETTER_NOT_FOUND },
+      });
     });
 
     it('toggles runInLetters on the existing row without creating a new one', async () => {
@@ -2042,7 +2087,10 @@ describe('MagazinePieceService', () => {
       const dto: CreateCorrectionDto = { text: 'We misstated a date.' };
       await expect(
         service.addCorrection('missing', dto, 'editor-1'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+      });
     });
 
     it('creates a correction and records a correction_published audit event', async () => {
@@ -2115,9 +2163,10 @@ describe('MagazinePieceService', () => {
 
     it('throws NotFoundException when the issue does not exist', async () => {
       issues.findOne.mockResolvedValue(null);
-      await expect(service.getIssueProduction('99')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getIssueProduction('99')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND },
+      });
     });
   });
 
@@ -2323,7 +2372,10 @@ describe('MagazinePieceService', () => {
           },
           'editor-1',
         ),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({
+        constructor: BadRequestException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_CARE_GATE_OPEN },
+      });
       expect(articles.save).not.toHaveBeenCalled();
     });
 
@@ -2412,7 +2464,10 @@ describe('MagazinePieceService', () => {
 
       await expect(
         service.publishPiece('piece-1', {}, 'editor-1'),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({
+        constructor: BadRequestException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_CARE_GATE_OPEN },
+      });
       expect(articles.save).not.toHaveBeenCalled();
     });
 
@@ -2861,7 +2916,12 @@ describe('MagazinePieceService', () => {
         const dto: UpdateBylineDto = { byline: 'A. Writer' };
         await expect(
           service.updateMyByline('writer-1', 'piece-1', dto),
-        ).rejects.toBeInstanceOf(ForbiddenException);
+        ).rejects.toMatchObject({
+          constructor: ForbiddenException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_ASSIGNED_TO_YOU,
+          },
+        });
         expect(pieces.save).not.toHaveBeenCalled();
       });
 
@@ -2875,7 +2935,10 @@ describe('MagazinePieceService', () => {
         const dto: UpdateBylineDto = { byline: 'A. Writer' };
         await expect(
           service.updateMyByline('writer-1', 'piece-1', dto),
-        ).rejects.toBeInstanceOf(ForbiddenException);
+        ).rejects.toMatchObject({
+          constructor: ForbiddenException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_BYLINE_LOCKED },
+        });
         expect(pieces.save).not.toHaveBeenCalled();
       });
 
@@ -2903,7 +2966,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.fileDraft('writer-1', 'piece-1'),
-        ).rejects.toBeInstanceOf(ForbiddenException);
+        ).rejects.toMatchObject({
+          constructor: ForbiddenException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_ASSIGNED_TO_YOU,
+          },
+        });
         expect(pieceEvents.create).not.toHaveBeenCalled();
       });
 
@@ -3071,7 +3139,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.getMyDraft('writer-1', 'piece-1'),
-        ).rejects.toBeInstanceOf(ForbiddenException);
+        ).rejects.toMatchObject({
+          constructor: ForbiddenException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_ASSIGNED_TO_YOU,
+          },
+        });
       });
 
       it('returns the draft body and the version to file against', async () => {
@@ -3542,7 +3615,10 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.listArticleComments('missing'),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+        });
       });
 
       it('returns a nested tree with resolved author names and no leak', async () => {
@@ -3691,7 +3767,10 @@ describe('MagazinePieceService', () => {
           service.addArticleComment('missing', 'editor-1', {
             body: 'hello',
           }),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+        });
       });
     });
 
@@ -3743,7 +3822,12 @@ describe('MagazinePieceService', () => {
           service.replyToArticleComment('missing', 'editor-1', {
             body: 'hi',
           }),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_COMMENT_NOT_FOUND,
+          },
+        });
         expect(articleComments.save).not.toHaveBeenCalled();
       });
     });
@@ -3779,7 +3863,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.resolveArticleComment('missing', { resolved: true }),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_COMMENT_NOT_FOUND,
+          },
+        });
       });
     });
   });
@@ -3830,7 +3919,10 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.listArticleVersions('missing'),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+        });
       });
 
       it('lists versions newest-first with resolved author names and no blocks payload', async () => {
@@ -3878,7 +3970,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.getArticleVersion('missing'),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_VERSION_NOT_FOUND,
+          },
+        });
       });
 
       it('returns the full blocks snapshot alongside the resolved author', async () => {
@@ -3972,7 +4069,10 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.restoreArticleVersion('missing', 'version-1', 'editor-1'),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+        });
       });
 
       it('throws NotFoundException when the piece has no article yet', async () => {
@@ -3980,7 +4080,10 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.restoreArticleVersion('piece-1', 'version-1', 'editor-1'),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_HAS_NO_ARTICLE },
+        });
       });
 
       it('throws NotFoundException when the version does not exist', async () => {
@@ -3989,7 +4092,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.restoreArticleVersion('piece-1', 'missing', 'editor-1'),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_VERSION_NOT_FOUND,
+          },
+        });
       });
 
       it('throws NotFoundException when the version belongs to a different article', async () => {
@@ -4005,7 +4113,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.restoreArticleVersion('piece-1', 'version-1', 'editor-1'),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_VERSION_NOT_IN_PIECE,
+          },
+        });
         expect(articles.save).not.toHaveBeenCalled();
       });
 
@@ -4114,7 +4227,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.restoreArticleVersion('piece-1', 'version-1', 'editor-1'),
-        ).rejects.toBeInstanceOf(BadRequestException);
+        ).rejects.toMatchObject({
+          constructor: BadRequestException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+          },
+        });
         expect(articles.save).not.toHaveBeenCalled();
         expect(articleVersions.create).not.toHaveBeenCalled();
       });
@@ -4207,7 +4325,12 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.listPieceMessages('piece-1', 'writer-2', false),
-        ).rejects.toBeInstanceOf(ForbiddenException);
+        ).rejects.toMatchObject({
+          constructor: ForbiddenException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_THREAD_FORBIDDEN,
+          },
+        });
         expect(pieceMessages.find).not.toHaveBeenCalled();
       });
 
@@ -4216,7 +4339,10 @@ describe('MagazinePieceService', () => {
 
         await expect(
           service.listPieceMessages('missing', 'writer-1', false),
-        ).rejects.toBeInstanceOf(NotFoundException);
+        ).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND },
+        });
       });
 
       it('succeeds for the assigned writer', async () => {
@@ -4310,7 +4436,12 @@ describe('MagazinePieceService', () => {
           service.postPieceMessage('piece-1', 'writer-2', false, {
             body: 'Let me in?',
           }),
-        ).rejects.toBeInstanceOf(ForbiddenException);
+        ).rejects.toMatchObject({
+          constructor: ForbiddenException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_THREAD_FORBIDDEN,
+          },
+        });
         expect(pieceMessages.save).not.toHaveBeenCalled();
         expect(notifications.create).not.toHaveBeenCalled();
       });
@@ -4450,9 +4581,10 @@ describe('MagazinePieceService', () => {
   describe('submission deadline', () => {
     it('404s an unknown issue number on read', async () => {
       issues.findOne.mockResolvedValue(null);
-      await expect(service.getSubmissionDeadline('99')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getSubmissionDeadline('99')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND },
+      });
     });
 
     it('404s an unknown issue number on write', async () => {
@@ -4463,7 +4595,10 @@ describe('MagazinePieceService', () => {
           { submissionDeadline: '2026-10-01' },
           'editor-1',
         ),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND },
+      });
     });
 
     it('reads back null when the desk has set no deadline', async () => {
@@ -4526,9 +4661,10 @@ describe('MagazinePieceService', () => {
   describe('issue close date', () => {
     it('404s an unknown issue number on read', async () => {
       issues.findOne.mockResolvedValue(null);
-      await expect(service.getIssueClosesOn('99')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getIssueClosesOn('99')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND },
+      });
     });
 
     it('404s an unknown issue number on write', async () => {
@@ -4539,7 +4675,10 @@ describe('MagazinePieceService', () => {
           { closesOn: '2026-10-01' },
           'editor-1',
         ),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND },
+      });
     });
 
     it('reads back null when the desk has set no close date', async () => {

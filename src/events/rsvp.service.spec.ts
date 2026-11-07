@@ -572,6 +572,8 @@ describe('RsvpService', () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
       capacity: 2,
     });
     goingSeats = 2; // full
@@ -584,6 +586,8 @@ describe('RsvpService', () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
       capacity: 5,
     });
     goingSeats = 1;
@@ -595,6 +599,8 @@ describe('RsvpService', () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
       capacity: 1,
     });
     goingSeats = 1; // still full
@@ -614,6 +620,8 @@ describe('RsvpService', () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
       capacity: 1,
     });
     goingSeats = 0; // 0 going after the step-down → 1 seat free
@@ -782,6 +790,8 @@ describe('RsvpService', () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
       visibility: EventVisibility.InviteOnly,
       hostId: 'host',
       capacity: null,
@@ -806,6 +816,8 @@ describe('RsvpService', () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
       visibility: EventVisibility.InviteOnly,
       hostId: 'host',
       capacity: null,
@@ -825,6 +837,8 @@ describe('RsvpService', () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
       visibility: EventVisibility.Network,
       hostId: 'host',
       capacity: null,

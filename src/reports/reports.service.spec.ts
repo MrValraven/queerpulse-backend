@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   HttpException,
   HttpStatus,
   Logger,
@@ -165,6 +164,31 @@ describe('ReportsService', () => {
   });
 
   describe('create', () => {
+    // PRD-368: a `message` report files only when the reporter held a seat in
+    // the message's conversation when it was sent, and the message lookup runs
+    // only for a uuid subject id. These fixtures seat `reporter-1` in the
+    // thread from before the message arrived.
+    const REPORTED_MESSAGE_ID = '0b5e7c1a-2d3f-4a5b-8c6d-7e8f9a0b1c2d';
+    const REPORTED_CONVERSATION_ID = '9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
+
+    const seatReporterBesideMessage = (senderId: string): void => {
+      messages.findOne.mockResolvedValue({
+        id: REPORTED_MESSAGE_ID,
+        conversationId: REPORTED_CONVERSATION_ID,
+        senderId,
+        body: 'Leave me alone',
+        createdAt: new Date('2026-08-01T10:00:00.000Z'),
+        editedAt: null,
+        deletedAt: null,
+      });
+      conversationParticipants.findOne.mockResolvedValue({
+        id: 'seat-reporter-1',
+        leftAt: null,
+        historyFloorAt: null,
+        identityId: 'identity-reporter-1',
+      });
+    };
+
     it('persists an open report tied to the reporter, deriving severity + SLA', async () => {
       const res = await service.create('reporter-1', {
         subjectType: ReportSubjectType.Post,
@@ -424,18 +448,28 @@ describe('ReportsService', () => {
     });
 
     it('persists anonymity and evidence when provided', async () => {
+      seatReporterBesideMessage('someone-else');
+
       await service.create('reporter-1', {
         subjectType: ReportSubjectType.Message,
-        subjectId: 'msg-1',
+        subjectId: REPORTED_MESSAGE_ID,
         reasonCode: 'unwanted_contact',
         anonymous: true,
         evidence: [{ type: 'screenshot', uploadId: 'upload-1' }],
       });
 
+      // The client's evidence is kept as sent, and the server's snapshot of the
+      // reported message follows it.
       expect(reports.save).toHaveBeenCalledWith(
         expect.objectContaining({
           anonymous: true,
-          evidence: [{ type: 'screenshot', uploadId: 'upload-1' }],
+          evidence: [
+            { type: 'screenshot', uploadId: 'upload-1' },
+            expect.objectContaining({
+              type: 'message-snapshot',
+              messageId: REPORTED_MESSAGE_ID,
+            }) as unknown,
+          ],
         }),
       );
     });
@@ -446,9 +480,11 @@ describe('ReportsService', () => {
     // an off-platform address is dropped rather than stored beside their id.
     // Dropped, never refused: the report itself still files.
     it('drops a contact email on a signed-in filing', async () => {
+      seatReporterBesideMessage('someone-else');
+
       const res = await service.create('reporter-1', {
         subjectType: ReportSubjectType.Message,
-        subjectId: 'msg-1',
+        subjectId: REPORTED_MESSAGE_ID,
         reasonCode: 'unwanted_contact',
         anonymous: true,
         contactEmail: 'member@example.com',
@@ -525,37 +561,43 @@ describe('ReportsService', () => {
     });
 
     it('rejects reporting your own message', async () => {
-      messages.findOne.mockResolvedValue({
-        id: 'msg-1',
-        senderId: 'reporter-1',
-      });
+      seatReporterBesideMessage('reporter-1');
 
       await expect(
         service.create('reporter-1', {
           subjectType: ReportSubjectType.Message,
-          subjectId: 'msg-1',
+          subjectId: REPORTED_MESSAGE_ID,
           reasonCode: 'harassment',
         }),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow('You cannot report your own message');
+      expect(reports.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a message from a conversation the reporter never sat in', async () => {
+      seatReporterBesideMessage('someone-else');
+      conversationParticipants.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.create('stranger-1', {
+          subjectType: ReportSubjectType.Message,
+          subjectId: REPORTED_MESSAGE_ID,
+          reasonCode: 'harassment',
+        }),
+      ).rejects.toThrow(
+        'You can only report a message from a conversation you were in',
+      );
       expect(reports.save).not.toHaveBeenCalled();
     });
 
     it('allows reporting a message authored by someone else', async () => {
       // A reported message is snapshotted into `evidence` at filing time, so
-      // the fixture needs the timestamps that snapshot reads.
-      messages.findOne.mockResolvedValue({
-        id: 'msg-1',
-        senderId: 'someone-else',
-        body: 'Leave me alone',
-        createdAt: new Date('2026-08-01T10:00:00.000Z'),
-        editedAt: null,
-        deletedAt: null,
-      });
+      // the fixture carries the timestamps that snapshot reads.
+      seatReporterBesideMessage('someone-else');
 
       await expect(
         service.create('reporter-1', {
           subjectType: ReportSubjectType.Message,
-          subjectId: 'msg-1',
+          subjectId: REPORTED_MESSAGE_ID,
           reasonCode: 'harassment',
         }),
       ).resolves.toBeDefined();
@@ -567,7 +609,7 @@ describe('ReportsService', () => {
           evidence: [
             expect.objectContaining({
               type: 'message-snapshot',
-              messageId: 'msg-1',
+              messageId: REPORTED_MESSAGE_ID,
               body: 'Leave me alone',
               senderId: 'someone-else',
               createdAt: '2026-08-01T10:00:00.000Z',

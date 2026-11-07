@@ -11,6 +11,7 @@ import {
   Post,
   Query,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import {
   CurrentUser,
@@ -29,6 +30,7 @@ import { UpdateReaderCommentDto } from './dto/update-reader-comment.dto';
 import { MagazineReaderCommentsService } from './magazine-reader-comments.service';
 import { MagazineService } from './magazine.service';
 import { StorySubmissionsService } from './story-submissions.service';
+import { MagazineValidationCodeInterceptor } from './magazine-validation-code.interceptor';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiBadRequestResponse,
@@ -48,6 +50,8 @@ import {
 @ApiCookieAuth()
 @Controller('magazine')
 @UseGuards(ActiveMemberGuard)
+// Lifts the `code` a coded DTO constraint carries into the 400 body.
+@UseInterceptors(MagazineValidationCodeInterceptor)
 export class MagazineController {
   constructor(
     private readonly magazineService: MagazineService,

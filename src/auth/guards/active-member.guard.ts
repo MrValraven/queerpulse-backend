@@ -6,6 +6,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { codedErrorBody, PLATFORM_ERROR_CODE } from '../../common/coded-error';
 import { UserStatus } from '../../users/entities/user.entity';
 import { CurrentUserData } from '../decorators/current-user.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
@@ -35,7 +36,12 @@ export class ActiveMemberGuard implements CanActivate {
       .switchToHttp()
       .getRequest<{ user?: CurrentUserData }>();
     if (user?.status !== UserStatus.Active) {
-      throw new ForbiddenException('Active membership required');
+      throw new ForbiddenException(
+        codedErrorBody(
+          PLATFORM_ERROR_CODE.ACTIVE_MEMBERSHIP_REQUIRED,
+          'Active membership required',
+        ),
+      );
     }
     return true;
   }

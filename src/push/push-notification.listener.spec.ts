@@ -511,17 +511,24 @@ describe('PushNotificationListener', () => {
     // profile's Places section (`notifications.adapters.ts`'s
     // `listing_owner_offer` branch); this pins the push route to agree with
     // it, regardless of whether the payload carries a `listingSlug`.
-    const { listener, push, notificationPreferences } = build({
+    const { listener, push, notificationPreferences, profilesRepo } = build({
       actorProfile: ACTOR,
     });
     await listener.handleNotificationBatchCreated(
       emit(
+        // The same payload `ListingOwnerOffersService` writes: the offering
+        // admin travels as `actorId`, the type's actor key.
         makeNotification(NotificationType.ListingOwnerOffer, {
+          actorId: 'actor-1',
+          source: 'listing',
           listingName: 'Lux Café',
           listingSlug: 'lux-cafe',
         }),
       ),
     );
+    expect(profilesRepo.findOne).toHaveBeenCalledWith({
+      where: { userId: 'actor-1' },
+    });
     expect(notificationPreferences.recipientsPushEnabled).toHaveBeenCalledWith(
       ['recipient-1'],
       'listings',
@@ -1776,8 +1783,8 @@ describe('PushNotificationListener', () => {
       expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
         ['member-1'],
         expect.objectContaining({
-          title: 'Payment to confirm',
-          body: 'Someone says they paid Night Shift for Lisbon at four',
+          title: 'New payment to confirm',
+          body: 'Lisbon at four: a buyer says they paid Night Shift. Confirm it in Studio.',
           data: { url: '/studio/payments?persona=persona-1' },
           l10n: {
             titleKey: 'push:studioPurchaseClaimed.title',
@@ -1850,8 +1857,8 @@ describe('PushNotificationListener', () => {
         1,
         ['buyer-1'],
         expect.objectContaining({
-          title: 'Purchase confirmed',
-          body: 'Night Shift confirmed your payment for Lisbon at four',
+          title: 'Payment confirmed',
+          body: 'Night Shift confirmed your payment for Lisbon at four. Your download is ready.',
           data: { url: '/account/music-purchases' },
           l10n: {
             titleKey: 'push:studioPurchaseConfirmed.title',
@@ -1865,7 +1872,7 @@ describe('PushNotificationListener', () => {
         ['buyer-1'],
         expect.objectContaining({
           title: 'Payment not confirmed',
-          body: 'Night Shift could not match your payment for Lisbon at four',
+          body: 'Night Shift could not confirm your payment for Lisbon at four. Open Studio to see why.',
           data: { url: '/account/music-purchases' },
           l10n: {
             titleKey: 'push:studioPurchaseDeclined.title',

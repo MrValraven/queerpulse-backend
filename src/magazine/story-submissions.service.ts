@@ -16,6 +16,8 @@ import {
   StorySubmissionResponse,
   toStorySubmissionResponse,
 } from './magazine-response';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /**
  * The two statuses a member can still pull a story back from: it has landed in
@@ -115,7 +117,12 @@ export class StorySubmissionsService {
       where: { id: submissionId, userId },
     });
     if (!submission) {
-      throw new NotFoundException('Story submission not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_NOT_FOUND,
+          'Story submission not found',
+        ),
+      );
     }
 
     if (submission.withdrawnAt !== null) {
@@ -128,7 +135,10 @@ export class StorySubmissionsService {
       WITHDRAWABLE_SUBMISSION_STATUSES.includes(submission.status);
     if (!isStillOpen) {
       throw new ConflictException(
-        'The desk has already answered this story, so it can no longer be withdrawn.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_ALREADY_ANSWERED,
+          'The desk has already answered this story, so it can no longer be withdrawn.',
+        ),
       );
     }
 
@@ -144,7 +154,10 @@ export class StorySubmissionsService {
     );
     if (claim.affected === 0) {
       throw new ConflictException(
-        'The desk has already answered this story, so it can no longer be withdrawn.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_ALREADY_ANSWERED,
+          'The desk has already answered this story, so it can no longer be withdrawn.',
+        ),
       );
     }
 

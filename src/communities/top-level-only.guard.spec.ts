@@ -52,9 +52,11 @@ const EXPECTED_COUNTS: Record<
     communityQuerySites: 1,
   },
   'press-kit/press-kit.service.ts': { helperUses: 1, communityQuerySites: 1 },
+  // The second site is the forum-thread EXISTS in `publicForumThreadSlugs`,
+  // raw SQL that checks `"parent_id" IS NULL` inline.
   'profiles/activity-visibility.service.ts': {
     helperUses: 1,
-    communityQuerySites: 1,
+    communityQuerySites: 2,
   },
   'feature-usage/admin-feature-usage.service.ts': {
     helperUses: 1,

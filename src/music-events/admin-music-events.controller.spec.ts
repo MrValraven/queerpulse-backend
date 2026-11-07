@@ -146,12 +146,17 @@ describe('AdminMusicEventsController', () => {
       HEADERS_METADATA,
       handlerOf('attendeesCsv'),
     ) as { name: string; value: string }[];
-    expect(headers).toEqual([
-      { name: 'Content-Type', value: 'text/csv; charset=utf-8' },
+    // Sorted by header name: the decorator order on the handler carries no
+    // meaning, only the two headers and their values do.
+    const headersByName = [...headers].sort((first, second) =>
+      first.name.localeCompare(second.name),
+    );
+    expect(headersByName).toEqual([
       {
         name: 'Content-Disposition',
         value: 'attachment; filename="event-guests.csv"',
       },
+      { name: 'Content-Type', value: 'text/csv; charset=utf-8' },
     ]);
     expect(routeNamed('attendeesCsv').path).toBe(':slug/attendees.csv');
   });

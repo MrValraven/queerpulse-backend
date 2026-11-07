@@ -27,6 +27,10 @@ import {
 import { MessageStar } from './entities/message-star.entity';
 import { Message, MessageKind } from './entities/message.entity';
 import {
+  groupJoinHistoryFloorCoversPredicate,
+  isCoveredByGroupJoinHistoryFloor,
+} from './group-join-history-floor';
+import {
   isCoveredByMailboxStaffFloor,
   mailboxStaffHistoryFloorCoversPredicate,
 } from './mailbox-seats';
@@ -45,8 +49,9 @@ import type { ViewerMessageResponse } from './viewer-message-fields';
  * alone.
  *
  * The repositories are in-memory stand-ins that filter by the `where` they
- * are given. The floor queries answer through the rule's in-memory twin,
- * `isCoveredByMailboxStaffFloor`. `IdentityAttributionService` is the real
+ * are given. The floor queries answer through the rules' in-memory twins,
+ * `isCoveredByMailboxStaffFloor` and `isCoveredByGroupJoinHistoryFloor`.
+ * `IdentityAttributionService` is the real
  * service over a stand-in identity lookup and preference table.
  */
 
@@ -240,10 +245,10 @@ function isSameRender(first: unknown, second: unknown): boolean {
   return JSON.stringify(canonical(first)) === JSON.stringify(canonical(second));
 }
 
-const FLOOR_CLAUSE = mailboxStaffHistoryFloorCoversPredicate(
+const FLOOR_CLAUSE = `(${mailboxStaffHistoryFloorCoversPredicate(
   'parent.created_at',
   'seat',
-);
+)} OR ${groupJoinHistoryFloorCoversPredicate('parent.created_at', 'seat')})`;
 
 interface World {
   core: MessagingCoreService;
@@ -599,14 +604,20 @@ function buildWorld({
               return (parameters.parentIds as string[])
                 .map((parentId) => messages.get(parentId))
                 .filter((parent): parent is Message => Boolean(parent))
-                .filter((parent) =>
-                  isCoveredByMailboxStaffFloor(parent.createdAt, {
-                    historyFloorAt: candidate.historyFloorAt,
-                    identityKind: identityKindById.get(candidate.identityId),
-                    isGroupConversation:
-                      conversation.kind === ConversationKind.Group,
-                    isOfficialConversation: conversation.isOfficial,
-                  }),
+                .filter(
+                  (parent) =>
+                    isCoveredByMailboxStaffFloor(parent.createdAt, {
+                      historyFloorAt: candidate.historyFloorAt,
+                      identityKind: identityKindById.get(candidate.identityId),
+                      isGroupConversation:
+                        conversation.kind === ConversationKind.Group,
+                      isOfficialConversation: conversation.isOfficial,
+                    }) ||
+                    isCoveredByGroupJoinHistoryFloor(parent.createdAt, {
+                      historyFloorAt: candidate.historyFloorAt,
+                      isGroupConversation:
+                        conversation.kind === ConversationKind.Group,
+                    }),
                 )
                 .map((parent) => ({
                   parentId: parent.id,

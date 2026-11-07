@@ -109,6 +109,19 @@ describe('CsrfGuard', () => {
     );
   });
 
+  it('puts the CSRF_REJECTED code beside the unchanged sentence on a missing token', () => {
+    let refusal: ForbiddenException | undefined;
+    try {
+      guard.canActivate(httpContext('POST'));
+    } catch (error) {
+      refusal = error as ForbiddenException;
+    }
+    expect(refusal?.getResponse()).toEqual({
+      code: 'CSRF_REJECTED',
+      message: 'Invalid or missing CSRF token',
+    });
+  });
+
   it('rejects mismatched cookie and header tokens', () => {
     expect(() =>
       guard.canActivate(
@@ -184,6 +197,21 @@ describe('CsrfGuard', () => {
       expect(() =>
         guardOnOneSite.canActivate(httpContext('POST', cookies, headers)),
       ).toThrow(ForbiddenException);
+    });
+
+    it('puts the CSRF_REJECTED code beside the cross-site sentence', () => {
+      const guardOnOneSite = sameSiteGuard(reflector as unknown as Reflector);
+      const { cookies, headers } = matchingProdTokens('cross-site');
+      let refusal: ForbiddenException | undefined;
+      try {
+        guardOnOneSite.canActivate(httpContext('POST', cookies, headers));
+      } catch (error) {
+        refusal = error as ForbiddenException;
+      }
+      expect(refusal?.getResponse()).toEqual({
+        code: 'CSRF_REJECTED',
+        message: 'Cross-site request rejected',
+      });
     });
 
     it('allows a cross-site label when the app and API are on different sites', () => {

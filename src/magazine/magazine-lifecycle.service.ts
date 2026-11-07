@@ -29,6 +29,8 @@ import {
   toArticleLifecycleRecord,
 } from './magazine-lifecycle-response';
 import { notifyPieceWriter } from './magazine-writer-notifier';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /**
  * How far ahead the review queue looks by default. Thirty days is one
@@ -221,11 +223,19 @@ export class MagazineLifecycleService {
   ): Promise<ArticleLifecycleRecord> {
     const piece = await this.pieces.findOne({ where: { id: pieceId } });
     if (!piece) {
-      throw new NotFoundException('Piece not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND,
+          'Piece not found',
+        ),
+      );
     }
     if (!piece.articleId) {
       throw new BadRequestException(
-        'This piece has no article yet, so there is nothing to set a lifecycle on.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_HAS_NO_ARTICLE,
+          'This piece has no article yet, so there is nothing to set a lifecycle on.',
+        ),
       );
     }
     const article = await this.loadArticleOr404(piece.articleId);
@@ -242,11 +252,19 @@ export class MagazineLifecycleService {
       });
       if (!supersededBy) {
         throw new NotFoundException(
-          'No article with that slug to supersede this one.',
+          codedErrorBody(
+            MAGAZINE_ERROR_CODE.MAGAZINE_SUPERSEDING_ARTICLE_NOT_FOUND,
+            'No article with that slug to supersede this one.',
+          ),
         );
       }
       if (supersededBy.id === article.id) {
-        throw new BadRequestException('A piece cannot supersede itself.');
+        throw new BadRequestException(
+          codedErrorBody(
+            MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_SUPERSEDES_ITSELF,
+            'A piece cannot supersede itself.',
+          ),
+        );
       }
     }
 
@@ -259,7 +277,10 @@ export class MagazineLifecycleService {
 
     if (nextState === 'superseded' && !nextSupersededById) {
       throw new BadRequestException(
-        'Marking a piece superseded needs the piece that replaces it.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_SUPERSEDING_ARTICLE_REQUIRED,
+          'Marking a piece superseded needs the piece that replaces it.',
+        ),
       );
     }
 
@@ -329,23 +350,37 @@ export class MagazineLifecycleService {
   ): Promise<ArticleTranslationRecord> {
     const piece = await this.pieces.findOne({ where: { id: pieceId } });
     if (!piece) {
-      throw new NotFoundException('Piece not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND,
+          'Piece not found',
+        ),
+      );
     }
     if (!piece.articleId) {
       throw new BadRequestException(
-        'This piece has no article yet, so there is nothing to translate.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_HAS_NO_ARTICLE,
+          'This piece has no article yet, so there is nothing to translate.',
+        ),
       );
     }
     const original = await this.loadArticleOr404(piece.articleId);
 
     if (original.translationOfArticleId) {
       throw new BadRequestException(
-        'Translate from the original piece rather than from another translation.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_TRANSLATION_SOURCE_IS_TRANSLATION,
+          'Translate from the original piece rather than from another translation.',
+        ),
       );
     }
     if ((original.locale ?? DEFAULT_ARTICLE_LOCALE) === dto.locale) {
       throw new BadRequestException(
-        'This piece is already written in that language.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_TRANSLATION_SAME_LANGUAGE,
+          'This piece is already written in that language.',
+        ),
       );
     }
 
@@ -354,7 +389,10 @@ export class MagazineLifecycleService {
     });
     if (existing) {
       throw new ConflictException(
-        'This piece already has a translation in that language.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_TRANSLATION_ALREADY_EXISTS,
+          'This piece already has a translation in that language.',
+        ),
       );
     }
 
@@ -466,7 +504,12 @@ export class MagazineLifecycleService {
   async listTranslations(pieceId: string): Promise<ArticleTranslationRecord[]> {
     const piece = await this.pieces.findOne({ where: { id: pieceId } });
     if (!piece) {
-      throw new NotFoundException('Piece not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND,
+          'Piece not found',
+        ),
+      );
     }
     if (!piece.articleId) return [];
     const article = await this.loadArticleOr404(piece.articleId);
@@ -556,7 +599,12 @@ export class MagazineLifecycleService {
   private async loadArticleOr404(articleId: string): Promise<MagazineArticle> {
     const article = await this.articles.findOne({ where: { id: articleId } });
     if (!article) {
-      throw new NotFoundException('Article not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_NOT_FOUND,
+          'Article not found',
+        ),
+      );
     }
     return article;
   }

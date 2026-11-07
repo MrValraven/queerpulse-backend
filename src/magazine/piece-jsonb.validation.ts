@@ -4,6 +4,8 @@ import {
   PieceCare,
   PieceCareSubject,
 } from './entities/magazine-piece.entity';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE, MagazineErrorCode } from './magazine-error-codes';
 
 /**
  * Pure validators for the `MagazinePiece.brief`/`.care` JSONB columns. No
@@ -48,12 +50,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function failBrief(reason: string): never {
-  throw new BadRequestException(`brief: ${reason}`);
+/**
+ * Refuses a malformed brief. `code` is `MAGAZINE_PIECE_BRIEF_INVALID` for a
+ * wrong shape or type, and `MAGAZINE_PIECE_BRIEF_TOO_LARGE` for a size cap.
+ */
+function failBrief(
+  reason: string,
+  code: MagazineErrorCode = MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_INVALID,
+): never {
+  throw new BadRequestException(codedErrorBody(code, `brief: ${reason}`));
 }
 
-function failCare(reason: string): never {
-  throw new BadRequestException(`care: ${reason}`);
+/** Same as `failBrief`, for the care record (`MAGAZINE_PIECE_CARE_*`). */
+function failCare(
+  reason: string,
+  code: MagazineErrorCode = MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_INVALID,
+): never {
+  throw new BadRequestException(codedErrorBody(code, `care: ${reason}`));
 }
 
 // Size ceilings for the two jsonb columns on `magazine_piece`. Both are
@@ -95,7 +108,10 @@ export function validatePieceBrief(input: unknown): PieceBrief | null {
       failBrief(`${field} must be a string`);
     }
     if (fieldValue.length > MAX_JSONB_TEXT_LENGTH) {
-      failBrief(`${field} must be at most ${MAX_JSONB_TEXT_LENGTH} characters`);
+      failBrief(
+        `${field} must be at most ${MAX_JSONB_TEXT_LENGTH} characters`,
+        MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_TOO_LARGE,
+      );
     }
   }
 
@@ -104,10 +120,16 @@ export function validatePieceBrief(input: unknown): PieceBrief | null {
     failBrief('wants must be an array of strings');
   }
   if (wants.length > MAX_JSONB_ITEMS) {
-    failBrief(`wants can have at most ${MAX_JSONB_ITEMS} entries`);
+    failBrief(
+      `wants can have at most ${MAX_JSONB_ITEMS} entries`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_TOO_LARGE,
+    );
   }
   if (wants.some((want) => want.length > MAX_JSONB_TEXT_LENGTH)) {
-    failBrief(`each want must be at most ${MAX_JSONB_TEXT_LENGTH} characters`);
+    failBrief(
+      `each want must be at most ${MAX_JSONB_TEXT_LENGTH} characters`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_BRIEF_TOO_LARGE,
+    );
   }
 
   if (!isNumberOrNull(record.wordCount)) {
@@ -291,7 +313,10 @@ export function validatePieceCare(input: unknown): PieceCare | null {
     failCare('subjects must be an array');
   }
   if (record.subjects.length > MAX_JSONB_ITEMS) {
-    failCare(`subjects can have at most ${MAX_JSONB_ITEMS} entries`);
+    failCare(
+      `subjects can have at most ${MAX_JSONB_ITEMS} entries`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_TOO_LARGE,
+    );
   }
   record.subjects.forEach((subject, index) =>
     assertCareSubject(subject, index),
@@ -302,11 +327,15 @@ export function validatePieceCare(input: unknown): PieceCare | null {
     failCare('contentNotes must be an array of strings');
   }
   if (contentNotes.length > MAX_JSONB_ITEMS) {
-    failCare(`contentNotes can have at most ${MAX_JSONB_ITEMS} entries`);
+    failCare(
+      `contentNotes can have at most ${MAX_JSONB_ITEMS} entries`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_TOO_LARGE,
+    );
   }
   if (contentNotes.some((note) => note.length > MAX_JSONB_TEXT_LENGTH)) {
     failCare(
       `each content note must be at most ${MAX_JSONB_TEXT_LENGTH} characters`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_TOO_LARGE,
     );
   }
 
@@ -314,7 +343,10 @@ export function validatePieceCare(input: unknown): PieceCare | null {
     failCare('flags must be an array');
   }
   if (record.flags.length > MAX_JSONB_ITEMS) {
-    failCare(`flags can have at most ${MAX_JSONB_ITEMS} entries`);
+    failCare(
+      `flags can have at most ${MAX_JSONB_ITEMS} entries`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_CARE_TOO_LARGE,
+    );
   }
   record.flags.forEach((flag, index) => validateCareFlag(flag, index));
 

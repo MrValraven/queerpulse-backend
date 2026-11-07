@@ -46,6 +46,10 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'ForumPostPhotoDto.image': 'ForumPostPhoto.storageKey',
   'CreateCommunityDto.coverImageUrl': 'Community.coverImageUrl',
   'CreateCommunityDto.avatarImageUrl': 'Community.avatarImageUrl',
+  // A subcommunity is a `Community` row with a parent, so its cover and avatar
+  // land in the same two columns.
+  'CreateSubcommunityDto.coverImageUrl': 'Community.coverImageUrl',
+  'CreateSubcommunityDto.avatarImageUrl': 'Community.avatarImageUrl',
   'UpsertCardProgramDto.crestMediaKey': 'CommunityCard.crestMediaKey',
   'UpsertCardProgramDto.backgroundMediaKey': 'CommunityCard.backgroundMediaKey',
   'CreateLandlordDto.photo': 'Landlord.photo',
@@ -55,6 +59,9 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'CreateListingReviewDto.photo': 'ListingReview.photo',
   // The ordered gallery: one `@IsImageReference` field per photo.
   'ListingGalleryPhotoDto.image': 'Listing.photoGallery',
+  // Framing names a photo already in the gallery by its key, and saves its
+  // focus and zoom beside it.
+  'ListingPhotoFramingEntryDto.image': 'Listing.photoGallery',
   // LEGACY four-slot pair, still accepted on the wire. Whatever a client sends
   // through these slots is stored in the ordered gallery (the `photos` column
   // is only a derived mirror of it), so the gallery source is what covers them.
@@ -84,6 +91,10 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'WorkItemDto.imageUrl': 'WorkItem.imageUrl',
   'UpdateProfileDto.avatarUrl': 'Profile.avatarUrl',
   'CreateEventDto.coverImageUrl': 'Event.coverImageUrl',
+  // A batch writes one `Event` per row, the row's cover winning over the
+  // shared one.
+  'EventBatchSharedDto.coverImageUrl': 'Event.coverImageUrl',
+  'EventBatchRowDto.coverImageUrl': 'Event.coverImageUrl',
   'CreateGroupConversationDto.avatarUrl': 'Conversation.avatarUrl',
   'UpdateConversationDto.avatarUrl': 'Conversation.avatarUrl',
   'CompanyWorkItemDto.imageUrl': 'Company.work[].imageUrl',
@@ -116,7 +127,16 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // other required image slot is (see `ForumPostPhotoDto.image`). The source
   // was wired in an earlier task; this entry is the one this DTO needed.
   'CreateStickerDto.storageKey': 'Sticker.storageKey',
+  // An artwork replacement (`UpdateStickerDto.artwork`) overwrites the same
+  // column, so it maps to the same source.
+  'StickerArtworkDto.storageKey': 'Sticker.storageKey',
   'UpdateStudioReleaseDto.coverKey': 'StudioRelease.coverKey',
+  // Studio scene covers and Studio page photos: the body names a staff upload,
+  // and the column stores a scoped copy of it, kept alive by the storage
+  // sweep's own lookups (see `RULED_OUT_IMAGE_FIELDS`).
+  'CreateAdminStudioSceneDto.coverKey': 'StudioScene.coverKey',
+  'UpdateAdminStudioSceneDto.coverKey': 'StudioScene.coverKey',
+  'PutStudioLandingPhotoDto.imageKey': 'StudioLandingPhoto.imageKey',
   // Studio v3 persona posts: the create and the edit body both write the
   // one photo column.
   'CreatePersonaPostDto.imageKey': 'SubprofilePost.imageKey',

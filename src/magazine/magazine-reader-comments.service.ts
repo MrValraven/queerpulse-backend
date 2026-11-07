@@ -18,6 +18,8 @@ import {
   ReaderCommentResponse,
   toReaderCommentResponse,
 } from './magazine-reader-comment-response';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 // Matches `ReportSubjectType.MagazineComment`'s value — kept as a plain
 // string here (not an import from `reports`) to avoid a magazine -> reports
@@ -114,10 +116,20 @@ export class MagazineReaderCommentsService {
   ): Promise<ReaderCommentResponse> {
     const comment = await this.loadCommentOrThrow(id);
     if (comment.deletedAt) {
-      throw new NotFoundException('Comment not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_FOUND,
+          'Comment not found',
+        ),
+      );
     }
     if (comment.authorId !== user.userId) {
-      throw new ForbiddenException('Only the author can edit this comment');
+      throw new ForbiddenException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_AUTHOR,
+          'Only the author can edit this comment',
+        ),
+      );
     }
     // ENG-102 — a comment a moderator has hidden or removed is not editable by
     // anyone, its author included. `toReaderCommentResponse` already reports
@@ -131,7 +143,12 @@ export class MagazineReaderCommentsService {
       comment.id,
     );
     if (moderation.hidden || moderation.removed) {
-      throw new NotFoundException('Comment not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_FOUND,
+          'Comment not found',
+        ),
+      );
     }
     comment.body = body;
     comment.editedAt = new Date();
@@ -149,7 +166,12 @@ export class MagazineReaderCommentsService {
   ): Promise<ReaderCommentResponse> {
     const comment = await this.loadCommentOrThrow(id);
     if (comment.authorId !== user.userId) {
-      throw new ForbiddenException('Only the author can delete this comment');
+      throw new ForbiddenException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_AUTHOR,
+          'Only the author can delete this comment',
+        ),
+      );
     }
     if (!comment.deletedAt) {
       comment.deletedAt = new Date();
@@ -179,7 +201,12 @@ export class MagazineReaderCommentsService {
   private async loadCommentOrThrow(id: string): Promise<MagazineReaderComment> {
     const comment = await this.comments.findOne({ where: { id } });
     if (!comment) {
-      throw new NotFoundException('Comment not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_FOUND,
+          'Comment not found',
+        ),
+      );
     }
     return comment;
   }
@@ -202,18 +229,36 @@ export class MagazineReaderCommentsService {
     // so a muted member's comment stays repliable. Same split
     // `ForumThreadsService.loadOr404` documents.
     if (await this.blockFilter.isBlockedEitherWay(viewerId, parent.authorId)) {
-      throw new NotFoundException('Comment not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_FOUND,
+          'Comment not found',
+        ),
+      );
     }
     if (parent.articleId !== articleId) {
       throw new BadRequestException(
-        'Parent comment does not belong to this article',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_PARENT_ON_OTHER_ARTICLE,
+          'Parent comment does not belong to this article',
+        ),
       );
     }
     if (parent.parentId !== null) {
-      throw new BadRequestException('Cannot reply to a reply');
+      throw new BadRequestException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_REPLY_TO_REPLY,
+          'Cannot reply to a reply',
+        ),
+      );
     }
     if (parent.deletedAt) {
-      throw new BadRequestException('Cannot reply to a deleted comment');
+      throw new BadRequestException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_PARENT_DELETED,
+          'Cannot reply to a deleted comment',
+        ),
+      );
     }
     return parent;
   }
@@ -223,7 +268,12 @@ export class MagazineReaderCommentsService {
   ): Promise<MagazineArticle> {
     const article = await this.articles.findOne({ where: { slug } });
     if (!article || !article.publishedAt || article.publishedAt > new Date()) {
-      throw new NotFoundException('Article not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_NOT_FOUND,
+          'Article not found',
+        ),
+      );
     }
     return article;
   }

@@ -170,12 +170,15 @@ import {
 } from './magazine-clock';
 import { notifyPieceWriter } from './magazine-writer-notifier';
 import { MagazineIssueAnnouncerService } from './magazine-issue-announcer.service';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /**
  * The 409 `code` `convertDeckToArticle` answers for a live or scheduled deck.
  * The deck editor reads it to name the step that unblocks the conversion.
  */
-export const DECK_CONVERT_PUBLISHED_CODE = 'magazine_deck_convert_published';
+export const DECK_CONVERT_PUBLISHED_CODE =
+  MAGAZINE_ERROR_CODE.MAGAZINE_DECK_CONVERT_PUBLISHED;
 
 function deckConvertPublishedConflict(): ConflictException {
   return new ConflictException({
@@ -839,7 +842,12 @@ export class MagazinePieceService {
         this.assertFormatReady(['The deck has not been started yet.']);
         // `assertFormatReady` always throws on a non-empty list; this is here
         // only so the compiler can see `deck` narrowed below.
-        throw new BadRequestException('This piece is not ready to publish.');
+        throw new BadRequestException(
+          codedErrorBody(
+            MAGAZINE_ERROR_CODE.MAGAZINE_PUBLISH_NOT_READY,
+            'This piece is not ready to publish.',
+          ),
+        );
       }
       this.assertFormatReady(deckPublishBlockers(deck));
       wasLive = isLiveInstant(deck.publishedAt);
@@ -950,7 +958,7 @@ export class MagazinePieceService {
     if (openGateItems.length > 0) {
       throw new BadRequestException({
         message: 'This piece is behind its care gate and cannot be published.',
-        code: 'magazine_care_gate_open',
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_CARE_GATE_OPEN,
         openGateItems,
       });
     }
@@ -989,7 +997,7 @@ export class MagazinePieceService {
       throw new BadRequestException({
         message:
           'This piece is scheduled to publish, so its article has to stay ready. Put this back or unpublish it from the piece record first.',
-        code: 'magazine_publish_not_ready',
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_PUBLISH_NOT_READY,
         openGateItems: introducedBlockers,
       });
     }
@@ -1004,7 +1012,7 @@ export class MagazinePieceService {
     if (blockers.length > 0) {
       throw new BadRequestException({
         message: 'This piece is not ready to publish.',
-        code: 'magazine_publish_not_ready',
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_PUBLISH_NOT_READY,
         openGateItems: blockers,
       });
     }
@@ -1188,7 +1196,12 @@ export class MagazinePieceService {
   ): Promise<LetterResponse> {
     const letter = await this.letters.findOne({ where: { id: letterId } });
     if (!letter || letter.pieceId !== pieceId) {
-      throw new NotFoundException('Letter not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_LETTER_NOT_FOUND,
+          'Letter not found',
+        ),
+      );
     }
 
     letter.runInLetters = runInLetters;
@@ -1390,7 +1403,10 @@ export class MagazinePieceService {
       dto.stage !== piece.stage
     ) {
       throw new ConflictException(
-        'This piece is published. Unpublish it from the piece record to move it back.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_PUBLISHED_STAGE_LOCKED,
+          'This piece is published. Unpublish it from the piece record to move it back.',
+        ),
       );
     }
 
@@ -1415,7 +1431,7 @@ export class MagazinePieceService {
       throw new ConflictException({
         message:
           'This piece has a publish date. Unpublish it from the piece record to change its stage.',
-        code: 'magazine_piece_scheduled',
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_SCHEDULED,
       });
     }
 
@@ -1429,7 +1445,10 @@ export class MagazinePieceService {
       dto.format !== undefined && dto.format !== piece.format;
     if (isFormatChange && (piece.articleId !== null || piece.deckId !== null)) {
       throw new ConflictException(
-        'This piece already has content in its current format, so its format cannot change.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_FORMAT_LOCKED,
+          'This piece already has content in its current format, so its format cannot change.',
+        ),
       );
     }
 
@@ -1447,7 +1466,7 @@ export class MagazinePieceService {
       throw new ConflictException({
         message:
           'This piece has a publish date. Unpublish it from the piece record before reopening its care record.',
-        code: 'magazine_piece_scheduled',
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_SCHEDULED,
       });
     }
 
@@ -1580,12 +1599,18 @@ export class MagazinePieceService {
 
     if (article !== null && article.publishedAt !== null) {
       throw new ConflictException(
-        'This piece has a published article. Unpublish it before deleting the piece.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_DELETE_ARTICLE_PUBLISHED,
+          'This piece has a published article. Unpublish it before deleting the piece.',
+        ),
       );
     }
     if (deck !== null && deck.publishedAt !== null) {
       throw new ConflictException(
-        'This piece has a published deck. Unpublish it before deleting the piece.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_DELETE_DECK_PUBLISHED,
+          'This piece has a published deck. Unpublish it before deleting the piece.',
+        ),
       );
     }
 
@@ -1714,7 +1739,7 @@ export class MagazinePieceService {
     if (!updateResult.affected) {
       throw new ConflictException({
         message: 'This pitch has already been triaged.',
-        code: 'magazine_pitch_already_triaged',
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_ALREADY_TRIAGED,
       });
     }
 
@@ -1966,7 +1991,12 @@ export class MagazinePieceService {
       where: { id: commentId },
     });
     if (!parent) {
-      throw new NotFoundException('Comment not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DESK_COMMENT_NOT_FOUND,
+          'Comment not found',
+        ),
+      );
     }
 
     const reply = this.articleComments.create({
@@ -1996,7 +2026,12 @@ export class MagazinePieceService {
       where: { id: commentId },
     });
     if (!comment) {
-      throw new NotFoundException('Comment not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DESK_COMMENT_NOT_FOUND,
+          'Comment not found',
+        ),
+      );
     }
 
     comment.resolved = dto.resolved;
@@ -2097,13 +2132,21 @@ export class MagazinePieceService {
   ): Promise<ArticleDraftResponse> {
     const piece = await this.loadPieceOr404(pieceId);
     if (piece.articleId === null) {
-      throw new NotFoundException('This piece has no article draft yet.');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_HAS_NO_ARTICLE,
+          'This piece has no article draft yet.',
+        ),
+      );
     }
 
     const version = await this.loadArticleVersionOr404(versionId);
     if (version.articleId !== piece.articleId) {
       throw new NotFoundException(
-        'This version does not belong to this piece.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_VERSION_NOT_IN_PIECE,
+          'This version does not belong to this piece.',
+        ),
       );
     }
 
@@ -2244,7 +2287,12 @@ export class MagazinePieceService {
       where: { number: dto.number },
     });
     if (existing) {
-      throw new ConflictException(`Issue ${dto.number} already exists`);
+      throw new ConflictException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NUMBER_TAKEN,
+          `Issue ${dto.number} already exists`,
+        ),
+      );
     }
 
     const issue = this.issues.create({
@@ -2300,7 +2348,12 @@ export class MagazinePieceService {
     if (dto.issueId !== null) {
       issue = await this.issues.findOne({ where: { id: dto.issueId } });
       if (!issue) {
-        throw new NotFoundException('Issue not found');
+        throw new NotFoundException(
+          codedErrorBody(
+            MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND,
+            'Issue not found',
+          ),
+        );
       }
     }
 
@@ -2690,7 +2743,12 @@ export class MagazinePieceService {
         where: { number: issueNumber },
       });
       if (!issue) {
-        throw new NotFoundException('Issue not found');
+        throw new NotFoundException(
+          codedErrorBody(
+            MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND,
+            'Issue not found',
+          ),
+        );
       }
 
       if (!issue.publishedOn) {
@@ -2884,16 +2942,29 @@ export class MagazinePieceService {
   }> {
     const deck = await this.decks.findOne({ where: { id: deckId } });
     if (!deck) {
-      throw new NotFoundException('Deck not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_NOT_FOUND,
+          'Deck not found',
+        ),
+      );
     }
 
     const piece = await this.pieces.findOne({ where: { deckId } });
     if (!piece) {
-      throw new NotFoundException('No piece links to this deck.');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_HAS_NO_PIECE,
+          'No piece links to this deck.',
+        ),
+      );
     }
     if (piece.articleId !== null) {
       throw new ConflictException(
-        'This piece has already been converted to an article.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_ALREADY_CONVERTED,
+          'This piece has already been converted to an article.',
+        ),
       );
     }
     if (deck.publishedAt !== null) {
@@ -3123,11 +3194,19 @@ export class MagazinePieceService {
   ): Promise<WriterAssignmentResponse> {
     const piece = await this.loadPieceOr404(pieceId);
     if (piece.writerId !== writerId) {
-      throw new ForbiddenException('This piece is not assigned to you.');
+      throw new ForbiddenException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_ASSIGNED_TO_YOU,
+          'This piece is not assigned to you.',
+        ),
+      );
     }
     if (piece.stage === 'ready') {
       throw new ForbiddenException(
-        'The byline is locked once the piece is ready.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_BYLINE_LOCKED,
+          'The byline is locked once the piece is ready.',
+        ),
       );
     }
 
@@ -3191,7 +3270,12 @@ export class MagazinePieceService {
   ): Promise<WriterAssignmentResponse> {
     const piece = await this.loadPieceOr404(pieceId);
     if (piece.writerId !== writerId) {
-      throw new ForbiddenException('This piece is not assigned to you.');
+      throw new ForbiddenException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_ASSIGNED_TO_YOU,
+          'This piece is not assigned to you.',
+        ),
+      );
     }
 
     if (dto?.blocks !== undefined) {
@@ -3409,7 +3493,12 @@ export class MagazinePieceService {
   ): Promise<WriterDraftResponse> {
     const piece = await this.loadPieceOr404(pieceId);
     if (piece.writerId !== writerId) {
-      throw new ForbiddenException('This piece is not assigned to you.');
+      throw new ForbiddenException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_ASSIGNED_TO_YOU,
+          'This piece is not assigned to you.',
+        ),
+      );
     }
 
     const article =
@@ -3447,7 +3536,10 @@ export class MagazinePieceService {
     }
     if (piece.writerId !== userId) {
       throw new ForbiddenException(
-        'This piece thread is not accessible to you.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_THREAD_FORBIDDEN,
+          'This piece thread is not accessible to you.',
+        ),
       );
     }
   }
@@ -3606,12 +3698,18 @@ export class MagazinePieceService {
   ): Promise<PieceRecord> {
     if (!dto.editorId) {
       throw new BadRequestException(
-        'editorId is required to commission a pitch',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_COMMISSION_EDITOR_REQUIRED,
+          'editorId is required to commission a pitch',
+        ),
       );
     }
     if (!dto.section) {
       throw new BadRequestException(
-        'section is required to commission a pitch',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_COMMISSION_SECTION_REQUIRED,
+          'section is required to commission a pitch',
+        ),
       );
     }
     const editorId = dto.editorId;
@@ -3655,7 +3753,12 @@ export class MagazinePieceService {
 
         const pitch = await pitchRepository.findOne({ where: { id } });
         if (!pitch) {
-          throw new NotFoundException('Pitch not found');
+          throw new NotFoundException(
+            codedErrorBody(
+              MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_NOT_FOUND,
+              'Pitch not found',
+            ),
+          );
         }
         // Guard against a double-submit/retry re-commissioning a pitch that's
         // already been triaged — without this, a duplicate MagazinePiece would
@@ -3663,7 +3766,7 @@ export class MagazinePieceService {
         if (pitch.status !== 'waiting' && pitch.status !== 'maybe') {
           throw new ConflictException({
             message: 'This pitch has already been triaged.',
-            code: 'magazine_pitch_already_triaged',
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_ALREADY_TRIAGED,
           });
         }
 
@@ -3678,7 +3781,7 @@ export class MagazinePieceService {
         if (!claimResult.affected) {
           throw new ConflictException({
             message: 'This pitch has already been triaged.',
-            code: 'magazine_pitch_already_triaged',
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_ALREADY_TRIAGED,
           });
         }
         pitch.status = 'commissioned';
@@ -3970,7 +4073,12 @@ export class MagazinePieceService {
   private async loadPieceOr404(id: string): Promise<MagazinePiece> {
     const piece = await this.pieces.findOne({ where: { id } });
     if (!piece) {
-      throw new NotFoundException('Piece not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_NOT_FOUND,
+          'Piece not found',
+        ),
+      );
     }
     return piece;
   }
@@ -3978,7 +4086,12 @@ export class MagazinePieceService {
   private async loadPitchOr404(id: string): Promise<MagazinePitch> {
     const pitch = await this.pitches.findOne({ where: { id } });
     if (!pitch) {
-      throw new NotFoundException('Pitch not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_PITCH_NOT_FOUND,
+          'Pitch not found',
+        ),
+      );
     }
     return pitch;
   }
@@ -3987,7 +4100,12 @@ export class MagazinePieceService {
   private async loadIssueOr404(number: string): Promise<MagazineIssue> {
     const issue = await this.issues.findOne({ where: { number } });
     if (!issue) {
-      throw new NotFoundException('Issue not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND,
+          'Issue not found',
+        ),
+      );
     }
     return issue;
   }
@@ -4102,11 +4220,13 @@ export class MagazinePieceService {
     if (expectedVersion === undefined || expectedVersion === article.version) {
       return;
     }
-    throw new ConflictException({
-      message:
+    throw new ConflictException(
+      codedErrorBody(
+        MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_DRAFT_VERSION_CONFLICT,
         'This draft changed since you loaded it. Reload to see the current version before saving again.',
-      currentVersion: article.version,
-    });
+        { currentVersion: article.version },
+      ),
+    );
   }
 
   /**
@@ -4179,17 +4299,24 @@ export class MagazinePieceService {
     });
 
     if (!applied) {
-      throw new ConflictException({
-        message:
+      throw new ConflictException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_DRAFT_VERSION_CONFLICT,
           'This draft changed while you were saving. Reload to see the current version before saving again.',
-      });
+        ),
+      );
     }
   }
 
   private async loadArticleOr404(id: string): Promise<MagazineArticle> {
     const article = await this.articles.findOne({ where: { id } });
     if (!article) {
-      throw new NotFoundException('Article not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_NOT_FOUND,
+          'Article not found',
+        ),
+      );
     }
     return article;
   }
@@ -4199,7 +4326,12 @@ export class MagazinePieceService {
   ): Promise<MagazineArticleVersion> {
     const version = await this.articleVersions.findOne({ where: { id } });
     if (!version) {
-      throw new NotFoundException('Article version not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_VERSION_NOT_FOUND,
+          'Article version not found',
+        ),
+      );
     }
     return version;
   }

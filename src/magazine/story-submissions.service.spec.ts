@@ -10,6 +10,7 @@ import {
   SubmissionStatus,
 } from './entities/magazine-story-submission.entity';
 import { StorySubmissionsService } from './story-submissions.service';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 describe('StorySubmissionsService', () => {
   let service: StorySubmissionsService;
@@ -286,7 +287,10 @@ describe('StorySubmissionsService', () => {
 
       await expect(
         service.withdrawMine('user-2', 'sub-1'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_NOT_FOUND },
+      });
       expect(submissions.findOne).toHaveBeenCalledWith({
         where: { id: 'sub-1', userId: 'user-2' },
       });
@@ -304,7 +308,12 @@ describe('StorySubmissionsService', () => {
 
       await expect(
         service.withdrawMine('user-1', 'sub-1'),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_ALREADY_ANSWERED,
+        },
+      });
       expect(submissions.update).not.toHaveBeenCalled();
     });
 
@@ -315,7 +324,12 @@ describe('StorySubmissionsService', () => {
 
       await expect(
         service.withdrawMine('user-1', 'sub-1'),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_ALREADY_ANSWERED,
+        },
+      });
     });
 
     // A double tap asked for a state the row is already in. The frontend

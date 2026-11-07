@@ -272,7 +272,7 @@ describe('toCommunityDetail subcommunity fields', () => {
       id: 'parent-1',
       slug: 'parent',
       name: 'Parent',
-      avatarImageUrl: 'parent-avatar-key',
+      avatarImageUrl: 'https://cdn.example.com/parent-avatar.png',
       rules: ['Be kind', 'No spam'],
       rulesVersion: 3,
       allowsSubcommunities: true,
@@ -306,7 +306,7 @@ describe('toCommunityDetail subcommunity fields', () => {
     expect(dto.parent).toEqual({
       slug: 'parent',
       name: 'Parent',
-      avatarImageUrl: expect.any(String),
+      avatarImageUrl: 'https://cdn.example.com/parent-avatar.png',
       isMember: true,
     });
     expect(dto.inheritedRules).toEqual({

@@ -91,6 +91,17 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
   'push:studioLandingPreviewLive.title': 'Aprovação para a página do Studio',
   'push:studioLandingPreviewLive.body':
     '{track} de {persona} está aprovada para a página do Studio',
+  // Studio purchases: word for word the Portuguese copy in the app's
+  // pushMessages.ts, so the service worker and iOS render the same text.
+  'push:studioPurchaseClaimed.title': 'Novo pagamento para confirmar',
+  'push:studioPurchaseClaimed.body':
+    '{item}: alguém diz que pagou a {artist}. Confirma no Studio.',
+  'push:studioPurchaseConfirmed.title': 'Pagamento confirmado',
+  'push:studioPurchaseConfirmed.body':
+    '{artist} confirmou o teu pagamento de {item}. O teu download está pronto.',
+  'push:studioPurchaseDeclined.title': 'Pagamento não confirmado',
+  'push:studioPurchaseDeclined.body':
+    '{artist} não conseguiu confirmar o teu pagamento de {item}. Abre o Studio para ver porquê.',
   // Studio collaborative playlists
   'push:studioPlaylistEditorInvite.title': 'Convite para playlist',
   'push:studioPlaylistEditorInvite.body':

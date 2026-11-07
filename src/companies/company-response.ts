@@ -81,9 +81,21 @@ export interface CompanyReviewOwnerReplyDTO {
   at: string;
 }
 
+/**
+ * One review of a company.
+ *
+ * There is NO author object here, for any viewer. The write-a-review screens
+ * promise "your name is not shown", so the server never sends the member behind
+ * a review to the employer, to other members, or to the page's own owner
+ * replying to it. The only thing a viewer learns about authorship is
+ * `isViewerAuthor`: whether the review is their OWN, which they already know.
+ * That is what lets the client offer "edit your review" without being handed
+ * anybody's identity.
+ */
 export interface CompanyReviewDTO {
   id: string;
-  author: MemberRef | null;
+  /** True only when the viewer wrote this review. Never reveals anyone else. */
+  isViewerAuthor: boolean;
   title: string;
   stars: number;
   byline: string;
@@ -170,13 +182,19 @@ function isEditedAfterOwnerReply(review: CompanyReview): boolean {
   return review.editedAt.getTime() > review.ownerRepliedAt.getTime();
 }
 
+/**
+ * Viewer-aware review builder. The caller passes the viewing member's id and
+ * this decides `isViewerAuthor` from the row's own `authorId`; the author is
+ * never resolved, so there is no profile lookup to forget to skip. A review
+ * whose author erased their account (`authorId` NULL) is nobody's own.
+ */
 export function toCompanyReview(
   r: CompanyReview,
-  author: MemberRef | null,
+  viewerId: string,
 ): CompanyReviewDTO {
   return {
     id: r.id,
-    author,
+    isViewerAuthor: r.authorId !== null && r.authorId === viewerId,
     title: r.title,
     stars: r.stars,
     byline: r.byline,

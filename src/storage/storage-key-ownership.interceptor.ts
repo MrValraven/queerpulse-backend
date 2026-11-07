@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { Observable } from 'rxjs';
+import { codedErrorBody, PLATFORM_ERROR_CODE } from '../common/coded-error';
 import { storageKeyFromImageUrl } from '../common/image-url';
 import {
   allowsPersonaScopedKeys,
@@ -22,6 +23,13 @@ import {
   isVjKey,
   storageKeyOwnerId,
 } from './storage-key';
+
+// The one refusal every ownership branch below throws: a stable code beside
+// the unchanged English sentence.
+const UPLOAD_NOT_YOURS_BODY = codedErrorBody(
+  PLATFORM_ERROR_CODE.UPLOAD_NOT_YOURS,
+  'Referenced upload does not belong to you',
+);
 
 // This interceptor does two related things to every image-ish string in a
 // state-changing request body, in one walk:
@@ -178,7 +186,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       if (requesterUserId && allowances.personaScopedKeys) {
         return normalized;
       }
-      throw new ForbiddenException('Referenced upload does not belong to you');
+      throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
     }
     // Studio discovery: a scene-scoped key names no uploader either. It is
     // refused on every route except `STUDIO_SCENE_SCOPED_KEY_HANDLERS`,
@@ -187,7 +195,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       if (requesterUserId && allowances.studioSceneScopedKeys) {
         return normalized;
       }
-      throw new ForbiddenException('Referenced upload does not belong to you');
+      throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
     }
     // Studio landing v2: a landing-scoped key names no uploader either. It is
     // refused on every route except `STUDIO_LANDING_SCOPED_KEY_HANDLERS`,
@@ -196,7 +204,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       if (requesterUserId && allowances.studioLandingScopedKeys) {
         return normalized;
       }
-      throw new ForbiddenException('Referenced upload does not belong to you');
+      throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
     }
     // VJ: a clip or thumbnail key names no uploader either. It is refused on
     // every route except `VJ_KEY_HANDLERS`, whose service checks the key's
@@ -205,7 +213,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       if (requesterUserId && allowances.vjKeys) {
         return normalized;
       }
-      throw new ForbiddenException('Referenced upload does not belong to you');
+      throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
     }
 
     const ownerUserId = storageKeyOwnerId(normalized);
@@ -224,7 +232,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       if (arrivedAsResolvedUrl && allowances.sharedUploads) {
         return normalized;
       }
-      throw new ForbiddenException('Referenced upload does not belong to you');
+      throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
     }
     return normalized;
   }

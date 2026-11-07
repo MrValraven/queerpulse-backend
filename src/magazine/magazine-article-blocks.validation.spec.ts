@@ -1,5 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
 import { validateArticleBlocks } from './magazine-article-blocks.validation';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
+
+/** What `run` throws, or `undefined`, so a spec can assert its body `code`. */
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
 
 const VALID_MIXED_BLOCKS = [
   {
@@ -55,29 +66,39 @@ describe('validateArticleBlocks', () => {
   });
 
   it('throws when input is not an array', () => {
-    expect(() => validateArticleBlocks({})).toThrow(BadRequestException);
+    expect(thrownBy(() => validateArticleBlocks({}))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_INVALID },
+    });
   });
 
   it('throws when an image block src is neither an upload key nor https', () => {
     // `blocks` is a bare `unknown` on the DTO, so class-validator never reaches
     // this field — an unchecked `src` was the one image reference in the app
     // that could carry a `javascript:` URI into a reader's browser.
-    expect(() =>
-      validateArticleBlocks([
-        {
-          id: 'b1',
-          kind: 'image',
-          alt: 'A crowd cheering.',
-          caption: '',
-          credit: 'Sara Pinheiro',
-          rights: 'courtesy',
-          tint: 'coral',
-          crop: '16:9',
-          focal: { x: 0.5, y: 0.5 },
-          src: 'javascript:alert(1)',
-        },
-      ]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validateArticleBlocks([
+          {
+            id: 'b1',
+            kind: 'image',
+            alt: 'A crowd cheering.',
+            caption: '',
+            credit: 'Sara Pinheiro',
+            rights: 'courtesy',
+            tint: 'coral',
+            crop: '16:9',
+            focal: { x: 0.5, y: 0.5 },
+            src: 'javascript:alert(1)',
+          },
+        ]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_IMAGE_SOURCE_INVALID,
+      },
+    });
   });
 
   it('accepts an empty image src (a freshly inserted image block)', () => {
@@ -99,11 +120,16 @@ describe('validateArticleBlocks', () => {
   });
 
   it('throws when a paragraph html exceeds the size cap', () => {
-    expect(() =>
-      validateArticleBlocks([
-        { id: 'b1', kind: 'paragraph', html: 'x'.repeat(20_001) },
-      ]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validateArticleBlocks([
+          { id: 'b1', kind: 'paragraph', html: 'x'.repeat(20_001) },
+        ]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_TOO_LONG },
+    });
   });
 
   it('throws when the block count exceeds the per-article cap', () => {
@@ -112,54 +138,77 @@ describe('validateArticleBlocks', () => {
       kind: 'paragraph',
       html: 'A line.',
     }));
-    expect(() => validateArticleBlocks(blocks)).toThrow(BadRequestException);
+    expect(thrownBy(() => validateArticleBlocks(blocks))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_TOO_MANY },
+    });
   });
 
   it('throws for an unknown kind', () => {
-    expect(() =>
-      validateArticleBlocks([{ id: 'b1', kind: 'carousel' }]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() => validateArticleBlocks([{ id: 'b1', kind: 'carousel' }])),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_INVALID },
+    });
   });
 
   it('throws when an image block is missing alt', () => {
-    expect(() =>
-      validateArticleBlocks([
-        {
-          id: 'b1',
-          kind: 'image',
-          caption: '',
-          credit: 'Sara Pinheiro',
-          rights: 'courtesy',
-          tint: 'coral',
-          crop: '16:9',
-          focal: { x: 0.5, y: 0.5 },
-        },
-      ]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validateArticleBlocks([
+          {
+            id: 'b1',
+            kind: 'image',
+            caption: '',
+            credit: 'Sara Pinheiro',
+            rights: 'courtesy',
+            tint: 'coral',
+            crop: '16:9',
+            focal: { x: 0.5, y: 0.5 },
+          },
+        ]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+      },
+    });
   });
 
   it('throws when an image block is missing caption', () => {
-    expect(() =>
-      validateArticleBlocks([
-        {
-          id: 'b1',
-          kind: 'image',
-          alt: 'A crowd cheering.',
-          credit: 'Sara Pinheiro',
-          rights: 'courtesy',
-          tint: 'coral',
-          crop: '16:9',
-          focal: { x: 0.5, y: 0.5 },
-        },
-      ]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validateArticleBlocks([
+          {
+            id: 'b1',
+            kind: 'image',
+            alt: 'A crowd cheering.',
+            credit: 'Sara Pinheiro',
+            rights: 'courtesy',
+            tint: 'coral',
+            crop: '16:9',
+            focal: { x: 0.5, y: 0.5 },
+          },
+        ]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_INVALID },
+    });
   });
 
   it('throws when a stats block has non-array items', () => {
-    expect(() =>
-      validateArticleBlocks([
-        { id: 'b1', kind: 'stats', items: { value: '20', label: 'years' } },
-      ]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validateArticleBlocks([
+          { id: 'b1', kind: 'stats', items: { value: '20', label: 'years' } },
+        ]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_INVALID },
+    });
   });
 });

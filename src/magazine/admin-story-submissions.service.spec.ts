@@ -9,6 +9,7 @@ import {
   MagazineStorySubmission,
   SubmissionStatus,
 } from './entities/magazine-story-submission.entity';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 function makeSubmission(
   overrides: Partial<MagazineStorySubmission> = {},
@@ -89,9 +90,10 @@ function makeService(
 describe('AdminStorySubmissionsService.reopen', () => {
   it('throws NotFoundException when the submission does not exist', async () => {
     const service = makeService(makeSubmissionsRepo(null));
-    await expect(service.reopen('editor-2', 'missing')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.reopen('editor-2', 'missing')).rejects.toMatchObject({
+      constructor: NotFoundException,
+      response: { code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_NOT_FOUND },
+    });
   });
 
   it('refuses a story the member withdrew, before anything else', async () => {
@@ -99,9 +101,10 @@ describe('AdminStorySubmissionsService.reopen', () => {
       makeSubmission({ withdrawnAt: new Date('2026-07-11T00:00:00.000Z') }),
     );
     const service = makeService(submissions);
-    await expect(service.reopen('editor-2', 'sub-1')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(service.reopen('editor-2', 'sub-1')).rejects.toMatchObject({
+      constructor: ConflictException,
+      response: { code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_WITHDRAWN },
+    });
     expect(submissions.update).not.toHaveBeenCalled();
   });
 
@@ -116,9 +119,10 @@ describe('AdminStorySubmissionsService.reopen', () => {
       }),
     );
     const service = makeService(submissions);
-    await expect(service.reopen('editor-2', 'sub-1')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(service.reopen('editor-2', 'sub-1')).rejects.toMatchObject({
+      constructor: ConflictException,
+      response: { code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_NOT_DECIDED },
+    });
     expect(submissions.update).not.toHaveBeenCalled();
   });
 
@@ -131,9 +135,12 @@ describe('AdminStorySubmissionsService.reopen', () => {
       }),
     );
     const service = makeService(submissions);
-    await expect(service.reopen('editor-2', 'sub-1')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(service.reopen('editor-2', 'sub-1')).rejects.toMatchObject({
+      constructor: ConflictException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_REOPEN_NOT_DECLINED,
+      },
+    });
     expect(submissions.update).not.toHaveBeenCalled();
   });
 
@@ -146,9 +153,12 @@ describe('AdminStorySubmissionsService.reopen', () => {
       }),
     );
     const service = makeService(submissions);
-    await expect(service.reopen('editor-2', 'sub-1')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(service.reopen('editor-2', 'sub-1')).rejects.toMatchObject({
+      constructor: ConflictException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_REOPEN_NOT_DECLINED,
+      },
+    });
     expect(submissions.update).not.toHaveBeenCalled();
   });
 
@@ -157,9 +167,10 @@ describe('AdminStorySubmissionsService.reopen', () => {
       makeSubmission({ acceptedPieceId: 'piece-1' }),
     );
     const service = makeService(submissions);
-    await expect(service.reopen('editor-2', 'sub-1')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(service.reopen('editor-2', 'sub-1')).rejects.toMatchObject({
+      constructor: ConflictException,
+      response: { code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_HAS_DESK_RECORD },
+    });
     expect(submissions.update).not.toHaveBeenCalled();
   });
 
@@ -231,9 +242,12 @@ describe('AdminStorySubmissionsService.reopen', () => {
     const create = jest.fn();
     const service = makeService(submissions, makeNotifications(create));
 
-    await expect(service.reopen('editor-2', 'sub-1')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(service.reopen('editor-2', 'sub-1')).rejects.toMatchObject({
+      constructor: ConflictException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.STORY_SUBMISSION_DECIDED_DURING_REOPEN,
+      },
+    });
     expect(create).not.toHaveBeenCalled();
   });
 });

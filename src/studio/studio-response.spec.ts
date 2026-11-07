@@ -1073,7 +1073,7 @@ describe('Studio artist kinds mappers', () => {
     const card = toStudioReleaseCard(show(), podcaster(), EMPTY_RELEASE_STATS);
     const draft = toStudioTrackResponse(
       episode('episode-3', 3, null, {
-        notes: '00:00 Intro\n\n01:30 Housing',
+        notes: 'Housing rights,\nthis week\n\n00:00 Intro\n01:30 Housing',
         sources: [],
       }),
       card,
@@ -1081,8 +1081,11 @@ describe('Studio artist kinds mappers', () => {
       { isOwner: true },
     );
     expect(draft.isDraft).toBe(true);
-    expect(draft.notes).toBe('00:00 Intro\n\n01:30 Housing');
-    expect(draft.notesExcerpt).toBe('00:00 Intro 01:30 Housing');
+    expect(draft.notes).toBe(
+      'Housing rights,\nthis week\n\n00:00 Intro\n01:30 Housing',
+    );
+    // The excerpt keeps the first prose paragraph and drops the chapter lines.
+    expect(draft.notesExcerpt).toBe('Housing rights, this week');
     expect(draft.publishedAt).toBeNull();
     expect(draft.sources).toEqual([]);
     const published = toStudioTrackResponse(

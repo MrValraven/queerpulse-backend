@@ -1,4 +1,11 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
 import {
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -15,12 +22,15 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateWriterApplicationDto } from './dto/create-writer-application.dto';
 import { WriterApplicationsService } from './writer-applications.service';
+import { MagazineValidationCodeInterceptor } from './magazine-validation-code.interceptor';
 
 @Feature('magazine')
 @ApiTags('Magazine — Writer applications')
 @ApiCookieAuth()
 @Controller('magazine/writer-applications')
 @UseGuards(ActiveMemberGuard)
+// Lifts the `code` a coded DTO constraint carries into the 400 body.
+@UseInterceptors(MagazineValidationCodeInterceptor)
 export class WriterApplicationsController {
   constructor(private readonly writerApplications: WriterApplicationsService) {}
 

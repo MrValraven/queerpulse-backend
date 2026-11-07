@@ -1120,4 +1120,13 @@ export const RULED_OUT_IMAGE_FIELDS: string[] = [
   // OPEN session, the one copy a screen is still showing.
   'QuizshowSession.quizSnapshot',
   'Partner.logo',
+  // A Studio scene cover and a Studio page photo store a SCOPED COPY of the
+  // staff upload (`studio-scene/...` and `studio-landing/...`, minted by
+  // `StorageService.copyObjectToStudioSceneScope` and
+  // `copyObjectToStudioLandingScope`), and the staff upload itself is left for
+  // the orphan sweep to reclaim. `StorageMaintenanceService` keeps a live copy
+  // through its own `studio_scenes` and `studio_landing_photos` lookups, so the
+  // resolver carries no source for either column.
+  'StudioScene.coverKey',
+  'StudioLandingPhoto.imageKey',
 ];

@@ -1,5 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
 import { validateDeckSlides } from './deck-slides.validation';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
+
+/** What `run` throws, or `undefined`, so a spec can assert its body `code`. */
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
 
 const VALID_MIXED_DECK = [
   {
@@ -49,7 +60,10 @@ describe('validateDeckSlides', () => {
   });
 
   it('throws when slides is not an array', () => {
-    expect(() => validateDeckSlides({})).toThrow(BadRequestException);
+    expect(thrownBy(() => validateDeckSlides({}))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDES_INVALID },
+    });
   });
 
   it('throws when slides.length exceeds 40', () => {
@@ -57,48 +71,73 @@ describe('validateDeckSlides', () => {
       layout: 'text',
       heading: 'Filler heading',
     }));
-    expect(() => validateDeckSlides(tooManySlides)).toThrow(
-      BadRequestException,
-    );
+    expect(thrownBy(() => validateDeckSlides(tooManySlides))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDES_TOO_MANY },
+    });
   });
 
   it('throws when a text slide has no heading, body, or pull', () => {
-    expect(() =>
-      validateDeckSlides([{ layout: 'text', eyebrow: 'Just an eyebrow' }]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validateDeckSlides([{ layout: 'text', eyebrow: 'Just an eyebrow' }]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+      },
+    });
   });
 
   it('throws when an image slide is missing alt', () => {
-    expect(() =>
-      validateDeckSlides([
-        { layout: 'image', src: 'https://example.com/a.jpg', tint: 'coral' },
-      ]),
-    ).toThrow(BadRequestException);
+    expect(
+      thrownBy(() =>
+        validateDeckSlides([
+          { layout: 'image', src: 'https://example.com/a.jpg', tint: 'coral' },
+        ]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+      },
+    });
   });
 
   it('throws when a before-after slide is missing after.label', () => {
-    expect(() =>
-      validateDeckSlides([
-        {
-          layout: 'interactive',
-          kind: 'before-after',
-          before: {
-            src: 'https://example.com/before.jpg',
-            alt: 'Before photo',
-            label: 'Before',
+    expect(
+      thrownBy(() =>
+        validateDeckSlides([
+          {
+            layout: 'interactive',
+            kind: 'before-after',
+            before: {
+              src: 'https://example.com/before.jpg',
+              alt: 'Before photo',
+              label: 'Before',
+            },
+            after: {
+              src: 'https://example.com/after.jpg',
+              alt: 'After photo',
+            },
           },
-          after: {
-            src: 'https://example.com/after.jpg',
-            alt: 'After photo',
-          },
-        },
-      ]),
-    ).toThrow(BadRequestException);
+        ]),
+      ),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+      },
+    });
   });
 
   it('throws for an unknown layout', () => {
-    expect(() => validateDeckSlides([{ layout: 'carousel' }])).toThrow(
-      BadRequestException,
-    );
+    expect(
+      thrownBy(() => validateDeckSlides([{ layout: 'carousel' }])),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDES_INVALID },
+    });
   });
 });

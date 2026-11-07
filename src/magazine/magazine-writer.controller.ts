@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -35,6 +36,7 @@ import { FileDraftDto } from './dto/file-draft.dto';
 import { SubmitPitchDto } from './dto/submit-pitch.dto';
 import { UpdateBylineDto } from './dto/update-byline.dto';
 import { MagazinePieceService } from './magazine-piece.service';
+import { MagazineValidationCodeInterceptor } from './magazine-validation-code.interceptor';
 
 // ActiveMemberGuard runs first (a suspended writer is locked out), then
 // StaffRolesGuard requires the `magazine_writer` staff role (admins are a
@@ -57,6 +59,8 @@ import { MagazinePieceService } from './magazine-piece.service';
 @Controller('magazine/writer')
 @UseGuards(ActiveMemberGuard, StaffRolesGuard)
 @StaffRoles('magazine_writer')
+// Lifts the `code` a coded DTO constraint carries into the 400 body.
+@UseInterceptors(MagazineValidationCodeInterceptor)
 export class MagazineWriterController {
   constructor(private readonly magazinePieces: MagazinePieceService) {}
 

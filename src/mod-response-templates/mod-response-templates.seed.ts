@@ -36,13 +36,13 @@ export const modResponseTemplatesSeed: ReadonlyArray<ModResponseTemplateSeed> =
       label: 'Dismiss: nothing against the guidelines',
       reasonCode: null,
       actionCode: 'dismiss',
-      body: 'Thank you for reporting this. We read it properly and looked at the full context, and we did not find anything that breaks the community guidelines, so we are closing the report without acting on it. That is not a judgement on how it felt to you. If this carries on or gets worse, report it again and say that you have reported it before, so we can look at the pattern rather than the single moment.',
+      body: 'Thank you for reporting this. We read it properly and looked at the full context, and we did not find anything that breaks the community guidelines, so we are closing the report without acting on it. We take how it felt to you seriously. If this carries on or gets worse, report it again and say that you have reported it before, so we can look at the whole pattern.',
     },
     {
       label: 'Dismiss: already handled',
       reasonCode: null,
       actionCode: 'dismiss',
-      body: 'Thank you for reporting this. It had already been reviewed and dealt with before your report reached us, so we are closing this one rather than acting twice. Reporting it was the right thing to do.',
+      body: 'Thank you for reporting this. It had already been reviewed and dealt with before your report reached us, so we are closing this one to avoid acting twice. Reporting it was the right thing to do.',
     },
 
     // ── Harassment ───────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ export const modResponseTemplatesSeed: ReadonlyArray<ModResponseTemplateSeed> =
       label: 'Discrimination: warning',
       reasonCode: 'discrimination',
       actionCode: 'warn',
-      body: 'Hi {member}. We reviewed your post in {community} and found it discriminatory towards other members. Deliberate misgendering, deadnaming, and language that writes a group of people out of the room all break our guidelines. Please read them again before you post. You can appeal this decision from your account.',
+      body: 'Hi {member}. We reviewed your post in {community} and found it discriminatory towards other members. Deliberate misgendering, deadnaming, and language that writes a group of people out of the conversation all break our guidelines. Please read them again before you post. You can appeal this decision from your account.',
     },
 
     // ── Spam and off-topic ───────────────────────────────────────────────
@@ -130,7 +130,7 @@ export const modResponseTemplatesSeed: ReadonlyArray<ModResponseTemplateSeed> =
       label: 'Spam: promotional post removed',
       reasonCode: 'spam',
       actionCode: 'remove_content',
-      body: 'Hi {member}. We removed your post in {community} because it was promotion rather than a contribution to the conversation. If you run something you would like members to know about, the directory is the place for it, or ask a moderator first. Your account is unaffected.',
+      body: 'Hi {member}. We removed your post in {community} because it was promotion that added nothing to the conversation. If you run something you would like members to know about, the directory is the place for it, or ask a moderator first. Your account is unaffected.',
     },
     {
       label: 'Off topic: post removed',

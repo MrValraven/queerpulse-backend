@@ -6,7 +6,10 @@ import { ConnectionsService } from '../connections/connections.service';
 import { EventAudienceGateService } from '../events/event-audience-gate.service';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import { EventCommunity } from '../events/entities/event-community.entity';
-import { EventInvite } from '../events/entities/event-invite.entity';
+import {
+  EventInvite,
+  EventInviteStatus,
+} from '../events/entities/event-invite.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import {
   Event,
@@ -67,16 +70,29 @@ function buildService(options: {
 }) {
   let profileQueryCount = 0;
   const droppedUserIds = new Set<string>();
+  // The `p.slug IN (:...slugs)` or `p.user_id IN (:...userIds)` filter the
+  // service sends, honoured here so a lookup names only the members it was
+  // asked about.
+  let requestedFilter: { slugs?: string[]; userIds?: string[] } = {};
   const profileQuery = {
     innerJoin: () => profileQuery,
-    where: () => profileQuery,
+    where: (
+      _condition: string,
+      parameters: { slugs?: string[]; userIds?: string[] },
+    ) => {
+      requestedFilter = parameters;
+      return profileQuery;
+    },
     andWhere: () => profileQuery,
     getMany: () => {
       profileQueryCount += 1;
       return Promise.resolve(
         PROFILES.filter(
           (profile) =>
-            profile.userId !== VIEWER_ID && !droppedUserIds.has(profile.userId),
+            (requestedFilter.slugs?.includes(profile.slug) ??
+              requestedFilter.userIds?.includes(profile.userId)) === true &&
+            profile.userId !== VIEWER_ID &&
+            !droppedUserIds.has(profile.userId),
         ),
       );
     },
@@ -121,10 +137,19 @@ function buildService(options: {
   const service = new MentionNameResolveService(
     {
       createQueryBuilder: () => profileQuery,
-      find: jest.fn(() =>
-        Promise.resolve(
-          PROFILES.filter((profile) => profile.userId === VIEWER_ID),
-        ),
+      find: jest.fn(
+        ({
+          where,
+        }: {
+          where: { userId: string; slug: FindOperator<string[]> };
+        }) =>
+          Promise.resolve(
+            PROFILES.filter(
+              (profile) =>
+                profile.userId === where.userId &&
+                where.slug.value.includes(profile.slug),
+            ),
+          ),
       ),
     } as unknown as Repository<Profile>,
     empty as unknown as Repository<Community>,
@@ -421,7 +446,15 @@ describe('MentionNameResolveService, event mentions', () => {
     }),
     eventRow('event-taken-down', 'late-rave', 'Late rave'),
   ];
-  const INVITES = [{ eventId: 'event-invite-only', inviteeId: INVITEE_ID }];
+  // A live invite: the gate admits only the statuses in
+  // `ADMITTING_INVITE_STATUSES`.
+  const INVITES = [
+    {
+      eventId: 'event-invite-only',
+      inviteeId: INVITEE_ID,
+      status: EventInviteStatus.Pending,
+    },
+  ];
   const COHOSTS = [{ eventId: 'event-taken-down', userId: COHOST_ID }];
   const TAKEN_DOWN_EVENT_IDS = ['event-taken-down'];
 

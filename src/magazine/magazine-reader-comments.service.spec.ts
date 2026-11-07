@@ -6,6 +6,7 @@ import {
 import { MemberLookup } from '../common/member-ref';
 import { MagazineReaderComment } from './entities/magazine-reader-comment.entity';
 import { MagazineReaderCommentsService } from './magazine-reader-comments.service';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 const ARTICLE = {
   id: 'article-1',
@@ -128,9 +129,10 @@ describe('MagazineReaderCommentsService.list', () => {
   it('404s on an unpublished/unknown article slug', async () => {
     const { service, articles } = build();
     articles.findOne.mockResolvedValueOnce(null);
-    await expect(service.list('nope', viewer)).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.list('nope', viewer)).rejects.toMatchObject({
+      constructor: NotFoundException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_NOT_FOUND },
+    });
   });
 
   it('returns an empty page for a published article with no comments', async () => {
@@ -209,9 +211,10 @@ describe('MagazineReaderCommentsService.create', () => {
   it('404s on an unpublished/unknown article slug', async () => {
     const { service, articles } = build();
     articles.findOne.mockResolvedValueOnce(null);
-    await expect(service.create('nope', author, 'hi')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.create('nope', author, 'hi')).rejects.toMatchObject({
+      constructor: NotFoundException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_NOT_FOUND },
+    });
   });
 
   it('rejects replying to a reply (one level deep only)', async () => {
@@ -225,7 +228,12 @@ describe('MagazineReaderCommentsService.create', () => {
     });
     await expect(
       service.create('city-changed', author, 'hi', 'reply-1'),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_REPLY_TO_REPLY,
+      },
+    });
   });
 
   it('rejects replying to a deleted comment', async () => {
@@ -239,7 +247,12 @@ describe('MagazineReaderCommentsService.create', () => {
     });
     await expect(
       service.create('city-changed', author, 'hi', 'top-1'),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_PARENT_DELETED,
+      },
+    });
   });
 
   it('404s a reply under a comment whose author is blocked either way', async () => {
@@ -255,7 +268,10 @@ describe('MagazineReaderCommentsService.create', () => {
 
     await expect(
       service.create('city-changed', author, 'hi', 'top-1'),
-    ).rejects.toBeInstanceOf(NotFoundException);
+    ).rejects.toMatchObject({
+      constructor: NotFoundException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_FOUND },
+    });
     expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
       'author-1',
       'blocker-1',
@@ -317,9 +333,12 @@ describe('MagazineReaderCommentsService.update/remove', () => {
       body: 'orig',
       deletedAt: null,
     });
-    await expect(service.update('c1', stranger, 'hack')).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
+    await expect(service.update('c1', stranger, 'hack')).rejects.toMatchObject({
+      constructor: ForbiddenException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_AUTHOR,
+      },
+    });
   });
 
   it('update: editing a deleted comment 404s', async () => {
@@ -330,9 +349,10 @@ describe('MagazineReaderCommentsService.update/remove', () => {
       body: 'orig',
       deletedAt: new Date(),
     });
-    await expect(service.update('c1', author, 'new')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.update('c1', author, 'new')).rejects.toMatchObject({
+      constructor: NotFoundException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_FOUND },
+    });
   });
 
   // ENG-102 — `toReaderCommentResponse` already reports `canEdit: false` on a
@@ -353,9 +373,12 @@ describe('MagazineReaderCommentsService.update/remove', () => {
         deletedAt: null,
       });
       contentModeration.stateFor.mockResolvedValueOnce(state);
-      await expect(service.update('c1', author, 'new')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.update('c1', author, 'new')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_FOUND,
+        },
+      });
       expect(comments.save).not.toHaveBeenCalled();
     },
   );
@@ -387,9 +410,12 @@ describe('MagazineReaderCommentsService.update/remove', () => {
       body: 'orig',
       deletedAt: null,
     });
-    await expect(service.remove('c1', stranger)).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
+    await expect(service.remove('c1', stranger)).rejects.toMatchObject({
+      constructor: ForbiddenException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_READER_COMMENT_NOT_AUTHOR,
+      },
+    });
   });
 
   it('remove: author soft-deletes their own comment, blanking the response', async () => {

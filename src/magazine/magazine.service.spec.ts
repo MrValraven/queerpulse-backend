@@ -21,6 +21,7 @@ import {
   MagazineService,
 } from './magazine.service';
 import { magazineIssueVisibleThroughDate } from './magazine-clock';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 type QueryBuilderMock = {
   select: jest.Mock;
@@ -319,9 +320,10 @@ describe('MagazineService', () => {
   describe('getIssueByNumber', () => {
     it('404s an unknown issue number', async () => {
       issues.findOne.mockResolvedValue(null);
-      await expect(service.getIssueByNumber('99')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getIssueByNumber('99')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND },
+      });
     });
 
     // CON-18: an embargoed issue is unreachable by number, not merely absent
@@ -384,7 +386,11 @@ describe('MagazineService', () => {
 
   describe('listArticles', () => {
     it('maps rows to ArticleListItem, resolving author + issue number', async () => {
-      const qb = makeQueryBuilder([ARTICLE], 1);
+      // PRD-102: the list carries the desk's own kicker and section.
+      const qb = makeQueryBuilder(
+        [{ ...ARTICLE, kicker: 'Field notes', section: 'Features' }],
+        1,
+      );
       articles.createQueryBuilder.mockReturnValue(qb);
       authors.find.mockResolvedValue([AUTHOR]);
       issues.find.mockResolvedValue([ISSUE]);
@@ -397,6 +403,8 @@ describe('MagazineService', () => {
             slug: 'city-changed',
             title: 'The city changed. Did we?',
             dek: "Lisbon's queer community has spent a decade finding itself.",
+            kicker: 'Field notes',
+            section: 'Features',
             author: {
               handle: 'sofia',
               displayName: 'Sofia Andrade',
@@ -501,9 +509,10 @@ describe('MagazineService', () => {
   describe('getArticleBySlug', () => {
     it('404s an unknown slug', async () => {
       articles.findOne.mockResolvedValue(null);
-      await expect(service.getArticleBySlug('nope')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getArticleBySlug('nope')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_NOT_FOUND },
+      });
     });
 
     it('returns the full ArticleResponse, including body', async () => {
@@ -694,9 +703,10 @@ describe('MagazineService', () => {
   describe('getAuthorBySlug', () => {
     it('404s an unknown slug', async () => {
       authors.findOne.mockResolvedValue(null);
-      await expect(service.getAuthorBySlug('nope')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.getAuthorBySlug('nope')).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_AUTHOR_NOT_FOUND },
+      });
     });
 
     it('returns the mapped author when found', async () => {
@@ -906,7 +916,12 @@ describe('MagazineService', () => {
 
         await expect(
           service.updateDeck('deck-1', { publishedAt: scheduledAt }, EDITOR_ID),
-        ).rejects.toBeInstanceOf(ConflictException);
+        ).rejects.toMatchObject({
+          constructor: ConflictException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_PUBLISH_UNLINKED,
+          },
+        });
         expect(decks.save).not.toHaveBeenCalled();
       });
 
@@ -1045,26 +1060,33 @@ describe('MagazineService', () => {
     describe('deleteDeck', () => {
       it('404s on an unknown deck', async () => {
         decks.findOne.mockResolvedValue(null);
-        await expect(service.deleteDeck('deck-1')).rejects.toBeInstanceOf(
-          NotFoundException,
-        );
+        await expect(service.deleteDeck('deck-1')).rejects.toMatchObject({
+          constructor: NotFoundException,
+          response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_NOT_FOUND },
+        });
         expect(decks.delete).not.toHaveBeenCalled();
       });
 
       it('refuses to hard-delete a published deck (unpublish first)', async () => {
         decks.findOne.mockResolvedValue(makeDeck({ publishedAt: new Date() }));
-        await expect(service.deleteDeck('deck-1')).rejects.toBeInstanceOf(
-          ConflictException,
-        );
+        await expect(service.deleteDeck('deck-1')).rejects.toMatchObject({
+          constructor: ConflictException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_DELETE_PUBLISHED,
+          },
+        });
         expect(decks.delete).not.toHaveBeenCalled();
       });
 
       it('refuses to orphan a desk piece that still points at the deck', async () => {
         decks.findOne.mockResolvedValue(makeDeck());
         pieces.findOne.mockResolvedValue({ id: 'piece-1' });
-        await expect(service.deleteDeck('deck-1')).rejects.toBeInstanceOf(
-          ConflictException,
-        );
+        await expect(service.deleteDeck('deck-1')).rejects.toMatchObject({
+          constructor: ConflictException,
+          response: {
+            code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_DELETE_OWNED_BY_PIECE,
+          },
+        });
         expect(decks.delete).not.toHaveBeenCalled();
       });
 

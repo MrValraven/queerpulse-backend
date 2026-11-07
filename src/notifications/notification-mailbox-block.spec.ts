@@ -97,14 +97,15 @@ const EXPECTED_PAYLOAD_SQL = `NOT ${seatExcludedFromMailboxByStoredConversationI
  */
 const LOAD_BEARING_PAYLOAD_FRAGMENTS = [
   // blockedStaffSeatPredicate: the person block, checked in both directions,
-  // and the guard that keeps the rule off group/official threads.
+  // and the guard that keeps the rule off group threads. PRD-372 brought an
+  // official thread's QueerPulse Team seats under the same rule, so this
+  // predicate carries no official-thread guard.
   '"staff_customer_block"."blocker_id" = "blocked_staff_seat"."user_id"',
   '"staff_customer_block"."blocked_id" = "blocking_customer_seat"."user_id"',
   '"staff_customer_block"."blocked_id" = "blocked_staff_seat"."user_id"',
   '"staff_customer_block"."blocker_id" = "blocking_customer_seat"."user_id"',
   `"blocked_staff_identity"."kind" <> 'profile'`,
   `"blocked_staff_conversation"."kind" <> 'group'`,
-  '"blocked_staff_conversation"."is_official" = false',
   '"staff_business_identity_block"."blocker_user_id" = "blocking_customer_seat"."user_id"',
   '"staff_business_identity_block"."identity_id" = "blocked_staff_seat"."identity_id"',
   // departedStaffSeatPredicate: the departure itself.
@@ -112,6 +113,9 @@ const LOAD_BEARING_PAYLOAD_FRAGMENTS = [
   // identityBlockedCustomerSeatPredicate: the customer's own block of the
   // business, keyed off the customer as the blocker.
   `"identity_blocking_customer_identity"."kind" = 'profile'`,
+  // An official thread never matches: no block of the QueerPulse Team takes
+  // a member out of their own official thread.
+  '"identity_blocking_customer_conversation"."is_official" = false',
   `"identity_blocked_business_identity"."kind" <> 'profile'`,
   '"customer_business_identity_block"."blocker_user_id" = "identity_blocking_customer_seat"."user_id"',
   '"customer_business_identity_block"."identity_id" = "identity_blocked_business_seat"."identity_id"',

@@ -96,6 +96,7 @@ describe('ProfilesService.getBySlug visibility', () => {
     getVouchCount: jest.Mock;
     getVouchCounts: jest.Mock;
     getNamedVoucherIds: jest.Mock;
+    getPublicVouchDirections: jest.Mock;
   };
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeBlocked: jest.Mock };
   let handles: { rename: jest.Mock; previousProfileOwnerOf: jest.Mock };
@@ -151,6 +152,12 @@ describe('ProfilesService.getBySlug visibility', () => {
       // `acceptedConnectionsAmong`, so every OTHER test in this describe
       // (which never sets `vouchersVisible: true`) is unaffected.
       getNamedVoucherIds: jest.fn().mockResolvedValue([]),
+      // The related cards' closeness chip reads both vouch directions in one
+      // batch. No vouches either way by default.
+      getPublicVouchDirections: jest.fn().mockResolvedValue({
+        youVouched: new Set<string>(),
+        vouchedForYou: new Set<string>(),
+      }),
     };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
@@ -1051,10 +1058,20 @@ describe('ProfilesService.getBySlug visibility', () => {
       // block, hidden-from, 24h hide, takedown) for this viewer.
       qb.getRawMany.mockResolvedValue([{ user_id: 'visible-1' }]);
       profiles.createQueryBuilder.mockReturnValue(qb);
-      // Both read as accepted connections, so the roster gate alone must
-      // drop `hidden-1` from the count.
-      connections.acceptedConnectionsAmong.mockResolvedValue(
-        new Set(['hidden-1', 'visible-1']),
+      // Both are accepted connections, so the roster gate alone must drop
+      // `hidden-1` from the count. Like the real
+      // `ConnectionsService.acceptedConnectionsAmong`, the stub answers only
+      // for the candidate ids it is handed.
+      const acceptedConnectionIds = new Set(['hidden-1', 'visible-1']);
+      connections.acceptedConnectionsAmong.mockImplementation(
+        (_viewerUserId: string, candidateIds: string[]) =>
+          Promise.resolve(
+            new Set(
+              candidateIds.filter((candidateId) =>
+                acceptedConnectionIds.has(candidateId),
+              ),
+            ),
+          ),
       );
 
       const res = await service.getBySlug('jo', 'viewer-1');

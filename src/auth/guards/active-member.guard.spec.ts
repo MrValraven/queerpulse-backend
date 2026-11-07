@@ -30,4 +30,18 @@ describe('ActiveMemberGuard', () => {
   it('rejects when there is no authenticated user', () => {
     expect(() => guard.canActivate(ctx(undefined))).toThrow(ForbiddenException);
   });
+
+  it('ships the ACTIVE_MEMBERSHIP_REQUIRED code beside the unchanged sentence', () => {
+    let refusal: ForbiddenException | undefined;
+    try {
+      guard.canActivate(ctx({ status: UserStatus.Suspended }));
+    } catch (error) {
+      refusal = error as ForbiddenException;
+    }
+    expect(refusal?.getResponse()).toEqual({
+      code: 'ACTIVE_MEMBERSHIP_REQUIRED',
+      message: 'Active membership required',
+    });
+    expect(refusal?.message).toBe('Active membership required');
+  });
 });

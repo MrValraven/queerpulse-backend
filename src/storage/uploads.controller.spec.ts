@@ -215,10 +215,13 @@ describe('UploadsController', () => {
       expect(errors.some((e) => e.property === 'kind')).toBe(true);
     });
 
-    it('rejects a disallowed content type', async () => {
+    // The DTO admits the union of every kind's content types (an avatar's PDF
+    // is refused later by the per-kind table in `StorageService`), so the body
+    // gate refuses a type that no upload kind accepts.
+    it('rejects a content type no upload kind accepts', async () => {
       const dto = plainToInstance(PresignRequestDto, {
         kind: 'avatar',
-        contentType: 'application/pdf',
+        contentType: 'text/html',
         byteSize: 1024,
       });
       const errors = await validate(dto);

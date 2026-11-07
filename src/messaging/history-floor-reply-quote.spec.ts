@@ -20,6 +20,10 @@ import { ConversationPinnedMessage } from './entities/conversation-pinned-messag
 import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { Message, MessageKind } from './entities/message.entity';
 import { MessageHide } from './entities/message-hide.entity';
+import {
+  groupJoinHistoryFloorCoversPredicate,
+  isCoveredByGroupJoinHistoryFloor,
+} from './group-join-history-floor';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import {
@@ -46,7 +50,8 @@ import { MessagingCoreService } from './messaging-core.service';
  *
  * The parent query runs against a fixture: the stand-in builder accepts only
  * the clauses it knows and answers the floor clause through its in-memory
- * twin, `isCoveredByMailboxStaffFloor`. The real SQL is exercised against
+ * twins, `isCoveredByMailboxStaffFloor` and, for the PRD-400 group join
+ * floor the same clause carries, `isCoveredByGroupJoinHistoryFloor`. The real SQL is exercised against
  * Postgres in the task report's probe.
  */
 
@@ -64,10 +69,10 @@ IDENTITY_KIND_BY_ID.set(LISTING_IDENTITY_ID, IdentityKind.Listing);
 IDENTITY_KIND_BY_ID.set(CUSTOMER_IDENTITY_ID, IdentityKind.Profile);
 IDENTITY_KIND_BY_ID.set(FRIEND_IDENTITY_ID, IdentityKind.Profile);
 
-const EXPECTED_FLOOR_CLAUSE = mailboxStaffHistoryFloorCoversPredicate(
+const EXPECTED_FLOOR_CLAUSE = `(${mailboxStaffHistoryFloorCoversPredicate(
   'parent.created_at',
   'seat',
-);
+)} OR ${groupJoinHistoryFloorCoversPredicate('parent.created_at', 'seat')})`;
 
 const HISTORY_FLOOR = new Date('2026-09-10T12:00:00.000Z');
 const PRE_FLOOR = new Date('2026-09-10T11:00:00.000Z');
@@ -184,13 +189,18 @@ function buildCore(
         if (clause === 'parent.id IN (:...parentIds)') {
           continue;
         } else if (clause === EXPECTED_FLOOR_CLAUSE) {
-          rows = rows.filter((parent) =>
-            isCoveredByMailboxStaffFloor(parent.createdAt, {
-              historyFloorAt: viewerSeat.historyFloorAt,
-              identityKind: IDENTITY_KIND_BY_ID.get(viewerSeat.identityId),
-              isGroupConversation,
-              isOfficialConversation: false,
-            }),
+          rows = rows.filter(
+            (parent) =>
+              isCoveredByMailboxStaffFloor(parent.createdAt, {
+                historyFloorAt: viewerSeat.historyFloorAt,
+                identityKind: IDENTITY_KIND_BY_ID.get(viewerSeat.identityId),
+                isGroupConversation,
+                isOfficialConversation: false,
+              }) ||
+              isCoveredByGroupJoinHistoryFloor(parent.createdAt, {
+                historyFloorAt: viewerSeat.historyFloorAt,
+                isGroupConversation,
+              }),
           );
         } else {
           throw new Error(`Unrecognised parent clause: ${clause}`);

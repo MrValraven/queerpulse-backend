@@ -1,4 +1,5 @@
 import { NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { EventEmitter } from 'events';
 import { Response } from 'express';
 import { PassThrough, Readable } from 'stream';
 import { Repository } from 'typeorm';
@@ -191,14 +192,15 @@ describe('FilesController', () => {
       expect(storage.createPresignedDownload).not.toHaveBeenCalled();
     });
 
-    it('does not fall back to the uploader-only check (participant path, not owner path)', async () => {
-      // The uploader (their id is the key's owner segment) is still refused when
-      // they are not a participant — proof the branch is participant-scoped, not
-      // uploader-scoped.
+    // The uploader (their id is the key's owner segment) is admitted before the
+    // participant query, so an object that outlives its message stays visible,
+    // and deletable, to the one member who uploaded it. Everyone else still
+    // needs a seat (see the 404 above).
+    it('admits the uploader to their own image without a participant seat', async () => {
       messageQueryBuilder.getExists.mockResolvedValue(false);
-      await expect(serve(MESSAGE_IMAGE_KEY, LOGGED_IN)).rejects.toThrow(
-        NotFoundException,
-      );
+      await serve(MESSAGE_IMAGE_KEY, LOGGED_IN);
+      expect(messages.createQueryBuilder).not.toHaveBeenCalled();
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
   });
 
@@ -912,8 +914,10 @@ describe('FilesController', () => {
     // headers and never redirected to a presigned URL.
     it('streams to a conversation participant as a sandboxed attachment', async () => {
       messageQueryBuilder.getExists.mockResolvedValue(true);
+      // `pipeline` detaches its listeners from `response.req` on finish, so the
+      // stand-in request is an emitter, as Express's IncomingMessage is.
       const sink = Object.assign(new PassThrough(), {
-        req: { method: 'GET' },
+        req: Object.assign(new EventEmitter(), { method: 'GET' }),
         setHeader: jest.fn(),
         status: jest.fn(),
       });
@@ -950,10 +954,25 @@ describe('FilesController', () => {
       expect(storage.createPresignedDownload).not.toHaveBeenCalled();
     });
 
-    it('does not fall back to the uploader-only check (participant path, not owner path)', async () => {
+    it('admits the uploader to their own document without a participant seat', async () => {
       messageQueryBuilder.getExists.mockResolvedValue(false);
-      await expect(serve(MESSAGE_DOCUMENT_KEY, LOGGED_IN)).rejects.toThrow(
-        NotFoundException,
+      const sink = Object.assign(new PassThrough(), {
+        req: Object.assign(new EventEmitter(), { method: 'GET' }),
+        setHeader: jest.fn(),
+        status: jest.fn(),
+      });
+      sink.status.mockReturnValue(sink);
+      sink.resume();
+      await controller.serve(
+        MESSAGE_DOCUMENT_KEY.split('/'),
+        LOGGED_IN as never,
+        sink as unknown as Response,
+      );
+      // The only query is the cosmetic display-name lookup; the participant
+      // check never runs for the uploader.
+      expect(messageQueryBuilder.getExists).not.toHaveBeenCalled();
+      expect(storage.openObjectStream).toHaveBeenCalledWith(
+        MESSAGE_DOCUMENT_KEY,
       );
     });
   });

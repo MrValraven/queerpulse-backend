@@ -65,6 +65,8 @@ describe('SocialService', () => {
     createQueryBuilder: jest.Mock;
     update: jest.Mock;
     delete: jest.Mock;
+    findOne: jest.Mock;
+    query: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
@@ -104,6 +106,12 @@ describe('SocialService', () => {
       createQueryBuilder: jest.fn(() => qbStub()),
       update: jest.fn().mockResolvedValue({ affected: 0 }),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      // `blockMember` reads the pair's connection row back when the sever
+      // touched nothing, to log which block holds it. No row by default.
+      findOne: jest.fn().mockResolvedValue(null),
+      // `restoreConnectionAfterUnblock` is one raw UPDATE ... RETURNING. An
+      // empty result means no blocked row of this actor's was found.
+      query: jest.fn().mockResolvedValue([]),
     };
     eventEmitter = { emit: jest.fn() };
     dataSource = {
@@ -342,6 +350,8 @@ describe('SocialService', () => {
         blockerId: 'me',
         blockedId: 'them',
         reason: 'spam',
+        // PRD-423: a block by slug records no matched chat.
+        matchedConversationId: null,
       });
       expect(insertQb.orIgnore).toHaveBeenCalled();
       expect(blocks.findOneOrFail).toHaveBeenCalledWith({
@@ -488,34 +498,28 @@ describe('SocialService', () => {
 
     it('restores the connection edge this actor blocked (P1-3)', async () => {
       stubSlugResolution({ them: 'them' });
-      const updateQb = qbStub();
-      manager.createQueryBuilder.mockReturnValue(updateQb);
       await service.unblockMember('me', 'them');
+      expect(manager.query).toHaveBeenCalledTimes(1);
+      const [sql, parameters] = manager.query.mock.calls[0] as [
+        string,
+        unknown[],
+      ];
+      expect(sql).toContain('UPDATE "connections" SET');
       // Conditional flip: only a connection this actor blocked is reopened.
-      expect(updateQb.update).toHaveBeenCalledWith(Connection);
-      expect(updateQb.andWhere).toHaveBeenCalledWith('"status" = :blocked', {
-        blocked: ConnectionStatus.Blocked,
-      });
-      expect(updateQb.andWhere).toHaveBeenCalledWith(
-        '"blocked_by" = :unblockerId',
-        { unblockerId: 'me' },
-      );
-      const [set] = updateQb.set!.mock.calls[0] as [Record<string, unknown>];
-      expect(set).toMatchObject({
-        blockedBy: null,
-        statusBeforeBlock: null,
-        respondedAtBeforeBlock: null,
-      });
+      expect(sql).toContain(`"status" = '${ConnectionStatus.Blocked}'`);
+      expect(sql).toContain('"blocked_by" = $3');
+      // With no surviving block the stash is cleared and blocked_by lifted.
+      expect(sql).toContain('ELSE COALESCE("status_before_block"');
+      expect(sql).toMatch(/"blocked_by" = CASE[\s\S]*?ELSE NULL/);
+      // 'me' < 'them' lexicographically: low, high, unblocker, other member.
+      expect(parameters).toEqual(['me', 'them', 'me', 'them']);
     });
 
     it('reports the accepted connection it put back (PRD-363)', async () => {
       stubSlugResolution({ them: 'them' });
-      const updateQb = qbStub();
-      updateQb.execute!.mockResolvedValue({
-        raw: [{ status: ConnectionStatus.Accepted }],
-        affected: 1,
-      });
-      manager.createQueryBuilder.mockReturnValue(updateQb);
+      manager.query.mockResolvedValueOnce([
+        { status: ConnectionStatus.Accepted },
+      ]);
       await expect(service.unblockMember('me', 'them')).resolves.toEqual({
         restoredStatus: 'accepted',
       });

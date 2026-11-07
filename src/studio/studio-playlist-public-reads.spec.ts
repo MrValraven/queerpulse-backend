@@ -66,6 +66,8 @@ describe('Public playlist reads after collaborative playlists', () => {
       statsSource,
       relatedArtistsSource,
       methodBody(readsSource, 'async searchPlaylists('),
+      methodBody(readsSource, 'async searchPlaylistsPage('),
+      methodBody(readsSource, 'private async searchPlaylistSlice('),
       methodBody(readsSource, 'listCreditedToPersona('),
       methodBody(readsSource, 'async listForTrack('),
       methodBody(readsSource, 'async listCreditedToMember('),
@@ -78,8 +80,17 @@ describe('Public playlist reads after collaborative playlists', () => {
   });
 
   it('lists search, the persona page and the track page through the public predicate', () => {
-    for (const signature of [
+    // Both search entry points read one shared slice query, which carries the predicate.
+    for (const searchEntryPoint of [
       'async searchPlaylists(',
+      'async searchPlaylistsPage(',
+    ]) {
+      expect(methodBody(readsSource, searchEntryPoint)).toContain(
+        'this.searchPlaylistSlice(',
+      );
+    }
+    for (const signature of [
+      'private async searchPlaylistSlice(',
       'listCreditedToPersona(',
       'async listForTrack(',
     ]) {

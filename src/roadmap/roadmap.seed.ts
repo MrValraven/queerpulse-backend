@@ -210,7 +210,7 @@ export const ROADMAP_ITEMS: SeedItem[] = [
     category: 'Members',
     name: 'Anonymous Q&A threads',
     description:
-      'Ask questions anonymously within communities. No names — just honest answers.',
+      'Ask questions anonymously within communities. No names, just honest answers.',
     votes: 98,
     sortOrder: 1,
   },
@@ -219,7 +219,7 @@ export const ROADMAP_ITEMS: SeedItem[] = [
     category: 'Messaging',
     name: 'Group messaging',
     description:
-      'Create threads with multiple members — for planning events, projects, or just chatting.',
+      'Create threads with multiple members for planning events, projects, or just chatting.',
     votes: 76,
     sortOrder: 2,
   },
@@ -358,7 +358,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     progress: 100,
     votes: 71,
     requested: true,
-    publicNote: 'Safety as infrastructure, not a policy page.',
+    publicNote: 'Safety built into the infrastructure.',
     targetQuarter: 'Q3 2026',
     priority: RoadmapPriority.P0,
     confidence: RoadmapConfidence.Likely,
@@ -376,7 +376,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     date: 'Mar 2026',
     progress: 100,
     votes: 56,
-    publicNote: 'Introductions, not cold DMs.',
+    publicNote: 'Warm introductions between members.',
     targetQuarter: 'Q3 2026',
     priority: RoadmapPriority.P1,
     confidence: RoadmapConfidence.Likely,
@@ -431,14 +431,13 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Building,
     category: 'Resources',
     description:
-      "Licensed, WPATH-informed therapists reviewed by members who've actually seen them — vetted before listing, not just self-submitted.",
+      "Licensed, WPATH-informed therapists reviewed by members who've actually seen them and vetted before listing.",
     stage: 'In progress',
     eta: '~Q3 2026',
     progress: 60,
     votes: 214,
     requested: true,
-    publicNote:
-      'A directory of therapists our members have actually sat with — not a Google list.',
+    publicNote: 'A directory of therapists our members have actually sat with.',
     targetQuarter: 'Q3 2026',
     priority: RoadmapPriority.P0,
     confidence: RoadmapConfidence.Likely,
@@ -483,7 +482,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
         from: 'Q3 2026',
         to: 'Q4 2026',
         reason:
-          'Clinical reviewer availability — we would rather be late than wrong on dosages and pathways.',
+          'Clinical reviewer availability. We would rather be late than wrong on dosages and pathways.',
         movedByName: 'Ana Duarte',
         movedAt: '2026-07-12T00:00:00.000Z',
       },
@@ -501,7 +500,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Building,
     category: 'Economy',
     description:
-      'Structured, named employer reviews from members — held pending a legal read on defamation exposure before launch.',
+      'Structured, named employer reviews from members, held pending a legal read on defamation exposure before launch.',
     stage: 'Blocked',
     eta: '~Q4 2026',
     progress: 25,
@@ -524,7 +523,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     spikeFlag: true,
     blockedBy: 'Sofia Melo (legal)',
     blockedWhy:
-      'Defamation exposure on named-employer reviews — waiting on a written opinion before we open it up.',
+      'Defamation exposure on named-employer reviews, so we are waiting on a written opinion before we open it up.',
     ownerSlug: 'jo-silva',
   },
   {
@@ -559,7 +558,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     eta: '~Q3 2026',
     progress: 60,
     votes: 167,
-    publicNote: 'The room, in your pocket.',
+    publicNote: 'The community, in your pocket.',
     targetQuarter: 'Q3 2026',
     priority: RoadmapPriority.P0,
     confidence: RoadmapConfidence.Likely,
@@ -627,7 +626,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Planned,
     category: 'Resources',
     description:
-      'Plain-language guide to Portuguese legal protections and processes — name/gender marker changes, anti-discrimination law, housing and employment rights.',
+      'Plain-language guide to Portuguese legal protections and processes, including name/gender marker changes, anti-discrimination law, housing and employment rights.',
     votes: 176,
     requested: true,
     publicNote: 'Your rights here, in words that make sense.',
@@ -695,7 +694,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
       'Testing sites, PrEP access, and harm-reduction basics reviewed by a sexual health nurse.',
     votes: 124,
     requested: true,
-    publicNote: 'Testing, PrEP and care — without the lecture.',
+    publicNote: 'Testing, PrEP and care, with no lecture.',
     targetQuarter: 'Q4 2026',
     priority: RoadmapPriority.P1,
     confidence: RoadmapConfidence.Likely,
@@ -717,7 +716,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Planned,
     category: 'Members',
     description:
-      'Ask questions anonymously within communities. No names — just honest answers.',
+      'Ask questions anonymously within communities. No names, just honest answers.',
     votes: 98,
     requested: true,
     publicNote: 'Ask the thing you cannot sign your name to.',
@@ -735,9 +734,9 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Planned,
     category: 'Messaging',
     description:
-      'Create threads with multiple members — for planning events, projects, or just chatting.',
+      'Create threads with multiple members for planning events, projects, or just chatting.',
     votes: 76,
-    publicNote: 'Small rooms inside the room.',
+    publicNote: 'Small circles inside the community.',
     targetQuarter: 'Q1 2027',
     priority: RoadmapPriority.P2,
     confidence: RoadmapConfidence.Maybe,
@@ -751,7 +750,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     description:
       'Structured book and article reading groups with discussion threads and a shared reading schedule. Currently scoped to the "Queer Creatives" community.',
     votes: 54,
-    publicNote: 'One book, one room, once a month.',
+    publicNote: 'One book, one table, once a month.',
     targetQuarter: 'Q1 2027',
     priority: RoadmapPriority.P3,
     confidence: RoadmapConfidence.Hoping,
@@ -787,10 +786,10 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Backlog,
     category: 'Resources',
     description:
-      'A resource, not a script — options and considerations for members thinking about coming out, including not doing it.',
+      'A resource that lays out options and considerations for members thinking about coming out, including the option of not coming out at all.',
     votes: 97,
     requested: true,
-    publicNote: 'No single script. Including the option of not doing it.',
+    publicNote: 'Many paths, including the option of not coming out.',
     targetQuarter: 'Q1 2027',
     priority: RoadmapPriority.P2,
     confidence: RoadmapConfidence.Hoping,
@@ -876,33 +875,33 @@ export const ROADMAP_ADMIN_SEED_PENDING_IDEAS: RoadmapAdminSeedPendingIdea[] = [
     text: 'Trans-friendly barber & salon list',
     category: 'Resources',
     votes: 64,
-    note: 'Submitted by Rui M. — "Getting a haircut without being misgendered is harder than it sounds."',
+    note: 'Submitted by Rui M.: "Getting a haircut without being misgendered is harder than it sounds"',
     duplicateOfName: 'Queer-owned business directory',
   },
   {
     text: 'Buddy system for first events',
     category: 'Events',
     votes: 51,
-    note: 'Submitted by Sofia A. — "Walking in alone the first time is the hardest part."',
+    note: 'Submitted by Sofia A.: "Walking in alone the first time is the hardest part"',
   },
   {
     text: 'Asylum & residency resource hub',
     category: 'Resources',
     votes: 47,
-    note: 'Submitted anonymously — "For queer migrants navigating AIMA. Nothing accurate exists in English." Flagged as a possible spike.',
+    note: 'Submitted anonymously: "For queer migrants navigating AIMA, nothing accurate exists in English". Flagged as a possible spike.',
     duplicateOfName: 'Portuguese legal rights guide',
   },
   {
     text: 'Skill swap between members',
     category: 'Economy',
     votes: 38,
-    note: 'Submitted by Nuno F. — "I will do your brand identity, you do my accounting."',
+    note: 'Submitted by Nuno F.: "I will do your brand identity, you do my accounting"',
   },
   {
     text: 'Sober-friendly event tag',
     category: 'Events',
     votes: 33,
-    note: 'Submitted by Beatriz L. — "Not everything has to happen in a bar."',
+    note: 'Submitted by Beatriz L.: "Good events can happen outside a bar too"',
   },
 ];
 
@@ -923,7 +922,7 @@ export const ROADMAP_ADMIN_SEED_NOT_BUILDING: RoadmapAdminSeedNotBuildingIdea[] 
       category: 'Members',
       declineReason: 'scope',
       declineNote:
-        'Public profiles turn a vouched room into a directory strangers can scrape. The whole point is that you cannot see in from outside.',
+        'Public profiles turn a vouched community into a directory strangers can scrape. The whole point is that you cannot see in from outside.',
       votes: 29,
     },
     {
@@ -931,7 +930,7 @@ export const ROADMAP_ADMIN_SEED_NOT_BUILDING: RoadmapAdminSeedNotBuildingIdea[] 
       category: 'Members',
       declineReason: 'harm',
       declineNote:
-        'Mixing professional networking with dating puts people who are out at work in an impossible position. There are good apps for this; we are not one.',
+        'Mixing professional networking with dating puts people who are out at work in an impossible position. There are good apps for this and we leave it to them.',
       votes: 74,
     },
   ];
@@ -998,7 +997,7 @@ export const ROADMAP_ADMIN_SEED_AUDIT: RoadmapAdminSeedAuditEntry[] = [
     actorSlug: 'jo-silva',
     actorLabel: 'Jo Silva',
     action:
-      'Moved "Honest employer reviews" to Blocked — waiting on legal opinion',
+      'Moved "Honest employer reviews" to Blocked, waiting on legal opinion',
     createdAt: '2026-08-03T08:12:00.000Z',
   },
   {

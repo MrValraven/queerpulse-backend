@@ -4,6 +4,8 @@ import { Repository } from 'typeorm';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
 import { MagazinePiece } from './entities/magazine-piece.entity';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /** What one issue cost in a single currency. Every figure is a decimal string. */
 export interface IssueCostCurrencyTotal {
@@ -95,7 +97,12 @@ export class MagazineIssueCostsService {
       select: { id: true, number: true, title: true },
     });
     if (!issue) {
-      throw new NotFoundException('Issue not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND,
+          'Issue not found',
+        ),
+      );
     }
 
     const [totals, counts] = await Promise.all([

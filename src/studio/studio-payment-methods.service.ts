@@ -208,13 +208,17 @@ export class StudioPaymentMethodsService {
       if (drafts.length > 0) {
         await manager.query(
           insertSqlFor(drafts.length),
-          drafts.flatMap((draft, position) => [
-            draft.kind,
-            draft.label,
-            draft.value,
-            draft.note,
-            position,
-          ]),
+          // `$1` is the persona every tuple shares; each row's own values follow from `$2`.
+          [
+            subprofileId,
+            ...drafts.flatMap((draft, position) => [
+              draft.kind,
+              draft.label,
+              draft.value,
+              draft.note,
+              position,
+            ]),
+          ],
         );
       }
       const fresh = await this.readRows(manager, subprofileId);

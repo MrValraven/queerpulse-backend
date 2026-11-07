@@ -15,17 +15,23 @@ interface Harness {
   countFor: (profile: Profile, viewerUserId: string) => Promise<number | null>;
   getNamedVoucherIds: jest.Mock;
   acceptedConnectionsAmong: jest.Mock;
+  visibleMemberIds: jest.Mock;
 }
 
 function buildHarness(): Harness {
   const getNamedVoucherIds = jest.fn().mockResolvedValue([]);
   const acceptedConnectionsAmong = jest.fn().mockResolvedValue(new Set());
+  // The vouchers-roster boundary (block, hidden-from, takedown). Every
+  // candidate passes by default, so the count tests read the count alone.
+  const visibleMemberIds = jest.fn((_viewerUserId: string, userIds: string[]) =>
+    Promise.resolve(new Set(userIds)),
+  );
   const vouchService = { getNamedVoucherIds } as unknown as VouchService;
   const connectionsService = {
     acceptedConnectionsAmong,
   } as unknown as ConnectionsService;
-  // A bare instance with the two collaborators this method reads injected by
-  // name. `Object.create` skips the 20-argument constructor, so adding an
+  // A bare instance with the collaborators this method reads injected by
+  // name, plus its own `visibleMemberIds` gate stubbed on the instance. `Object.create` skips the 20-argument constructor, so adding an
   // unrelated dependency to `ProfilesService` never breaks this spec.
   const service = Object.create(ProfilesService.prototype) as Record<
     string,
@@ -33,6 +39,7 @@ function buildHarness(): Harness {
   >;
   service.vouchService = vouchService;
   service.connectionsService = connectionsService;
+  service.visibleMemberIds = visibleMemberIds;
   const callable = service as unknown as {
     loadMutualVoucherCount: (
       profile: Profile,
@@ -44,6 +51,7 @@ function buildHarness(): Harness {
       callable.loadMutualVoucherCount.call(service, profile, viewerUserId),
     getNamedVoucherIds,
     acceptedConnectionsAmong,
+    visibleMemberIds,
   };
 }
 
@@ -165,6 +173,26 @@ describe('ProfilesService mutual voucher count: the count itself', () => {
     await harness.countFor(memberProfile(), 'viewer-1');
 
     expect(harness.getNamedVoucherIds).toHaveBeenCalledTimes(1);
+    expect(harness.visibleMemberIds).toHaveBeenCalledTimes(1);
     expect(harness.acceptedConnectionsAmong).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts only the vouchers the roster boundary shows this viewer', async () => {
+    const harness = buildHarness();
+    harness.getNamedVoucherIds.mockResolvedValue(['voucher-1', 'voucher-2']);
+    harness.visibleMemberIds.mockResolvedValue(new Set(['voucher-1']));
+    harness.acceptedConnectionsAmong.mockResolvedValue(new Set(['voucher-1']));
+
+    await expect(harness.countFor(memberProfile(), 'viewer-1')).resolves.toBe(
+      1,
+    );
+    expect(harness.visibleMemberIds).toHaveBeenCalledWith('viewer-1', [
+      'voucher-1',
+      'voucher-2',
+    ]);
+    // A voucher the roster hides never reaches the connections read.
+    expect(harness.acceptedConnectionsAmong).toHaveBeenCalledWith('viewer-1', [
+      'voucher-1',
+    ]);
   });
 });

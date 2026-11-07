@@ -163,8 +163,9 @@ describe('AccountDeletionProcessorService storage erasure', () => {
     // back referenced. It is the real resolver rather than a mock deliberately:
     // the thing under test is whether a surviving row keeps its object, and a
     // stubbed "yes it is referenced" would assert nothing about that.
-    // Every source either `find()`s a plain column or query-builds a jsonb one;
-    // only the `event_photos` source is given a matching row.
+    // Every source either `find()`s a plain column or query-builds a jsonb one
+    // (the persona-item nested-photo source narrows its columns with
+    // `select`); only the `event_photos` source is given a matching row.
     dataSource = {
       transaction: jest.fn(
         async (run: (entityManager: unknown) => Promise<unknown>) =>
@@ -176,6 +177,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
         }
         const arrayQueryBuilder: Record<string, unknown> = {};
         Object.assign(arrayQueryBuilder, {
+          select: jest.fn().mockReturnValue(arrayQueryBuilder),
           where: jest.fn().mockReturnValue(arrayQueryBuilder),
           andWhere: jest.fn().mockReturnValue(arrayQueryBuilder),
           getMany: jest.fn().mockResolvedValue([]),

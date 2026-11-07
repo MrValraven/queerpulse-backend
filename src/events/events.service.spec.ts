@@ -272,6 +272,10 @@ describe('EventsService', () => {
     endAt: null,
     capacity: null,
     communityId: null,
+    // A real row always carries `address` (the column is nullable). The
+    // detail builder compares it against the public business addresses, so
+    // the fixture holds the stored null an address-less gathering has.
+    address: null,
   });
 
   beforeEach(async () => {
@@ -1000,6 +1004,7 @@ describe('EventsService', () => {
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
       showAttendeeCount: true,
+      address: null,
     };
     const openRow = {
       eventId: 'e1',
@@ -1078,6 +1083,7 @@ describe('EventsService', () => {
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
       showAttendeeCount: false,
+      address: null,
     };
 
     // Three members going, one with a plus-one (four seats against a
@@ -1356,6 +1362,7 @@ describe('EventsService', () => {
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
       showAttendeeCount: true,
+      address: null,
     };
 
     // The `andWhere` calls carrying the active-account predicate, as
@@ -1564,6 +1571,7 @@ describe('EventsService', () => {
       visibility: EventVisibility.Public,
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
+      address: null,
     });
     const detail = await service.getBySlug('d', 'host');
     expect(detail.isOrganizer).toBe(true);
@@ -1611,6 +1619,7 @@ describe('EventsService', () => {
       visibility: EventVisibility.InviteOnly,
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
+      address: null,
     });
     cohosts.exists.mockResolvedValue(false);
     audienceGate.assertViewable.mockResolvedValue(undefined);
@@ -1650,6 +1659,7 @@ describe('EventsService', () => {
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
       capacity: 2,
+      address: null,
     });
     await service.update('x', 'u1', { capacity: 5 });
     expect(rsvpService.reconcileWaitlist).toHaveBeenCalledWith('x');
@@ -1666,6 +1676,7 @@ describe('EventsService', () => {
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
       capacity: 5,
+      address: null,
     });
     await service.update('x', 'u1', { capacity: 2 });
     expect(rsvpService.reconcileWaitlist).not.toHaveBeenCalled();
@@ -1800,6 +1811,7 @@ describe('EventsService', () => {
       capacity: null,
       communityId: null,
       coverImageUrl,
+      address: null,
     });
 
     it('lets a cohost re-save the unchanged foreign cover already stored', async () => {
@@ -2816,6 +2828,7 @@ describe('EventsService', () => {
       cost: null,
       startAt: new Date('2030-01-01T00:00:00.000Z'),
       title: 'Party',
+      address: null,
     });
     rsvps.find.mockResolvedValue([
       { userId: 'a' },

@@ -91,8 +91,12 @@ export class CompaniesController {
   @ApiOperation({ summary: "List a company's reviews (paginated)." })
   @ApiOkResponse({ description: 'A page of company reviews.' })
   @ApiNotFoundResponse({ description: 'No company with that slug.' })
-  listReviews(@Param('slug') slug: string, @Query() query: ListCompaniesQuery) {
-    return this.companiesService.listReviews(slug, query);
+  listReviews(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() query: ListCompaniesQuery,
+  ) {
+    return this.companiesService.listReviews(slug, query, user.userId);
   }
 
   @Post(':slug/reviews')

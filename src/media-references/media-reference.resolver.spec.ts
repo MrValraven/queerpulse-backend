@@ -29,6 +29,9 @@ function makeMockRepository(
     ? jest.fn(config.findImplementation)
     : jest.fn().mockResolvedValue(config.findRows ?? []);
   const queryBuilderStub = {
+    // Sources that read only some columns (e.g. `SubprofileItem.structured`)
+    // narrow the selection first.
+    select: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
     // Sources with an `additionalWhere` (e.g. `Message.attachment.url`) chain
     // one of these onto the prefilter.

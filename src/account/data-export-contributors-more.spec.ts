@@ -439,7 +439,6 @@ const OWNER_FILTERS: [
       finds(byColumn('offereeId')),
       finds(either('userId', 'invitedByUserId')),
       finds(byColumn('senderId')),
-      finds(byColumn('askerId'), byColumn('answeredById')),
       finds(byColumn('voterId')),
       finds(byColumn('userId')),
     ],

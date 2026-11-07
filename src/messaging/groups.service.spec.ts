@@ -104,9 +104,13 @@ describe('GroupsService.updateGroup foreign photo ownership (M1)', () => {
       {} as never,
       {} as never,
       mediaCropService as never,
-      // PRD-364: `PreferencesService`, unused by `updateGroup` (this spec's
-      // only path under test). `buildMemberSummaries` is itself mocked above.
-      {} as never,
+      // PRD-364: `PreferencesService`. `toGroupConversationResponse` reads
+      // the roster's read-receipt sharing through it on every successful
+      // `updateGroup`; `buildMemberSummaries`, its only consumer, is itself
+      // mocked above, so an empty map is enough.
+      {
+        getMessagingPrivacyForUsers: jest.fn().mockResolvedValue(new Map()),
+      } as never,
       // PRD-353: `GroupInvite` repository, unused by `updateGroup` (this
       // spec's caller row carries no `role`, so `toGroupConversationResponse`'s
       // `canSeePendingInvites` gate is always false here).

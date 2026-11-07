@@ -101,7 +101,8 @@ describe('StudioOwnershipService', () => {
   });
 
   it('refuses a persona of another kind', async () => {
-    subprofiles.findOne.mockResolvedValue({ id: PERSONA_ID, kind: 'poet' });
+    // Poets publish spoken word in Studio, so a writer stands in for a kind outside the artist kinds.
+    subprofiles.findOne.mockResolvedValue({ id: PERSONA_ID, kind: 'writer' });
     expect(await codeOf(service.assertArtistPersona(USER_ID, PERSONA_ID))).toBe(
       'studio_persona_kind_not_allowed',
     );

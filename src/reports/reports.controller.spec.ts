@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { ThrottlerModule, seconds } from '@nestjs/throttler';
 import { ReportSubjectType } from './entities/report.entity';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
@@ -14,6 +15,9 @@ describe('ReportsController', () => {
     service = { create: jest.fn(), reasonsFor: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
+      // `ReportFilingThrottlerGuard` on `create` resolves the throttler options
+      // and storage, which the real app gets from the global ThrottlerModule.
+      imports: [ThrottlerModule.forRoot([{ limit: 10, ttl: seconds(60) }])],
       controllers: [ReportsController],
       providers: [{ provide: ReportsService, useValue: service }],
     }).compile();
@@ -124,6 +128,32 @@ describe('ReportsController', () => {
       ),
     ).toThrow(ForbiddenException);
     expect(service.create).not.toHaveBeenCalled();
+  });
+
+  it('names the ACTIVE_MEMBERSHIP_REQUIRED code on that refusal', () => {
+    let refusal: ForbiddenException | undefined;
+    try {
+      void controller.create(
+        {
+          userId: 'user-1',
+          email: 'a@b.com',
+          status: 'suspended',
+          role: 'member',
+        },
+        {
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'user-2',
+          reasonCode: 'harassment',
+        },
+        CLIENT_IP,
+      );
+    } catch (error) {
+      refusal = error as ForbiddenException;
+    }
+    expect(refusal?.getResponse()).toEqual({
+      code: 'ACTIVE_MEMBERSHIP_REQUIRED',
+      message: 'Active membership required',
+    });
   });
 
   it('delegates the reason catalogue to the service', () => {

@@ -18,6 +18,10 @@ import { VALIDATION_PIPE_OPTIONS } from './common/validation-pipe.options';
 import { resolveAllowedOrigins } from './config/frontend-origins';
 import { ensureDatabaseSchema } from './database/ensure-database-schema';
 
+// Largest JSON body any route accepts. Global because this app has no direct
+// `express` dependency to mount a route-scoped parser from.
+const JSON_BODY_LIMIT = '512kb';
+
 // How long to let Sentry drain its buffer on shutdown before giving up.
 const SENTRY_FLUSH_TIMEOUT_MS = 2000;
 
@@ -39,6 +43,13 @@ async function bootstrap() {
     rawBody: true,
     bufferLogs: true,
   });
+  // Nest's default JSON parser keeps body-parser's 100 kB limit, which cuts off
+  // a story submission (body up to 120000 characters, more in bytes once
+  // multibyte or escaped) with a 413 before its DTO validation can answer.
+  // `useBodyParser` replaces that default parser (same `jsonParser` name, so
+  // Nest skips registering its own) and still honours `rawBody: true`, because
+  // the adapter adds the raw-body `verify` hook itself for the HMAC webhooks.
+  app.useBodyParser('json', { limit: JSON_BODY_LIMIT });
   const logger = app.get(Logger);
   // Wrapped so Nest's own boot chatter (one line per module, per controller and
   // per route, ~1,030 lines here, emitted in under a second) never reaches the

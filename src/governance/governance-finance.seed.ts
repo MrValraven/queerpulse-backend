@@ -76,7 +76,7 @@ export const financeIncomeSeed: FinanceLine[] = [
   {
     label: 'Event ticket sales',
     amount: '€2,180',
-    note: 'Net figure. QueerPulse takes 0% of ticket revenue — 100% goes to hosts. This line covers only events we organise ourselves.',
+    note: 'Net figure. QueerPulse takes 0% of ticket revenue and 100% goes to hosts. This line covers only events we organise ourselves.',
     width: 94,
     items: [
       {
@@ -104,7 +104,7 @@ export const financeIncomeSeed: FinanceLine[] = [
         period: '47 tickets · €18',
         amount: '€846',
       },
-      { name: 'Miscellaneous', period: '—', amount: '€62' },
+      { name: 'Miscellaneous', period: '-', amount: '€62' },
     ],
     total: { label: '6 platform-run events', amount: '€2,180' },
   },
@@ -174,7 +174,7 @@ export const financeExpenseSeed: FinanceLine[] = [
       },
       { name: 'Design & collaboration tools', period: '€14/mo', amount: '€42' },
       { name: 'Backup & disaster recovery', period: '€13/mo', amount: '€39' },
-      { name: 'Miscellaneous', period: '—', amount: '€40' },
+      { name: 'Miscellaneous', period: '-', amount: '€40' },
     ],
     total: { label: '11 line items', amount: '€520' },
   },
@@ -190,12 +190,12 @@ export const financeExpenseSeed: FinanceLine[] = [
         amount: '€180',
       },
       {
-        name: 'Newcomer dinner — food & catering',
+        name: 'Newcomer dinner: food & catering',
         period: 'April',
         amount: '€220',
       },
       {
-        name: 'Trans healthcare session — equipment',
+        name: 'Trans healthcare session: equipment',
         period: 'May · venue donated',
         amount: '€40',
       },
@@ -205,7 +205,7 @@ export const financeExpenseSeed: FinanceLine[] = [
         amount: '€280',
       },
       {
-        name: 'Skills fair — materials & printing',
+        name: 'Skills fair: materials & printing',
         period: 'April',
         amount: '€60',
       },
@@ -224,7 +224,7 @@ export const financeExpenseSeed: FinanceLine[] = [
         period: 'Quarterly',
         amount: '€60',
       },
-      { name: 'Miscellaneous supplies', period: '—', amount: '€140' },
+      { name: 'Miscellaneous supplies', period: '-', amount: '€140' },
     ],
     total: { label: '9 line items · 7 events subsidised', amount: '€1,240' },
   },
@@ -259,33 +259,33 @@ export const financeExpenseSeed: FinanceLine[] = [
     width: 38,
     items: [
       {
-        name: 'Grant #1 — Housing emergency support',
-        period: '—',
+        name: 'Grant #1: Housing emergency support',
+        period: '-',
         amount: '€200',
       },
       {
-        name: 'Grant #2 — Creative project (documentary)',
-        period: '—',
+        name: 'Grant #2: Creative project (documentary)',
+        period: '-',
         amount: '€150',
       },
       {
-        name: 'Grant #3 — Trans healthcare travel costs',
-        period: '—',
+        name: 'Grant #3: Trans healthcare travel costs',
+        period: '-',
         amount: '€120',
       },
       {
-        name: 'Grant #4 — Community event materials',
-        period: '—',
+        name: 'Grant #4: Community event materials',
+        period: '-',
         amount: '€80',
       },
       {
-        name: 'Grant #5 — Skills training course fee',
-        period: '—',
+        name: 'Grant #5: Skills training course fee',
+        period: '-',
         amount: '€150',
       },
       {
-        name: 'Grant #6 — Emergency relocation support',
-        period: '—',
+        name: 'Grant #6: Emergency relocation support',
+        period: '-',
         amount: '€100',
       },
     ],
@@ -294,7 +294,7 @@ export const financeExpenseSeed: FinanceLine[] = [
   {
     label: 'Magazine production',
     amount: '€380',
-    note: 'Contributor honoraria, editorial costs, and design. Contributors are paid — no unpaid labour policy.',
+    note: 'Contributor honoraria, editorial costs, and design. Contributors are paid, under a no-unpaid-labour policy.',
     width: 18,
     items: [
       {
@@ -304,11 +304,11 @@ export const financeExpenseSeed: FinanceLine[] = [
       },
       {
         name: 'Photography & illustration (2 pieces)',
-        period: '—',
+        period: '-',
         amount: '€64',
       },
-      { name: 'Editorial coordination', period: '—', amount: '€40' },
-      { name: 'Design & layout', period: '—', amount: '€24' },
+      { name: 'Editorial coordination', period: '-', amount: '€40' },
+      { name: 'Design & layout', period: '-', amount: '€24' },
     ],
     total: { label: 'Issue 18 · June 2026', amount: '€380' },
   },
@@ -318,10 +318,10 @@ export const financeExpenseSeed: FinanceLine[] = [
     note: 'Small quarterly payments to our three volunteer moderators. Moderation is difficult work and should not be entirely unpaid.',
     width: 22,
     items: [
-      { name: 'Mariana — lead moderator', period: 'Q2 2026', amount: '€200' },
-      { name: 'Rui — moderator', period: 'Q2 2026', amount: '€150' },
+      { name: 'Mariana, lead moderator', period: 'Q2 2026', amount: '€200' },
+      { name: 'Rui, moderator', period: 'Q2 2026', amount: '€150' },
       {
-        name: 'Ana — moderator (part-time)',
+        name: 'Ana, moderator (part-time)',
         period: 'Q2 2026',
         amount: '€120',
       },
@@ -351,7 +351,7 @@ export const financeEventNotesSeed: FinanceEventNote[] = [
   },
   {
     title: 'This quarter:',
-    body: '34 events hosted. ~€8,400 in ticket revenue — all of which went directly to hosts.',
+    body: '34 events hosted. ~€8,400 in ticket revenue, all of which went directly to hosts.',
   },
 ];
 

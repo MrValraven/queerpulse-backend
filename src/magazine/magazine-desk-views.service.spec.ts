@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MagazineDeskView } from './entities/magazine-desk-view.entity';
 import { MagazineDeskViewsService } from './magazine-desk-views.service';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 type ViewsRepositoryMock = {
   find: jest.Mock;
@@ -96,7 +97,10 @@ describe('MagazineDeskViewsService', () => {
 
       await expect(
         service.createView('editor-1', { name: 'Close week', query: {} }),
-      ).rejects.toThrow(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NAME_TAKEN },
+      });
       expect(views.save).not.toHaveBeenCalled();
     });
 
@@ -113,7 +117,12 @@ describe('MagazineDeskViewsService', () => {
 
       await expect(
         service.createView('editor-1', { name: 'One more', query: {} }),
-      ).rejects.toThrow(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_LIMIT_REACHED,
+        },
+      });
     });
 
     it('maps a lost unique-constraint race to the same 409', async () => {
@@ -124,7 +133,10 @@ describe('MagazineDeskViewsService', () => {
 
       await expect(
         service.createView('editor-1', { name: 'Close week', query: {} }),
-      ).rejects.toThrow(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NAME_TAKEN },
+      });
     });
   });
 
@@ -134,7 +146,10 @@ describe('MagazineDeskViewsService', () => {
 
       await expect(
         service.updateView('editor-1', 'someone-elses-view', { name: 'Mine' }),
-      ).rejects.toThrow(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NOT_FOUND },
+      });
     });
 
     it('renames and replaces the query', async () => {
@@ -161,7 +176,10 @@ describe('MagazineDeskViewsService', () => {
 
       await expect(
         service.updateView('editor-1', 'view-2', { name: 'Close week' }),
-      ).rejects.toThrow(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NAME_TAKEN },
+      });
     });
 
     it('moves a view and renumbers the whole list', async () => {
@@ -197,7 +215,10 @@ describe('MagazineDeskViewsService', () => {
 
       await expect(
         service.deleteView('editor-1', 'someone-elses-view'),
-      ).rejects.toThrow(NotFoundException);
+      ).rejects.toMatchObject({
+        constructor: NotFoundException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NOT_FOUND },
+      });
     });
   });
 });

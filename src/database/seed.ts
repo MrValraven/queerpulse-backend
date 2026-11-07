@@ -748,7 +748,7 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     posts: [
       {
         authorSlug: 'tomas-mendes',
-        body: 'Welcome to Queer Artists Lisbon! Drop a link to something you made this month.',
+        body: 'Welcome to Queer Artists Lisbon! Drop a link to something you made this month',
         kind: PostKind.Announcement,
         pinned: true,
         reactions: [
@@ -764,18 +764,18 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
       },
       {
         authorSlug: 'ana-rocha',
-        body: 'Looking for a printmaker to collaborate on a zine about queer nightlife.',
+        body: 'Looking for a printmaker to collaborate on a zine about queer nightlife',
         kind: PostKind.Post,
         pinned: false,
         reactions: [{ slug: 'tomas-mendes', key: ReactionKey.Fire }],
         replies: [
           {
             authorSlug: 'tomas-mendes',
-            text: "I'm in, let's talk risograph.",
+            text: "I'm in, let's talk risograph",
           },
           {
             authorSlug: 'noa-silva',
-            text: 'Following this, would love to help curate.',
+            text: 'Following this, would love to help curate',
           },
         ],
       },
@@ -794,7 +794,7 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     rosterVisible: false,
     features: ['discussion', 'rooms'],
     rules: [
-      'Confidentiality stays in the room',
+      'What is shared here stays here',
       'No judgment, no advice unless asked',
     ],
     ownerSlug: 'ana-rocha',
@@ -802,26 +802,26 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     posts: [
       {
         authorSlug: 'ana-rocha',
-        body: 'Reminder: our Thursday check-in room opens at 19:00. All quiet, all welcome.',
+        body: 'Reminder: our Thursday check-in opens at 19:00, all quiet and all welcome',
         kind: PostKind.Announcement,
         pinned: true,
         reactions: [{ slug: 'noa-silva', key: ReactionKey.Support }],
-        replies: [{ authorSlug: 'noa-silva', text: "I'll be there." }],
+        replies: [{ authorSlug: 'noa-silva', text: "I'll be there" }],
       },
       {
         authorSlug: 'noa-silva',
-        body: '90 days today. Thank you all for holding space.',
+        body: '90 days today, thank you all for holding space',
         kind: PostKind.Post,
         pinned: false,
         reactions: [{ slug: 'ana-rocha', key: ReactionKey.Celebrate }],
-        replies: [{ authorSlug: 'ana-rocha', text: 'So proud of you.' }],
+        replies: [{ authorSlug: 'ana-rocha', text: 'So proud of you' }],
       },
     ],
     // tomas-mendes is deliberately NOT on this community's roster — this is
     // the request-tier community's pending join-request.
     pendingJoinRequest: {
       slug: 'tomas-mendes',
-      note: 'A friend recommended this group, would love to join and listen.',
+      note: 'A friend recommended this group, would love to join and listen',
     },
   },
   {
@@ -844,7 +844,7 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     posts: [
       {
         authorSlug: 'noa-silva',
-        body: 'Posting a curator role at my gallery — DM me if illustration + editorial is your thing.',
+        body: 'Posting a curator role at my gallery, DM me if illustration + editorial is your thing',
         kind: PostKind.Announcement,
         pinned: true,
         reactions: [{ slug: 'tomas-mendes', key: ReactionKey.Fire }],
@@ -870,7 +870,7 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     type: CommunityType.Sports,
     whoFor:
       'Queer people who want to move their bodies without the locker-room chill.',
-    tagline: 'Sweat, not judgment.',
+    tagline: 'Sweat, laugh, belong.',
     accessTier: AccessTier.Public,
     rosterVisible: true,
     features: ['discussion', 'events'],
@@ -883,7 +883,7 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
     posts: [
       {
         authorSlug: 'tomas-mendes',
-        body: 'Sunday hike up to Sameiro, meet at the station at 9am.',
+        body: 'Sunday hike up to Sameiro, meet at the station at 9am',
         kind: PostKind.Announcement,
         pinned: true,
         reactions: [
@@ -893,13 +893,13 @@ const COMMUNITIES: CommunitySeedDefinition[] = [
         replies: [
           {
             authorSlug: 'ana-rocha',
-            text: "Count me in, I'll bring snacks.",
+            text: "Count me in, I'll bring snacks",
           },
         ],
       },
       {
         authorSlug: 'ana-rocha',
-        body: 'Started a casual five-a-side group, message me if you want in on the group chat.',
+        body: 'Started a casual five-a-side group, message me if you want in on the group chat',
         kind: PostKind.Post,
         pinned: false,
         reactions: [{ slug: 'tomas-mendes', key: ReactionKey.Support }],
@@ -1704,14 +1704,14 @@ const COMPANIES: CompanySeedDefinition[] = [
         title: 'Genuinely lovely place to make things',
         stars: 5,
         byline: 'Collaborator',
-        body: ['Every project feels like a conversation, not a brief.'],
+        body: ['Every project feels like a good conversation'],
       },
       {
         authorSlug: 'noa-silva',
         title: 'Great eye for print',
         stars: 4,
         byline: 'Client',
-        body: ['The risograph work they did for us was gorgeous.'],
+        body: ['The risograph work they did for us was gorgeous'],
       },
     ],
   },
@@ -1720,7 +1720,7 @@ const COMPANIES: CompanySeedDefinition[] = [
     nameText: 'QueerPulse',
     tagline: 'The invite-only platform behind this whole thing.',
     about:
-      'QueerPulse builds community infrastructure — profiles, vouching, events, and messaging — for queer communities that want their own space.',
+      'QueerPulse builds community infrastructure for queer communities that want their own space: profiles, vouching, events, and messaging.',
     queerRun: true,
     queerLed: true,
     values: [
@@ -1749,7 +1749,7 @@ const COMPANIES: CompanySeedDefinition[] = [
         stars: 5,
         byline: 'Early member',
         body: [
-          'The vouching flow feels safe in a way most apps never bother with.',
+          'The vouching flow feels safe in a way most apps never bother with',
         ],
       },
       {
@@ -1757,7 +1757,7 @@ const COMPANIES: CompanySeedDefinition[] = [
         title: 'Great team to build alongside',
         stars: 5,
         byline: 'Contributor',
-        body: ['Thoughtful about privacy from day one.'],
+        body: ['Thoughtful about privacy from day one'],
       },
     ],
   },
@@ -1771,7 +1771,7 @@ const COMPANIES: CompanySeedDefinition[] = [
     queerLed: true,
     values: [
       {
-        title: 'Rights, not favors',
+        title: 'Rights for everyone',
         desc: 'Legal and policy advocacy at the core.',
       },
       {
@@ -1794,14 +1794,14 @@ const COMPANIES: CompanySeedDefinition[] = [
         title: 'Vital work, done with care',
         stars: 5,
         byline: 'Volunteer',
-        body: ['The support line trained me well and never rushed a caller.'],
+        body: ['The support line trained me well and never rushed a caller'],
       },
       {
         authorSlug: 'noa-silva',
         title: 'Meaningful, if under-resourced',
         stars: 4,
         byline: 'Former intern',
-        body: ['Everyone here is stretched thin but shows up anyway.'],
+        body: ['Everyone here is stretched thin but shows up anyway'],
       },
     ],
   },
@@ -1816,7 +1816,7 @@ const COMPANIES: CompanySeedDefinition[] = [
     values: [
       {
         title: 'Evidence over optics',
-        desc: 'Measured outcomes, not just statements.',
+        desc: 'Measured outcomes behind every statement.',
       },
       {
         title: 'Long-term partnership',
@@ -1838,16 +1838,14 @@ const COMPANIES: CompanySeedDefinition[] = [
         title: 'Solid, if a bit slow-moving',
         stars: 3,
         byline: 'Partner org staff',
-        body: [
-          'Good recommendations, took a while to get momentum internally.',
-        ],
+        body: ['Good recommendations, took a while to get momentum internally'],
       },
       {
         authorSlug: 'noa-silva',
         title: 'Changed how we hire curators',
         stars: 4,
         byline: 'Gallery director',
-        body: ['Their audit was uncomfortable and exactly what we needed.'],
+        body: ['Their audit was uncomfortable and exactly what we needed'],
       },
     ],
   },
@@ -1856,13 +1854,13 @@ const COMPANIES: CompanySeedDefinition[] = [
     nameText: 'Livraria Devagar',
     tagline: 'A queer-run independent bookshop.',
     about:
-      'Livraria Devagar is a small independent bookshop specializing in queer literature, zines, and community events — readings, book clubs, and swap shelves.',
+      'Livraria Devagar is a small independent bookshop specializing in queer literature, zines, and community events such as readings, book clubs, and swap shelves.',
     queerRun: true,
     queerLed: true,
     values: [
       {
         title: 'Slow reading',
-        desc: 'A shop built for browsing, not just buying.',
+        desc: 'A shop built for browsing and lingering.',
       },
       {
         title: 'Local first',
@@ -1884,14 +1882,14 @@ const COMPANIES: CompanySeedDefinition[] = [
         title: 'My favourite shop in the city',
         stars: 5,
         byline: 'Regular',
-        body: ['The staff picks shelf alone is worth the visit.'],
+        body: ['The staff picks shelf alone is worth the visit'],
       },
       {
         authorSlug: 'ana-rocha',
         title: 'Wonderful book club',
         stars: 5,
         byline: 'Book club member',
-        body: ['Warm space, great discussions every month.'],
+        body: ['Warm space, great discussions every month'],
       },
     ],
   },
@@ -2049,7 +2047,7 @@ const JOBS: JobSeedDefinition[] = [
         'Sit in on client calls and take briefs',
       ],
       lookingFor: [
-        '1-2 years of illustration or print design experience (a portfolio, not a degree, is what matters)',
+        '1-2 years of illustration or print design experience (your portfolio is what matters)',
         'Comfort with Lisbon-based, in-person studio days a few times a week',
       ],
       offer: [
@@ -2154,7 +2152,7 @@ const JOBS: JobSeedDefinition[] = [
     qrLabel: 'Queer-run team',
     detail: {
       about: [
-        'QueerPulse builds community infrastructure — profiles, vouching, events, and messaging — for queer communities that want their own space.',
+        'QueerPulse builds community infrastructure for queer communities that want their own space: profiles, vouching, events, and messaging.',
       ],
       dayToDay: [
         'Design and ship features across the NestJS/TypeORM backend',
@@ -2164,14 +2162,14 @@ const JOBS: JobSeedDefinition[] = [
       lookingFor: [
         '3+ years building production backend services',
         'Comfort with PostgreSQL, TypeORM (or a similar data-mapper ORM), and REST APIs',
-        'Care about privacy-by-design, not just as a checkbox',
+        'Care about privacy-by-design as a core practice',
       ],
       offer: [
         'A small, fully remote, queer-run team',
-        'Direct input into product direction, not just ticket execution',
+        'Direct input into product direction and how the work gets shaped',
       ],
       reviewerNote:
-        'Compensation is negotiable based on experience — reach out even if the range feels off.',
+        'Compensation is negotiable based on experience, so reach out even if the range feels off.',
     },
     benefits: ['Fully remote', 'Flexible hours', 'Learning budget'],
     inclusivity: [
@@ -2322,7 +2320,7 @@ const JOBS: JobSeedDefinition[] = [
     qrLabel: 'Queer-run bookshop',
     detail: {
       about: [
-        'Livraria Devagar is a small independent bookshop specializing in queer literature, zines, and community events — readings, book clubs, and swap shelves.',
+        'Livraria Devagar is a small independent bookshop specializing in queer literature, zines, and community events such as readings, book clubs, and swap shelves.',
       ],
       dayToDay: [
         'Run the shop floor and till during your shifts',
@@ -2330,7 +2328,7 @@ const JOBS: JobSeedDefinition[] = [
         'Host our monthly queer book club discussion',
       ],
       lookingFor: [
-        'A love of queer literature (retail experience is a bonus, not a requirement)',
+        'A love of queer literature (retail experience is a bonus)',
         'Comfort hosting a small group discussion once a month',
       ],
       offer: ['Staff discount on all stock', 'A say in what the shop stocks'],
@@ -2365,11 +2363,11 @@ const JOB_APPLICATIONS: JobApplicationSeedDefinition[] = [
       {
         question: 'Why do you want to build QueerPulse?',
         answer:
-          'I want the platform I already love using to be sustainable long-term.',
+          'I want the platform I already love using to be sustainable long-term',
       },
     ],
     coverNote:
-      "I've been vouching for people here since week one — would love to help build it.",
+      "I've been vouching for people here since week one, would love to help build it",
     status: JobApplicationStatus.Submitted,
   },
   {
@@ -2379,11 +2377,11 @@ const JOB_APPLICATIONS: JobApplicationSeedDefinition[] = [
       {
         question: 'What print work have you shipped?',
         answer:
-          "I've printed a few zine covers for local collectives and would love to do more.",
+          "I've printed a few zine covers for local collectives and would love to do more",
       },
     ],
     coverNote:
-      'I already collaborate with Atelier Pulso informally — this would make it official.',
+      'I already collaborate with Atelier Pulso informally, this would make it official',
     status: JobApplicationStatus.Reviewing,
   },
 ];
@@ -2582,7 +2580,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     signups: [
       {
         memberSlug: 'tomas-mendes',
-        note: 'I mentored at a similar org back in Porto — happy to bring that experience here.',
+        note: 'I mentored at a similar org back in Porto, happy to bring that experience here',
       },
       { memberSlug: 'noa-silva', note: null },
     ],
@@ -2632,7 +2630,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     signups: [
       {
         memberSlug: 'noa-silva',
-        note: "I've done crisis-line work before and want to bring that here.",
+        note: "I've done crisis-line work before and want to bring that here",
       },
     ],
   },
@@ -2748,7 +2746,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
         },
       ],
       commitments: [{ label: 'Time', detail: '2 hours once a month' }],
-      goodFor: ['Comfortable running a room', 'Zine-makers and illustrators'],
+      goodFor: ['Comfortable leading a group', 'Zine-makers and illustrators'],
       teamIntro:
         'You will co-run it alongside shop staff the first couple of times.',
     },
@@ -2759,7 +2757,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     signups: [
       {
         memberSlug: 'ana-rocha',
-        note: 'I run a similar workshop informally already — would love to make it official.',
+        note: 'I run a similar workshop informally already, would love to make it official',
       },
       { memberSlug: 'tomas-mendes', note: null },
     ],
@@ -2890,9 +2888,9 @@ const PARTNERS: PartnerSeedDefinition[] = [
     tier: 'Operational · founding',
     since: 'Illustrative partner',
     eyebrow: 'Rights & advocacy',
-    tagline: 'Rights, not favours.',
+    tagline: 'Rights for everyone.',
     about: [
-      'A sample advocacy organisation used to illustrate how an operational partnership renders. Not a real partner.',
+      'A sample advocacy organisation used to illustrate how an operational partnership renders. This partner is a sample.',
     ],
     stats: [
       { value: 'Multi-year', label: 'Illustrative tenure' },
@@ -2901,7 +2899,7 @@ const PARTNERS: PartnerSeedDefinition[] = [
     aboutMore: [
       {
         heading: 'Why we partner',
-        body: 'Illustrative operational partnership — legal advocacy that backs member protections.',
+        body: 'Illustrative operational partnership: legal advocacy that backs member protections.',
       },
     ],
     jointWork: [
@@ -2944,7 +2942,7 @@ const PARTNERS: PartnerSeedDefinition[] = [
     reviewNote: null,
     featured: true,
     testimonialQuote:
-      "What QueerPulse asked us for at the start was unusual: not money, not co-branding — a commitment to specific operational changes in how our helpline handed off to a community. It took a year. It's the partnership we're proudest of.",
+      "What QueerPulse asked us for at the start was unusual, a commitment to specific operational changes in how our helpline handed off to a community, it took a year but it's the partnership we're proudest of",
     testimonialAuthor: 'Programme Director',
     testimonialRole: 'Northside LGBTI+ Association',
   },
@@ -2962,7 +2960,7 @@ const PARTNERS: PartnerSeedDefinition[] = [
     eyebrow: 'Health & wellbeing',
     tagline: 'Care that meets you where you are.',
     about: [
-      'A sample health collective used to illustrate a community-level wellbeing partnership, run largely by volunteers. Not a real partner.',
+      'A sample health collective used to illustrate a community-level wellbeing partnership, run largely by volunteers. This partner is a sample.',
     ],
     stats: [
       { value: 'A few hundred', label: 'People supported / year (sample)' },
@@ -2970,7 +2968,7 @@ const PARTNERS: PartnerSeedDefinition[] = [
     aboutMore: [
       {
         heading: 'Why we partner',
-        body: 'Illustrative community partnership — consistent volunteers make a visible difference for drop-in visitors.',
+        body: 'Illustrative community partnership: consistent volunteers make a visible difference for drop-in visitors.',
       },
     ],
     jointWork: [
@@ -3029,13 +3027,13 @@ const PARTNERS: PartnerSeedDefinition[] = [
     eyebrow: 'Arts & community',
     tagline: 'Slow making, together.',
     about: [
-      'A sample arts foundation used to illustrate a community-level cultural partnership. Not a real partner.',
+      'A sample arts foundation used to illustrate a community-level cultural partnership. This partner is a sample.',
     ],
     stats: [{ value: 'A dozen or so', label: 'Workshops hosted (sample)' }],
     aboutMore: [
       {
         heading: 'Why we partner',
-        body: 'Illustrative community partnership — a monthly workshop is one of the few hands-on, low-pressure event spaces we co-host.',
+        body: 'Illustrative community partnership: a monthly workshop is one of the few hands-on, low-pressure event spaces we co-host.',
       },
     ],
     jointWork: [
@@ -3092,9 +3090,9 @@ const PARTNERS: PartnerSeedDefinition[] = [
     tier: 'Applicant',
     since: 'Illustrative applicant',
     eyebrow: 'Arts & space',
-    tagline: 'A room of our own, on loan.',
+    tagline: 'A studio of our own, on loan.',
     about: [
-      'A sample applicant used to illustrate the "pending" review state. Not a real applicant.',
+      'A sample applicant used to illustrate the "pending" review state. This applicant is a sample.',
     ],
     stats: [],
     aboutMore: [],
@@ -3292,7 +3290,7 @@ const LISTINGS: ListingSeedDefinition[] = [
     ownerBio:
       'Designer for cultural institutions and small presses. Believes good design is a form of care.',
     address: 'R. da Escola Politécnica 84 · Príncipe Real',
-    hoursNote: 'Open by appointment — message to arrange a time.',
+    hoursNote: 'Open by appointment: message to arrange a time.',
     attributes: [
       'made-to-order',
       'custom-commissions',
@@ -3305,7 +3303,7 @@ const LISTINGS: ListingSeedDefinition[] = [
     inclusionPractices: ['chosen-name'],
     langs: ['pt', 'en'],
     whatItIs: [
-      'Inês runs Atelier Pulso as a small studio doing brand identity and editorial design — mostly for cultural institutions, small presses, and queer projects.',
+      'Inês runs Atelier Pulso as a small studio doing brand identity and editorial design, mostly for cultural institutions, small presses, and queer projects.',
       'It is genuinely open by appointment: message ahead to see the print archive or talk about a project. Riso and letterpress on site.',
     ],
     gallery: [
@@ -3332,14 +3330,14 @@ const LISTINGS: ListingSeedDefinition[] = [
     hood: 'Mouraria',
     price: '€€€',
     blurb:
-      'Monthly intimate dinners — twelve seats, seasonal menu, honest cooking. The most important table in Mouraria.',
+      'Monthly intimate dinners: twelve seats, seasonal menu, honest cooking. The most important table in Mouraria.',
     tagline: 'Twelve seats, one long table, the best night out sitting down.',
     ownerName: 'Tomás Beto',
     ownerRole: 'Chef · host',
     ownerBio:
       'Chef and supper-club host. Cooks the way his avó did, for people who need a table.',
     address: 'Address shared with ticket · Mouraria',
-    hoursNote: 'Monthly seatings — book a seat for the next dinner.',
+    hoursNote: 'Monthly seatings: book a seat for the next dinner.',
     attributes: [
       'vegetarian-options',
       'vegan-options',
@@ -3459,11 +3457,11 @@ const LISTINGS: ListingSeedDefinition[] = [
     price: '€€€',
     blurb:
       'Queer-owned natural wine bar and small-plates kitchen. Seasonal menu, opinionated wine list.',
-    tagline: 'Natural wine, small plates, and a room that wants you to stay.',
+    tagline: 'Natural wine, small plates, and a bar that wants you to stay.',
     ownerName: 'Marco & Renato',
     ownerRole: 'Owners',
     ownerBio:
-      'A couple who left restaurant kitchens to open the room they wanted to drink in. One is a QueerPulse member.',
+      'A couple who left restaurant kitchens to open the bar they wanted to drink in. One is a QueerPulse member.',
     address: 'R. de Arroios 142 · Arroios',
     hoursNote: 'Evenings, Tue–Sun. Closed Mondays.',
     attributes: [
@@ -3478,7 +3476,7 @@ const LISTINGS: ListingSeedDefinition[] = [
     inclusionPractices: [],
     langs: ['pt', 'en', 'fr'],
     whatItIs: [
-      'A Farinha is a queer-owned natural wine bar and small-plates kitchen in Arroios — a short seasonal menu and a long, opinionated wine list.',
+      'A Farinha is a queer-owned natural wine bar and small-plates kitchen in Arroios, with a short seasonal menu and a long, opinionated wine list.',
       'It’s the place for a second date, a celebration, or a slow Tuesday that turns into something.',
     ],
     gallery: ['The bar', 'Small plates', 'Wine wall', 'Arroios corner'],
@@ -3531,7 +3529,7 @@ const LISTINGS: ListingSeedDefinition[] = [
     price: '€€',
     blurb:
       'Queer-owned barbershop known for trans haircuts done right. No awkward questions, no gendered pricing.',
-    tagline: 'The cut you ask for is the cut you get — no negotiation.',
+    tagline: 'The cut you ask for is the cut you get, no negotiation.',
     ownerName: 'Vasco Lima',
     ownerRole: 'Owner · barber',
     ownerBio:
@@ -3555,7 +3553,7 @@ const LISTINGS: ListingSeedDefinition[] = [
     langs: ['pt', 'pt-BR', 'en'],
     whatItIs: [
       'Navalha is a queer-owned barbershop built on giving trans and non-binary clients the haircut they actually asked for, without the interrogation.',
-      'Pricing is by service, never by gender or hair length.',
+      'Pricing follows the service alone, whatever your gender or hair length.',
     ],
     gallery: [
       'The chairs',
@@ -3579,11 +3577,11 @@ const LISTINGS: ListingSeedDefinition[] = [
     blurb:
       'Yoga, capoeira, and weights in a converted Alfama warehouse. Queer-run, sliding-scale memberships.',
     tagline:
-      'Yoga, capoeira, and iron under one Alfama roof — pay what you can.',
+      'Yoga, capoeira, and iron under one Alfama roof, pay what you can.',
     ownerName: 'Rui & Pedro',
     ownerRole: 'Co-founders',
     ownerBio:
-      'Two friends who wanted one room for all the ways they move. Queer-run, sliding-scale on principle.',
+      'Two friends who wanted one place for all the ways they move. Queer-run, sliding-scale on principle.',
     address: 'Beco do Mexias 4 · Alfama',
     hoursNote: 'Class schedule Mon–Sat; weights room open daily.',
     attributes: [
@@ -3605,7 +3603,7 @@ const LISTINGS: ListingSeedDefinition[] = [
     langs: ['pt', 'en'],
     whatItIs: [
       'Movimento is a queer-run movement space in a converted Alfama warehouse: yoga at dawn, capoeira in the evening, free weights in between.',
-      'Memberships are sliding-scale and nobody checks your maths, so the room ends up genuinely mixed.',
+      'Memberships are sliding-scale and nobody checks your maths, so the crowd ends up genuinely mixed.',
     ],
     gallery: [
       'Warehouse floor',
@@ -3638,14 +3636,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'André Quintela',
       byline: 'he/him · client',
       stars: 5,
-      text: 'Inês rebuilt my studio identity and made it feel more like me than my old one did. Patient, fast, honest about what wasn’t working.',
+      text: 'Inês rebuilt my studio identity and made it feel more like me than my old one did, patient, fast, honest about what wasn’t working',
       helpful: 12,
     },
     {
       name: 'Livraria Bertha',
       byline: 'partner',
       stars: 5,
-      text: 'Designed our entire signage and event series. Every queer press in Lisbon should be working with her.',
+      text: 'Designed our entire signage and event series, every queer press in Lisbon should be working with her',
       helpful: 7,
     },
   ],
@@ -3654,14 +3652,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'Carla Nunes',
       byline: 'she/her · regular',
       stars: 5,
-      text: 'I came alone to my first one terrified and left with three numbers and a full heart. Tomás seats you like he’s thought about it all week.',
+      text: 'I came alone to my first one terrified and left with three numbers and a full heart, Tomás seats you like he’s thought about it all week',
       helpful: 28,
     },
     {
       name: 'Kai Oliveira',
       byline: 'they/them · 2 visits',
       stars: 5,
-      text: 'The food is genuinely excellent and the room is the point. Best twelve euros-an-hour my social life has ever spent.',
+      text: 'The food is genuinely excellent and the company is the point, best twelve euros-an-hour my social life has ever spent',
       helpful: 15,
     },
   ],
@@ -3670,14 +3668,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'Luísa Marques',
       byline: 'she/her · curator',
       stars: 5,
-      text: 'Lume shows the work the big institutions will claim to have discovered in five years. Go now and be smug later.',
+      text: 'Lume shows the work the big institutions will claim to have discovered in five years, go now and be smug later',
       helpful: 12,
     },
     {
       name: 'Beatriz Pinto',
       byline: 'she/her · artist',
       stars: 5,
-      text: 'They gave me my first solo room and treated it like it mattered. Openings feel like a community, not a market.',
+      text: 'They gave me my first solo show and treated it like it mattered, openings feel like a community',
       helpful: 8,
     },
   ],
@@ -3686,14 +3684,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'Sofia Castaño',
       byline: 'she/her · regular',
       stars: 5,
-      text: 'I have never left empty-handed and never left poorer in spirit. The recommendations card by the till is a hazard.',
+      text: 'I have never left empty-handed and never left poorer in spirit, the recommendations card by the till is a hazard',
       helpful: 17,
     },
     {
       name: 'Nuno Ferreira',
       byline: 'he/him · 4 visits',
       stars: 5,
-      text: 'Came for one book, stayed for a launch I didn’t know was happening, met half a reading group. That’s Bertha.',
+      text: 'Came for one book, stayed for a launch I didn’t know was happening, met half a reading group, that’s Bertha',
       helpful: 11,
     },
   ],
@@ -3702,14 +3700,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'Anika Rao',
       byline: 'she/her · regular',
       stars: 5,
-      text: 'Told Renato "something orange and a bit weird" and he changed my whole opinion of wine. The plates kept coming and I let them.',
+      text: 'Told Renato "something orange and a bit weird" and he changed my whole opinion of wine, the plates kept coming and I let them',
       helpful: 16,
     },
     {
       name: 'Sofia Castaño',
       byline: 'she/her · 3 visits',
       stars: 5,
-      text: 'Brought a date, then my friends, then my mother. Passed every test. Hospitality you can feel.',
+      text: 'Brought a date, then my friends, then my mother, passed every test, hospitality you can feel',
       helpful: 9,
     },
   ],
@@ -3718,14 +3716,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'Kai Oliveira',
       byline: 'they/them · artist',
       stars: 5,
-      text: 'Diogo got a sound out of my demos I’d been chasing for two years. The modular wall alone is worth the trip.',
+      text: 'Diogo got a sound out of my demos I’d been chasing for two years, the modular wall alone is worth the trip',
       helpful: 10,
     },
     {
       name: 'Rita Sousa',
       byline: 'she/her · client',
       stars: 5,
-      text: 'First-record sliding scale meant I could afford to make the thing properly. Patient with a total beginner.',
+      text: 'First-record sliding scale meant I could afford to make the thing properly, patient with a total beginner',
       helpful: 8,
     },
   ],
@@ -3734,14 +3732,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'Kai Oliveira',
       byline: 'they/them · regular',
       stars: 5,
-      text: 'Asked for a cut I’d been too scared to ask for anywhere. Vasco just nodded and did it perfectly. I cried a little in the chair.',
+      text: 'Asked for a cut I’d been too scared to ask for anywhere, Vasco just nodded and did it perfectly, I cried a little in the chair',
       helpful: 41,
     },
     {
       name: 'Nuno Ferreira',
       byline: 'he/him · monthly',
       stars: 5,
-      text: 'Same price as my old place, none of the awkwardness, twice the skill. Never going anywhere else.',
+      text: 'Same price as my old place, none of the awkwardness, twice the skill, never going anywhere else',
       helpful: 13,
     },
   ],
@@ -3750,14 +3748,14 @@ const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
       name: 'Kai Oliveira',
       byline: 'they/them · member',
       stars: 5,
-      text: 'Where else can you do sun salutations and then deadlift in the same hour for whatever you can pay? Alfama’s best-kept secret.',
+      text: 'Where else can you do sun salutations and then deadlift in the same hour for whatever you can pay? Alfama’s best-kept secret',
       helpful: 15,
     },
     {
       name: 'Tomás Beto',
       byline: 'he/him · capoeira',
       stars: 4,
-      text: 'The roda on Sundays is pure joy and properly mixed — ages, bodies, levels. Sliding scale means everyone’s actually there.',
+      text: 'The roda on Sundays is pure joy and properly mixed, ages, bodies, levels, sliding scale means everyone’s actually there',
       helpful: 8,
     },
   ],
@@ -3778,7 +3776,7 @@ const LISTING_EVENTS: Record<string, ListingEventSeed[]> = {
   'galeria-lume': [
     {
       slug: 'lume-group-show-opening',
-      title: 'Opening — group show, eight emerging artists',
+      title: 'Opening: group show, eight emerging artists',
       description:
         'The summer group show opens with eight emerging queer and feminist artists. Free entry, generous openings.',
       inDays: 12,
@@ -3788,7 +3786,7 @@ const LISTING_EVENTS: Record<string, ListingEventSeed[]> = {
   'livraria-bertha': [
     {
       slug: 'bertha-queer-poetry-reading',
-      title: 'Reading — new queer poetry in translation',
+      title: 'Reading: new queer poetry in translation',
       description:
         'An evening of new queer poetry in translation, read between the stacks.',
       inDays: 5,
@@ -3806,7 +3804,7 @@ const LISTING_EVENTS: Record<string, ListingEventSeed[]> = {
   'queer-supper-club': [
     {
       slug: 'supper-club-summer-dinner',
-      title: 'Summer dinner — the market decides',
+      title: 'Summer dinner: the market decides',
       description:
         'The next monthly seating: a seasonal menu for twelve, the market decides the courses.',
       inDays: 9,
@@ -4017,15 +4015,15 @@ const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
     heroNote: 'Catarina on her street in Mouraria',
     lead: "She turned a stack of eviction notices into a residents' coalition the city council could not ignore.",
     body: [
-      'In the spring of 2022, three of Catarina\'s neighbours got the same letter within a week — a notice to vacate, dressed up in the language of "building works." She recognised it for what it was: the slow, legal pushing-out of the people who had made Mouraria what it is. Many of them were older, many were queer, and almost all had lived on the same street for decades.',
-      'She could have signed a petition. Instead she started knocking on doors. Not to organise a protest — to map the situation. Who had received what, when, from which landlord, under which clause. By the end of the month she had a spreadsheet that did something no individual tenant could do alone: it showed a pattern.',
-      "That spreadsheet became a coalition. The coalition became a delegation to the Câmara Municipal, where Catarina testified — twice — on how short-term rentals were hollowing out the neighbourhood's queer community. She is not a lawyer and has never claimed to be one. What she is, is impossible to brush aside, because she always arrives with the receipts.",
-      "Today her residents' network is the most active in Mouraria. It runs a phone tree for anyone who gets a notice, a shared folder of documentation, and a standing relationship with ILGA Portugal's legal team. None of it existed three years ago. All of it exists because one person decided that the neighbourhood that raised us should still have room for us.",
-      "We highlight Catarina because her work is the kind that rarely gets seen: patient, unglamorous, and built entirely on showing up for the people next door. She didn't wait to be qualified. She started, and the qualification followed.",
+      'In the spring of 2022, three of Catarina\'s neighbours got the same letter within a week: a notice to vacate, dressed up in the language of "building works." She recognised it for what it was: the slow, legal pushing-out of the people who had made Mouraria what it is. Many of them were older, many were queer, and almost all had lived on the same street for decades.',
+      'She could have signed a petition. Instead she started knocking on doors to map the situation. Who had received what, when, from which landlord, under which clause. By the end of the month she had a spreadsheet that did something no individual tenant could do alone: it showed a pattern.',
+      "That spreadsheet became a coalition. The coalition became a delegation to the Câmara Municipal, where Catarina testified twice on how short-term rentals were hollowing out the neighbourhood's queer community. She is not a lawyer and has never claimed to be one. What she is, is impossible to brush aside, because she always arrives with the receipts.",
+      "Today her residents' network is the most active in Mouraria. It runs a phone tree for anyone who gets a notice, a shared folder of documentation, and a standing relationship with ILGA Portugal's legal team. None of it existed three years ago. All of it exists because one person decided that the neighbourhood that raised us should still have a place for us.",
+      'We highlight Catarina because her work is the kind that rarely gets seen: patient, unglamorous, and built entirely on showing up for the people next door. She started before anyone qualified her, and the qualification followed.',
     ],
     pullQuoteText:
-      'The neighbourhood that raised us should still have room for us.',
-    pullQuoteCite: '— Catarina Vaz',
+      'The neighbourhood that raised us should still have a place for us.',
+    pullQuoteCite: 'Catarina Vaz',
     isFeatured: true,
     sortOrder: 0,
   },
@@ -4045,17 +4043,17 @@ const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
     ],
     byline: 'Words by Catarina Vaz',
     heroNote: 'Jonas at a GP training session',
-    lead: "He decided that the fifteen minutes trans patients spend explaining themselves should be the doctor's job to remove, not the patient's to endure.",
+    lead: 'He decided that the fifteen minutes trans patients spend explaining themselves should be removed by the doctor, with no work left for the patient.',
     body: [
-      'Jonas started counting. Every appointment, every trans person he knew described the same tax: the first ten or fifteen minutes spent not on their health, but on explaining themselves — their identity, their history, their words — to a clinician who should already have known.',
-      "So he built the thing that didn't exist: Saúde Trans, a plain-language resource that trans patients could hand to a GP, and that GPs could actually use. Not an academic paper. A practical guide — what to ask, what not to ask, what to write down, who to refer to.",
+      'Jonas started counting. Every appointment, every trans person he knew described the same tax: the first ten or fifteen minutes spent on explaining themselves (their identity, their history, their words) to a clinician who should already have known.',
+      "So he built the thing that didn't exist: Saúde Trans, a plain-language resource that trans patients could hand to a GP, and that GPs could actually use. It is a practical guide: what to ask, what not to ask, what to write down, who to refer to.",
       'Then he did the harder thing. He started training doctors, one practice at a time. Over forty GPs have now sat through his session, which is less a lecture than a series of uncomfortable, useful corrections. Several of them now run clinics that members travel across the city to reach.',
-      'He is not satisfied with individual clinics, though. Reform is the point. Jonas now sits on a working group advising the public health service on trans care pathways — the slow, bureaucratic, deeply unglamorous arena where the fifteen minutes actually get abolished for everyone, not just the people lucky enough to find a good doctor.',
+      'He is not satisfied with individual clinics, though. Reform is the point. Jonas now sits on a working group advising the public health service on trans care pathways, the slow, bureaucratic, deeply unglamorous arena where the fifteen minutes actually get abolished for everyone, including people who never find a good doctor.',
       'We highlight Jonas because he turned a private frustration into a public protocol. He measured the harm, named it, and then did the patient work of removing it from the system itself.',
     ],
     pullQuoteText:
       "Explaining yourself shouldn't be the price of getting care.",
-    pullQuoteCite: '— Jonas Ferreira',
+    pullQuoteCite: 'Jonas Ferreira',
     isFeatured: false,
     sortOrder: 1,
   },
@@ -4067,7 +4065,7 @@ const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
     tint: 'coral',
     tags: ['Arts', 'Curating', 'Culture'],
     summary:
-      'Programmed the first queer season at a major Lisbon museum and co-founded the Rainbow Arts Collective. Making queer art central, not marginal.',
+      'Programmed the first queer season at a major Lisbon museum and co-founded the Rainbow Arts Collective. Making queer art central to the city.',
     impact: [
       'Curated the first dedicated queer season at a major Lisbon museum',
       'Co-founded the Rainbow Arts Collective and its open-crit programme',
@@ -4075,17 +4073,16 @@ const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
     ],
     byline: 'Words by André Bento',
     heroNote: 'Luísa in the gallery, mid-install',
-    lead: 'She refused the sidebar. Queer art, she insists, belongs in the main hall — and she has spent a decade putting it there.',
+    lead: 'She refused the sidebar. Queer art, she insists, belongs in the main hall, and she has spent a decade putting it there.',
     body: [
-      'For most of Luísa\'s career, "queer programming" in Lisbon meant a corner during Pride, a panel after hours, a side room. She found the arrangement quietly insulting — not because the work was bad, but because the placement said something about where it belonged.',
-      "So when she finally had the keys, she programmed the first dedicated queer season at a major Lisbon museum — in the main galleries, in the main season, on the main posters. Not as a theme to be visited and left, but as part of the city's cultural record.",
-      "Alongside the institutional work, she co-founded the Rainbow Arts Collective, which does the opposite job: it builds rooms from nothing, in borrowed spaces, for artists who don't yet have the keys. The two halves of her work feed each other — the collective is where the museum's next show often begins.",
+      'For most of Luísa\'s career, "queer programming" in Lisbon meant a corner during Pride, a panel after hours, a side room. She found the arrangement quietly insulting, because the placement said something about where the work belonged.',
+      "So when she finally had the keys, she programmed the first dedicated queer season at a major Lisbon museum, in the main galleries, in the main season, on the main posters, as part of the city's cultural record.",
+      "Alongside the institutional work, she co-founded the Rainbow Arts Collective, which does the opposite job: it builds spaces from nothing, in borrowed spaces, for artists who don't yet have the keys. The two halves of her work feed each other, and the collective is where the museum's next show often begins.",
       "What ties it together is a refusal of the margin. Luísa treats queer art as central to Lisbon's story, and then makes the institutions act as if that were obviously true.",
-      "We highlight Luísa because changing what hangs on the main wall changes what a city thinks of itself. She didn't ask for a bigger sidebar. She moved the work to the centre.",
+      'We highlight Luísa because changing what hangs on the main wall changes what a city thinks of itself. She moved the work to the centre.',
     ],
-    pullQuoteText:
-      "We're not a sidebar to this city. We're part of the main story.",
-    pullQuoteCite: '— Luísa Gomes',
+    pullQuoteText: "We are part of this city's main story.",
+    pullQuoteCite: 'Luísa Gomes',
     isFeatured: false,
     sortOrder: 2,
   },
@@ -4179,13 +4176,13 @@ const ORG_TIERS: Array<{
     name: 'Employer',
     priceDisplay: '€2.4k',
     pricePeriod: 'per year',
-    dek: 'For workplaces that want to back the community materially, not with a logo.',
+    dek: 'For workplaces that want to back the community materially.',
     bullets: [
       'A verified employer profile members can vouch for',
       'Two open clinic / advice nights a year',
       'Quarterly impact note (no vanity metrics)',
       'Named contact for member escalations',
-      'Illustrative tier — figures are sample values',
+      'Illustrative tier: figures are sample values',
     ],
     footnote: 'Reviewed annually. Either side can end it.',
     ctaType: OrgTierCtaType.Propose,
@@ -4200,15 +4197,15 @@ const ORG_TIERS: Array<{
     name: 'Operational partner',
     priceDisplay: 'Custom',
     pricePeriod: 'scoped per partnership',
-    dek: 'A committed operational seam — the partnership this whole page is about.',
+    dek: 'A committed operational seam: the partnership this whole page is about.',
     bullets: [
       'Specific operational changes, agreed in writing',
       'Joint case-bridge or referral pathway',
       'Shared reporting, member-visible',
-      'A year-long build, not a launch',
-      'Illustrative tier — terms are sample values',
+      'A year-long build',
+      'Illustrative tier: terms are sample values',
     ],
-    footnote: 'Proposed, not purchased. We say no often.',
+    footnote: 'Proposed by you and reviewed by our team. We say no often.',
     ctaType: OrgTierCtaType.Propose,
     ctaTarget: null,
     ctaLabel: 'Propose a partnership',
@@ -4227,7 +4224,7 @@ const ORG_TIERS: Array<{
       'Quarterly reports + annual audit',
       'No say over moderation or editorial',
       'Public funding-transparency entry',
-      'Illustrative tier — figures are sample values',
+      'Illustrative tier: figures are sample values',
     ],
     footnote: 'Multi-year commitments preferred.',
     ctaType: OrgTierCtaType.Propose,
@@ -4406,7 +4403,7 @@ async function seed(): Promise<void> {
             { userId: user.id },
             {
               verified: true,
-              now: 'Illustrating a zine about the neighbourhood.',
+              now: 'Illustrating a zine about the neighbourhood',
               joinedAt: new Date('2024-03-01T00:00:00.000Z'),
             },
           );
@@ -4432,7 +4429,7 @@ async function seed(): Promise<void> {
               userId: user.id,
               kind: ShapingKind.Film,
               title: 'Paris Is Burning',
-              note: 'Chosen family is a craft.',
+              note: 'Chosen family is a craft',
             }),
           ]);
           await manager.getRepository(Activity).save([

@@ -18,6 +18,7 @@ import { MessageHide } from './entities/message-hide.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { Message, MessageKind } from './entities/message.entity';
+import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
 import { mailboxStaffHistoryFloorCoversPredicate } from './mailbox-seats';
 import type { MessageLike } from './messaging-core.service';
 import {
@@ -346,7 +347,10 @@ export async function loadViewerRenderInputs(
   }
 
   // The same floor rule `toMessageResponses` applies to its viewer's seat,
-  // asked once for every floored seat in the audience.
+  // asked once for every floored seat in the audience. PRD-400: that rule
+  // covers a group seat's JOIN floor beside the mailbox staff floor, so a
+  // member who joined a group later gets the unavailable quote for a
+  // pre-join parent here exactly as their own REST read renders it.
   const flooredSeatIds = viewerIds
     .map((viewerId) => firstSeatByUserId.get(viewerId))
     .filter((seat): seat is ConversationParticipant =>
@@ -370,10 +374,13 @@ export async function loadViewerRenderInputs(
             parentIds: parents.map((parent) => parent.id),
           })
           .andWhere(
-            mailboxStaffHistoryFloorCoversPredicate(
+            `(${mailboxStaffHistoryFloorCoversPredicate(
               'parent.created_at',
               'seat',
-            ),
+            )} OR ${groupJoinHistoryFloorCoversPredicate(
+              'parent.created_at',
+              'seat',
+            )})`,
           )
           .getRawMany<{ parentId: string; seatId: string }>()
       : [];

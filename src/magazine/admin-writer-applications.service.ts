@@ -22,6 +22,8 @@ import {
   AdminWriterApplicationsPageDTO,
   toAdminWriterApplicationDTO,
 } from './writer-application-response';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 export const ADMIN_WRITER_APPLICATIONS_PAGE_SIZE = 20;
 
@@ -76,10 +78,20 @@ export class AdminWriterApplicationsService {
   ): Promise<AdminWriterApplicationDTO> {
     const application = await this.applications.findOne({ where: { id } });
     if (!application) {
-      throw new NotFoundException('Writer application not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.WRITER_APPLICATION_NOT_FOUND,
+          'Writer application not found',
+        ),
+      );
     }
     if (application.status !== WriterApplicationStatus.Pending) {
-      throw new ConflictException('Application already resolved');
+      throw new ConflictException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_RESOLVED,
+          'Application already resolved',
+        ),
+      );
     }
     // Approving grants `magazine_writer` (below), so triaging your own
     // application is a self-grant of a staff role. The `editorial` grant that
@@ -90,7 +102,10 @@ export class AdminWriterApplicationsService {
     // refusing a self-appointment: someone else has to decide.
     if (application.userId === actorUserId) {
       throw new ForbiddenException(
-        'Someone else has to review your own writer application',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.WRITER_APPLICATION_SELF_REVIEW,
+          'Someone else has to review your own writer application',
+        ),
       );
     }
 
@@ -127,7 +142,12 @@ export class AdminWriterApplicationsService {
       })
       .execute();
     if (claim.affected === 0) {
-      throw new ConflictException('Application already resolved');
+      throw new ConflictException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_RESOLVED,
+          'Application already resolved',
+        ),
+      );
     }
 
     try {

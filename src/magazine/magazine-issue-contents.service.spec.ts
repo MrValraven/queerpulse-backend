@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { LessThanOrEqual } from 'typeorm';
 import { MagazineIssueContentsService } from './magazine-issue-contents.service';
 import { magazineIssueVisibleThroughDate } from './magazine-clock';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 const NEXT_WEEK = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 const LAST_WEEK = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -36,9 +37,10 @@ describe('MagazineIssueContentsService.getContents', () => {
   it('404s on an issue that has not shipped', async () => {
     const { service, issues } = build();
     issues.findOne.mockResolvedValueOnce(null);
-    await expect(service.getContents('99')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.getContents('99')).rejects.toMatchObject({
+      constructor: NotFoundException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND },
+    });
   });
 
   it('lists a curated entry whose article is already published', async () => {

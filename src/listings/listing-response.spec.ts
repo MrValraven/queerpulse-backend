@@ -242,12 +242,18 @@ describe('toDirectoryDetail', () => {
   });
 
   it('carries framing on the public photoGallery', () => {
-    const listing = makeDirectoryListing({
-      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
-    });
-    expect(
-      toDirectoryDetail(listing, [], [], 0).photoGallery[0]?.framing,
-    ).toEqual(framing);
+    // A real storage key resolves through `toImageUrl`, which needs the base.
+    setImageUrlBase('https://api.test');
+    try {
+      const listing = makeDirectoryListing({
+        photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
+      });
+      expect(
+        toDirectoryDetail(listing, [], [], 0).photoGallery[0]?.framing,
+      ).toEqual(framing);
+    } finally {
+      resetImageUrlBaseForTesting();
+    }
   });
 
   it('passes the saved-item count straight through as savedCount', () => {
@@ -943,13 +949,21 @@ describe('toListingDTO (the owner/managed response)', () => {
   });
 
   it('carries framing on the owner wire photoGallery', () => {
-    const dto = toListingDTO(
-      makeManagedListing({
-        photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
-      }),
-      null,
-    );
-    expect(dto.photoGallery[0]?.framing).toEqual(framing);
+    // A real storage key resolves through `toImageUrl`, which needs the base.
+    setImageUrlBase('https://api.test');
+    try {
+      const dto = toListingDTO(
+        makeManagedListing({
+          photoGallery: [
+            { image: galleryKey, alt: 'Bar', caption: '', framing },
+          ],
+        }),
+        null,
+      );
+      expect(dto.photoGallery[0]?.framing).toEqual(framing);
+    } finally {
+      resetImageUrlBaseForTesting();
+    }
   });
 
   it('carries every attribute field to the owner and serves tags and goodFor empty', () => {

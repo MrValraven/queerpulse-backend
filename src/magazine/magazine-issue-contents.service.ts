@@ -6,6 +6,8 @@ import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazinePiece } from './entities/magazine-piece.entity';
 import { magazineIssueVisibleThroughDate } from './magazine-clock';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /** What kind of page an entry opens. */
 export type IssueContentsEntryKind = 'article' | 'deck';
@@ -88,7 +90,12 @@ export class MagazineIssueContentsService {
       },
     });
     if (!issue) {
-      throw new NotFoundException('Issue not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND,
+          'Issue not found',
+        ),
+      );
     }
 
     const curated = issue.digest.filter((item) => item.on);

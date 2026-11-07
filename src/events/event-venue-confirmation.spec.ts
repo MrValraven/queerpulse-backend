@@ -421,6 +421,7 @@ describe('EventsService venue confirmation (LOC-16)', () => {
         endAt: null,
         timezone: 'Europe/Lisbon',
         venue: 'Lux Cafe',
+        address: null,
         cost: null,
         listingId: null,
         communityId: null,

@@ -8,6 +8,7 @@ import {
   MagazineWriterApplication,
   WriterApplicationStatus,
 } from './entities/magazine-writer-application.entity';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 type ApplicationsRepoOverrides = Partial<{
   create: jest.Mock;
@@ -75,7 +76,12 @@ describe('WriterApplicationsService', () => {
       );
       await expect(
         service.create('user-1', { pitchNote: 'Hi' }),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({
+        constructor: BadRequestException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.WRITER_APPLICATION_SAMPLE_REQUIRED,
+        },
+      });
     });
 
     it('rejects when the user already holds magazine_writer', async () => {
@@ -86,7 +92,12 @@ describe('WriterApplicationsService', () => {
       );
       await expect(
         service.create('user-1', { sampleText: 'A paragraph.' }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_WRITER,
+        },
+      });
     });
 
     it('rejects a duplicate pending application (unique violation)', async () => {
@@ -107,7 +118,12 @@ describe('WriterApplicationsService', () => {
       );
       await expect(
         service.create('user-1', { sampleText: 'A paragraph.' }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_PENDING,
+        },
+      });
     });
 
     it('saves and returns the application on success', async () => {

@@ -74,6 +74,24 @@ describe('StorageKeyOwnershipInterceptor', () => {
     );
   });
 
+  it('puts the UPLOAD_NOT_YOURS code beside the unchanged sentence', () => {
+    const ctx = httpContext(
+      'PATCH',
+      { avatarUrl: OTHER_USER_KEY },
+      { userId: OWN_USER_ID },
+    );
+    let refusal: ForbiddenException | undefined;
+    try {
+      interceptor.intercept(ctx, nextHandler());
+    } catch (error) {
+      refusal = error as ForbiddenException;
+    }
+    expect(refusal?.getResponse()).toEqual({
+      code: 'UPLOAD_NOT_YOURS',
+      message: 'Referenced upload does not belong to you',
+    });
+  });
+
   it('does not leak the other user id in the rejection message', () => {
     const ctx = httpContext(
       'PATCH',

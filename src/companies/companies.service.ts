@@ -11,7 +11,6 @@ import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
-import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
@@ -330,6 +329,7 @@ export class CompaniesService {
   async listReviews(
     slug: string,
     query: CompanyListQuery,
+    viewerId: string,
   ): Promise<Paginated<CompanyReviewDTO>> {
     const company = await this.loadOr404(slug);
     // A taken-down company's reviews are not publicly readable either — the
@@ -344,15 +344,12 @@ export class CompaniesService {
     // In-query, so the paginated count and the page agree with each other.
     this.excludeModeratedReviews(qb, 'r.id');
 
-    return paginate(qb, page, async (rows) => {
-      if (!rows.length) return [];
-      const refs = await new MemberLookup(this.profiles).byUserIds(
-        presentActorIds(rows.map((r) => r.authorId)),
-      );
-      return rows.map((r) =>
-        toCompanyReview(r, actorFromLookup(refs, r.authorId) ?? null),
-      );
-    });
+    // No author lookup: a review's author is never sent to any viewer (the
+    // write screens promise "your name is not shown"). The row only says
+    // whether it is the viewer's own, via `isViewerAuthor`.
+    return paginate(qb, page, (rows) =>
+      rows.map((row) => toCompanyReview(row, viewerId)),
+    );
   }
 
   // UNIQUE per (company, author) — a repeat review from the same member
@@ -377,8 +374,7 @@ export class CompaniesService {
           body: dto.body,
         }),
       );
-      const author = await this.memberRefFor(authorId);
-      return toCompanyReview(saved, author);
+      return toCompanyReview(saved, authorId);
     } catch (err) {
       if (isUniqueViolation(err)) {
         throw new ConflictException('You have already reviewed this company');
@@ -482,12 +478,10 @@ export class CompaniesService {
       subjectLabel: company.nameText,
     });
 
-    // The reply's author is the employer, but the returned row still represents
-    // the REVIEWER, so resolve their profile to keep the DTO's author ref.
-    const author = saved.authorId
-      ? await this.memberRefOrNull(saved.authorId)
-      : null;
-    return toCompanyReview(saved, author);
+    // The caller here is the employer, never the reviewer (the owner cannot
+    // review their own company), so `isViewerAuthor` is false and the reviewer
+    // is not identified to the person answering them.
+    return toCompanyReview(saved, userId);
   }
 
   /**
@@ -574,7 +568,7 @@ export class CompaniesService {
     }
     const saved = await this.reviews.save(review);
 
-    return toCompanyReview(saved, await this.memberRefOrNull(userId));
+    return toCompanyReview(saved, userId);
   }
 
   /**
@@ -662,29 +656,6 @@ export class CompaniesService {
       )`,
       { reviewSubjectType: CompaniesService.REVIEW_SUBJECT_TYPE },
     );
-  }
-
-  // Resolves a userId to a `MemberRef`, or `null` when there is no profile
-  // behind it. Used on the review write paths, where a missing profile must
-  // degrade to an unattributed review rather than fail the write that already
-  // committed — unlike `memberRefFor` below, whose caller is creating the row
-  // and can still refuse.
-  private async memberRefOrNull(userId: string): Promise<MemberRef | null> {
-    const refs = await new MemberLookup(this.profiles).byUserIds([userId]);
-    return refs.get(userId) ?? null;
-  }
-
-  // Resolves a single userId to a MemberRef for an actor who just created a
-  // row (a miss here would mean a data-integrity bug — an authenticated
-  // member without a profile — not a legitimate empty state). Mirrors
-  // `CommunitiesService.memberRefFor`.
-  private async memberRefFor(userId: string): Promise<MemberRef> {
-    const refs = await new MemberLookup(this.profiles).byUserIds([userId]);
-    const ref = refs.get(userId);
-    if (!ref) {
-      throw new NotFoundException('Member profile not found');
-    }
-    return ref;
   }
 
   private async resolveTeamUserIds(

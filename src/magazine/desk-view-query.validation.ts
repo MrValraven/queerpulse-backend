@@ -1,4 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE, MagazineErrorCode } from './magazine-error-codes';
 import { DeskViewQuery } from './entities/magazine-desk-view.entity';
 
 /**
@@ -43,8 +45,16 @@ const ALLOWED_KEYS = new Set([
 const MAX_LIST_ITEMS = 20;
 const MAX_TEXT_LENGTH = 80;
 
-function fail(reason: string): never {
-  throw new BadRequestException(`query: ${reason}`);
+/**
+ * Refuses a malformed saved-view query. `code` is
+ * `MAGAZINE_DESK_VIEW_QUERY_INVALID` for a wrong shape, type or value, and
+ * `MAGAZINE_DESK_VIEW_QUERY_TOO_LARGE` for a list or text cap.
+ */
+function fail(
+  reason: string,
+  code: MagazineErrorCode = MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID,
+): never {
+  throw new BadRequestException(codedErrorBody(code, `query: ${reason}`));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,14 +84,20 @@ function readTextList(
     fail(`${key} must be an array of strings`);
   }
   if (value.length > MAX_LIST_ITEMS) {
-    fail(`${key} holds at most ${MAX_LIST_ITEMS} entries`);
+    fail(
+      `${key} holds at most ${MAX_LIST_ITEMS} entries`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_TOO_LARGE,
+    );
   }
   for (const entry of value) {
     if (typeof entry !== 'string' || entry.length === 0) {
       fail(`${key} entries must be non-empty strings`);
     }
     if (entry.length > MAX_TEXT_LENGTH) {
-      fail(`${key} entries are at most ${MAX_TEXT_LENGTH} characters`);
+      fail(
+        `${key} entries are at most ${MAX_TEXT_LENGTH} characters`,
+        MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_TOO_LARGE,
+      );
     }
   }
   return [...(value as string[])];

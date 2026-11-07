@@ -1,4 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE, MagazineErrorCode } from './magazine-error-codes';
 import { DeckSlide } from './entities/magazine-deck.entity';
 
 /**
@@ -23,8 +25,19 @@ function isStringIfPresent(value: unknown): boolean {
   return value === undefined || typeof value === 'string';
 }
 
-function fail(index: number, reason: string): never {
-  throw new BadRequestException(`slides[${index}]: ${reason}`);
+/**
+ * Refuses one malformed slide. `code` defaults to
+ * `MAGAZINE_DECK_SLIDES_INVALID` (wrong shape, type or choice); an empty
+ * required field passes `MAGAZINE_DECK_SLIDE_FIELD_REQUIRED`.
+ */
+function fail(
+  index: number,
+  reason: string,
+  code: MagazineErrorCode = MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDES_INVALID,
+): never {
+  throw new BadRequestException(
+    codedErrorBody(code, `slides[${index}]: ${reason}`),
+  );
 }
 
 function validateTextSlide(
@@ -43,6 +56,7 @@ function validateTextSlide(
     fail(
       index,
       'text slide requires at least one non-empty heading, body, or pull',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
     );
   }
   if (
@@ -59,13 +73,25 @@ function validateImageSlide(
   index: number,
 ): void {
   if (!isNonEmptyString(record.src)) {
-    fail(index, 'image slide requires a non-empty src');
+    fail(
+      index,
+      'image slide requires a non-empty src',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   if (!isNonEmptyString(record.alt)) {
-    fail(index, 'image slide requires a non-empty alt');
+    fail(
+      index,
+      'image slide requires a non-empty alt',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   if (!isNonEmptyString(record.tint)) {
-    fail(index, 'image slide requires a non-empty tint');
+    fail(
+      index,
+      'image slide requires a non-empty tint',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   for (const field of ['caption', 'overlay'] as const) {
     if (!isStringIfPresent(record[field])) {
@@ -79,13 +105,25 @@ function validateStatSlide(
   index: number,
 ): void {
   if (!isNonEmptyString(record.value)) {
-    fail(index, 'stat slide requires a non-empty value');
+    fail(
+      index,
+      'stat slide requires a non-empty value',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   if (!isNonEmptyString(record.label)) {
-    fail(index, 'stat slide requires a non-empty label');
+    fail(
+      index,
+      'stat slide requires a non-empty label',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   if (!isNonEmptyString(record.tint)) {
-    fail(index, 'stat slide requires a non-empty tint');
+    fail(
+      index,
+      'stat slide requires a non-empty tint',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   for (const field of ['unit', 'source'] as const) {
     if (!isStringIfPresent(record[field])) {
@@ -105,7 +143,11 @@ function validateBeforeAfterPanel(
   const panel = value as Record<string, unknown>;
   for (const field of ['src', 'alt', 'label'] as const) {
     if (!isNonEmptyString(panel[field])) {
-      fail(index, `${panelName}.${field} must be a non-empty string`);
+      fail(
+        index,
+        `${panelName}.${field} must be a non-empty string`,
+        MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+      );
     }
   }
 }
@@ -130,10 +172,18 @@ function validateInteractiveSlide(
 
   // kind === 'reveal'
   if (!isNonEmptyString(record.prompt)) {
-    fail(index, 'reveal slide requires a non-empty prompt');
+    fail(
+      index,
+      'reveal slide requires a non-empty prompt',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   if (!isNonEmptyString(record.hidden)) {
-    fail(index, 'reveal slide requires a non-empty hidden');
+    fail(
+      index,
+      'reveal slide requires a non-empty hidden',
+      MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDE_FIELD_REQUIRED,
+    );
   }
   if (!isStringIfPresent(record.tint)) {
     fail(index, 'tint must be a string if present');
@@ -147,10 +197,20 @@ function validateInteractiveSlide(
  */
 export function validateDeckSlides(slides: unknown): DeckSlide[] {
   if (!Array.isArray(slides)) {
-    throw new BadRequestException('slides must be an array');
+    throw new BadRequestException(
+      codedErrorBody(
+        MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDES_INVALID,
+        'slides must be an array',
+      ),
+    );
   }
   if (slides.length > 40) {
-    throw new BadRequestException('slides must not exceed 40 entries');
+    throw new BadRequestException(
+      codedErrorBody(
+        MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLIDES_TOO_MANY,
+        'slides must not exceed 40 entries',
+      ),
+    );
   }
 
   slides.forEach((slide, index) => {

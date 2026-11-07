@@ -29,8 +29,11 @@ describe('TokenBucketLimiter.sweepIdle', () => {
     // Only 2 of the 5 seconds needed to refill have passed.
     limiter.sweepIdle(start + 2_000);
 
-    // Still rate-limited: the sweep must not have deleted, and thereby
-    // reset, a bucket that genuinely has not refilled yet.
+    // The kept bucket holds exactly the 2 tokens those 2 seconds refilled,
+    // so the third consume is rate-limited. A swept (deleted) bucket would
+    // have restarted at full capacity and allowed all 5.
+    expect(limiter.tryConsume('u1', start + 2_000)).toBe(true);
+    expect(limiter.tryConsume('u1', start + 2_000)).toBe(true);
     expect(limiter.tryConsume('u1', start + 2_000)).toBe(false);
   });
 

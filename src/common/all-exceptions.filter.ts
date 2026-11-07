@@ -1,8 +1,15 @@
-import { ArgumentsHost, Catch, HttpException, Logger } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  Catch,
+  HttpException,
+  Logger,
+  PayloadTooLargeException,
+} from '@nestjs/common';
 import { BaseExceptionFilter } from '@nestjs/core';
 import * as Sentry from '@sentry/node';
 import { STATUS_CODES } from 'node:http';
 import type { Response } from 'express';
+import { codedErrorBody, PLATFORM_ERROR_CODE } from './coded-error';
 import { recordRequestFailure } from './request-failure-log';
 
 /**
@@ -39,11 +46,24 @@ import { recordRequestFailure } from './request-failure-log';
 export class AllExceptionsFilter extends BaseExceptionFilter {
   private readonly logger = new Logger('UnhandledException');
 
-  catch(exception: unknown, host: ArgumentsHost): void {
+  catch(rawException: unknown, host: ArgumentsHost): void {
     if (host.getType() !== 'http') {
-      super.catch(exception, host);
+      super.catch(rawException, host);
       return;
     }
+
+    // body-parser rejects an oversized body with a plain http-errors error (not
+    // an `HttpException`), so it would be logged and sent to Sentry like a 500.
+    // It is the sender's mistake, so it is turned into the equivalent coded 413
+    // `HttpException` and takes the same quiet client-error path below.
+    const exception = isBodyTooLargeError(rawException)
+      ? new PayloadTooLargeException(
+          codedErrorBody(
+            PLATFORM_ERROR_CODE.PAYLOAD_TOO_LARGE,
+            rawException.message || 'Payload Too Large',
+          ),
+        )
+      : rawException;
 
     const isHttp = exception instanceof HttpException;
     const status = isHttp ? exception.getStatus() : 500;
@@ -117,4 +137,25 @@ function normalizeErrorBody(
         ? reasonPhrase
         : source.message,
   };
+}
+
+/**
+ * Whether `error` is body-parser / raw-body's "request entity too large"
+ * rejection. These are `http-errors` instances, so they carry `status` and
+ * `statusCode` (413) and `type: 'entity.too.large'`; any one of the three is
+ * enough, since the shape is all that is shared with the library.
+ */
+function isBodyTooLargeError(error: unknown): error is Error {
+  if (typeof error !== 'object' || error === null) return false;
+  if (error instanceof HttpException) return false;
+  const fields = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    type?: unknown;
+  };
+  return (
+    fields.status === 413 ||
+    fields.statusCode === 413 ||
+    fields.type === 'entity.too.large'
+  );
 }

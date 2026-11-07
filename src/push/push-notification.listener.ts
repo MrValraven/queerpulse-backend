@@ -1245,7 +1245,8 @@ export class PushNotificationListener {
   }
 
   /**
-   * "Someone says they paid Night Shift for Lisbon at four" (Studio
+   * "Lisbon at four: a buyer says they paid Night Shift. Confirm it in
+   * Studio." (Studio
    * purchases). Goes to the members of the persona that hold a Studio grant,
    * behind the `Personas` switch, and opens the payments page on that
    * persona. No member is resolved, so no face or name rides along; the
@@ -1267,8 +1268,8 @@ export class PushNotificationListener {
     );
     if (recipientUserIds.length === 0) return;
     await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
-      title: 'Payment to confirm',
-      body: `Someone says they paid ${artist} for ${item}`,
+      title: 'New payment to confirm',
+      body: `${item}: a buyer says they paid ${artist}. Confirm it in Studio.`,
       tag: `notification:${notification.id}`,
       data: {
         url: `/studio/payments?persona=${encodeURIComponent(subprofileId)}`,
@@ -1283,7 +1284,8 @@ export class PushNotificationListener {
   }
 
   /**
-   * "Night Shift confirmed your payment for Lisbon at four" (Studio
+   * "Night Shift confirmed your payment for Lisbon at four. Your download
+   * is ready." (Studio
    * purchases). Goes to the buyer with no category gate, since the buyer
    * asked for the purchase; quiet hours already ran for the batch. No member
    * is resolved and the amount stays in the app. Opens the purchases page.
@@ -1296,8 +1298,8 @@ export class PushNotificationListener {
     const item = this.payloadString(notification, 'itemTitle');
     if (!artist || !item) return;
     await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
-      title: 'Purchase confirmed',
-      body: `${artist} confirmed your payment for ${item}`,
+      title: 'Payment confirmed',
+      body: `${artist} confirmed your payment for ${item}. Your download is ready.`,
       tag: `notification:${notification.id}`,
       data: { url: '/account/music-purchases' },
       l10n: {
@@ -1310,7 +1312,8 @@ export class PushNotificationListener {
   }
 
   /**
-   * "Night Shift could not match your payment for Lisbon at four" (Studio
+   * "Night Shift could not confirm your payment for Lisbon at four. Open
+   * Studio to see why." (Studio
    * purchases). Goes to the buyer with no category gate; quiet hours already
    * ran for the batch. The decline reason and the amount stay in the app, and
    * no member is resolved. Opens the purchases page.
@@ -1324,7 +1327,7 @@ export class PushNotificationListener {
     if (!artist || !item) return;
     await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
       title: 'Payment not confirmed',
-      body: `${artist} could not match your payment for ${item}`,
+      body: `${artist} could not confirm your payment for ${item}. Open Studio to see why.`,
       tag: `notification:${notification.id}`,
       data: { url: '/account/music-purchases' },
       l10n: {

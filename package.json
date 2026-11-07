@@ -161,7 +161,7 @@
       "reflect-metadata"
     ],
     "transformIgnorePatterns": [
-      "^(?!.*[\\\\/]node_modules[\\\\/]\\.pnpm[\\\\/](htmlparser2|domhandler|domutils|dom-serializer|domelementtype|entities)@).*[\\\\/]node_modules[\\\\/]"
+      "^(?!.*[\\\\/]node_modules[\\\\/]\\.pnpm[\\\\/](htmlparser2|domhandler|domutils|dom-serializer|domelementtype|entities|cookie)@).*[\\\\/]node_modules[\\\\/]"
     ]
   }
 }

@@ -492,9 +492,12 @@ describe('VjLibraryService', () => {
       find: jest.fn((entity: unknown, options?: FindOptions) =>
         Promise.resolve(findRows(entity, options)),
       ),
-      findOne: jest.fn((entity: unknown, options?: FindOptions) =>
-        Promise.resolve(findRows(entity, options)[0] ?? null),
-      ),
+      // A copy, as TypeORM hands back a fresh entity: a later `update` must
+      // leave a row the service already read unchanged.
+      findOne: jest.fn((entity: unknown, options?: FindOptions) => {
+        const foundRow = findRows(entity, options)[0];
+        return Promise.resolve(foundRow ? { ...foundRow } : null);
+      }),
       count: jest.fn((entity: unknown, options?: FindOptions) =>
         Promise.resolve(findRows(entity, options).length),
       ),

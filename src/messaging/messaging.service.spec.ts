@@ -39,6 +39,13 @@ import { MessageRequestsService } from './message-requests.service';
 import { StorageService } from '../storage/storage.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
+import { Identity, IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
+import { Sticker } from '../stickers/entities/sticker.entity';
+import { MessageHide } from './entities/message-hide.entity';
+import { MESSAGE_DELETE_EVIDENCE_HOLD_DAYS } from './message-evidence-hold';
 
 /**
  * Minimal chainable stand-in for a TypeORM SelectQueryBuilder. Every builder
@@ -123,6 +130,68 @@ function emptyReactions(): { key: string; count: number; mine: boolean }[] {
 
 /** PRD-372: no thread in this suite is official, so the QueerPulse Team
  *  seats are never touched; the id never matches a seat here. */
+/**
+ * Every member in this file speaks as their own profile identity, whose id is
+ * derived from the user id. `IdentitiesService` answers that model alone: a
+ * user may act as their own profile identity and as nothing else, and no
+ * identity here is a business, persona or official mailbox.
+ */
+const PROFILE_IDENTITY_PREFIX = 'profile-identity-';
+
+function profileIdentityIdFor(userId: string): string {
+  return `${PROFILE_IDENTITY_PREFIX}${userId}`;
+}
+
+function profileIdentityFor(identityId: string): Identity {
+  return {
+    id: identityId,
+    kind: IdentityKind.Profile,
+    userId: identityId.startsWith(PROFILE_IDENTITY_PREFIX)
+      ? identityId.slice(PROFILE_IDENTITY_PREFIX.length)
+      : null,
+    subprofileId: null,
+    listingId: null,
+    companyId: null,
+    shouldShowStaffNames: false,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+  };
+}
+
+function identitiesStub() {
+  const staffUserIds = (identityId: string): string[] => {
+    const userId = profileIdentityFor(identityId).userId;
+    return userId ? [userId] : [];
+  };
+  return {
+    resolveProfileIdentityId: jest.fn((userId: string) =>
+      Promise.resolve(profileIdentityIdFor(userId)),
+    ),
+    resolveOfficialIdentityId: jest.fn().mockResolvedValue('official-identity'),
+    getById: jest.fn((identityId: string) =>
+      Promise.resolve(profileIdentityFor(identityId)),
+    ),
+    // Fixture seats and messages written before identities carry no
+    // identity id; the real lookup finds no row for those, so neither does
+    // this one.
+    getByIds: jest.fn((identityIds: Array<string | null | undefined>) =>
+      Promise.resolve(
+        [...new Set(identityIds)]
+          .filter((identityId): identityId is string => Boolean(identityId))
+          .map(profileIdentityFor),
+      ),
+    ),
+    describeIdentities: jest.fn().mockResolvedValue(new Map()),
+    staffUserIds: jest.fn((identityId: string) =>
+      Promise.resolve(staffUserIds(identityId)),
+    ),
+    isAllowedToActAs: jest.fn((userId: string, identityId: string) =>
+      Promise.resolve(staffUserIds(identityId).includes(userId)),
+    ),
+    assertMayActAs: jest.fn().mockResolvedValue(undefined),
+    isRemovedPersona: jest.fn().mockResolvedValue(false),
+  };
+}
+
 function officialMailboxSeatsStub() {
   return {
     officialIdentityId: jest.fn().mockResolvedValue('official-identity'),
@@ -145,7 +214,7 @@ describe('MessagingService', () => {
     findOne: jest.Mock;
     update: jest.Mock;
     save: jest.Mock;
-    exists: jest.Mock;
+    exist: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let messages: {
@@ -221,7 +290,9 @@ describe('MessagingService', () => {
       save: jest.fn((value: Partial<ConversationParticipant>) =>
         Promise.resolve(value),
       ),
-      exists: jest.fn().mockResolvedValue(true),
+      // CW-05: `assertMaySendAs` checks the sending identity's seat in the
+      // thread directly. Default: the sender holds that seat.
+      exist: jest.fn().mockResolvedValue(true),
       // `listConversations` now loads the caller's own participant rows through a
       // bounded, last-activity-ordered QueryBuilder (a deterministic
       // DEFAULT_LIST_LIMIT cap) rather than `participants.find`. Default to an
@@ -406,6 +477,41 @@ describe('MessagingService', () => {
           provide: OfficialMailboxSeatsService,
           useValue: officialMailboxSeatsStub(),
         },
+        // PRD-227: `toMessageResponses` folds the viewer's own "delete for
+        // me" hides on a page's reply parents. Default: nothing hidden.
+        {
+          provide: getRepositoryToken(MessageHide),
+          useValue: {
+            find: jest.fn().mockResolvedValue([]),
+            exist: jest.fn().mockResolvedValue(false),
+          },
+        },
+        // A sticker send resolves its sticker row; no test in this file
+        // sends one.
+        {
+          provide: getRepositoryToken(Sticker),
+          useValue: { findOne: jest.fn().mockResolvedValue(null) },
+        },
+        { provide: IdentitiesService, useValue: identitiesStub() },
+        // Task 11: every sender here is a profile identity, so no message
+        // carries a staff first name.
+        {
+          provide: IdentityAttributionService,
+          useValue: {
+            buildStaffNameResolver: jest
+              .fn()
+              .mockResolvedValue({ resolve: () => null }),
+            loadStaffNameResolverInputs: jest.fn().mockResolvedValue({}),
+          },
+        },
+        // Task 18: reseats a mailbox's staff on a reused enquiry thread; no
+        // test in this file sends an enquiry.
+        {
+          provide: IdentityMailboxSyncService,
+          useValue: {
+            resyncConversation: jest.fn().mockResolvedValue(undefined),
+          },
+        },
       ],
     }).compile();
     service = module.get(MessagingService);
@@ -426,6 +532,31 @@ describe('MessagingService', () => {
     return qb;
   }
 
+  /**
+   * Task 13c: a direct thread's gates (`sendMessage`'s connection and block
+   * checks, `canJoinConversationLive`) read the caller's seat through
+   * `requireParticipant`, then every seat of the thread at once through
+   * `MessagingCoreService.loadDirectThreadSeats`, each seat speaking as its
+   * holder's own profile identity.
+   */
+  function stubDirectThreadSeats(
+    conversationId: string,
+    callerId: string,
+    counterpartId: string,
+  ): void {
+    const directSeat = (userId: string) => ({
+      conversationId,
+      userId,
+      identityId: profileIdentityIdFor(userId),
+    });
+    const callerSeat = directSeat(callerId);
+    participants.findOne.mockResolvedValueOnce(callerSeat);
+    participants.find.mockResolvedValueOnce([
+      callerSeat,
+      directSeat(counterpartId),
+    ]);
+  }
+
   describe('listConversations', () => {
     it('returns [] when the user has no participant rows', async () => {
       stubMyParticipants([]);
@@ -435,14 +566,34 @@ describe('MessagingService', () => {
     });
 
     it('maps grouped unread counts, sorts newest-first, and 0s conversations with no unread row', async () => {
+      // Task 13c: the inbox names a DM counterpart through the identity each
+      // seat speaks as, here every member's own profile.
       stubMyParticipants([
-        { conversationId: 'c1', muted: false, lastReadAt: null },
-        { conversationId: 'c2', muted: true, lastReadAt: new Date() },
+        {
+          conversationId: 'c1',
+          identityId: profileIdentityIdFor('me'),
+          muted: false,
+          lastReadAt: null,
+        },
+        {
+          conversationId: 'c2',
+          identityId: profileIdentityIdFor('me'),
+          muted: true,
+          lastReadAt: new Date(),
+        },
       ]);
       // others (non-self)
       participants.find.mockResolvedValueOnce([
-        { conversationId: 'c1', userId: 'u2' },
-        { conversationId: 'c2', userId: 'u3' },
+        {
+          conversationId: 'c1',
+          userId: 'u2',
+          identityId: profileIdentityIdFor('u2'),
+        },
+        {
+          conversationId: 'c2',
+          userId: 'u3',
+          identityId: profileIdentityIdFor('u3'),
+        },
       ]);
       conversations.find.mockResolvedValueOnce([
         {
@@ -672,15 +823,35 @@ describe('MessagingService', () => {
     });
 
     it('sets replyRequiresConnection (PRD-220) for a DM whose counterpart is not an accepted connection, but not for one who is', async () => {
+      // Task 13c: the reply gate reads the counterpart through the identity
+      // each seat speaks as, here every member's own profile.
       stubMyParticipants([
-        { conversationId: 'c1', muted: false, lastReadAt: null },
-        { conversationId: 'c2', muted: false, lastReadAt: null },
+        {
+          conversationId: 'c1',
+          identityId: profileIdentityIdFor('me'),
+          muted: false,
+          lastReadAt: null,
+        },
+        {
+          conversationId: 'c2',
+          identityId: profileIdentityIdFor('me'),
+          muted: false,
+          lastReadAt: null,
+        },
       ]);
       participants.find.mockResolvedValueOnce([
         // c1's counterpart is a stranger (e.g. a cold housing enquiry);
         // c2's is an accepted connection.
-        { conversationId: 'c1', userId: 'stranger' },
-        { conversationId: 'c2', userId: 'u2' },
+        {
+          conversationId: 'c1',
+          userId: 'stranger',
+          identityId: profileIdentityIdFor('stranger'),
+        },
+        {
+          conversationId: 'c2',
+          userId: 'u2',
+          identityId: profileIdentityIdFor('u2'),
+        },
       ]);
       conversations.find.mockResolvedValueOnce([
         {
@@ -1122,6 +1293,7 @@ describe('MessagingService', () => {
         displayName: 'Member',
         pronouns: null,
         avatarUrl: null,
+        isFormerMember: false,
       });
     });
 
@@ -1442,10 +1614,13 @@ describe('MessagingService', () => {
 
       await service.getMessages('conv-1', 'user-1', {});
 
+      // A system pill (a member joining or leaving) stays in the thread
+      // whoever its actor is.
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         queryBuilder,
         'user-1',
         '"m"."sender_id"',
+        { unless: `"m"."kind" = 'system'` },
       );
     });
 
@@ -1488,10 +1663,13 @@ describe('MessagingService', () => {
         after: '2026-01-02T00:00:00.000Z',
       });
 
+      // A system pill (a member joining or leaving) stays in the thread
+      // whoever its actor is.
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         queryBuilder,
         'user-1',
         '"m"."sender_id"',
+        { unless: `"m"."kind" = 'system'` },
       );
     });
   });
@@ -1509,9 +1687,7 @@ describe('MessagingService', () => {
     });
 
     it('refuses a DM whose counterpart is blocked either way (P0)', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
       await expect(service.canJoinConversationLive('c1', 'me')).resolves.toBe(
@@ -1520,9 +1696,7 @@ describe('MessagingService', () => {
     });
 
     it('allows a normal, unblocked, still-present participant', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       await expect(service.canJoinConversationLive('c1', 'me')).resolves.toBe(
         true,
@@ -1531,16 +1705,24 @@ describe('MessagingService', () => {
   });
 
   describe('markRead', () => {
-    // `requireActiveParticipant` runs its blocked-counterpart probe on its own
-    // builder before `markRead` builds the UPDATE, so the update builder is the
-    // SECOND one handed out. Pin both so the assertions below read the right one.
-    function stubMarkReadBuilders(): { probe: MockQb; update: MockQb } {
-      const probe = makeQb();
+    // `requireActiveParticipant` runs two probes on builders of their own
+    // before `markRead` builds the UPDATE: `requireParticipant`'s mailbox
+    // exclusion check (Task 13c fix round 1), then the blocked-counterpart
+    // check. The update builder is the THIRD one handed out. Pin all three so
+    // the assertions below read the right one.
+    function stubMarkReadBuilders(): {
+      membershipProbe: MockQb;
+      blockProbe: MockQb;
+      update: MockQb;
+    } {
+      const membershipProbe = makeQb();
+      const blockProbe = makeQb();
       const update = makeQb();
       participants.createQueryBuilder
-        .mockReturnValueOnce(probe)
+        .mockReturnValueOnce(membershipProbe)
+        .mockReturnValueOnce(blockProbe)
         .mockReturnValueOnce(update);
-      return { probe, update };
+      return { membershipProbe, blockProbe, update };
     }
 
     it('stamps both watermarks with a DB-side expression and emits the DB value', async () => {
@@ -1587,10 +1769,14 @@ describe('MessagingService', () => {
           userId: 'me',
           lastReadAt: messageTime,
         });
-      messages.findOne.mockResolvedValueOnce({
-        id: 'm1',
-        createdAt: messageTime,
+      // `messageCreatedAt` reads the row's exact microsecond `created_at` as
+      // text, so the watermark keeps the precision the SQL comparison needs.
+      const exactCreatedAt = '2026-06-30T11:59:00.123456Z';
+      const createdAtQuery = makeQb();
+      createdAtQuery.getRawOne.mockResolvedValueOnce({
+        exact_created_at: exactCreatedAt,
       });
+      messages.createQueryBuilder.mockReturnValueOnce(createdAtQuery);
       const { update } = stubMarkReadBuilders();
 
       await service.markRead('c1', 'me', { upToMessageId: 'm1' });
@@ -1603,7 +1789,7 @@ describe('MessagingService', () => {
       );
       expect(update.setParameter).toHaveBeenCalledWith(
         'watermark',
-        messageTime.toISOString(),
+        exactCreatedAt,
       );
     });
 
@@ -1680,9 +1866,7 @@ describe('MessagingService', () => {
     });
 
     it('rejects when the participants are no longer connected', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       connections.areConnected.mockResolvedValue(false);
       await expect(
@@ -1694,9 +1878,7 @@ describe('MessagingService', () => {
     // edge somehow still reads Accepted — defense-in-depth alongside the
     // transactional sever in `SocialService.blockMember`.
     it('rejects a send when either party has blocked the other, even if still marked accepted-connected', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       connections.areConnected.mockResolvedValue(true);
       blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
@@ -1721,9 +1903,7 @@ describe('MessagingService', () => {
     });
 
     it('persists and emits message.created on a valid send', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       connections.areConnected.mockResolvedValue(true);
 
@@ -1736,9 +1916,7 @@ describe('MessagingService', () => {
     });
 
     it('returns a MessageResponse carrying the sender, not the internal view', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       connections.areConnected.mockResolvedValue(true);
       messages.save.mockResolvedValueOnce({
@@ -1795,9 +1973,7 @@ describe('MessagingService', () => {
     });
 
     it('still emits the internal MessageView (with senderId) on message.created', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       connections.areConnected.mockResolvedValue(true);
 
@@ -1819,9 +1995,7 @@ describe('MessagingService', () => {
     // PRD-221: mentioning the ONE person a 1:1 DM could possibly be to is
     // always the same fact its own delivery already told them.
     it('excludes the DM counterpart from the mention fan-out (PRD-221)', async () => {
-      participants.findOne
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      stubDirectThreadSeats('c1', 'me', 'them');
       conversations.findOne.mockResolvedValue({
         id: 'c1',
         kind: ConversationKind.Direct,
@@ -1905,9 +2079,7 @@ describe('MessagingService', () => {
     // unconditional dead end for both sides.
     describe('the one-tap-reply gate (PRD-340)', () => {
       it('lets the member who did NOT initiate the thread send, and opens it', async () => {
-        participants.findOne
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        stubDirectThreadSeats('c1', 'me', 'them');
         conversations.findOne.mockResolvedValue({
           id: 'c1',
           isOfficial: false,
@@ -1925,9 +2097,7 @@ describe('MessagingService', () => {
       });
 
       it('still refuses the INITIATOR until the other side has replied', async () => {
-        participants.findOne
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        stubDirectThreadSeats('c1', 'me', 'them');
         conversations.findOne.mockResolvedValue({
           id: 'c1',
           isOfficial: false,
@@ -1943,9 +2113,7 @@ describe('MessagingService', () => {
       });
 
       it('lets EITHER side send once the thread has been opened', async () => {
-        participants.findOne
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        stubDirectThreadSeats('c1', 'me', 'them');
         conversations.findOne.mockResolvedValue({
           id: 'c1',
           isOfficial: false,
@@ -1965,9 +2133,7 @@ describe('MessagingService', () => {
       // (see the backfill migration's own comment). The platform's original,
       // unconditional rule still applies to it.
       it('keeps refusing both sides of a pre-migration thread with no known initiator', async () => {
-        participants.findOne
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        stubDirectThreadSeats('c1', 'me', 'them');
         conversations.findOne.mockResolvedValue({
           id: 'c1',
           isOfficial: false,
@@ -1995,16 +2161,12 @@ describe('MessagingService', () => {
         });
         connections.areConnected.mockResolvedValue(false);
 
-        participants.findOne
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        stubDirectThreadSeats('c1', 'me', 'them');
         await expect(
           service.sendMessage('c1', 'me', 'hey, still there?'),
         ).rejects.toBeInstanceOf(ForbiddenException);
 
-        participants.findOne
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' })
-          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' });
+        stubDirectThreadSeats('c1', 'them', 'me');
         await expect(
           service.sendMessage('c1', 'them', 'hey, still there?'),
         ).rejects.toBeInstanceOf(ForbiddenException);
@@ -2507,7 +2669,11 @@ describe('MessagingService', () => {
       stubParticipant();
     });
 
-    it('deletes the stored object behind an image attachment nothing else references', async () => {
+    // PRD-361: an unsend keeps the bytes for the evidence hold. The tombstone
+    // carries `attachmentPurgeAfter`, and `MessageEvidenceHoldSweepService`
+    // purges the object once the hold ends (`message-attachment-purge.spec.ts`
+    // covers that purge itself).
+    it('keeps the stored object behind an image attachment and stamps the evidence hold', async () => {
       messages.findOne.mockResolvedValue({
         id: 'm1',
         conversationId: 'c1',
@@ -2519,19 +2685,26 @@ describe('MessagingService', () => {
           provider: 'upload',
         },
       });
-      stubDeleteThenReferenceProbe({ affected: 1, stillReferenced: false });
+      const { update } = stubDeleteThenReferenceProbe({
+        affected: 1,
+        stillReferenced: false,
+      });
 
       await expect(service.deleteMessage('c1', 'm1', 'me')).resolves.toEqual({
         ok: true,
       });
 
-      // `url` and `previewUrl` are the same key for an uploaded image, so the
-      // object is deleted ONCE, not twice.
-      expect(storage.deleteObjectByReference).toHaveBeenCalledTimes(1);
-      expect(storage.deleteObjectByReference).toHaveBeenCalledWith(IMAGE_KEY);
+      expect(storage.deleteObjectByReference).not.toHaveBeenCalled();
+      const [tombstoneValues] = update.set.mock.calls[0] as [
+        { deletedAt: () => string; attachmentPurgeAfter: () => string },
+      ];
+      expect(tombstoneValues.deletedAt()).toBe('now()');
+      expect(tombstoneValues.attachmentPurgeAfter()).toBe(
+        `now() + interval '${MESSAGE_DELETE_EVIDENCE_HOLD_DAYS} days'`,
+      );
     });
 
-    it('deletes the stored object behind a document attachment', async () => {
+    it('keeps the stored object behind a document attachment for the evidence hold', async () => {
       messages.findOne.mockResolvedValue({
         id: 'm1',
         conversationId: 'c1',
@@ -2545,12 +2718,18 @@ describe('MessagingService', () => {
           provider: 'upload',
         },
       });
-      stubDeleteThenReferenceProbe({ affected: 1, stillReferenced: false });
+      const { update } = stubDeleteThenReferenceProbe({
+        affected: 1,
+        stillReferenced: false,
+      });
 
       await service.deleteMessage('c1', 'm1', 'me');
 
-      expect(storage.deleteObjectByReference).toHaveBeenCalledWith(
-        DOCUMENT_KEY,
+      expect(storage.deleteObjectByReference).not.toHaveBeenCalled();
+      expect(update.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachmentPurgeAfter: expect.any(Function),
+        }),
       );
     });
 
@@ -2683,6 +2862,7 @@ describe('buildReplyTo (DES-220 media quote)', () => {
       id: 'p1',
       snippet: 'Photo',
       senderName: 'Ana Silva',
+      senderIsFormerMember: false,
       deleted: false,
       kind: 'image',
       thumbnailUrl: 'https://cdn.example/preview.jpg',

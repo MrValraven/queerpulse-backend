@@ -257,23 +257,36 @@ describe('ListingVenueEventsService (LOC-16)', () => {
       await service.listForOwner('QPL-2026-0001', 'owner-1');
 
       const calls = events.findAndCount.mock.calls as [
-        { where: Record<string, unknown> },
+        { where: Record<string, unknown>[] },
       ][];
       const [pendingCall] = calls;
-      const where = pendingCall?.[0].where ?? {};
-      expect(where['listingId']).toBe(LISTING.id);
-      expect(where['status']).toBe(EventStatus.Published);
-      expect(where['venueConfirmation']).toBe(EventVenueConfirmation.Pending);
-      // `In([...])` keeps the requested values on `_value`.
-      const visibility = where['visibility'] as { _value?: string[] };
-      expect(visibility._value).toEqual([
-        EventVisibility.Public,
-        EventVisibility.Members,
-      ]);
-      // A gathering nobody outside its audience may know about is never listed
-      // here: it can never reach the venue's page, so there is nothing to ask.
-      expect(visibility._value).not.toContain(EventVisibility.InviteOnly);
-      expect(visibility._value).not.toContain(EventVisibility.Network);
+      const whereArms = pendingCall?.[0].where ?? [];
+      // Two OR arms, so a gathering that is underway still counts as upcoming:
+      // one tests the start, the other the end.
+      expect(whereArms).toHaveLength(2);
+      const [startArm, endArm] = whereArms;
+      expect((startArm?.['startAt'] as { _type?: string })._type).toBe(
+        'moreThanOrEqual',
+      );
+      expect((endArm?.['endAt'] as { _type?: string })._type).toBe(
+        'moreThanOrEqual',
+      );
+      for (const where of whereArms) {
+        expect(where['listingId']).toBe(LISTING.id);
+        expect(where['status']).toBe(EventStatus.Published);
+        expect(where['venueConfirmation']).toBe(EventVenueConfirmation.Pending);
+        // `In([...])` keeps the requested values on `_value`.
+        const visibility = where['visibility'] as { _value?: string[] };
+        expect(visibility._value).toEqual([
+          EventVisibility.Public,
+          EventVisibility.Members,
+        ]);
+        // A gathering nobody outside its audience may know about is never
+        // listed here: it can never reach the venue's page, so there is
+        // nothing to ask.
+        expect(visibility._value).not.toContain(EventVisibility.InviteOnly);
+        expect(visibility._value).not.toContain(EventVisibility.Network);
+      }
     });
 
     it('reports true totals alongside the capped arrays', async () => {

@@ -314,7 +314,12 @@ describe('LandlordsService', () => {
       expect(builder.where).toHaveBeenCalledWith('l.status = :live', {
         live: LandlordStatus.Live,
       });
-      expect(result.items[0]?.rating).toEqual({ score: '4.0', count: 2 });
+      // Both fixture rows carry a tenancy attestation.
+      expect(result.items[0]?.rating).toEqual({
+        score: '4.0',
+        count: 2,
+        attestedCount: 2,
+      });
     });
 
     it('applies the hood filter when supplied', async () => {
@@ -401,13 +406,21 @@ describe('LandlordsService', () => {
       // The rating is aggregated in SQL, not summed from the rows above, so
       // the raw AVG/COUNT is what the view reads.
       const ratingQb = ratingQbStub();
-      ratingQb.getRawOne.mockResolvedValue({ average: '4', count: '1' });
+      ratingQb.getRawOne.mockResolvedValue({
+        average: '4',
+        count: '1',
+        attested_count: '1',
+      });
       recommendations.createQueryBuilder.mockReturnValue(ratingQb);
 
       const result = await service.detail('friendly-landlord');
 
       expect(result.slug).toBe('friendly-landlord');
-      expect(result.rating).toEqual({ score: '4.0', count: 1 });
+      expect(result.rating).toEqual({
+        score: '4.0',
+        count: 1,
+        attestedCount: 1,
+      });
       expect(result.recommendations).toHaveLength(1);
     });
   });
@@ -1064,7 +1077,11 @@ describe('LandlordsService', () => {
       const result = await service.browse({ page: 1 });
 
       // 5 alone, never (5 + 1) / 2.
-      expect(result.items[0]?.rating).toEqual({ score: '5.0', count: 1 });
+      expect(result.items[0]?.rating).toEqual({
+        score: '5.0',
+        count: 1,
+        attestedCount: 1,
+      });
     });
 
     it('excludes taken-down stars from the admin console list ratings too', async () => {
@@ -1081,7 +1098,11 @@ describe('LandlordsService', () => {
 
       const result = await service.listForAdmin({ page: 1 });
 
-      expect(result.items[0]?.rating).toEqual({ score: '5.0', count: 1 });
+      expect(result.items[0]?.rating).toEqual({
+        score: '5.0',
+        count: 1,
+        attestedCount: 1,
+      });
     });
 
     it('still SHOWS a taken-down recommendation to staff, flagged, so it can be lifted', async () => {
@@ -1182,9 +1203,14 @@ describe('LandlordsService', () => {
       const detail = await service.detail('friendly-landlord');
 
       expect(Object.keys(detail.recommendations[0] ?? {}).sort()).toEqual([
+        // PRD-249: the author's attestation, the constant self-attested label
+        // and the staff-published landlord reply. None carries a user id.
+        'attestation',
         'createdAt',
         'id',
         'initials',
+        'isSelfAttested',
+        'landlordReply',
         'member',
         'name',
         'stars',
@@ -1192,6 +1218,9 @@ describe('LandlordsService', () => {
         'tint',
         'verificationLevel',
       ]);
+      expect(JSON.stringify(detail.recommendations[0])).not.toContain(
+        'author-1',
+      );
     });
 
     it('hands the same id back from the write, so a fresh rating is reportable', async () => {

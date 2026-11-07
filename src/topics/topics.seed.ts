@@ -71,7 +71,7 @@ export const topicsSeed: TopicSeed[] = [
     tag: 'nightlife',
     label: 'Nightlife',
     description:
-      "Where to dance, who's playing, and which rooms actually feel safe after dark. Party listings, venue reviews, and get-home-safe plans, by the people who go.",
+      "Where to dance, who's playing, and which venues actually feel safe after dark. Party listings, venue reviews, and get-home-safe plans, by the people who go.",
     isCrisisCard: false,
   },
 ];

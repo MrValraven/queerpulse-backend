@@ -103,6 +103,8 @@ describe('buildBadges', () => {
         cat: 'Attendance',
         name: 'First Event',
         context: 'Pride Brunch · Jun 2025',
+        // A member-specific note, so the client renders it as written.
+        hasCustomContext: true,
         rarity: 'common',
         tint: 'jade',
         xpReward: 40,

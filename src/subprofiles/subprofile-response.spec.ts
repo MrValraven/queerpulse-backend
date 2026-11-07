@@ -139,15 +139,15 @@ describe('editVersion (ENG-451)', () => {
 });
 
 describe('tattoo item view shaping', () => {
-  // Well-formed storage keys (`<prefix>/<owner uuid>/<file uuid><ext>`):
+  // Well-formed persona-scoped storage keys (`persona/<uuid>/<uuid><ext>`):
   // `toImageUrl` drops anything that does not parse as one, so a loose
   // stand-in would make the nested ref assertions pass for the wrong reason.
   const ITEM_IMAGE_KEY =
-    'work-image/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222.jpg';
+    'persona/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222.jpg';
   const BEFORE_IMAGE_KEY =
-    'work-image/11111111-1111-1111-1111-111111111111/33333333-3333-3333-3333-333333333333.jpg';
+    'persona/11111111-1111-1111-1111-111111111111/33333333-3333-3333-3333-333333333333.jpg';
   const SESSION_IMAGE_KEY =
-    'work-image/11111111-1111-1111-1111-111111111111/44444444-4444-4444-4444-444444444444.jpg';
+    'persona/11111111-1111-1111-1111-111111111111/44444444-4444-4444-4444-444444444444.jpg';
 
   beforeEach(() => {
     // `toImageUrl` resolves a storage key only once the base URL is wired.

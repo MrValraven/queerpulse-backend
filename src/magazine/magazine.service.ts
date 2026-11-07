@@ -56,13 +56,16 @@ import {
   toOpenIssueResponse,
   toSectionResponse,
 } from './magazine-response';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /**
  * The 409 `code` `updateDeck` answers when a publish-state change targets a
  * deck a desk piece links to. The deck editor reads it to send the same act
  * through the piece's publish/unpublish endpoints instead.
  */
-export const DECK_PUBLISH_VIA_PIECE_CODE = 'magazine_deck_publish_via_piece';
+export const DECK_PUBLISH_VIA_PIECE_CODE =
+  MAGAZINE_ERROR_CODE.MAGAZINE_DECK_PUBLISH_VIA_PIECE;
 
 /**
  * The 409 `code` `updateDeck` answers when a publish-state change targets a
@@ -71,7 +74,8 @@ export const DECK_PUBLISH_VIA_PIECE_CODE = 'magazine_deck_publish_via_piece';
  * publish from their desk piece; a standalone deck can still come back down
  * (`publishedAt: null`) but has no piece to publish through.
  */
-export const DECK_PUBLISH_UNLINKED_CODE = 'magazine_deck_publish_unlinked';
+export const DECK_PUBLISH_UNLINKED_CODE =
+  MAGAZINE_ERROR_CODE.MAGAZINE_DECK_PUBLISH_UNLINKED;
 
 /** Two nullable publish instants name the same moment (or are both null). */
 function isSameInstant(left: Date | null, right: Date | null): boolean {
@@ -224,7 +228,12 @@ export class MagazineService {
       },
     });
     if (!issue) {
-      throw new NotFoundException('Issue not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ISSUE_NOT_FOUND,
+          'Issue not found',
+        ),
+      );
     }
     const crops = await this.mediaCropService.getMany(
       issue.coverUrl ? [issue.coverUrl] : [],
@@ -545,7 +554,12 @@ export class MagazineService {
       !addressed.publishedAt ||
       addressed.publishedAt > new Date()
     ) {
-      throw new NotFoundException('Article not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_NOT_FOUND,
+          'Article not found',
+        ),
+      );
     }
 
     const article = await this.resolveRequestedLocale(addressed, lang);
@@ -721,7 +735,12 @@ export class MagazineService {
   async getAuthorBySlug(slug: string): Promise<AuthorResponse> {
     const author = await this.authors.findOne({ where: { slug } });
     if (!author) {
-      throw new NotFoundException('Author not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_AUTHOR_NOT_FOUND,
+          'Author not found',
+        ),
+      );
     }
     return this.toOneAuthorResponse(author);
   }
@@ -767,7 +786,12 @@ export class MagazineService {
   ): Promise<AuthorResponse> {
     const author = await this.authors.findOne({ where: { slug } });
     if (!author) {
-      throw new NotFoundException('Author not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_AUTHOR_NOT_FOUND,
+          'Author not found',
+        ),
+      );
     }
 
     if (dto.memberSlug !== undefined) {
@@ -789,7 +813,10 @@ export class MagazineService {
     const author = await this.authors.findOne({ where: { userId } });
     if (!author) {
       throw new NotFoundException(
-        'You have no magazine byline yet. One is created when your first piece publishes.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_OWN_BYLINE_NOT_FOUND,
+          'You have no magazine byline yet. One is created when your first piece publishes.',
+        ),
       );
     }
     return this.applyAuthorEdits(
@@ -889,14 +916,22 @@ export class MagazineService {
       select: { userId: true, slug: true },
     });
     if (!profile) {
-      throw new NotFoundException('No member with that profile slug');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_AUTHOR_LINK_MEMBER_NOT_FOUND,
+          'No member with that profile slug',
+        ),
+      );
     }
     const alreadyLinked = await this.authors.findOne({
       where: { userId: profile.userId },
     });
     if (alreadyLinked && alreadyLinked.id !== author.id) {
       throw new ConflictException(
-        'That member is already linked to another magazine byline',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_AUTHOR_LINK_MEMBER_TAKEN,
+          'That member is already linked to another magazine byline',
+        ),
       );
     }
     return profile.userId;
@@ -965,7 +1000,12 @@ export class MagazineService {
     // 404 an unknown slug and an unpublished/future-dated one alike, mirroring
     // `getArticleBySlug` / `ContentPagesService.getBySlug`.
     if (!deck || !deck.publishedAt || deck.publishedAt > new Date()) {
-      throw new NotFoundException('Deck not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_NOT_FOUND,
+          'Deck not found',
+        ),
+      );
     }
     return toDeckResponse(deck);
   }
@@ -981,7 +1021,12 @@ export class MagazineService {
   async getDeckById(id: string): Promise<DeckResponse> {
     const deck = await this.decks.findOne({ where: { id } });
     if (!deck) {
-      throw new NotFoundException('Deck not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_NOT_FOUND,
+          'Deck not found',
+        ),
+      );
     }
     return toDeckResponse(deck);
   }
@@ -1041,7 +1086,12 @@ export class MagazineService {
 
     const existing = await this.decks.findOne({ where: { slug: dto.slug } });
     if (existing) {
-      throw new ConflictException('A deck with this slug already exists');
+      throw new ConflictException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_SLUG_TAKEN,
+          'A deck with this slug already exists',
+        ),
+      );
     }
 
     const deck = this.decks.create({
@@ -1067,7 +1117,12 @@ export class MagazineService {
   ): Promise<DeckResponse> {
     const deck = await this.decks.findOne({ where: { id } });
     if (!deck) {
-      throw new NotFoundException('Deck not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_NOT_FOUND,
+          'Deck not found',
+        ),
+      );
     }
 
     const incomingSlides =
@@ -1240,11 +1295,19 @@ export class MagazineService {
   async deleteDeck(id: string): Promise<void> {
     const deck = await this.decks.findOne({ where: { id } });
     if (!deck) {
-      throw new NotFoundException('Deck not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_NOT_FOUND,
+          'Deck not found',
+        ),
+      );
     }
     if (deck.publishedAt !== null) {
       throw new ConflictException(
-        'This deck is published. Unpublish it before deleting it.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_DELETE_PUBLISHED,
+          'This deck is published. Unpublish it before deleting it.',
+        ),
       );
     }
     const linkedPiece = await this.pieces.findOne({
@@ -1253,7 +1316,10 @@ export class MagazineService {
     });
     if (linkedPiece) {
       throw new ConflictException(
-        'This deck belongs to a desk piece. Delete the piece instead, which removes the deck with it.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_DELETE_OWNED_BY_PIECE,
+          'This deck belongs to a desk piece. Delete the piece instead, which removes the deck with it.',
+        ),
       );
     }
     await this.decks.delete(id);
@@ -1280,7 +1346,12 @@ export class MagazineService {
       select: { id: true },
     });
     if (!deck) {
-      throw new NotFoundException('Deck not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DECK_NOT_FOUND,
+          'Deck not found',
+        ),
+      );
     }
     const piece = await this.pieces.findOne({
       where: { deckId },
@@ -1346,7 +1417,12 @@ export class MagazineService {
     if (!author) {
       // Data-integrity bug (FK should prevent this), not a legitimate empty
       // state — mirrors `CommunitiesService.memberRefFor`.
-      throw new NotFoundException('Author not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_AUTHOR_NOT_FOUND,
+          'Author not found',
+        ),
+      );
     }
     return author;
   }

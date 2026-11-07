@@ -1438,7 +1438,9 @@ describe('CommunitiesService', () => {
       await service.list('u1', {});
 
       expect(qb.orderBy).toHaveBeenCalledWith('c.createdAt', 'DESC');
-      expect(qb.addOrderBy).not.toHaveBeenCalled();
+      // `created_at` ties are common, so `id` makes the page order total.
+      expect(qb.addOrderBy).toHaveBeenCalledTimes(1);
+      expect(qb.addOrderBy).toHaveBeenCalledWith('c.id', 'ASC');
     });
 
     it("sort='newest' orders by created_at DESC (same as the default)", async () => {
@@ -1448,7 +1450,9 @@ describe('CommunitiesService', () => {
       await service.list('u1', { sort: 'newest' });
 
       expect(qb.orderBy).toHaveBeenCalledWith('c.createdAt', 'DESC');
-      expect(qb.addOrderBy).not.toHaveBeenCalled();
+      // `created_at` ties are common, so `id` makes the page order total.
+      expect(qb.addOrderBy).toHaveBeenCalledTimes(1);
+      expect(qb.addOrderBy).toHaveBeenCalledWith('c.id', 'ASC');
     });
 
     it("sort='name' orders alphabetically with a stable id tiebreaker", async () => {
@@ -1463,7 +1467,7 @@ describe('CommunitiesService', () => {
 
     // A space never surfaces in the top-level grid or its facet counters;
     // it is reached through its parent's own subcommunities listing.
-    it('excludes spaces (parent_id IS NULL) from the page and both facet queries', async () => {
+    it('excludes spaces (parent_id IS NULL) from the page and every facet query', async () => {
       const communitiesQueryBuilder = qbStub();
       communities.createQueryBuilder.mockReturnValue(communitiesQueryBuilder);
 
@@ -1472,8 +1476,9 @@ describe('CommunitiesService', () => {
       expect(communitiesQueryBuilder.andWhere).toHaveBeenCalledWith(
         'c.parent_id IS NULL',
       );
-      // Three independent `browseBaseQuery` calls back this endpoint (the
-      // page, and each of the two facet aggregates). `qbStub()` types its
+      // Four independent `browseBaseQuery` calls back this endpoint (the
+      // page, and each of the three facet aggregates: tags, toggles and
+      // type). `qbStub()` types its
       // return as `Record<string, jest.Mock>`, so with
       // `noUncheckedIndexedAccess` on, the property read is typed
       // `jest.Mock | undefined`; asserting the mock type at the access site
@@ -1483,7 +1488,7 @@ describe('CommunitiesService', () => {
         andWhereMock.mock.calls.filter(
           (call: unknown[]) => call[0] === 'c.parent_id IS NULL',
         ),
-      ).toHaveLength(3);
+      ).toHaveLength(4);
     });
   });
 
@@ -4536,7 +4541,8 @@ describe('CommunitiesService', () => {
           spaceRow({ rules: ['Space-only rule'] }),
           parentRow({
             name: 'Parent Name',
-            avatarImageUrl: 'parent-avatar-key',
+            avatarImageUrl:
+              'community-avatars/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg',
             rules: ['Be kind', 'No spam'],
             rulesVersion: 3,
           }),
@@ -4551,7 +4557,8 @@ describe('CommunitiesService', () => {
         expect(detail.parent).toEqual({
           slug: 'parent',
           name: 'Parent Name',
-          avatarImageUrl: 'https://api.test/files/parent-avatar-key',
+          avatarImageUrl:
+            'https://api.test/files/community-avatars/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg',
           isMember: true,
         });
         expect(detail.inheritedRules).toEqual({
@@ -4564,12 +4571,19 @@ describe('CommunitiesService', () => {
       });
 
       it('marks parent.isMember false for a viewer with a space roster row but no roster row of their own on the parent', async () => {
-        stageCommunities(spaceRow(), parentRow());
+        // A public space: a leftover space row grants no effective role
+        // without a parent seat, so a gated tier would answer Members only
+        // before the detail is built.
+        stageCommunities(
+          spaceRow({ accessTier: AccessTier.Public }),
+          parentRow(),
+        );
         // A MOD row on the space itself; nothing on the parent roster.
         stageRoster({ [SPACE_ID]: { 'space-mod-1': RosterRole.Mod } });
 
         const detail = await service.getBySlug('space', 'space-mod-1');
 
+        expect(detail.myRole).toBeNull();
         expect(detail.parent?.isMember).toBe(false);
       });
     });

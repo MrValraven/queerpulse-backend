@@ -1341,14 +1341,41 @@ describe('SubprofilesService', () => {
                 : [[row.subprofileId, row.position] as const],
             ),
           );
-          const owner = {
-            slug: profile.slug,
-            name: `${profile.firstName} ${profile.lastName}`.trim(),
+          // Mirrors production's owner ref: each card names the persona's
+          // CREATOR, read in one batched `profiles.find` over the creators
+          // other than the viewed profile's user (ENG-153).
+          const creatorProfileByUserId = new Map<
+            string,
+            { slug: string; firstName: string; lastName: string }
+          >([[profile.userId, profile]]);
+          const coOwnedCreatorIds = [
+            ...new Set(
+              linkedSps
+                .map((sp) => sp.userId)
+                .filter((userId) => userId !== profile.userId),
+            ),
+          ];
+          if (coOwnedCreatorIds.length) {
+            const creatorProfiles = await profiles.find({
+              where: { userId: In(coOwnedCreatorIds) },
+            });
+            for (const creatorProfile of creatorProfiles) {
+              creatorProfileByUserId.set(creatorProfile.userId, creatorProfile);
+            }
+          }
+          const ownerRefFor = (creatorUserId: string) => {
+            const creatorProfile = creatorProfileByUserId.get(creatorUserId);
+            return creatorProfile
+              ? {
+                  slug: creatorProfile.slug,
+                  name: `${creatorProfile.firstName} ${creatorProfile.lastName}`.trim(),
+                }
+              : undefined;
           };
           return sortByMemberPosition(
             linkedSps,
             memberPositionsBySubprofileId,
-          ).map((sp) => toPublicDTO(sp, [], owner));
+          ).map((sp) => toPublicDTO(sp, [], ownerRefFor(sp.userId)));
         }),
       // Mirrors SubprofilePublicReadService.getByHandle: both link kinds
       // resolve by handle, the published holder first (a draft may share the

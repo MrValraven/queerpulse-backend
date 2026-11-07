@@ -11,6 +11,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { Request } from 'express';
 import { SKIP_CSRF_KEY } from './skip-csrf.decorator';
 import { csrfCookieName } from './csrf-cookie';
+import { codedErrorBody, PLATFORM_ERROR_CODE } from '../common/coded-error';
 import { DEFAULT_FRONTEND_ORIGIN } from '../config/frontend-origins';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -218,7 +219,11 @@ export class CsrfGuard implements CanActivate {
         `cookie=${hasCookie ? 'present' : 'missing'} ` +
         `header=${hasHeader ? 'present' : 'missing'}`,
     );
-    return new ForbiddenException(message);
+    // One code for every refusal here: whichever check failed, the client's
+    // answer is the same (reload the page to get a fresh token).
+    return new ForbiddenException(
+      codedErrorBody(PLATFORM_ERROR_CODE.CSRF_REJECTED, message),
+    );
   }
 
   /**

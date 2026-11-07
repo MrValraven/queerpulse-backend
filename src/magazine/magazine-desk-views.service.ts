@@ -16,6 +16,8 @@ import {
   DeskViewQuery,
   MagazineDeskView,
 } from './entities/magazine-desk-view.entity';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 const OWNER_NAME_CONSTRAINT = 'UQ_magazine_desk_view_owner_name';
 
@@ -64,7 +66,10 @@ export class MagazineDeskViewsService {
 
     if (existing.length >= DESK_VIEWS_PER_OWNER_MAX) {
       throw new ConflictException(
-        `You can keep up to ${DESK_VIEWS_PER_OWNER_MAX} saved views. Delete one to save another.`,
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_LIMIT_REACHED,
+          `You can keep up to ${DESK_VIEWS_PER_OWNER_MAX} saved views. Delete one to save another.`,
+        ),
       );
     }
     if (existing.some((view) => view.name === dto.name)) {
@@ -91,7 +96,12 @@ export class MagazineDeskViewsService {
     const ownerViews = await this.ownerViewsInOrder(ownerId);
     const view = ownerViews.find((candidate) => candidate.id === viewId);
     if (!view) {
-      throw new NotFoundException('Saved view not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NOT_FOUND,
+          'Saved view not found',
+        ),
+      );
     }
 
     if (dto.name !== undefined && dto.name !== view.name) {
@@ -129,7 +139,12 @@ export class MagazineDeskViewsService {
   async deleteView(ownerId: string, viewId: string): Promise<void> {
     const result = await this.views.delete({ id: viewId, ownerId });
     if (!result.affected) {
-      throw new NotFoundException('Saved view not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NOT_FOUND,
+          'Saved view not found',
+        ),
+      );
     }
   }
 
@@ -142,7 +157,10 @@ export class MagazineDeskViewsService {
 
   private duplicateNameConflict(): ConflictException {
     return new ConflictException(
-      'You already have a saved view with this name.',
+      codedErrorBody(
+        MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_NAME_TAKEN,
+        'You already have a saved view with this name.',
+      ),
     );
   }
 

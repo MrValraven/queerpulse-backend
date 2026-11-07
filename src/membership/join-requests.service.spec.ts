@@ -643,6 +643,7 @@ describe('JoinRequestsService', () => {
       expect(Object.keys(view ?? {}).sort()).toEqual([
         'decidedAt',
         'declineReason',
+        'dueAt',
         'inviteCode',
         'inviteExpiresAt',
         'inviteStatus',
@@ -1458,6 +1459,7 @@ describe('JoinRequestsService', () => {
           status: PlatformJoinRequestStatus.Declined,
           reviewedBy: null,
           assignedStaffId: null,
+          internalNoteUpdatedBy: null,
           inviteId: null,
         },
       ]);

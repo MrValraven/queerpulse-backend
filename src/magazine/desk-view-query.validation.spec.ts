@@ -1,5 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
 import { validateDeskViewQuery } from './desk-view-query.validation';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
+
+/** What `run` throws, or `undefined`, so a spec can assert its body `code`. */
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
 
 describe('validateDeskViewQuery', () => {
   it('accepts an empty query, the desk defaults', () => {
@@ -33,13 +44,19 @@ describe('validateDeskViewQuery', () => {
     ['an array', ['late']],
     ['null', null],
   ])('refuses %s', (_label, input) => {
-    expect(() => validateDeskViewQuery(input)).toThrow(BadRequestException);
+    expect(thrownBy(() => validateDeskViewQuery(input))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID },
+    });
   });
 
   it('refuses an unknown key so the column stays a known shape', () => {
-    expect(() => validateDeskViewQuery({ q: 'nightlife' })).toThrow(
-      'query: unknown key "q"',
-    );
+    expect(
+      thrownBy(() => validateDeskViewQuery({ q: 'nightlife' })),
+    ).toMatchObject({
+      message: 'query: unknown key "q"',
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID },
+    });
   });
 
   it.each([
@@ -48,19 +65,31 @@ describe('validateDeskViewQuery', () => {
     ['sort', { sort: 'title' }],
     ['groupBy', { groupBy: 'writer' }],
   ])('refuses an unknown %s value', (_key, input) => {
-    expect(() => validateDeskViewQuery(input)).toThrow(BadRequestException);
+    expect(thrownBy(() => validateDeskViewQuery(input))).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID },
+    });
   });
 
   it('refuses a list that is not all non-empty strings', () => {
-    expect(() => validateDeskViewQuery({ focus: ['late', 3] })).toThrow(
-      BadRequestException,
-    );
-    expect(() => validateDeskViewQuery({ sections: [''] })).toThrow(
-      BadRequestException,
-    );
-    expect(() => validateDeskViewQuery({ stages: 'Edit' })).toThrow(
-      BadRequestException,
-    );
+    expect(
+      thrownBy(() => validateDeskViewQuery({ focus: ['late', 3] })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID },
+    });
+    expect(
+      thrownBy(() => validateDeskViewQuery({ sections: [''] })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID },
+    });
+    expect(
+      thrownBy(() => validateDeskViewQuery({ stages: 'Edit' })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID },
+    });
   });
 
   it('caps list length and entry length', () => {
@@ -68,20 +97,40 @@ describe('validateDeskViewQuery', () => {
       { length: 21 },
       (_entry, position) => `s${position}`,
     );
-    expect(() => validateDeskViewQuery({ sections: tooMany })).toThrow(
-      BadRequestException,
-    );
-    expect(() => validateDeskViewQuery({ sections: ['x'.repeat(81)] })).toThrow(
-      BadRequestException,
-    );
+    expect(
+      thrownBy(() => validateDeskViewQuery({ sections: tooMany })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_TOO_LARGE,
+      },
+    });
+    expect(
+      thrownBy(() => validateDeskViewQuery({ sections: ['x'.repeat(81)] })),
+    ).toMatchObject({
+      constructor: BadRequestException,
+      response: {
+        code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_TOO_LARGE,
+      },
+    });
   });
 
   it('refuses an editor that is neither a string id nor null', () => {
-    expect(() => validateDeskViewQuery({ editor: 42 })).toThrow(
-      BadRequestException,
+    expect(thrownBy(() => validateDeskViewQuery({ editor: 42 }))).toMatchObject(
+      {
+        constructor: BadRequestException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID,
+        },
+      },
     );
-    expect(() => validateDeskViewQuery({ editor: '' })).toThrow(
-      BadRequestException,
+    expect(thrownBy(() => validateDeskViewQuery({ editor: '' }))).toMatchObject(
+      {
+        constructor: BadRequestException,
+        response: {
+          code: MAGAZINE_ERROR_CODE.MAGAZINE_DESK_VIEW_QUERY_INVALID,
+        },
+      },
     );
   });
 });

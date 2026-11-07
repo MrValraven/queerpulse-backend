@@ -264,7 +264,8 @@ describe('ActivityVisibilityService.filterVisible', () => {
     expect(sql).toContain('Subprofile.id IN (:...personaIds)');
     expect(sql).toContain('NOT EXISTS');
     expect(sql).toContain('FROM "content_moderation" "cm"');
-    expect(sql).toContain('"cm"."subject_id" = Subprofile.id::text');
+    // CAST keeps the id path quotable by TypeORM (see `publicPersonaIds`).
+    expect(sql).toContain('"cm"."subject_id" = CAST(Subprofile.id AS text)');
     expect(sql).toContain(
       '"cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL',
     );

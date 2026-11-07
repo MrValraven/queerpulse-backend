@@ -57,7 +57,7 @@ const PLACEHOLDER_OWNER = {
   email: 'safe-spaces-seed@queerpulse.internal',
   slug: 'queerpulse-directory-seed',
   firstName: 'QueerPulse Directory Seed',
-  lastName: '(dev fixture — not a real member)',
+  lastName: '(dev fixture, not a real member)',
 };
 
 async function resolveSafeSpaceListingOwnerId(
@@ -98,7 +98,7 @@ async function resolveSafeSpaceListingOwnerId(
     }),
   );
   console.log(
-    `No existing user found — created placeholder owner account (${PLACEHOLDER_OWNER.email})`,
+    `No existing user found, created placeholder owner account (${PLACEHOLDER_OWNER.email})`,
   );
   return user.id;
 }
@@ -175,7 +175,7 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
     cats: ['food', 'nightlife'],
     hood: 'Intendente',
     blurb:
-      "One of Lisbon's longest-running queer bars — staff step in fast, bathrooms are gender-neutral, entrance is step-free.",
+      "One of Lisbon's longest-running queer bars, where staff step in fast, bathrooms are gender-neutral, and the entrance is step-free.",
     address: 'R. de São Lázaro 11, Intendente, Lisbon',
     langs: ['pt', 'en'],
     attributes: ['alcohol-free-drinks', 'solo-friendly'],
@@ -211,13 +211,13 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
       {
         name: 'Kai L.',
         byline: 'Member 2 years · vouched 4×',
-        text: "A guy started filming people on the dancefloor. I pointed him out to the bar and he was gone in ninety seconds, no drama, no making me explain. That's the whole point of this place.",
+        text: "A guy started filming people on the dancefloor, I pointed him out to the bar and he was gone in ninety seconds, no drama, no making me explain, that's the whole point of this place",
         when: 'Vouched 18 Apr 2026',
       },
       {
         name: 'Rita V.',
         byline: 'Regular',
-        text: "It's the one bar I'll go to alone and still feel held. The bathrooms are genuinely fine and the staff clock when someone's not okay.",
+        text: "It's the one bar I'll go to alone and still feel held, the bathrooms are genuinely fine and the staff clock when someone's not okay",
         when: 'Vouched 2 Mar 2026',
       },
     ],
@@ -249,7 +249,7 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
     safeSpaceVerifier: 'Mod team · 2 visits',
     safeSpaceReVerifiedAt: '2026-05-06',
     safeSpaceSub:
-      'A queer-owned, sober-friendly café built for the long stay — laptop mornings, quiet first dates, a community board that actually gets read. Fully step-free.',
+      'A queer-owned, sober-friendly café built for the long stay: laptop mornings, quiet first dates, a community board that actually gets read. Fully step-free.',
     safeSpacePromises: [
       {
         title: 'Names & pronouns honoured.',
@@ -257,7 +257,7 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
       },
       {
         title: 'A safe table to wait at.',
-        desc: 'Meeting a stranger from a date or a sale? Tell staff — they keep an eye and will intervene if it goes wrong.',
+        desc: 'Meeting a stranger from a date or a sale? Tell staff, they keep an eye and will intervene if it goes wrong.',
       },
       {
         title: 'Fully step-free + accessible bathroom.',
@@ -265,20 +265,20 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
       },
       {
         title: 'Sober by default.',
-        desc: 'No alcohol, no pressure — a rare quiet option in a nightlife neighbourhood.',
+        desc: 'No alcohol, no pressure, a rare quiet option in a nightlife neighbourhood.',
       },
     ],
     safeSpaceVouches: [
       {
         name: 'Jonas F.',
         byline: 'Member 3 years',
-        text: 'I run my recovery meet-ups out of the corner here. Staff hold the table, keep it sober, never make it weird. Quietly one of the safest rooms in the city.',
+        text: 'I run my recovery meet-ups out of the corner here, staff hold the table, keep it sober, never make it weird, quietly one of the safest cafés in the city',
         when: 'Vouched 28 Apr 2026',
       },
       {
         name: 'Rita V.',
         byline: 'Regular',
-        text: 'Did all my scary first dates here on purpose. The staff clock it and hover just enough. Cup always says Rita, never the other name.',
+        text: 'Did all my scary first dates here on purpose, the staff clock it and hover just enough, cup always says Rita',
         when: 'Vouched 12 Apr 2026',
       },
     ],
@@ -337,7 +337,7 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
         },
       ],
       whatNow:
-        'Bar Atlas is no longer a verified safe space and the venue may not display the badge. If you have a recent experience here — good or bad — you can still file a report; the record stays open in case the venue applies to be re-reviewed in future, which requires demonstrable change.',
+        'Bar Atlas is no longer a verified safe space and the venue may not display the badge. If you have a recent experience here, good or bad, you can still file a report; the record stays open in case the venue applies to be re-reviewed in future, which requires demonstrable change.',
     },
   },
 ];

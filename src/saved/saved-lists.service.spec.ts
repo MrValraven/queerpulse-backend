@@ -465,7 +465,7 @@ describe('SavedListsService', () => {
       // Harper blocked (or hid from) the recipient after the list was shared.
       availability.availableRefs.mockResolvedValue(new Set<string>());
 
-      const shared = await service.getShared('g'.repeat(64), 'recipient-1');
+      const shared = await service.getShared('1'.repeat(64), 'recipient-1');
 
       expect(shared.items[0]?.availability).toBe('unavailable');
       expect(shared.items[0]?.title).toBe('');
@@ -485,7 +485,7 @@ describe('SavedListsService', () => {
         new Set(['listing:drama-bar']),
       );
 
-      const shared = await service.getShared('h'.repeat(64), 'recipient-1');
+      const shared = await service.getShared('2'.repeat(64), 'recipient-1');
 
       expect(shared.items[0]?.availability).toBe('available');
       expect(shared.items[0]?.title).toBe('Drama Bar');

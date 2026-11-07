@@ -1,4 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE, MagazineErrorCode } from './magazine-error-codes';
 import { isStorageKey } from '../storage/storage-key';
 import { ArticleBlock } from './entities/magazine-article.entity';
 
@@ -56,21 +58,41 @@ function isString(value: unknown): value is string {
   return typeof value === 'string';
 }
 
-function fail(index: number, reason: string): never {
-  throw new BadRequestException(`blocks[${index}]: ${reason}`);
+/**
+ * Refuses one malformed block. `code` defaults to
+ * `MAGAZINE_ARTICLE_BLOCKS_INVALID` (wrong shape, type or choice); the callers
+ * below pass a narrower code for an empty required field, a length cap, an
+ * image source, or too many stats items.
+ */
+function fail(
+  index: number,
+  reason: string,
+  code: MagazineErrorCode = MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_INVALID,
+): never {
+  throw new BadRequestException(
+    codedErrorBody(code, `blocks[${index}]: ${reason}`),
+  );
 }
 
 /** Rich-text field (`html`) — capped, since it holds a whole paragraph. */
 function checkHtmlLength(value: string, field: string, index: number): void {
   if (value.length > MAX_BLOCK_HTML_LENGTH) {
-    fail(index, `${field} must be at most ${MAX_BLOCK_HTML_LENGTH} characters`);
+    fail(
+      index,
+      `${field} must be at most ${MAX_BLOCK_HTML_LENGTH} characters`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_TOO_LONG,
+    );
   }
 }
 
 /** Short single-line field (a cite, an alt, a credit, a stat label). */
 function checkTextLength(value: string, field: string, index: number): void {
   if (value.length > MAX_BLOCK_TEXT_LENGTH) {
-    fail(index, `${field} must be at most ${MAX_BLOCK_TEXT_LENGTH} characters`);
+    fail(
+      index,
+      `${field} must be at most ${MAX_BLOCK_TEXT_LENGTH} characters`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_TOO_LONG,
+    );
   }
 }
 
@@ -86,7 +108,11 @@ function validateParagraphBlock(
 ): void {
   const html = record.html;
   if (!isNonEmptyString(html)) {
-    fail(index, 'paragraph block requires a non-empty html');
+    fail(
+      index,
+      'paragraph block requires a non-empty html',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkHtmlLength(html, 'html', index);
   if (record.lead !== undefined && typeof record.lead !== 'boolean') {
@@ -100,7 +126,11 @@ function validateHeadingBlock(
 ): void {
   const html = record.html;
   if (!isNonEmptyString(html)) {
-    fail(index, 'heading block requires a non-empty html');
+    fail(
+      index,
+      'heading block requires a non-empty html',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkHtmlLength(html, 'html', index);
 }
@@ -111,7 +141,11 @@ function validatePullQuoteBlock(
 ): void {
   const html = record.html;
   if (!isNonEmptyString(html)) {
-    fail(index, 'pullQuote block requires a non-empty html');
+    fail(
+      index,
+      'pullQuote block requires a non-empty html',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkHtmlLength(html, 'html', index);
 }
@@ -122,12 +156,20 @@ function validateQuoteBlock(
 ): void {
   const html = record.html;
   if (!isNonEmptyString(html)) {
-    fail(index, 'quote block requires a non-empty html');
+    fail(
+      index,
+      'quote block requires a non-empty html',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkHtmlLength(html, 'html', index);
   const cite = record.cite;
   if (!isNonEmptyString(cite)) {
-    fail(index, 'quote block requires a non-empty cite');
+    fail(
+      index,
+      'quote block requires a non-empty cite',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkTextLength(cite, 'cite', index);
 }
@@ -148,11 +190,19 @@ function validateImageBlock(
 ): void {
   const alt = record.alt;
   if (!isNonEmptyString(alt)) {
-    fail(index, 'image block requires a non-empty alt');
+    fail(
+      index,
+      'image block requires a non-empty alt',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   const credit = record.credit;
   if (!isNonEmptyString(credit)) {
-    fail(index, 'image block requires a non-empty credit');
+    fail(
+      index,
+      'image block requires a non-empty credit',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   const caption = record.caption;
   if (!isString(caption)) {
@@ -197,24 +247,40 @@ function validateImageBlock(
     !isStorageKey(src) &&
     !src.startsWith('https://')
   ) {
-    fail(index, 'src must be an uploaded image key or an https:// URL');
+    fail(
+      index,
+      'src must be an uploaded image key or an https:// URL',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_IMAGE_SOURCE_INVALID,
+    );
   }
 }
 
 function validateQaBlock(record: Record<string, unknown>, index: number): void {
   const question = record.q;
   if (!isNonEmptyString(question)) {
-    fail(index, 'qa block requires a non-empty q');
+    fail(
+      index,
+      'qa block requires a non-empty q',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkHtmlLength(question, 'q', index);
   const html = record.html;
   if (!isNonEmptyString(html)) {
-    fail(index, 'qa block requires a non-empty html');
+    fail(
+      index,
+      'qa block requires a non-empty html',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkHtmlLength(html, 'html', index);
   const who = record.who;
   if (!isNonEmptyString(who)) {
-    fail(index, 'qa block requires a non-empty who');
+    fail(
+      index,
+      'qa block requires a non-empty who',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkTextLength(who, 'who', index);
 }
@@ -226,12 +292,20 @@ function validateStatsItem(value: unknown, index: number): void {
   const item = value as Record<string, unknown>;
   const statValue = item.value;
   if (!isNonEmptyString(statValue)) {
-    fail(index, 'each stats item requires a non-empty value');
+    fail(
+      index,
+      'each stats item requires a non-empty value',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkTextLength(statValue, 'items[].value', index);
   const statLabel = item.label;
   if (!isNonEmptyString(statLabel)) {
-    fail(index, 'each stats item requires a non-empty label');
+    fail(
+      index,
+      'each stats item requires a non-empty label',
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCK_FIELD_REQUIRED,
+    );
   }
   checkTextLength(statLabel, 'items[].label', index);
 }
@@ -244,7 +318,11 @@ function validateStatsBlock(
     fail(index, 'stats block requires items to be an array');
   }
   if (record.items.length > MAX_STATS_ITEMS) {
-    fail(index, `stats block can have at most ${MAX_STATS_ITEMS} items`);
+    fail(
+      index,
+      `stats block can have at most ${MAX_STATS_ITEMS} items`,
+      MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_STATS_ITEMS_TOO_MANY,
+    );
   }
   record.items.forEach((item) => validateStatsItem(item, index));
 }
@@ -256,11 +334,19 @@ function validateStatsBlock(
  */
 export function validateArticleBlocks(input: unknown): ArticleBlock[] {
   if (!Array.isArray(input)) {
-    throw new BadRequestException('blocks must be an array');
+    throw new BadRequestException(
+      codedErrorBody(
+        MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_INVALID,
+        'blocks must be an array',
+      ),
+    );
   }
   if (input.length > MAX_BLOCKS_PER_ARTICLE) {
     throw new BadRequestException(
-      `blocks must have at most ${MAX_BLOCKS_PER_ARTICLE} entries`,
+      codedErrorBody(
+        MAGAZINE_ERROR_CODE.MAGAZINE_ARTICLE_BLOCKS_TOO_MANY,
+        `blocks must have at most ${MAX_BLOCKS_PER_ARTICLE} entries`,
+      ),
     );
   }
 

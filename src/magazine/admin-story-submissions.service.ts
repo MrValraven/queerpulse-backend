@@ -39,6 +39,8 @@ import {
 } from './admin-story-submissions-response';
 import { DecideStorySubmissionDto } from './dto/decide-story-submission.dto';
 import { ListAdminStorySubmissionsQuery } from './dto/list-admin-story-submissions.query';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /** One page of the admin story-submission list. */
 export const ADMIN_STORY_SUBMISSIONS_PAGE_SIZE = 20;
@@ -281,7 +283,12 @@ export class AdminStorySubmissionsService {
   ): Promise<AdminStorySubmissionDTO> {
     const submission = await this.submissions.findOne({ where: { id } });
     if (!submission) {
-      throw new NotFoundException('Story submission not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_NOT_FOUND,
+          'Story submission not found',
+        ),
+      );
     }
 
     // The member pulled this story back (PRD-129). It has already left the
@@ -292,7 +299,10 @@ export class AdminStorySubmissionsService {
     // while it was still open.
     if (submission.withdrawnAt !== null) {
       throw new ConflictException(
-        'The member withdrew this story, so it can no longer be decided.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_WITHDRAWN,
+          'The member withdrew this story, so it can no longer be decided.',
+        ),
       );
     }
 
@@ -312,7 +322,12 @@ export class AdminStorySubmissionsService {
       decision === 'accepted';
 
     if (submission.decidedAt !== null && !isFinishingEarlierAccept) {
-      throw new ConflictException('Submission already decided');
+      throw new ConflictException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_ALREADY_DECIDED,
+          'Submission already decided',
+        ),
+      );
     }
 
     const status = isFinishingEarlierAccept
@@ -365,7 +380,12 @@ export class AdminStorySubmissionsService {
             },
           );
           if (claim.affected === 0) {
-            throw new ConflictException('Submission already decided');
+            throw new ConflictException(
+              codedErrorBody(
+                MAGAZINE_ERROR_CODE.STORY_SUBMISSION_ALREADY_DECIDED,
+                'Submission already decided',
+              ),
+            );
           }
         }
 
@@ -390,7 +410,10 @@ export class AdminStorySubmissionsService {
           );
           if (pieceClaim.affected === 0) {
             throw new ConflictException(
-              'This submission already has a desk piece.',
+              codedErrorBody(
+                MAGAZINE_ERROR_CODE.STORY_SUBMISSION_HAS_DESK_RECORD,
+                'This submission already has a desk piece.',
+              ),
             );
           }
           return { commissionedPitchId: null, acceptedPieceId };
@@ -507,26 +530,41 @@ export class AdminStorySubmissionsService {
   ): Promise<AdminStorySubmissionDTO> {
     const submission = await this.submissions.findOne({ where: { id } });
     if (!submission) {
-      throw new NotFoundException('Story submission not found');
+      throw new NotFoundException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_NOT_FOUND,
+          'Story submission not found',
+        ),
+      );
     }
 
     if (submission.withdrawnAt !== null) {
       throw new ConflictException(
-        'The member withdrew this story, so the desk cannot put it back in the queue.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_WITHDRAWN,
+          'The member withdrew this story, so the desk cannot put it back in the queue.',
+        ),
       );
     }
 
     if (submission.decidedAt === null || submission.decision === null) {
       throw new ConflictException(
-        'This submission has not been decided, so there is nothing to reopen.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_NOT_DECIDED,
+          'This submission has not been decided, so there is nothing to reopen.',
+        ),
       );
     }
 
     if (submission.decision !== 'declined') {
       throw new ConflictException(
-        'Only a declined story can be reopened. This one was ' +
-          `${submission.decision}, and the desk record it created would be ` +
-          'left behind. Deal with that piece instead.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_REOPEN_NOT_DECLINED,
+          'Only a declined story can be reopened. This one was ' +
+            `${submission.decision}, and the desk record it created would be ` +
+            'left behind. Deal with that piece instead.',
+          { decision: submission.decision },
+        ),
       );
     }
 
@@ -539,7 +577,10 @@ export class AdminStorySubmissionsService {
       submission.commissionedPitchId !== null
     ) {
       throw new ConflictException(
-        'This submission already has a desk record, so it cannot be reopened.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_HAS_DESK_RECORD,
+          'This submission already has a desk record, so it cannot be reopened.',
+        ),
       );
     }
 
@@ -571,7 +612,10 @@ export class AdminStorySubmissionsService {
     );
     if (claim.affected === 0) {
       throw new ConflictException(
-        'This story was decided again while the page was open, so it could not be reopened.',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.STORY_SUBMISSION_DECIDED_DURING_REOPEN,
+          'This story was decided again while the page was open, so it could not be reopened.',
+        ),
       );
     }
 

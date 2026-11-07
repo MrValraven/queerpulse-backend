@@ -1833,9 +1833,22 @@ describe('SubprofilePublicReadService', () => {
       });
 
       it('passes the anonymous viewer id for a signed-out visitor', async () => {
-        personaRows.push(tattooPersona());
+        // A linked persona names its owner, so it stays behind the members
+        // wall; a signed-out visitor reaches an unlinked open persona.
+        personaRows.push(
+          makeSubprofile({
+            id: 'sp-unlinked',
+            userId: 'creator-1',
+            slug: 'nightform',
+            handle: 'nightform',
+            kind: SubprofileKind.TattooArtist,
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            visibility: SubprofileVisibility.Open,
+            status: SubprofileStatus.Published,
+          }),
+        );
 
-        await service.getByHandle('ana-dj-set', undefined);
+        await service.getByHandle('nightform', undefined);
 
         expect(
           affiliationEligibility.resolveFlashDayEvents,

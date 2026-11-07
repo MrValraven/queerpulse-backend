@@ -1198,6 +1198,19 @@ describe('ListingsService', () => {
             { ...runnableScope, ownerId: OWNER_ID },
             { ...runnableScope, id: In(['listing-co']) },
           ],
+          // Only the columns `toManagedListingItem` reads.
+          select: [
+            'id',
+            'ref',
+            'slug',
+            'name',
+            'online',
+            'mobile',
+            'address',
+            'hood',
+            'latitude',
+            'longitude',
+          ],
           order: { name: 'ASC' },
           take: DEFAULT_LIST_LIMIT,
         });

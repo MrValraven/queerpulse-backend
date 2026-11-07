@@ -361,7 +361,7 @@ describe('a directory enquiry lands in the listing mailbox', () => {
     );
   });
 
-  it('refuses an ownerless listing nobody manages, with the existing code, and opens no thread', async () => {
+  it('refuses an ownerless listing nobody manages as unclaimed, and opens no thread', async () => {
     const { service, transaction, postMessage, enquiries } = makeRouting({
       ownerUserId: null,
     });
@@ -370,7 +370,7 @@ describe('a directory enquiry lands in the listing mailbox', () => {
       service.getContact('drama-bar', 'customer-user'),
     ).resolves.toMatchObject({
       canMessageOwner: false,
-      unavailableReason: 'no_owner_account',
+      unavailableReason: 'unclaimed',
     });
     await expect(
       service.send('drama-bar', 'customer-user', { body: 'A question here.' }),

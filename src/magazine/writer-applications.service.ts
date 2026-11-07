@@ -15,6 +15,8 @@ import {
   toWriterApplicationDTO,
   WriterApplicationDTO,
 } from './writer-application-response';
+import { codedErrorBody } from '../common/coded-error';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 /**
  * Member-facing side of a magazine writer application: apply, and check your
@@ -40,7 +42,10 @@ export class WriterApplicationsService {
     const sampleLink = dto.sampleLink?.trim() || null;
     if (!sampleText && !sampleLink) {
       throw new BadRequestException(
-        'Include a writing sample: pasted text or a link',
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.WRITER_APPLICATION_SAMPLE_REQUIRED,
+          'Include a writing sample: pasted text or a link',
+        ),
       );
     }
 
@@ -48,7 +53,12 @@ export class WriterApplicationsService {
       where: { userId, role: 'magazine_writer' },
     });
     if (alreadyWriter) {
-      throw new ConflictException('Already a magazine writer');
+      throw new ConflictException(
+        codedErrorBody(
+          MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_WRITER,
+          'Already a magazine writer',
+        ),
+      );
     }
 
     try {
@@ -71,7 +81,12 @@ export class WriterApplicationsService {
       return toWriterApplicationDTO(saved);
     } catch (err) {
       if (isUniqueViolation(err)) {
-        throw new ConflictException('An application is already pending');
+        throw new ConflictException(
+          codedErrorBody(
+            MAGAZINE_ERROR_CODE.WRITER_APPLICATION_ALREADY_PENDING,
+            'An application is already pending',
+          ),
+        );
       }
       throw err;
     }

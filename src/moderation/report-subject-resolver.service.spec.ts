@@ -505,9 +505,40 @@ describe('ReportSubjectResolverService', () => {
       expect(sql).not.toMatch(/landlord_id\s+AS author_user_id/);
       // A whitespace-only recommendation reads as nothing to show.
       expect(sql).toContain("NULLIF(btrim(lrec.text), '')");
-      // The row has no reply field and no second contributor, so the
-      // statement never names the ambiguity column.
-      expect(sql).not.toContain('is_author_ambiguous');
+    });
+
+    /**
+     * PRD-249: the row also carries the landlord's single public reply, so the
+     * reported words can be the landlord's. The excerpt shows the reply and the
+     * flag keeps a sanction off the tenant who opened the exchange. A blank
+     * reply is not a second author, so the flag trims before it decides.
+     */
+    it('asks Postgres for the landlord reply and the ambiguity it brings', async () => {
+      const { service, query } = build();
+
+      await service.resolve(recommendationReport());
+
+      const [sql] = (query.mock.calls as [string, unknown[]][])[0]!;
+      expect(sql).toContain('/ reply:');
+      expect(sql).toMatch(
+        /\(NULLIF\(btrim\(lrec\.landlord_reply_text\), ''\) IS NOT NULL\)\s+AS is_author_ambiguous/,
+      );
+    });
+
+    it('flags the author as ambiguous when the landlord has replied', async () => {
+      const { service } = recommendationRow({
+        author_user_id: 'tenant-1',
+        excerpt:
+          'he asked me who my partner was before he would show the flat / reply: that never happened',
+        community_id: null,
+        is_author_ambiguous: true,
+      });
+
+      const resolution = await service.resolve(recommendationReport());
+
+      // The tenant is still named, and the flag holds back the sanction.
+      expect(resolution.authorUserId).toBe('tenant-1');
+      expect(resolution.isAuthorAmbiguous).toBe(true);
     });
   });
 

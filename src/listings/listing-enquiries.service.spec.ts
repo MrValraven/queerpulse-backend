@@ -488,11 +488,14 @@ describe('ListingEnquiriesService', () => {
     it('refuses an ownerless listing with no co-manager with a 400 and delivers nothing', async () => {
       listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
       refuseAs('IDENTITY_HAS_NO_STAFF');
+      // Nobody staffs it, so it reads as unclaimed and points at the claim path.
       await expect(
         service.send('drama-bar', 'member-1', { body: 'A question here.' }),
       ).rejects.toThrow(
         new BadRequestException(
-          'This listing cannot be messaged through QueerPulse',
+          'Nobody has claimed this listing yet, so there is no business ' +
+            'account to write to. If you run this place, claim the listing and ' +
+            'members will be able to reach you here.',
         ),
       );
       expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();

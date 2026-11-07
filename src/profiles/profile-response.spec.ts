@@ -563,6 +563,12 @@ describe('profile-response mappers', () => {
       closedAt: null,
       expiresAt: '2026-11-01T00:00:00.000Z',
       createdAt: '2026-08-03T00:00:00.000Z',
+      tags: [],
+      renewCount: 0,
+      // No `boardResponses` map passed, so the post reads as unanswered.
+      responseCount: 0,
+      helloCount: 0,
+      responders: [],
     });
     expect(dto.skills[0]).toEqual({ name: 'Web dev', meta: 'React' });
     expect(dto.groups[0]).toEqual({ name: 'Queer Devs', role: 'Member' });

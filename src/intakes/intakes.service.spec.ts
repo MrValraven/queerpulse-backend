@@ -34,14 +34,16 @@ describe('IntakesService', () => {
 
   beforeEach(async () => {
     submissions = {
-      // Real TypeORM assigns the uuid PK on `create`/`save`; the mock does
-      // the same so the announce-routing tests can assert against a real,
-      // defined id.
-      save: jest
-        .fn()
-        .mockImplementation((row: Partial<IntakeSubmission>) =>
-          Promise.resolve({ id: 'submission-1', ...row }),
-        ),
+      // Real TypeORM assigns the uuid PK and the `createdAt` column on
+      // `save`; the mock does the same so the announce-routing tests can
+      // assert against a real, defined id and the ack can read `submittedAt`.
+      save: jest.fn().mockImplementation((row: Partial<IntakeSubmission>) =>
+        Promise.resolve({
+          id: 'submission-1',
+          createdAt: new Date('2026-07-18T00:00:00.000Z'),
+          ...row,
+        }),
+      ),
       create: jest.fn((value: object) => value),
       findOne: jest.fn().mockResolvedValue(null),
       createQueryBuilder: jest.fn(),
@@ -93,6 +95,7 @@ describe('IntakesService', () => {
         undefined,
       );
       expect(ack.id).toBe('submission-1');
+      expect(ack.submittedAt).toBe('2026-07-18T00:00:00.000Z');
       expect(submissions.create).toHaveBeenCalledWith(
         expect.objectContaining({ submitterId: null, kind: 'sober_host' }),
       );

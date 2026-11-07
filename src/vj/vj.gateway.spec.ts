@@ -1238,6 +1238,10 @@ describe('VjGateway', () => {
         );
       }
 
+      // The goClip clip read is in flight and holds the queue.
+      await flushImmediate();
+      expect(harness.reads.existingClipIds).toHaveBeenCalledTimes(1);
+
       // The 41st frame answers while the goClip read still holds the queue.
       const refused = await setFadeLength(harness, remote, 41, 2000);
       expect(codeOf(refused)).toBe('vj_rate_limited');

@@ -700,8 +700,9 @@ describe('StorageService', () => {
   });
 
   describe('copyObjectToStudioLandingScope', () => {
+    // A `work-image` upload lands under its kind's `work` prefix.
     const STAFF_UPLOAD_KEY =
-      'work-image/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.jpg';
+      'work/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.jpg';
     let send: jest.SpiedFunction<S3Client['send']>;
 
     beforeEach(() => {

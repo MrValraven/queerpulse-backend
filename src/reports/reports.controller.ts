@@ -8,6 +8,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { codedErrorBody, PLATFORM_ERROR_CODE } from '../common/coded-error';
 import { UserStatus } from '../users/entities/user.entity';
 import {
   CurrentUser,
@@ -134,7 +135,12 @@ export class ReportsController {
     // assertion says what it actually holds, which is what
     // `ActiveMemberGuard` compares against.
     if (user && (user.status as UserStatus) !== UserStatus.Active) {
-      throw new ForbiddenException('Active membership required');
+      throw new ForbiddenException(
+        codedErrorBody(
+          PLATFORM_ERROR_CODE.ACTIVE_MEMBERSHIP_REQUIRED,
+          'Active membership required',
+        ),
+      );
     }
     return this.reportsService.create(user?.userId ?? null, dto, clientIp);
   }

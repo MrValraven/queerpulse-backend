@@ -26,6 +26,7 @@ import {
   MagazinePieceService,
 } from './magazine-piece.service';
 import { MagazineIssueAnnouncerService } from './magazine-issue-announcer.service';
+import { MAGAZINE_ERROR_CODE } from './magazine-error-codes';
 
 type RepositoryMock = {
   find: jest.Mock;
@@ -85,8 +86,13 @@ describe('MagazinePieceService deck drafts', () => {
     pitches = makeRepositoryMock();
     pieceEvents = makeRepositoryMock();
     articles = makeRepositoryMock();
+    // The piece's `CreateDateColumn` and `UpdateDateColumn` are filled by the
+    // database on insert, so the save mock fills them the same way. The piece
+    // record reads `createdAt` to say when a fresh piece entered its stage.
     pieces.save.mockImplementation((entity: MagazinePiece) => {
       entity.id = 'piece-1';
+      entity.createdAt ??= new Date('2026-09-01T09:00:00Z');
+      entity.updatedAt ??= new Date('2026-09-01T09:00:00Z');
       return Promise.resolve(entity);
     });
     decks.save.mockImplementation((entity: MagazineDeck) => {
@@ -384,7 +390,10 @@ describe('MagazinePieceService deck drafts', () => {
 
       await expect(
         service.updatePiece('piece-1', { format: 'deck' }, 'editor-1'),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_PIECE_FORMAT_LOCKED },
+      });
       expect(decks.create).not.toHaveBeenCalled();
       expect(pieces.save).not.toHaveBeenCalled();
     });
@@ -498,7 +507,10 @@ describe('MagazinePieceService deck drafts', () => {
 
       await expect(
         service.convertDeckToArticle('deck-1', 'editor-1'),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        constructor: ConflictException,
+        response: { code: MAGAZINE_ERROR_CODE.MAGAZINE_DECK_CONVERT_PUBLISHED },
+      });
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
     });
   });

@@ -246,11 +246,22 @@ describe('vj contract', () => {
   it('lists the catalog in catalog order with a catalog entry per id', () => {
     expect(Object.keys(VJ_EFFECT_CATALOG)).toEqual([...VJ_EFFECT_IDS]);
     expect(VJ_EFFECT_IDS).toHaveLength(34);
+    // Tint opens on the coral accent and kaleidoscope on six segments; every
+    // other variant effect opens on its first variant.
+    const pinnedDefaultVariants: Partial<Record<VjEffectId, string>> = {
+      tint: 'coral',
+      kaleidoscope: '6',
+    };
     for (const effectId of VJ_EFFECT_IDS) {
       const entry = VJ_EFFECT_CATALOG[effectId];
-      expect(entry.defaultVariant).toBe(
-        entry.variants.length === 0 ? null : entry.variants[0],
-      );
+      const expectedDefaultVariant =
+        entry.variants.length === 0
+          ? null
+          : (pinnedDefaultVariants[effectId] ?? entry.variants[0]);
+      expect(entry.defaultVariant).toBe(expectedDefaultVariant);
+      if (entry.variants.length > 0) {
+        expect(entry.variants).toContain(entry.defaultVariant);
+      }
       expect(Math.round(entry.defaultAmount * 100) / 100).toBe(
         entry.defaultAmount,
       );

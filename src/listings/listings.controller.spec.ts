@@ -7,7 +7,9 @@ import { CreateListingDto } from './dto/create-listing.dto';
 import { ListingStatus } from './entities/listing.entity';
 import { AdminListingsController } from './admin-listings.controller';
 import { ListingClaimsService } from './listing-claims.service';
+import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
+import { ListingOwnerOffersService } from './listing-owner-offers.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
 import { ListingsController } from './listings.controller';
@@ -68,6 +70,10 @@ describe('ListingsController', () => {
         { provide: ListingsService, useValue: service },
         { provide: ListingEditSuggestionsService, useValue: {} },
         { provide: ListingClaimsService, useValue: {} },
+        // The admin delegation panel's nomination and co-manager seats; none
+        // of the routes below reach them.
+        { provide: ListingOwnerOffersService, useValue: {} },
+        { provide: ListingCoManagersService, useValue: {} },
         {
           provide: ListingOwnerPendingService,
           useValue: ownerPendingService,

@@ -133,7 +133,7 @@ describe('ListListingDirectoryQuery owned', () => {
   it('keeps `owned` alongside the paged-grid params', async () => {
     await expect(
       run({ owned: 'women', page: '2', cat: 'food' }),
-    ).resolves.toMatchObject({ owned: ['women'], page: 2, cat: 'food' });
+    ).resolves.toMatchObject({ owned: ['women'], page: 2, cat: ['food'] });
   });
 
   it.each([
