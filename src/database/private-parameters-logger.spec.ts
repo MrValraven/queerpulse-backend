@@ -150,6 +150,8 @@ describe('touchesPrivateParameterTable', () => {
       'lead_entries',
       'vj_clips',
       'vj_packs',
+      'vj_scenes',
+      'vj_setlists',
     ]);
   });
 
@@ -165,6 +167,25 @@ describe('touchesPrivateParameterTable', () => {
     expect(touchesPrivateParameterTable('SELECT * FROM "vj_pack_clips"')).toBe(
       false,
     );
+  });
+
+  it('matches the set list table quoted or bare and leaves vj_setlist_items alone', () => {
+    expect(
+      touchesPrivateParameterTable(
+        'SELECT "setlist"."name" FROM "vj_setlists" "setlist"',
+      ),
+    ).toBe(true);
+    expect(
+      touchesPrivateParameterTable('UPDATE vj_setlists SET name = $1'),
+    ).toBe(true);
+    expect(
+      touchesPrivateParameterTable(
+        'INSERT INTO "vj_setlist_items" ("setlist_id", "scene_id") VALUES ($1, $2)',
+      ),
+    ).toBe(false);
+    expect(
+      touchesPrivateParameterTable('SELECT "vj_scenes"."look" FROM vj_scenes'),
+    ).toBe(true);
   });
 
   it('matches the leads table as the quoted identifier TypeORM writes', () => {
@@ -248,6 +269,21 @@ describe('PrivateParametersLogger', () => {
     const messages = logger.written[0]?.messages ?? [];
     expect(sqlMessage(logger)?.parameters).toBeUndefined();
     expect(JSON.stringify(messages)).not.toContain('Secret title');
+    expect(messages[1]?.message).toBe(900);
+  });
+
+  it('drops the parameters of a slow query on vj_scenes', () => {
+    const logger = new CapturingLogger(['error', 'warn']);
+    logger.logQuerySlow(
+      900,
+      'UPDATE "vj_scenes" SET "name" = $1, "look" = $2 WHERE "id" = $3',
+      ['Secret scene', { overlayText: 'Secret overlay' }, 'scene-1'],
+    );
+    const messages = logger.written[0]?.messages ?? [];
+    expect(sqlMessage(logger)?.parameters).toBeUndefined();
+    expect(sqlMessage(logger)?.message).toContain('"vj_scenes"');
+    expect(JSON.stringify(messages)).not.toContain('Secret scene');
+    expect(JSON.stringify(messages)).not.toContain('Secret overlay');
     expect(messages[1]?.message).toBe(900);
   });
 

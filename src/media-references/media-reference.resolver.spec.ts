@@ -1,4 +1,4 @@
-import type { DataSource } from 'typeorm';
+import { FindOperator, type DataSource } from 'typeorm';
 import { MediaReferenceResolver } from './media-reference.resolver';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -39,6 +39,22 @@ function makeMockRepository(
     find: findMock,
     createQueryBuilder: jest.fn().mockReturnValue(queryBuilderStub),
     metadata: { tableName: 'mock_table' },
+  };
+}
+
+/** A `find` stub that answers like Postgres for a plain-column source: only
+ *  rows whose queried column holds one of the `In(...)` candidates come back,
+ *  so a null column never matches. */
+function findRowsMatchingCandidates(rows: Record<string, unknown>[]) {
+  return (...findArguments: unknown[]): Promise<unknown[]> => {
+    const options = findArguments[0] as {
+      where: Record<string, { value: unknown[] }>;
+    };
+    const queriedColumn = Object.keys(options.where)[0] ?? '';
+    const candidates: unknown[] = options.where[queriedColumn]?.value ?? [];
+    return Promise.resolve(
+      rows.filter((row) => candidates.includes(row[queriedColumn])),
+    );
   };
 }
 
@@ -509,5 +525,65 @@ describe('MediaReferenceResolver', () => {
       { type: 'vj-thumbnail', entityId: CLIP_ID, label: 'Loop' },
     ]);
     expect(degraded).toBe(false);
+  });
+
+  it('keeps a VJ preview referenced', async () => {
+    const PREVIEW_KEY = 'vj-previews/eeeeeeee.webm';
+    const UNPREVIEWED_CLIP_KEY = 'vj-clips/ffffffff/gggggggg.mp4';
+    const clipRows: Record<string, unknown>[] = [
+      {
+        id: 'clip-1',
+        storageKey: 'vj-clips/aaaaaaaa/bbbbbbbb.mp4',
+        thumbnailStorageKey: null,
+        previewStorageKey: PREVIEW_KEY,
+        title: 'Loop',
+      },
+      {
+        id: 'clip-2',
+        storageKey: UNPREVIEWED_CLIP_KEY,
+        thumbnailStorageKey: null,
+        previewStorageKey: null,
+        title: 'Drift',
+      },
+    ];
+    const clipRepository = makeMockRepository({
+      findImplementation: findRowsMatchingCandidates(clipRows),
+    });
+    const dataSource = createMockDataSource([[VjClip, clipRepository]]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references, degraded } = await resolver.resolve([
+      PREVIEW_KEY,
+      UNPREVIEWED_CLIP_KEY,
+    ]);
+
+    expect(references.get(PREVIEW_KEY)).toEqual([
+      { type: 'vj-preview', entityId: 'clip-1', label: 'Loop' },
+    ]);
+    // The clip with a null preview key is referenced by its clip key only.
+    expect(references.get(UNPREVIEWED_CLIP_KEY)).toEqual([
+      { type: 'vj-clip', entityId: 'clip-2', label: 'Drift' },
+    ]);
+    const previewReferences = [...references.values()]
+      .flat()
+      .filter((reference) => reference.type === 'vj-preview');
+    expect(previewReferences).toEqual([
+      { type: 'vj-preview', entityId: 'clip-1', label: 'Loop' },
+    ]);
+    expect(degraded).toBe(false);
+
+    // The preview source asks for its own column with the candidate keys,
+    // so Postgres never matches a null key.
+    const previewFindOptions = clipRepository.find.mock.calls
+      .map((call: unknown[]) => call[0] as { where: Record<string, unknown> })
+      .find((options) => 'previewStorageKey' in options.where);
+    expect(previewFindOptions?.where.previewStorageKey).toBeInstanceOf(
+      FindOperator,
+    );
+    const previewCandidates = (
+      previewFindOptions?.where.previewStorageKey as FindOperator<string[]>
+    ).value;
+    expect(previewCandidates).toEqual(expect.arrayContaining([PREVIEW_KEY]));
+    expect(previewCandidates).not.toContain(null);
   });
 });

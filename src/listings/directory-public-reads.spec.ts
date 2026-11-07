@@ -510,7 +510,11 @@ describe('DirectoryService public reads', () => {
           const sql = idFilter.getSql?.('"Event"."id"') ?? '';
           expect(sql).toContain('NOT EXISTS');
           expect(sql).toContain('"content_moderation"');
-          expect(sql).toContain('= "Event"."id"::text');
+          // `CAST(... AS text)`, never `::text`: TypeORM only quotes the
+          // `Event.id` path inside a `find()` when a space, `=`, `)` or `,`
+          // follows it, so `::text` reached Postgres raw and 500'd the page.
+          expect(sql).toContain('= CAST("Event"."id" AS text)');
+          expect(sql).not.toContain('::text');
           expect(sql).toContain('"hidden_at" IS NOT NULL');
           expect(sql).toContain('"removed_at" IS NOT NULL');
         }

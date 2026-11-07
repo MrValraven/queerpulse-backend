@@ -89,9 +89,10 @@ const MAX_LIMIT = 200;
  *  conversation participants (`PRIVATE_MESSAGE_PREFIXES`), so the console never
  *  lists, signs, inspects or deletes them. Studio audio is left out too:
  *  staff act on a release through the Studio takedown, and an audio object
- *  has no thumbnail to show. VJ clips and thumbnails are left out as well:
- *  VJ media is managed at `admin/vj`, where a delete also removes the clip
- *  row. */
+ *  has no thumbnail to show. VJ clips, thumbnails and animated previews are
+ *  left out as well: VJ media is managed at `admin/vj`, where a delete also
+ *  removes the clip row, and deleting a preview here would leave its clip
+ *  pointing at a missing object. */
 const KNOWN_PREFIXES: ReadonlySet<string> = new Set([
   ...Object.values(UPLOAD_KIND_SPECS)
     .map((spec) => spec.prefix)
@@ -100,7 +101,8 @@ const KNOWN_PREFIXES: ReadonlySet<string> = new Set([
         !PRIVATE_MESSAGE_PREFIXES.has(prefix) &&
         prefix !== UPLOAD_KIND_SPECS.studio_audio.prefix &&
         prefix !== UPLOAD_KIND_SPECS.vj_clip.prefix &&
-        prefix !== UPLOAD_KIND_SPECS.vj_thumbnail.prefix,
+        prefix !== UPLOAD_KIND_SPECS.vj_thumbnail.prefix &&
+        prefix !== UPLOAD_KIND_SPECS.vj_preview.prefix,
     ),
   // T17: unlinked persona images (`persona/<uuid>/<uuid><ext>`). Not an
   // upload kind (nothing presigns under it), but staff browse and moderate

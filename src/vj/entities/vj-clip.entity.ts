@@ -16,7 +16,9 @@ import {
   DEFAULT_VJ_FIT_MODE,
   type VjClipMimeType,
   type VjFitMode,
+  type VjLoopMode,
   type VjMediaKind,
+  type VjSpeed,
 } from '../vj.contract';
 import { VjPackClip } from './vj-pack-clip.entity';
 
@@ -28,10 +30,16 @@ import { VjPackClip } from './vj-pack-clip.entity';
  * when its admin is erased. Every CHECK mirrors a service check that runs
  * first, so a driver error never carries a clip title. Deleting a clip
  * cascades its memberships in every pack. Migration `1839400000000-AddVj`.
+ *
+ * v2 (`1839500000000-AddVjV2`) adds the clip defaults a stage picks up on a
+ * tap (favorite, speed, loop points and loop mode) and the animated preview
+ * (`vj-previews/...`, a key that names nobody). Loop points belong to videos
+ * only and leave a playable span of at least 250 ms.
  */
 @Entity('vj_clips')
 @Unique('UQ_vj_clips_storage_key', ['storageKey'])
 @Unique('UQ_vj_clips_thumbnail_storage_key', ['thumbnailStorageKey'])
+@Unique('UQ_vj_clips_preview_storage_key', ['previewStorageKey'])
 @Index('IDX_vj_clips_created_at', ['createdAt', 'id'])
 @Index('IDX_vj_clips_created_by_user_id', ['createdByUserId'], {
   where: '"created_by_user_id" IS NOT NULL',
@@ -60,6 +68,19 @@ import { VjPackClip } from './vj-pack-clip.entity';
 @Check(
   'CHK_vj_clips_thumbnail_storage_key',
   `"thumbnail_storage_key" LIKE 'vj-thumbnails/%'`,
+)
+@Check(
+  'CHK_vj_clips_default_speed',
+  `"default_speed" IN (0.25, 0.5, 1, 1.5, 2, 4)`,
+)
+@Check('CHK_vj_clips_loop_mode', `"loop_mode" IN ('loop', 'pingPong')`)
+@Check(
+  'CHK_vj_clips_loop_points',
+  `("loop_in_ms" IS NULL AND "loop_out_ms" IS NULL) OR ("media_kind" = 'video' AND ("loop_in_ms" IS NULL OR "loop_in_ms" >= 0) AND ("loop_out_ms" IS NULL OR "loop_out_ms" <= "duration_ms") AND COALESCE("loop_out_ms", "duration_ms") - COALESCE("loop_in_ms", 0) >= 250)`,
+)
+@Check(
+  'CHK_vj_clips_preview_storage_key',
+  `"preview_storage_key" IS NULL OR "preview_storage_key" LIKE 'vj-previews/%'`,
 )
 export class VjClip {
   @PrimaryGeneratedColumn('uuid', { primaryKeyConstraintName: 'PK_vj_clips' })
@@ -95,6 +116,30 @@ export class VjClip {
 
   @Column({ type: 'varchar', length: 10, default: DEFAULT_VJ_FIT_MODE })
   fitMode!: VjFitMode;
+
+  /** Starred in the library; a shuffle with source `favorites` draws from these. */
+  @Column({ type: 'boolean', default: false })
+  isFavorite!: boolean;
+
+  /** The playback speed a stage takes when this clip goes live. */
+  @Column({ type: 'double precision', default: 1 })
+  defaultSpeed!: VjSpeed;
+
+  /** Loop start in ms; null loops from 0. Always null for a GIF. */
+  @Column({ type: 'integer', nullable: true })
+  loopInMs!: number | null;
+
+  /** Loop end in ms; null loops to the end. Always null for a GIF. */
+  @Column({ type: 'integer', nullable: true })
+  loopOutMs!: number | null;
+
+  @Column({ type: 'varchar', length: 10, default: 'loop' })
+  loopMode!: VjLoopMode;
+
+  /** The short WebM or MP4 preview under `vj-previews/`, null until one is
+   *  uploaded. */
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  previewStorageKey!: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   createdByUserId!: string | null;

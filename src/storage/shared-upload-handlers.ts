@@ -204,10 +204,12 @@ export function allowsStudioLandingScopedKeys(
   );
 }
 
-/** Handlers whose body may carry a VJ key (`vj-clips/...`, `vj-thumbnails/...`).
- *  The service checks shape, existence and magic bytes itself. */
+/** Handlers whose body may carry a VJ key (`vj-clips/...`, `vj-thumbnails/...`,
+ *  `vj-previews/...`). The service checks shape, existence and magic bytes
+ *  itself. */
 export const VJ_KEY_HANDLERS: ReadonlySet<string> = new Set([
   'AdminVjController.createClip',
+  'AdminVjController.setClipPreview',
 ]);
 
 /** Whether this controller+handler pair may carry a VJ key. Unknown pairs

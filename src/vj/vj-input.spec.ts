@@ -1,6 +1,7 @@
 import { HttpException } from '@nestjs/common';
 import type { CreateVjClipDto } from './dto/vj.dto';
 import {
+  checkVjLoopPoints,
   countCodePoints,
   isUuidText,
   isVjDimension,
@@ -9,7 +10,13 @@ import {
   normalizeDurationMs,
   normalizeIdPermutation,
   normalizePackName,
+  normalizeSceneName,
+  normalizeSetlistName,
+  normalizeSetlistSceneIds,
   parseMediaClipIds,
+  parseRequiredClipIds,
+  readEventIdBody,
+  readOptionalPackId,
 } from './vj-input';
 
 const CLIP_KEY_MP4 =
@@ -21,6 +28,9 @@ const CLIP_KEY_GIF =
 const THUMBNAIL_KEY =
   'vj-thumbnails/55555555-5555-4555-8555-555555555555/66666666-6666-4666-8666-666666666666.webp';
 const PACK_ID = '77777777-7777-4777-8777-777777777777';
+const SCENE_ID = '88888888-8888-4888-8888-888888888888';
+const OTHER_SCENE_ID = '99999999-9999-4999-8999-999999999999';
+const SETLIST_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 /** Runs a function and answers the `code` and extra body fields it refused with. */
 function refusalOf(run: () => unknown): Record<string, unknown> {
@@ -254,6 +264,268 @@ describe('normalizeIdPermutation', () => {
         normalizeIdPermutation(['a'], ['a', 'b'], 'VJ_PACK_REORDER_MISMATCH'),
       ).code,
     ).toBe('VJ_PACK_REORDER_MISMATCH');
+  });
+
+  it('answers the scene and set list reorder codes', () => {
+    expect(
+      refusalOf(() =>
+        normalizeIdPermutation(
+          ['a', 'a'],
+          ['a', 'b'],
+          'VJ_SCENE_REORDER_MISMATCH',
+        ),
+      ).code,
+    ).toBe('VJ_SCENE_REORDER_MISMATCH');
+    expect(
+      refusalOf(() =>
+        normalizeIdPermutation([], ['a'], 'VJ_SETLIST_REORDER_MISMATCH'),
+      ).code,
+    ).toBe('VJ_SETLIST_REORDER_MISMATCH');
+    expect(
+      normalizeIdPermutation(
+        ['B', 'a'],
+        ['a', 'b'],
+        'VJ_SETLIST_REORDER_MISMATCH',
+      ),
+    ).toEqual(['b', 'a']);
+  });
+});
+
+describe('normalizeClipUpdate v2', () => {
+  it('checks a clip update in the contract order', () => {
+    expect(
+      refusalOf(() => normalizeClipUpdate({ title: '', defaultSpeed: 3 })).code,
+    ).toBe('VJ_CLIP_TITLE_REQUIRED');
+    expect(
+      refusalOf(() =>
+        normalizeClipUpdate({
+          fitMode: 'stretch',
+          isFavorite: 'yes',
+          defaultSpeed: 3,
+          loopMode: 'bounce',
+          loopInMs: -1,
+        }),
+      ).code,
+    ).toBe('VJ_CLIP_FIT_MODE_INVALID');
+    expect(
+      refusalOf(() =>
+        normalizeClipUpdate({
+          isFavorite: 'yes',
+          defaultSpeed: 3,
+          loopMode: 'bounce',
+          loopInMs: -1,
+        }),
+      ).code,
+    ).toBe('VJ_CLIP_FAVORITE_INVALID');
+    expect(
+      refusalOf(() =>
+        normalizeClipUpdate({
+          defaultSpeed: 3,
+          loopMode: 'bounce',
+          loopInMs: -1,
+        }),
+      ).code,
+    ).toBe('VJ_CLIP_SPEED_INVALID');
+    expect(
+      refusalOf(() => normalizeClipUpdate({ loopMode: 'bounce', loopInMs: -1 }))
+        .code,
+    ).toBe('VJ_CLIP_LOOP_MODE_INVALID');
+
+    for (const defaultSpeed of [0.3, '1', null, 8]) {
+      expect(refusalOf(() => normalizeClipUpdate({ defaultSpeed })).code).toBe(
+        'VJ_CLIP_SPEED_INVALID',
+      );
+    }
+    for (const loopPoint of [-1, 1.5, '10', Number.NaN, 2 ** 53]) {
+      expect(
+        refusalOf(() => normalizeClipUpdate({ loopInMs: loopPoint })).code,
+      ).toBe('VJ_CLIP_LOOP_INVALID');
+      expect(
+        refusalOf(() => normalizeClipUpdate({ loopOutMs: loopPoint })).code,
+      ).toBe('VJ_CLIP_LOOP_INVALID');
+    }
+    for (const isFavorite of ['true', 1, null]) {
+      expect(refusalOf(() => normalizeClipUpdate({ isFavorite })).code).toBe(
+        'VJ_CLIP_FAVORITE_INVALID',
+      );
+    }
+    expect(refusalOf(() => normalizeClipUpdate({ loopMode: null })).code).toBe(
+      'VJ_CLIP_LOOP_MODE_INVALID',
+    );
+  });
+
+  it('reads every v2 field and leaves absent ones out', () => {
+    expect(
+      normalizeClipUpdate({
+        isFavorite: false,
+        defaultSpeed: 0.25,
+        loopMode: 'pingPong',
+        loopInMs: 0,
+        loopOutMs: null,
+      }),
+    ).toEqual({
+      isFavorite: false,
+      defaultSpeed: 0.25,
+      loopMode: 'pingPong',
+      loopInMs: 0,
+      loopOutMs: null,
+    });
+    expect(normalizeClipUpdate({ loopOutMs: 1200 })).toEqual({
+      loopOutMs: 1200,
+    });
+  });
+});
+
+describe('checkVjLoopPoints', () => {
+  const video = { mediaKind: 'video' as const, durationMs: 10_000 };
+  const gif = { mediaKind: 'gif' as const, durationMs: null };
+
+  it('checks merged loop points against the clip', () => {
+    const refusedCases: Array<
+      [
+        { mediaKind: 'video' | 'gif'; durationMs: number | null },
+        number | null,
+        number | null,
+      ]
+    > = [
+      [gif, 0, null],
+      [gif, null, 500],
+      [video, null, 10_001],
+      [video, 10_001, null],
+      [video, 1000, 1249],
+      [video, 9800, null],
+      [video, null, 249],
+      [video, 2000, 1000],
+      [video, -1, null],
+      [{ mediaKind: 'video', durationMs: null }, 0, null],
+    ];
+    for (const [clip, loopInMs, loopOutMs] of refusedCases) {
+      expect(
+        refusalOf(() => checkVjLoopPoints(clip, loopInMs, loopOutMs)).code,
+      ).toBe('VJ_CLIP_LOOP_INVALID');
+    }
+  });
+
+  it('passes both points cleared on any clip, and in or out alone', () => {
+    expect(() =>
+      checkVjLoopPoints({ mediaKind: 'video', durationMs: 100 }, null, null),
+    ).not.toThrow();
+    expect(() => checkVjLoopPoints(gif, null, null)).not.toThrow();
+    expect(() => checkVjLoopPoints(video, 9750, null)).not.toThrow();
+    expect(() => checkVjLoopPoints(video, null, 250)).not.toThrow();
+    expect(() => checkVjLoopPoints(video, 1000, 1250)).not.toThrow();
+    expect(() => checkVjLoopPoints(video, 0, 10_000)).not.toThrow();
+  });
+});
+
+describe('scene and set list names', () => {
+  it('reads scene and set list names', () => {
+    for (const value of [undefined, 5, null, '   ']) {
+      expect(refusalOf(() => normalizeSceneName(value)).code).toBe(
+        'VJ_SCENE_NAME_REQUIRED',
+      );
+      expect(refusalOf(() => normalizeSetlistName(value)).code).toBe(
+        'VJ_SETLIST_NAME_REQUIRED',
+      );
+    }
+    expect(refusalOf(() => normalizeSceneName('a'.repeat(61))).code).toBe(
+      'VJ_SCENE_NAME_TOO_LONG',
+    );
+    expect(refusalOf(() => normalizeSetlistName('a'.repeat(61))).code).toBe(
+      'VJ_SETLIST_NAME_TOO_LONG',
+    );
+    expect(normalizeSceneName('🌈'.repeat(60))).toBe('🌈'.repeat(60));
+    expect(normalizeSceneName('  Glow up ')).toBe('Glow up');
+    expect(normalizeSetlistName(' Friday ')).toBe('Friday');
+  });
+
+  it('keeps refusal messages free of the name it read', () => {
+    const name = 'Secret warehouse set';
+    const refusal = refusalOf(() => normalizeSceneName(name.repeat(4)));
+    expect(JSON.stringify(refusal)).not.toContain('warehouse');
+  });
+});
+
+describe('readOptionalPackId', () => {
+  it('reads an optional pack id', () => {
+    expect(readOptionalPackId(undefined)).toBeUndefined();
+    expect(readOptionalPackId(null)).toBeNull();
+    expect(readOptionalPackId(PACK_ID.toUpperCase())).toBe(PACK_ID);
+    for (const value of ['nope', 5, '', [PACK_ID]]) {
+      expect(refusalOf(() => readOptionalPackId(value)).code).toBe(
+        'VJ_PACK_NOT_FOUND',
+      );
+    }
+  });
+});
+
+describe('readEventIdBody', () => {
+  it('reads an event id body', () => {
+    expect(readEventIdBody(null)).toBeNull();
+    expect(readEventIdBody(PACK_ID.toUpperCase())).toBe(PACK_ID);
+    for (const value of [undefined, 'nope', 5, '', {}]) {
+      expect(refusalOf(() => readEventIdBody(value)).code).toBe(
+        'VJ_EVENT_NOT_FOUND',
+      );
+    }
+  });
+});
+
+describe('parseRequiredClipIds', () => {
+  it('requires clip ids on the media list and keeps their order', () => {
+    for (const value of [undefined, '', ' , ', ['a'], 'nope', 5]) {
+      expect(refusalOf(() => parseRequiredClipIds(value)).code).toBe(
+        'VJ_CLIP_IDS_INVALID',
+      );
+    }
+    expect(
+      parseRequiredClipIds(`${SCENE_ID},${PACK_ID.toUpperCase()},${SCENE_ID}`),
+    ).toEqual([SCENE_ID, PACK_ID]);
+    const manyIds = Array.from(
+      { length: 201 },
+      (_, index) =>
+        `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    ).join(',');
+    expect(refusalOf(() => parseRequiredClipIds(manyIds)).code).toBe(
+      'VJ_CLIP_IDS_INVALID',
+    );
+  });
+});
+
+describe('normalizeSetlistSceneIds', () => {
+  it('reads set list scene ids with repeats and caps them at 100', () => {
+    expect(normalizeSetlistSceneIds([], null)).toEqual([]);
+    expect(
+      normalizeSetlistSceneIds(
+        [SCENE_ID.toUpperCase(), OTHER_SCENE_ID, SCENE_ID],
+        SETLIST_ID,
+      ),
+    ).toEqual([SCENE_ID, OTHER_SCENE_ID, SCENE_ID]);
+    for (const value of [undefined, null, 'a,b', [SCENE_ID, 5], ['nope']]) {
+      expect(refusalOf(() => normalizeSetlistSceneIds(value, null)).code).toBe(
+        'VJ_SETLIST_ITEMS_INVALID',
+      );
+    }
+    const hundred = Array.from({ length: 100 }, () => SCENE_ID);
+    expect(normalizeSetlistSceneIds(hundred, SETLIST_ID)).toHaveLength(100);
+    const tooMany = [...hundred, SCENE_ID];
+    const refusal = refusalOf(() =>
+      normalizeSetlistSceneIds(tooMany, SETLIST_ID),
+    );
+    expect(refusal.code).toBe('VJ_SETLIST_FULL');
+    expect(refusal.setlistId).toBe(SETLIST_ID);
+    const createRefusal = refusalOf(() =>
+      normalizeSetlistSceneIds(tooMany, null),
+    );
+    expect(createRefusal.code).toBe('VJ_SETLIST_FULL');
+    expect(createRefusal).not.toHaveProperty('setlistId');
+  });
+
+  it('answers the items code before the full code', () => {
+    const mixed = [...Array.from({ length: 101 }, () => SCENE_ID), 'nope'];
+    expect(
+      refusalOf(() => normalizeSetlistSceneIds(mixed, SETLIST_ID)).code,
+    ).toBe('VJ_SETLIST_ITEMS_INVALID');
   });
 });
 

@@ -1269,7 +1269,12 @@ describe('ForumThreadsService', () => {
 
     it('drops the top window when too few threads fall inside it', async () => {
       const qb = qbStub([baseThread()]);
-      qb.getCount.mockResolvedValue(3);
+      // The shared stub returns itself from `clone`, so the probe's own window
+      // predicate would land in the same call log as the real query's. A
+      // separate probe stub keeps the two apart.
+      const probe = qbStub();
+      probe.getCount.mockResolvedValue(3);
+      qb.clone.mockReturnValue(probe);
       threads.createQueryBuilder.mockReturnValue(qb);
 
       await service.list('viewer-1', undefined, undefined, undefined, 'top');
@@ -1277,6 +1282,11 @@ describe('ForumThreadsService', () => {
       // The probe ran against a clone carrying every filter already folded on,
       // and its answer was "not enough", so the real query is unwindowed.
       expect(qb.clone).toHaveBeenCalled();
+      expect(probe.andWhere).toHaveBeenCalledWith(
+        't.created_at >= :topWindowStart',
+        expect.anything(),
+      );
+      expect(probe.getCount).toHaveBeenCalled();
       expect(qb.andWhere).not.toHaveBeenCalledWith(
         't.created_at >= :topWindowStart',
         expect.anything(),

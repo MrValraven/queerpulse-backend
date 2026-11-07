@@ -47,6 +47,7 @@ import { PublishPieceDto } from './dto/publish-piece.dto';
 import { ReplyArticleCommentDto } from './dto/reply-article-comment.dto';
 import { ResolveArticleCommentDto } from './dto/resolve-article-comment.dto';
 import { TriagePitchDto } from './dto/triage-pitch.dto';
+import { UnpublishPieceDto } from './dto/unpublish-piece.dto';
 import { UpdateArticleDto } from './dto/update-article.dto';
 import { UpdateLetterDto } from './dto/update-letter.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
@@ -208,19 +209,27 @@ export class AdminMagazinePiecesController {
   @Post('pieces/:id/unpublish')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: "Take a piece's article or deck back down to draft.",
+    summary:
+      "Take a piece's article or deck off the live site, back to ready, drafting or in review.",
   })
   @ApiOkResponse({
     description:
-      'The updated piece record. Never gated: an editor must always be able to pull a live piece down.',
+      'The updated piece record. The publish date is cleared and the piece lands at `ready` by default, ' +
+      'or at the `stage` in the optional body (`drafting` or `in_review`) when it was live, scheduled or ' +
+      'published. A piece that was none of those keeps its stage. Never gated: an editor must always be ' +
+      'able to pull a live piece down.',
   })
-  @ApiBadRequestResponse({ description: 'Malformed piece id.' })
+  @ApiBadRequestResponse({
+    description:
+      'Malformed piece id, or a `stage` other than `drafting` or `in_review`.',
+  })
   @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
   unpublishPiece(
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UnpublishPieceDto,
     @CurrentUser() user: CurrentUserData,
   ) {
-    return this.magazinePieces.unpublishPiece(id, user.userId);
+    return this.magazinePieces.unpublishPiece(id, user.userId, dto.stage);
   }
 
   @Get('pieces/:id/letters')

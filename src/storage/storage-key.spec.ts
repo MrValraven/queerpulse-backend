@@ -1,4 +1,9 @@
 import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+  toImageUrl,
+} from '../common/image-url';
+import {
   PERSONA_SCOPED_KIND_SPEC,
   STUDIO_AUDIO_KEY_PATTERN,
   STUDIO_LANDING_SCOPED_KIND_SPEC,
@@ -10,11 +15,13 @@ import {
   isStudioLandingScopedKey,
   isVjClipKey,
   isVjKey,
+  isVjPreviewKey,
   isVjThumbnailKey,
   parseStorageKey,
   storageKeyOwnerId,
   studioAudioContentTypeForKey,
   vjClipContentTypeForKey,
+  vjPreviewContentTypeForKey,
 } from './storage-key';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
 
@@ -331,5 +338,83 @@ describe('VJ keys', () => {
       isVjThumbnailKey(VALID_AVATAR_KEY),
       isVjKey(VALID_AVATAR_KEY),
     ]).toEqual([false, false, false]);
+  });
+});
+
+// VJ v2: a clip's animated preview lives under
+// `vj-previews/<uuid>/<uuid>.webm|.mp4`, where neither segment names anyone.
+describe('VJ preview keys', () => {
+  const FIRST_UUID = '0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b';
+  const SECOND_UUID = '5d1e7c90-2a3b-4c4d-8e5f-6a7b8c9d0e1f';
+  const previewKeyWithExtension = (extension: string) =>
+    `vj-previews/${FIRST_UUID}/${SECOND_UUID}${extension}`;
+  const WEBM_PREVIEW_KEY = previewKeyWithExtension('.webm');
+  const MP4_PREVIEW_KEY = previewKeyWithExtension('.mp4');
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  it('parses preview keys to the vj_preview kind', () => {
+    setImageUrlBase('https://api.example.test');
+    for (const key of [WEBM_PREVIEW_KEY, MP4_PREVIEW_KEY]) {
+      expect(parseStorageKey(key)).toBe(UPLOAD_KIND_SPECS.vj_preview);
+      expect(isStorageKey(key)).toBe(true);
+      expect(toImageUrl(key)).toBe(`https://api.example.test/files/${key}`);
+    }
+    expect(UPLOAD_KIND_SPECS.vj_preview).toEqual({
+      prefix: 'vj-previews',
+      maxBytes: 524288,
+      requiresSession: true,
+    });
+  });
+
+  it('refuses odd preview shapes', () => {
+    const oddKeys = [
+      previewKeyWithExtension('.gif'),
+      previewKeyWithExtension('.WEBM'),
+      previewKeyWithExtension('.webp'),
+      previewKeyWithExtension(''),
+      `vj-previews/${FIRST_UUID}.webm`,
+      'vj-previews/../x.webm',
+      `vj-previews/not-a-uuid/${SECOND_UUID}.webm`,
+    ];
+    for (const key of oddKeys) {
+      expect(parseStorageKey(key)).toBeNull();
+      expect(isVjPreviewKey(key)).toBe(false);
+      expect(isVjKey(key)).toBe(false);
+    }
+    const clipKeyWithPreviewExtension = `vj-clips/${FIRST_UUID}/${SECOND_UUID}.webm`;
+    expect(parseStorageKey(clipKeyWithPreviewExtension)).toBe(
+      UPLOAD_KIND_SPECS.vj_clip,
+    );
+    expect(isVjPreviewKey(clipKeyWithPreviewExtension)).toBe(false);
+  });
+
+  it('keeps preview keys out of the owner pattern', () => {
+    expect(storageKeyOwnerId(WEBM_PREVIEW_KEY)).toBeNull();
+    expect(storageKeyOwnerId(MP4_PREVIEW_KEY)).toBeNull();
+  });
+
+  it('reads the content type from a preview key', () => {
+    expect(vjPreviewContentTypeForKey(WEBM_PREVIEW_KEY)).toBe('video/webm');
+    expect(vjPreviewContentTypeForKey(MP4_PREVIEW_KEY)).toBe('video/mp4');
+    expect(
+      vjPreviewContentTypeForKey(previewKeyWithExtension('.gif')),
+    ).toBeNull();
+    expect(
+      vjPreviewContentTypeForKey(`vj-clips/${FIRST_UUID}/${SECOND_UUID}.webm`),
+    ).toBeNull();
+  });
+
+  it('counts previews as VJ keys', () => {
+    expect([
+      isVjClipKey(WEBM_PREVIEW_KEY),
+      isVjThumbnailKey(WEBM_PREVIEW_KEY),
+      isVjPreviewKey(WEBM_PREVIEW_KEY),
+      isVjKey(WEBM_PREVIEW_KEY),
+    ]).toEqual([false, false, true, true]);
+    expect(isVjKey(MP4_PREVIEW_KEY)).toBe(true);
+    expect(isVjPreviewKey(VALID_AVATAR_KEY)).toBe(false);
   });
 });

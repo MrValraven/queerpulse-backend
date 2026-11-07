@@ -7,23 +7,34 @@ import {
 } from '../common/image-url';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
-import type { CreateVjClipDto } from './dto/vj.dto';
+import type { CreateVjClipDto, UpdateVjClipDto } from './dto/vj.dto';
 import { VjClip } from './entities/vj-clip.entity';
 import { VjPackClip } from './entities/vj-pack-clip.entity';
 import { VjPack } from './entities/vj-pack.entity';
+import { VjScene } from './entities/vj-scene.entity';
+import { VJ_PACK_SUMMARY_V2_SQL } from './vj-library-reads';
 import {
   DENSIFY_VJ_PACK_CLIPS_SQL,
   DENSIFY_VJ_PACKS_SQL,
+  LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL,
   LOCK_VJ_CLIPS_SQL,
   LOCK_VJ_PACK_CLIPS_SQL,
   LOCK_VJ_PACKS_SQL,
   VJ_CLIP_PACK_IDS_SQL,
   VJ_PACK_NAME_HOLDER_SQL,
   VJ_PACK_SUMMARY_SQL,
+  VJ_SCENES_NAMING_CLIP_SQL,
   type VjCaller,
   VjLibraryService,
 } from './vj-library.service';
-import { VJ_LIBRARY_CHANGED, VJ_LIMITS } from './vj.contract';
+import { normalizeStoredVjSceneLook } from './vj-scene-look';
+import { LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL } from './vj-scene.service';
+import {
+  VJ_LIBRARY_CHANGED,
+  VJ_LIMITS,
+  type VjLibraryChange,
+  type VjSceneLook,
+} from './vj.contract';
 
 const ADMIN_ID = 'a7100000-0000-4000-8000-000000000001';
 const API_BASE_URL = 'https://api.example.test';
@@ -41,6 +52,11 @@ const OTHER_PACK_ID = uuidAt(1, 2);
 const CLIP_ID = uuidAt(2, 1);
 const OTHER_CLIP_ID = uuidAt(2, 2);
 const CREATED_ID = uuidAt(9, 1);
+const EVENT_ID = uuidAt(5, 1);
+const SCENE_ID = uuidAt(6, 1);
+const OTHER_SCENE_ID = uuidAt(6, 2);
+const THIRD_SCENE_ID = uuidAt(6, 3);
+const EVENT_TITLE = 'Pride closing night';
 
 function clipKeyAt(position: number, extension: string): string {
   return `vj-clips/${uuidAt(3, position)}/${uuidAt(4, position)}${extension}`;
@@ -50,10 +66,17 @@ function thumbnailKeyAt(position: number): string {
   return `vj-thumbnails/${uuidAt(3, position)}/${uuidAt(4, position)}.webp`;
 }
 
+function previewKeyAt(position: number, extension: string): string {
+  return `vj-previews/${uuidAt(3, position)}/${uuidAt(4, position)}${extension}`;
+}
+
 const CLIP_KEY = clipKeyAt(1, '.mp4');
 const THUMBNAIL_KEY = thumbnailKeyAt(1);
 const NEW_CLIP_KEY = clipKeyAt(7, '.mp4');
 const NEW_THUMBNAIL_KEY = thumbnailKeyAt(7);
+const PREVIEW_KEY = previewKeyAt(5, '.webm');
+const MP4_PREVIEW_KEY = previewKeyAt(6, '.mp4');
+const OLD_PREVIEW_KEY = previewKeyAt(8, '.webm');
 
 const ADMIN: VjCaller = { userId: ADMIN_ID };
 
@@ -114,6 +137,7 @@ function buildPack(overrides: Partial<VjPack> = {}): VjPack {
     createdByUserId: ADMIN_ID,
     createdAt: NOW,
     updatedAt: NOW,
+    eventId: null,
     ...overrides,
   } as VjPack;
 }
@@ -131,11 +155,65 @@ function buildClip(overrides: Partial<VjClip> = {}): VjClip {
     storageKey: CLIP_KEY,
     thumbnailStorageKey: THUMBNAIL_KEY,
     fitMode: 'fill',
+    isFavorite: false,
+    defaultSpeed: 1,
+    loopInMs: null,
+    loopOutMs: null,
+    loopMode: 'loop',
+    previewStorageKey: null,
     createdByUserId: ADMIN_ID,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
   } as VjClip;
+}
+
+/** The library change the service emits, every field it leaves unset null
+ *  or empty (contract 7.10). */
+function expectedChange(
+  fields: Partial<VjLibraryChange> & Pick<VjLibraryChange, 'kind'>,
+): VjLibraryChange {
+  return {
+    packId: null,
+    clipId: null,
+    packIds: [],
+    sceneId: null,
+    setlistId: null,
+    setlistIds: [],
+    eventId: null,
+    ...fields,
+  };
+}
+
+/** A canonical stored look (through the read normaliser) with the given
+ *  parts replaced. */
+function sceneLook(overrides: Partial<VjSceneLook> = {}): VjSceneLook {
+  return normalizeStoredVjSceneLook({
+    ...normalizeStoredVjSceneLook(null),
+    ...overrides,
+  });
+}
+
+function buildScene(id: string, look: VjSceneLook): VjScene {
+  return {
+    id,
+    name: 'Strobe drop',
+    packId: null,
+    position: 0,
+    look,
+    createdByUserId: ADMIN_ID,
+    createdAt: NOW,
+    updatedAt: NOW,
+  } as VjScene;
+}
+
+/** An `events` row as the pack summary join reads it. */
+interface StoredEventRow {
+  id: string;
+  title: string;
+  start_at: Date;
+  status: string;
+  visibility: string;
 }
 
 function buildMembership(
@@ -185,6 +263,8 @@ describe('VjLibraryService', () => {
   let storedClips: VjClip[];
   let storedMemberships: VjPackClip[];
   let storedProfiles: Profile[];
+  let storedScenes: VjScene[];
+  let storedEvents: StoredEventRow[];
   let settledTransactions: number;
   let settledAtEmit: number[];
   let objectSizes: Map<string, number>;
@@ -215,6 +295,7 @@ describe('VjLibraryService', () => {
     if (entity === VjClip) return storedClips as unknown as Row[];
     if (entity === VjPackClip) return storedMemberships as unknown as Row[];
     if (entity === Profile) return storedProfiles as unknown as Row[];
+    if (entity === VjScene) return storedScenes as unknown as Row[];
     throw new Error('Unexpected entity');
   }
 
@@ -266,6 +347,9 @@ describe('VjLibraryService', () => {
       .map((pack) => {
         const members = findRows(VjPackClip, { where: { packId: pack.id } });
         const clips = members.map((member) => member.clip as VjClip);
+        const event = storedEvents.find(
+          (candidate) => candidate.id === pack.eventId,
+        );
         return {
           id: pack.id,
           name: pack.name,
@@ -278,6 +362,11 @@ describe('VjLibraryService', () => {
             clips.reduce((total, clip) => total + clip.byteSize, 0),
           ),
           cover_thumbnail_key: clips[0]?.thumbnailStorageKey ?? null,
+          event_id: event?.id ?? null,
+          event_title: event?.title ?? null,
+          event_start_at: event?.start_at ?? null,
+          event_status: event?.status ?? null,
+          event_visibility: event?.visibility ?? null,
         };
       });
   }
@@ -286,12 +375,25 @@ describe('VjLibraryService', () => {
     if (
       sql === LOCK_VJ_PACKS_SQL ||
       sql === LOCK_VJ_CLIPS_SQL ||
-      sql === LOCK_VJ_PACK_CLIPS_SQL
+      sql === LOCK_VJ_PACK_CLIPS_SQL ||
+      sql === LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL ||
+      sql === LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL
     ) {
       return [];
     }
-    if (sql === VJ_PACK_SUMMARY_SQL) {
+    if (sql === VJ_PACK_SUMMARY_V2_SQL) {
       return summaryRows(parameters[0]);
+    }
+    if (sql === VJ_SCENES_NAMING_CLIP_SQL) {
+      const clipId = parameters[0] as string;
+      return storedScenes
+        .filter(
+          (scene) =>
+            (scene.look.source?.kind === 'clip' &&
+              scene.look.source.clipId === clipId) ||
+            scene.look.mix.clipId === clipId,
+        )
+        .map((scene) => ({ id: scene.id, look: scene.look }));
     }
     if (sql === VJ_CLIP_PACK_IDS_SQL) {
       const clipIds = parameters[0] as string[];
@@ -351,10 +453,22 @@ describe('VjLibraryService', () => {
 
   /** A stored row whose save assigns a fresh id and timestamps. */
   function saveRow(entity: unknown, row: Row): Row {
+    const columnDefaults: Row =
+      entity === VjClip
+        ? {
+            isFavorite: false,
+            defaultSpeed: 1,
+            loopInMs: null,
+            loopOutMs: null,
+            loopMode: 'loop',
+            previewStorageKey: null,
+          }
+        : {};
     const saved: Row = {
       id: CREATED_ID,
       createdAt: NOW,
       updatedAt: NOW,
+      ...columnDefaults,
       ...row,
     };
     rowsOf(entity).push(saved);
@@ -365,6 +479,8 @@ describe('VjLibraryService', () => {
     storedPacks = [];
     storedClips = [];
     storedMemberships = [];
+    storedScenes = [];
+    storedEvents = [];
     storedProfiles = [
       { userId: ADMIN_ID, firstName: 'Rui', lastName: 'Lopes' } as Profile,
     ];
@@ -522,6 +638,10 @@ describe('VjLibraryService', () => {
         packId: CREATED_ID,
         clipId: null,
         packIds: [],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
       expect(settledAtEmit).toEqual([1]);
     });
@@ -620,6 +740,10 @@ describe('VjLibraryService', () => {
         packId: PACK_ID,
         clipId: null,
         packIds: [],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
     });
 
@@ -674,6 +798,10 @@ describe('VjLibraryService', () => {
         packId: null,
         clipId: null,
         packIds: [],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
     });
 
@@ -705,6 +833,10 @@ describe('VjLibraryService', () => {
         packId: middle,
         clipId: null,
         packIds: [middle],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
 
       expect((await codeOf(service.deletePack(uuidAt(1, 99)))).status).toBe(
@@ -822,6 +954,10 @@ describe('VjLibraryService', () => {
         packId: PACK_ID,
         clipId: OTHER_CLIP_ID,
         packIds: [PACK_ID],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
     });
 
@@ -902,6 +1038,10 @@ describe('VjLibraryService', () => {
         packId: PACK_ID,
         clipId: CLIP_ID,
         packIds: [PACK_ID],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
     });
 
@@ -958,6 +1098,10 @@ describe('VjLibraryService', () => {
         packId: PACK_ID,
         clipId: null,
         packIds: [PACK_ID],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
     });
   });
@@ -1286,6 +1430,10 @@ describe('VjLibraryService', () => {
         packId: PACK_ID,
         clipId: CREATED_ID,
         packIds: [PACK_ID],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
       expect(settledAtEmit).toEqual([1]);
     });
@@ -1303,6 +1451,10 @@ describe('VjLibraryService', () => {
         packId: null,
         clipId: CREATED_ID,
         packIds: [],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
     });
 
@@ -1402,6 +1554,10 @@ describe('VjLibraryService', () => {
         packId: null,
         clipId: CLIP_ID,
         packIds: [PACK_ID, OTHER_PACK_ID],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
       expect(queriedSql()).toContain(VJ_CLIP_PACK_IDS_SQL);
     });
@@ -1448,6 +1604,10 @@ describe('VjLibraryService', () => {
         packId: null,
         clipId: CLIP_ID,
         packIds: [PACK_ID, OTHER_PACK_ID],
+        sceneId: null,
+        setlistId: null,
+        setlistIds: [],
+        eventId: null,
       });
 
       expect((await codeOf(service.deleteClip('nope'))).code).toBe(
@@ -1525,6 +1685,666 @@ describe('VjLibraryService', () => {
     });
   });
 
+  describe('pack event summary', () => {
+    it('adds the event summary to every pack', async () => {
+      storedPacks.push(
+        buildPack({ eventId: EVENT_ID }),
+        buildPack({ id: OTHER_PACK_ID, name: 'Closing', position: 1 }),
+      );
+      storedEvents.push({
+        id: EVENT_ID,
+        title: EVENT_TITLE,
+        start_at: NOW,
+        status: 'published',
+        visibility: 'members',
+      });
+      const summary = {
+        id: EVENT_ID,
+        title: EVENT_TITLE,
+        startAt: NOW.toISOString(),
+        isAvailable: true,
+      };
+
+      const list = await service.listPacks();
+      expect(list.items.map((pack) => pack.event)).toEqual([summary, null]);
+      expect((await service.getPackClips(PACK_ID)).pack.event).toEqual(summary);
+      expect(
+        (await service.renamePack(PACK_ID, { name: 'Sunrise' })).event,
+      ).toEqual(summary);
+
+      const [storedEvent] = storedEvents;
+      if (storedEvent) storedEvent.status = 'cancelled';
+      expect((await service.listPacks()).items[0]?.event).toEqual({
+        ...summary,
+        isAvailable: false,
+      });
+      expect(queriedSql()).toContain(VJ_PACK_SUMMARY_V2_SQL);
+      expect(queriedSql()).not.toContain(VJ_PACK_SUMMARY_SQL);
+    });
+  });
+
+  describe('clip update v2', () => {
+    it('checks a clip update in the contract order', async () => {
+      storedClips.push(
+        buildClip({ loopOutMs: 4000 }),
+        buildClip({
+          id: OTHER_CLIP_ID,
+          mediaKind: 'gif',
+          mimeType: 'image/gif',
+          durationMs: null,
+          storageKey: clipKeyAt(2, '.gif'),
+          thumbnailStorageKey: thumbnailKeyAt(2),
+        }),
+      );
+      const fieldRefusals: [UpdateVjClipDto, string][] = [
+        [
+          { title: ' ', fitMode: 'stretch', isFavorite: 'yes' },
+          'VJ_CLIP_TITLE_REQUIRED',
+        ],
+        [{ fitMode: 'stretch', isFavorite: 'yes' }, 'VJ_CLIP_FIT_MODE_INVALID'],
+        [{ isFavorite: 'yes', defaultSpeed: 3 }, 'VJ_CLIP_FAVORITE_INVALID'],
+        [{ defaultSpeed: 3, loopMode: 'bounce' }, 'VJ_CLIP_SPEED_INVALID'],
+        [{ loopMode: 'bounce', loopInMs: -1 }, 'VJ_CLIP_LOOP_MODE_INVALID'],
+        [{ loopInMs: 1.5 }, 'VJ_CLIP_LOOP_INVALID'],
+        [{ loopOutMs: '4000' }, 'VJ_CLIP_LOOP_INVALID'],
+      ];
+      for (const [body, code] of fieldRefusals) {
+        expect(
+          (await codeOf(service.updateClip(uuidAt(2, 99), body))).code,
+        ).toBe(code);
+      }
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+
+      expect(
+        (await codeOf(service.updateClip(uuidAt(2, 99), { loopInMs: 999999 })))
+          .code,
+      ).toBe('VJ_CLIP_NOT_FOUND');
+      expect(
+        (
+          await codeOf(
+            service.updateClip(CLIP_ID, { loopInMs: 7900, loopOutMs: null }),
+          )
+        ).code,
+      ).toBe('VJ_CLIP_LOOP_INVALID');
+      expect(
+        (await codeOf(service.updateClip(CLIP_ID, { loopOutMs: 9000 }))).code,
+      ).toBe('VJ_CLIP_LOOP_INVALID');
+      expect(
+        (await codeOf(service.updateClip(OTHER_CLIP_ID, { loopInMs: 0 }))).code,
+      ).toBe('VJ_CLIP_LOOP_INVALID');
+      expect(manager.update).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('reads the clip for update before the merged loop check', async () => {
+      storedClips.push(buildClip({ loopOutMs: 4000 }));
+
+      const outcome = await codeOf(
+        service.updateClip(CLIP_ID, { loopInMs: 3900 }),
+      );
+      expect(outcome).toMatchObject({
+        code: 'VJ_CLIP_LOOP_INVALID',
+        status: 400,
+      });
+      expect(findOneOptionsOf(VjClip)[0]).toMatchObject({
+        where: { id: CLIP_ID },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(manager.update).not.toHaveBeenCalled();
+
+      const clip = await service.updateClip(CLIP_ID, { loopInMs: 1000 });
+
+      expect(manager.update).toHaveBeenCalledWith(
+        VjClip,
+        { id: CLIP_ID },
+        { loopInMs: 1000 },
+      );
+      const lockedReadOrder = manager.findOne.mock.invocationCallOrder[1];
+      const updateOrder = manager.update.mock.invocationCallOrder[0];
+      if (lockedReadOrder === undefined || updateOrder === undefined) {
+        throw new Error('An update step never ran');
+      }
+      expect(lockedReadOrder).toBeLessThan(updateOrder);
+      expect(clip).toMatchObject({ loopInMs: 1000, loopOutMs: 4000 });
+    });
+
+    it('emits clip_favorite_changed, clip_defaults_changed or clip_updated by what changed', async () => {
+      storedPacks.push(buildPack());
+      storedClips.push(buildClip());
+      storedMemberships.push(buildMembership(PACK_ID, CLIP_ID, 0));
+
+      await service.updateClip(CLIP_ID, { isFavorite: true });
+      await service.updateClip(CLIP_ID, { isFavorite: true, defaultSpeed: 2 });
+      await service.updateClip(CLIP_ID, {
+        isFavorite: false,
+        loopMode: 'pingPong',
+      });
+      await service.updateClip(CLIP_ID, { loopInMs: 500, loopOutMs: 6000 });
+      await service.updateClip(CLIP_ID, {
+        title: 'Neon rain',
+        defaultSpeed: 0.5,
+      });
+      await service.updateClip(CLIP_ID, { fitMode: 'fit', isFavorite: true });
+
+      const emittedKinds = eventEmitter.emit.mock.calls.map(
+        (call: unknown[]) => (call[1] as VjLibraryChange).kind,
+      );
+      expect(emittedKinds).toEqual([
+        'clip_favorite_changed',
+        'clip_defaults_changed',
+        'clip_defaults_changed',
+        'clip_defaults_changed',
+        'clip_updated',
+        'clip_updated',
+      ]);
+      expect(manager.update).toHaveBeenNthCalledWith(
+        2,
+        VjClip,
+        { id: CLIP_ID },
+        { defaultSpeed: 2 },
+      );
+      expect(eventEmitter.emit).toHaveBeenNthCalledWith(
+        1,
+        VJ_LIBRARY_CHANGED,
+        expectedChange({
+          kind: 'clip_favorite_changed',
+          clipId: CLIP_ID,
+          packIds: [PACK_ID],
+        }),
+      );
+      expect(settledAtEmit).toEqual([1, 2, 3, 4, 5, 6]);
+    });
+
+    it('writes and emits nothing for a body equal to the stored clip', async () => {
+      storedClips.push(
+        buildClip({
+          isFavorite: true,
+          defaultSpeed: 2,
+          loopInMs: 1000,
+          loopOutMs: 5000,
+          loopMode: 'pingPong',
+        }),
+      );
+
+      const clip = await service.updateClip(CLIP_ID, {
+        title: ` ${CLIP_TITLE} `,
+        fitMode: 'fill',
+        isFavorite: true,
+        defaultSpeed: 2,
+        loopInMs: 1000,
+        loopOutMs: 5000,
+        loopMode: 'pingPong',
+      });
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(manager.update).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+      expect(clip).toMatchObject({
+        id: CLIP_ID,
+        isFavorite: true,
+        defaultSpeed: 2,
+        loopInMs: 1000,
+        loopOutMs: 5000,
+        loopMode: 'pingPong',
+      });
+    });
+  });
+
+  describe('clip preview', () => {
+    /** Seeds a valid uploaded preview under `key`. */
+    function seedPreviewUpload(key: string, bytes: Uint8Array): void {
+      objectSizes.set(key, 200_000);
+      objectBytes.set(key, bytes);
+    }
+
+    it('checks a preview put in the contract order', async () => {
+      storedClips.push(buildClip());
+
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview('nope', { previewStorageKey: 42 }),
+          )
+        ).code,
+      ).toBe('VJ_CLIP_NOT_FOUND');
+      for (const previewStorageKey of [CLIP_KEY, 42, undefined]) {
+        expect(
+          await codeOf(service.setClipPreview(CLIP_ID, { previewStorageKey })),
+        ).toMatchObject({
+          code: 'VJ_CLIP_KEY_INVALID',
+          status: 400,
+          body: { field: 'previewStorageKey' },
+        });
+      }
+      expect(storage.describeObject).not.toHaveBeenCalled();
+
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview(uuidAt(2, 99), {
+              previewStorageKey: PREVIEW_KEY,
+            }),
+          )
+        ).body,
+      ).toMatchObject({
+        code: 'VJ_UPLOAD_MISSING',
+        field: 'previewStorageKey',
+      });
+
+      objectSizes.set(PREVIEW_KEY, 0);
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview(uuidAt(2, 99), {
+              previewStorageKey: PREVIEW_KEY,
+            }),
+          )
+        ).code,
+      ).toBe('VJ_UPLOAD_CONTENT_MISMATCH');
+
+      objectSizes.set(PREVIEW_KEY, VJ_LIMITS.previewMaxBytes + 1);
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview(uuidAt(2, 99), {
+              previewStorageKey: PREVIEW_KEY,
+            }),
+          )
+        ).body,
+      ).toMatchObject({
+        code: 'VJ_UPLOAD_TOO_LARGE',
+        kind: 'vj_preview',
+        maxBytes: 524288,
+        field: 'previewStorageKey',
+      });
+
+      seedPreviewUpload(PREVIEW_KEY, MP4_BYTES);
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview(uuidAt(2, 99), {
+              previewStorageKey: PREVIEW_KEY,
+            }),
+          )
+        ).code,
+      ).toBe('VJ_UPLOAD_CONTENT_MISMATCH');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+
+      seedPreviewUpload(PREVIEW_KEY, WEBM_BYTES);
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview(uuidAt(2, 99), {
+              previewStorageKey: PREVIEW_KEY,
+            }),
+          )
+        ).code,
+      ).toBe('VJ_CLIP_NOT_FOUND');
+      expect(findOneOptionsOf(VjClip)[0]).toMatchObject({
+        where: { id: uuidAt(2, 99) },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(manager.update).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('deletes an unusable preview upload no clip holds', async () => {
+      storedClips.push(
+        buildClip(),
+        buildClip({ id: OTHER_CLIP_ID, previewStorageKey: MP4_PREVIEW_KEY }),
+      );
+
+      await codeOf(
+        service.setClipPreview(CLIP_ID, { previewStorageKey: PREVIEW_KEY }),
+      );
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+
+      objectSizes.set(PREVIEW_KEY, 0);
+      await codeOf(
+        service.setClipPreview(CLIP_ID, { previewStorageKey: PREVIEW_KEY }),
+      );
+      objectSizes.set(PREVIEW_KEY, VJ_LIMITS.previewMaxBytes + 1);
+      await codeOf(
+        service.setClipPreview(CLIP_ID, { previewStorageKey: PREVIEW_KEY }),
+      );
+      seedPreviewUpload(PREVIEW_KEY, PNG_BYTES);
+      await codeOf(
+        service.setClipPreview(CLIP_ID, { previewStorageKey: PREVIEW_KEY }),
+      );
+      expect(storage.deleteObjectByKey.mock.calls).toEqual([
+        [PREVIEW_KEY],
+        [PREVIEW_KEY],
+        [PREVIEW_KEY],
+      ]);
+
+      storage.deleteObjectByKey.mockClear();
+      seedPreviewUpload(MP4_PREVIEW_KEY, PNG_BYTES);
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview(CLIP_ID, {
+              previewStorageKey: MP4_PREVIEW_KEY,
+            }),
+          )
+        ).code,
+      ).toBe('VJ_UPLOAD_CONTENT_MISMATCH');
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+    });
+
+    it('refuses a QuickTime preview with VJ_UPLOAD_CONTENT_MISMATCH', async () => {
+      storedClips.push(buildClip());
+      seedPreviewUpload(MP4_PREVIEW_KEY, MOV_BYTES);
+
+      const outcome = await codeOf(
+        service.setClipPreview(CLIP_ID, { previewStorageKey: MP4_PREVIEW_KEY }),
+      );
+
+      expect(outcome.body).toMatchObject({
+        code: 'VJ_UPLOAD_CONTENT_MISMATCH',
+        field: 'previewStorageKey',
+      });
+      expect(storage.deleteObjectByKey).toHaveBeenCalledWith(MP4_PREVIEW_KEY);
+
+      seedPreviewUpload(MP4_PREVIEW_KEY, MP4_BYTES);
+      const clip = await service.setClipPreview(CLIP_ID, {
+        previewStorageKey: MP4_PREVIEW_KEY,
+      });
+      expect(clip.previewUrl).toBe(`${API_BASE_URL}/files/${MP4_PREVIEW_KEY}`);
+    });
+
+    it('answers VJ_CLIP_KEY_IN_USE for a key another clip stores', async () => {
+      storedClips.push(
+        buildClip(),
+        buildClip({ id: OTHER_CLIP_ID, previewStorageKey: PREVIEW_KEY }),
+      );
+      seedPreviewUpload(PREVIEW_KEY, WEBM_BYTES);
+
+      expect(
+        await codeOf(
+          service.setClipPreview(CLIP_ID, { previewStorageKey: PREVIEW_KEY }),
+        ),
+      ).toMatchObject({
+        code: 'VJ_CLIP_KEY_IN_USE',
+        status: 409,
+        body: { field: 'previewStorageKey' },
+      });
+
+      seedPreviewUpload(MP4_PREVIEW_KEY, MP4_BYTES);
+      manager.update.mockRejectedValueOnce(
+        uniqueViolation('UQ_vj_clips_preview_storage_key'),
+      );
+      expect(
+        (
+          await codeOf(
+            service.setClipPreview(CLIP_ID, {
+              previewStorageKey: MP4_PREVIEW_KEY,
+            }),
+          )
+        ).body,
+      ).toMatchObject({
+        code: 'VJ_CLIP_KEY_IN_USE',
+        field: 'previewStorageKey',
+      });
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('deletes the replaced preview after commit and logs the key only on failure', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      storedPacks.push(buildPack());
+      storedClips.push(buildClip({ previewStorageKey: OLD_PREVIEW_KEY }));
+      storedMemberships.push(buildMembership(PACK_ID, CLIP_ID, 0));
+      seedPreviewUpload(PREVIEW_KEY, WEBM_BYTES);
+
+      const clip = await service.setClipPreview(CLIP_ID.toUpperCase(), {
+        previewStorageKey: PREVIEW_KEY,
+      });
+
+      expect(manager.update).toHaveBeenCalledWith(
+        VjClip,
+        { id: CLIP_ID },
+        { previewStorageKey: PREVIEW_KEY },
+      );
+      expect(clip.previewUrl).toBe(`${API_BASE_URL}/files/${PREVIEW_KEY}`);
+      expect(storage.deleteObjectByKey.mock.calls).toEqual([[OLD_PREVIEW_KEY]]);
+      const transactionOrder = dataSource.transaction.mock
+        .invocationCallOrder[0] as number;
+      expect(
+        storage.deleteObjectByKey.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(transactionOrder);
+      expect(settledAtEmit).toEqual([1]);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        VJ_LIBRARY_CHANGED,
+        expectedChange({
+          kind: 'clip_preview_changed',
+          clipId: CLIP_ID,
+          packIds: [PACK_ID],
+        }),
+      );
+
+      seedPreviewUpload(MP4_PREVIEW_KEY, MP4_BYTES);
+      storage.deleteObjectByKey.mockRejectedValueOnce(
+        new Error(`delete failed for ${CLIP_TITLE}`),
+      );
+      await service.setClipPreview(CLIP_ID, {
+        previewStorageKey: MP4_PREVIEW_KEY,
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      const message = warn.mock.calls[0]?.[0] as string;
+      expect(message).toContain(PREVIEW_KEY);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(CLIP_TITLE);
+    });
+
+    it('treats the current key as a no-op', async () => {
+      storedClips.push(buildClip({ previewStorageKey: PREVIEW_KEY }));
+      seedPreviewUpload(PREVIEW_KEY, WEBM_BYTES);
+
+      const clip = await service.setClipPreview(CLIP_ID, {
+        previewStorageKey: PREVIEW_KEY,
+      });
+
+      expect(clip.previewUrl).toBe(`${API_BASE_URL}/files/${PREVIEW_KEY}`);
+      expect(manager.update).not.toHaveBeenCalled();
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('clip write locks', () => {
+    /** The call order of the first `findOne` that locks its row
+     *  `FOR UPDATE`. */
+    function rowLockOrder(): number {
+      const lockIndex = manager.findOne.mock.calls.findIndex(
+        (call: unknown[]) =>
+          (call[1] as { lock?: { mode: string } } | undefined)?.lock?.mode ===
+          'pessimistic_write',
+      );
+      const order = manager.findOne.mock.invocationCallOrder[lockIndex];
+      if (order === undefined) {
+        throw new Error('No row was read for update');
+      }
+      return order;
+    }
+
+    /** The call order of the first `manager.query` running `sql`. */
+    function queryOrder(sql: string): number {
+      const order =
+        manager.query.mock.invocationCallOrder[queriedSql().indexOf(sql)];
+      if (order === undefined) {
+        throw new Error('The query never ran');
+      }
+      return order;
+    }
+
+    it('takes the clip table lock in row exclusive mode before the clip row on PATCH and preview PUT', async () => {
+      expect(LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL).toBe(
+        'LOCK TABLE "vj_clips" IN ROW EXCLUSIVE MODE',
+      );
+      storedClips.push(buildClip());
+
+      await service.updateClip(CLIP_ID, { isFavorite: true });
+      expect(queriedSql()[0]).toBe(LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL);
+      expect(queriedSql()).not.toContain(LOCK_VJ_CLIPS_SQL);
+      expect(rowLockOrder()).toBeGreaterThan(
+        queryOrder(LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL),
+      );
+
+      manager.query.mockClear();
+      manager.findOne.mockClear();
+      objectSizes.set(PREVIEW_KEY, 200_000);
+      objectBytes.set(PREVIEW_KEY, WEBM_BYTES);
+      await service.setClipPreview(CLIP_ID, {
+        previewStorageKey: PREVIEW_KEY,
+      });
+      expect(queriedSql()[0]).toBe(LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL);
+      expect(rowLockOrder()).toBeGreaterThan(
+        queryOrder(LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL),
+      );
+    });
+
+    it('takes the scene table lock in row exclusive mode after the clip row and before the scenes on a clip delete', async () => {
+      storedClips.push(buildClip());
+
+      await service.deleteClip(CLIP_ID);
+
+      const sceneLockOrder = queryOrder(LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL);
+      expect(rowLockOrder()).toBeLessThan(sceneLockOrder);
+      expect(queryOrder(VJ_SCENES_NAMING_CLIP_SQL)).toBeGreaterThan(
+        sceneLockOrder,
+      );
+      expect(queryOrder(LOCK_VJ_PACK_CLIPS_SQL)).toBeLessThan(sceneLockOrder);
+    });
+  });
+
+  describe('clips media', () => {
+    it('signs media for listed clips in query order and leaves unknown ids out', async () => {
+      storedClips.push(
+        buildClip(),
+        buildClip({
+          id: OTHER_CLIP_ID,
+          mimeType: 'image/gif',
+          mediaKind: 'gif',
+          durationMs: null,
+          byteSize: 900,
+          storageKey: clipKeyAt(2, '.gif'),
+          thumbnailStorageKey: thumbnailKeyAt(2),
+        }),
+      );
+
+      const media = await service.getClipsMedia({
+        clipIds: `${OTHER_CLIP_ID},${uuidAt(2, 99)},${CLIP_ID.toUpperCase()}`,
+      });
+
+      expect(media.items.map((item) => item.clipId)).toEqual([
+        OTHER_CLIP_ID,
+        CLIP_ID,
+      ]);
+      expect(media.items[0]).toEqual({
+        clipId: OTHER_CLIP_ID,
+        url: `https://bucket.example.test/${clipKeyAt(2, '.gif')}?signature=1`,
+        expiresAt: '2026-11-05T12:15:00.000Z',
+        mimeType: 'image/gif',
+        byteSize: 900,
+      });
+      for (const item of media.items) {
+        expect(item).not.toHaveProperty('storageKey');
+      }
+      expect(manager.find).toHaveBeenCalledTimes(1);
+      expect(storage.createPresignedVjClipDownload).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses a media list with no clip ids', async () => {
+      for (const clipIds of [undefined, '', 'nope', 42]) {
+        expect((await codeOf(service.getClipsMedia({ clipIds }))).code).toBe(
+          'VJ_CLIP_IDS_INVALID',
+        );
+      }
+      expect(manager.find).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('clip delete v2', () => {
+    it('rewrites every scene look naming a deleted clip in the delete transaction', async () => {
+      const otherClipLook = sceneLook({
+        source: { kind: 'clip', clipId: OTHER_CLIP_ID },
+      });
+      storedClips.push(buildClip(), buildClip({ id: OTHER_CLIP_ID }));
+      storedScenes.push(
+        buildScene(
+          SCENE_ID,
+          sceneLook({ source: { kind: 'clip', clipId: CLIP_ID } }),
+        ),
+        buildScene(
+          OTHER_SCENE_ID,
+          sceneLook({
+            mix: { clipId: CLIP_ID, amount: 0.5, blendMode: 'multiply' },
+          }),
+        ),
+        buildScene(THIRD_SCENE_ID, otherClipLook),
+      );
+
+      await service.deleteClip(CLIP_ID);
+
+      expect(manager.query).toHaveBeenCalledWith(VJ_SCENES_NAMING_CLIP_SQL, [
+        CLIP_ID,
+      ]);
+      expect(storedScenes[0]?.look).toEqual(sceneLook({ source: null }));
+      expect(storedScenes[1]?.look).toEqual(
+        sceneLook({ mix: { clipId: null, amount: 0, blendMode: 'multiply' } }),
+      );
+      expect(storedScenes[2]?.look).toBe(otherClipLook);
+      const sceneUpdates = manager.update.mock.calls.filter(
+        (call: unknown[]) => call[0] === VjScene,
+      );
+      expect(sceneUpdates.map((call: unknown[]) => call[1])).toEqual([
+        { id: SCENE_ID },
+        { id: OTHER_SCENE_ID },
+      ]);
+      const clipReadOrder = manager.findOne.mock.invocationCallOrder[0];
+      const sceneReadIndex = queriedSql().indexOf(VJ_SCENES_NAMING_CLIP_SQL);
+      const sceneReadOrder =
+        manager.query.mock.invocationCallOrder[sceneReadIndex];
+      const lastSceneUpdateOrder = manager.update.mock.invocationCallOrder[1];
+      const clipDeleteOrder = manager.delete.mock.invocationCallOrder[0];
+      if (
+        clipReadOrder === undefined ||
+        sceneReadOrder === undefined ||
+        lastSceneUpdateOrder === undefined ||
+        clipDeleteOrder === undefined
+      ) {
+        throw new Error('A delete step never ran');
+      }
+      expect(clipReadOrder).toBeLessThan(sceneReadOrder);
+      expect(lastSceneUpdateOrder).toBeLessThan(clipDeleteOrder);
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(settledAtEmit).toEqual([1]);
+    });
+
+    it('deletes the preview object with the clip', async () => {
+      storedClips.push(buildClip({ previewStorageKey: PREVIEW_KEY }));
+
+      await service.deleteClip(CLIP_ID);
+
+      expect(storage.deleteObjectByKey.mock.calls).toEqual([
+        [CLIP_KEY],
+        [THUMBNAIL_KEY],
+        [PREVIEW_KEY],
+      ]);
+      const transactionOrder = dataSource.transaction.mock
+        .invocationCallOrder[0] as number;
+      for (const callOrder of storage.deleteObjectByKey.mock
+        .invocationCallOrder) {
+        expect(callOrder).toBeGreaterThan(transactionOrder);
+      }
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        VJ_LIBRARY_CHANGED,
+        expectedChange({ kind: 'clip_deleted', clipId: CLIP_ID }),
+      );
+    });
+  });
+
   describe('ids', () => {
     it('lowercases an uppercase id from a route or body before events and responses', async () => {
       storedPacks.push(
@@ -1582,36 +2402,60 @@ describe('VjLibraryService', () => {
           packId: PACK_ID,
           clipId: OTHER_CLIP_ID,
           packIds: [PACK_ID],
+          sceneId: null,
+          setlistId: null,
+          setlistIds: [],
+          eventId: null,
         },
         {
           kind: 'pack_clips_changed',
           packId: PACK_ID,
           clipId: OTHER_CLIP_ID,
           packIds: [PACK_ID],
+          sceneId: null,
+          setlistId: null,
+          setlistIds: [],
+          eventId: null,
         },
         {
           kind: 'pack_renamed',
           packId: PACK_ID,
           clipId: null,
           packIds: [],
+          sceneId: null,
+          setlistId: null,
+          setlistIds: [],
+          eventId: null,
         },
         {
           kind: 'clip_updated',
           packId: null,
           clipId: CLIP_ID,
           packIds: [PACK_ID],
+          sceneId: null,
+          setlistId: null,
+          setlistIds: [],
+          eventId: null,
         },
         {
           kind: 'pack_deleted',
           packId: OTHER_PACK_ID,
           clipId: null,
           packIds: [OTHER_PACK_ID],
+          sceneId: null,
+          setlistId: null,
+          setlistIds: [],
+          eventId: null,
         },
         {
           kind: 'clip_deleted',
           packId: null,
           clipId: CLIP_ID,
           packIds: [PACK_ID],
+          sceneId: null,
+          setlistId: null,
+          setlistIds: [],
+          eventId: null,
         },
       ]);
       expect(await service.packExists(PACK_ID.toUpperCase())).toBe(true);

@@ -376,7 +376,9 @@ describe('selectNodeUserIds', () => {
     expect(selected).not.toContain('user-0000');
     expect(selected).not.toContain('user-0010');
     expect(selected).toContain('user-0011');
-    expect(selected).toContain(`user-${String(MAX_NODES + 9)}`);
+    expect(selected).toContain(
+      `user-${String(MAX_NODES + 9).padStart(4, '0')}`,
+    );
     expect(loadNewestUserIds).not.toHaveBeenCalled();
   });
 

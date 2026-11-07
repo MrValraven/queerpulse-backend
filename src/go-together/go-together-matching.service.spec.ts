@@ -585,6 +585,8 @@ describe('GoTogetherMatchingService', () => {
   describe('launch key', () => {
     it('runs only the reconcile safety pass while Go together is held dark', async () => {
       mockIsGoTogetherLaunched.mockReturnValue(false);
+      // tick() reads the wall clock, and the fixtures are built around NOW.
+      jest.useFakeTimers({ now: NOW });
       const harness = build({
         configs: [
           config('event-grouped', { matchedAt: hoursFromNow(-2) }),
@@ -634,6 +636,8 @@ describe('GoTogetherMatchingService', () => {
     });
 
     it('runs the passes once the key is back on', async () => {
+      // tick() reads the wall clock, and the fixtures are built around NOW.
+      jest.useFakeTimers({ now: NOW });
       const harness = build({
         configs: [config('event-a')],
         events: [event('event-a')],

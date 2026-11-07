@@ -32,6 +32,8 @@ const vjClipKey =
   'vj-clips/88888888-8888-4888-8888-888888888888/99999999-9999-4999-8999-999999999999.mp4';
 const vjThumbnailKey =
   'vj-thumbnails/88888888-8888-4888-8888-888888888888/99999999-9999-4999-8999-999999999999.webp';
+const vjPreviewKey =
+  'vj-previews/88888888-8888-4888-8888-888888888888/99999999-9999-4999-8999-999999999999.webm';
 
 const publicPrefixes = [
   ...Object.values(UPLOAD_KIND_SPECS)
@@ -39,7 +41,10 @@ const publicPrefixes = [
     .filter(
       (prefix) =>
         !PRIVATE_MESSAGE_PREFIXES.has(prefix) &&
-        prefix !== UPLOAD_KIND_SPECS.studio_audio.prefix,
+        prefix !== UPLOAD_KIND_SPECS.studio_audio.prefix &&
+        prefix !== UPLOAD_KIND_SPECS.vj_clip.prefix &&
+        prefix !== UPLOAD_KIND_SPECS.vj_thumbnail.prefix &&
+        prefix !== UPLOAD_KIND_SPECS.vj_preview.prefix,
     ),
   // T17: unlinked persona images.
   PERSONA_SCOPED_PREFIX,
@@ -331,6 +336,7 @@ describe('AdminMediaService.list', () => {
     'studio-audio',
     'vj-clips',
     'vj-thumbnails',
+    'vj-previews',
   ])('rejects the %s prefix filter as an unknown kind', async (prefix) => {
     const { service, storage } = await makeService();
 
@@ -353,7 +359,7 @@ describe('AdminMediaService.head', () => {
     },
   );
 
-  it.each([vjClipKey, vjThumbnailKey])(
+  it.each([vjClipKey, vjThumbnailKey, vjPreviewKey])(
     '404s a VJ key without touching the bucket (%s)',
     async (key) => {
       const { service, storage } = await makeService();
@@ -383,6 +389,8 @@ describe('AdminMediaService.delete', () => {
     [vjClipKey, true],
     [vjThumbnailKey, false],
     [vjThumbnailKey, true],
+    [vjPreviewKey, false],
+    [vjPreviewKey, true],
   ])(
     '404s a VJ key without touching the bucket (%s, forced %p)',
     async (key, force) => {

@@ -303,6 +303,9 @@ describe('ForumController', () => {
       user,
       'c1',
       5,
+      // No ?sort= sent: the controller forwards the query's sort as-is and the
+      // service applies its default.
+      undefined,
     );
   });
 
@@ -342,6 +345,8 @@ describe('ForumController', () => {
       undefined,
       undefined,
       true,
+      // No funding chips picked: the filter object is still always passed.
+      { view: undefined, eligibility: undefined, scope: undefined },
     );
 
     await controller.getThread(mod, 'hello-world');

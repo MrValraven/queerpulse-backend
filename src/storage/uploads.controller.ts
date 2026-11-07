@@ -126,7 +126,7 @@ export class UploadsController {
   })
   @ApiForbiddenResponse({
     description:
-      'A sticker or VJ upload by a caller who is not an admin (VJ_UPLOAD_NOT_ADMIN for vj_clip and vj_thumbnail).',
+      'A sticker or VJ upload by a caller who is not an admin (VJ_UPLOAD_NOT_ADMIN for vj_clip, vj_thumbnail and vj_preview).',
   })
   presign(
     @CurrentUser() user: CurrentUserData,
@@ -141,7 +141,11 @@ export class UploadsController {
       throw new ForbiddenException('Only an admin may upload a sticker');
     }
     // VJ media is platform artwork under keys that name nobody, admin only.
-    if (dto.kind === 'vj_clip' || dto.kind === 'vj_thumbnail') {
+    if (
+      dto.kind === 'vj_clip' ||
+      dto.kind === 'vj_thumbnail' ||
+      dto.kind === 'vj_preview'
+    ) {
       if ((user.role as UserRole) !== UserRole.Admin) {
         throw vjError('VJ_UPLOAD_NOT_ADMIN');
       }

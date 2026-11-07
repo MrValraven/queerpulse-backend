@@ -489,6 +489,7 @@ describe('StorageKeyOwnershipInterceptor', () => {
   describe('VJ keys', () => {
     const CLIP_KEY = `vj-clips/${FILE_SEGMENT}/${FILE_SEGMENT}.mp4`;
     const THUMB_KEY = `vj-thumbnails/${FILE_SEGMENT}/${FILE_SEGMENT}.webp`;
+    const FIRST_SEGMENT_FOR_PREVIEW = '0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b';
     const clipCreate = {
       controller: 'AdminVjController',
       method: 'createClip',
@@ -556,6 +557,57 @@ describe('StorageKeyOwnershipInterceptor', () => {
       } finally {
         resetImageUrlBaseForTesting();
       }
+    });
+
+    // VJ v2: the preview PUT is the one route built for a preview key. The
+    // clip create lets every VJ key through the interceptor (one allowance
+    // covers all three kinds), and its own shape check accepts only a clip
+    // key and a thumbnail key there.
+    it('lets setClipPreview carry a preview key and refuses it on updateClip and unlisted routes', () => {
+      const PREVIEW_KEY = `vj-previews/${FIRST_SEGMENT_FOR_PREVIEW}/${FILE_SEGMENT}.webm`;
+      const previewPut = {
+        controller: 'AdminVjController',
+        method: 'setClipPreview',
+      };
+      const passedBody = { previewStorageKey: PREVIEW_KEY };
+      interceptor.intercept(
+        httpContext('PUT', passedBody, { userId: OWN_USER_ID }, previewPut),
+        nextHandler(),
+      );
+      expect(passedBody.previewStorageKey).toBe(PREVIEW_KEY);
+
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'PATCH',
+            { previewStorageKey: PREVIEW_KEY },
+            { userId: OWN_USER_ID },
+            { controller: 'AdminVjController', method: 'updateClip' },
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'PATCH',
+            { avatarUrl: PREVIEW_KEY },
+            { userId: OWN_USER_ID },
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
+      expect(() =>
+        interceptor.intercept(
+          httpContext(
+            'PUT',
+            { previewStorageKey: PREVIEW_KEY },
+            undefined,
+            previewPut,
+          ),
+          nextHandler(),
+        ),
+      ).toThrow(ForbiddenException);
     });
   });
 });

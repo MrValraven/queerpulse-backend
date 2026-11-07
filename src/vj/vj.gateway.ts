@@ -13,10 +13,13 @@
  * next frame past the cache: the frame acks `vj_not_admin`, then the
  * `exception` frame and the drop follow on the next tick.
  *
- * Stage state lives in memory in `VjStageService`; this gateway reads the
- * library for the one existence check a frame needs and fans the frames out
- * to the rooms of contract 6.3. Log lines name frames, codes, the admin user
- * id and socket ids only: payloads, overlay text, clip titles and pack names
+ * Stage state lives in memory in `VjStageService`, which also reads the
+ * lookups of every stage command (contract 7.7). This gateway reads the
+ * restore lookups of a screen attach and the set list counts a library change
+ * needs, stamps `serverNow` on every ack (contract 7.2) and fans the frames
+ * out to the rooms of contract 6.3. Log lines name frames, codes, the admin
+ * user id, socket ids and entity ids only: payloads, overlay text, clip
+ * titles, pack, scene and set list names, countdown labels and event titles
  * stay out.
  */
 import {
@@ -67,24 +70,46 @@ import {
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import {
   VjAttachPayloadDto,
+  VjClockSyncPayloadDto,
   VjGoClipPayloadDto,
+  VjGoGeneratorPayloadDto,
   VjReauthPayloadDto,
+  VjRecallScenePayloadDto,
+  VjResetLookPayloadDto,
   VjScreenAdvancePayloadDto,
+  VjScreenIdentifyPayloadDto,
   VjScreenStatusPayloadDto,
+  VjSetCountdownPayloadDto,
   VjSetEffectsPayloadDto,
+  VjSetEventCardPayloadDto,
+  VjSetlistSelectPayloadDto,
+  VjSetlistStepPayloadDto,
+  VjSetLogoPayloadDto,
+  VjSetMixPayloadDto,
   VjSetOverlayPayloadDto,
   VjSetPackPayloadDto,
+  VjSetScreenOverridePayloadDto,
   VjSetShufflePayloadDto,
   VjSetStrobePayloadDto,
+  VjSetTempoPayloadDto,
   VjSetTransitionPayloadDto,
+  VjSwapMixPayloadDto,
 } from './dto/vj-socket-payloads';
+import { vjAttachApplyAt } from './stage/vj-quantize';
+import {
+  EMPTY_VJ_LOOKUP_RESULTS,
+  isUuidString,
+  type VjLookupResults,
+} from './stage/vj-rule-kit';
 import {
   vjAckFailure,
   VJ_NOT_ADMIN_MESSAGE,
   VJ_SCREEN_REPLACED_MESSAGE,
 } from './vj.constants';
 import {
+  VJ_CONTRACT_VERSION,
   VJ_LIBRARY_CHANGED,
+  VJ_LIMITS,
   type VjAck,
   type VjAckFailure,
   type VjAttachRole,
@@ -94,12 +119,19 @@ import {
   type VjLibraryChange,
   type VjReauthAck,
   type VjRemoteCommandName,
+  type VjScreenIdentifyFrame,
   type VjSocketErrorCode,
   type VjStageFrame,
   type VjStageState,
+  type VjWsTransportCode,
 } from './vj.contract';
-import { VjLibraryService } from './vj-library.service';
-import { VjStageService } from './vj-stage.service';
+import { resolveVjLookups } from './vj-lookup-resolver';
+import { VjStageReadsService } from './vj-stage-reads.service';
+import {
+  VjStageService,
+  type VjScreenAttachOutcome,
+  type VjStageOutcome,
+} from './vj-stage.service';
 
 /** The handshake budget per verified user: a burst of 10, then one every 10 seconds. */
 const HANDSHAKE_RATE_LIMIT = { capacity: 10, refillPerSecond: 0.1 };
@@ -113,6 +145,14 @@ export const VJ_COMMAND_RATE_LIMIT = { capacity: 40, refillPerSecond: 10 };
 const ADVANCE_RATE_LIMIT = { capacity: 10, refillPerSecond: 2 };
 /** `screen:status` per socket: 10, then 2 per second; past it frames are dropped silently. */
 const STATUS_RATE_LIMIT = { capacity: 10, refillPerSecond: 2 };
+/** `stage:setMix` per socket: 60, then 25 per second, so a crossfader drag (20 per second) stays under it (contract 7.12). */
+export const VJ_MIX_RATE_LIMIT = { capacity: 60, refillPerSecond: 25 };
+/** `stage:setEffects` per socket: 60, then 25 per second, for pad drumming and effect sliders (contract 7.12). */
+export const VJ_EFFECTS_RATE_LIMIT = { capacity: 60, refillPerSecond: 25 };
+/** `screen:identify` per socket: 5, then one every 2 seconds. */
+const IDENTIFY_RATE_LIMIT = { capacity: 5, refillPerSecond: 0.5 };
+/** `clock:sync` per socket: 10, then one per second. */
+const CLOCK_SYNC_RATE_LIMIT = { capacity: 10, refillPerSecond: 1 };
 
 /** How long a socket's admin verdict is trusted before a frame reads `users.role` again. */
 export const VJ_ROLE_RECHECK_MS = 5000;
@@ -137,14 +177,42 @@ export function vjRemotesRoomName(adminUserId: string): string {
 /** The room every attached VJ socket joins; it receives `library:changed`. */
 export const VJ_LIBRARY_ROOM = 'vj:library';
 
-/** Refusals a client can repeat at no cost or that a busy remote meets in normal use; they get no log line, so a flood cannot fill the log. */
+/** Refusals a client can repeat at no cost or that a busy stage meets in normal use; they get no log line, so a flood cannot fill the log. */
 const UNLOGGED_REFUSALS: ReadonlySet<VjSocketErrorCode> =
   new Set<VjSocketErrorCode>([
     'vj_not_attached',
     'vj_wrong_role',
     'vj_rate_limited',
     'vj_stale_command',
+    'vj_clip_excluded',
+    'vj_clip_not_favorite',
+    'vj_stale_setlist',
   ]);
+
+/** Library change kinds whose stage effect needs the item count of each
+ *  active set list they name (contract 7.10). */
+const SETLIST_COUNT_CHANGE_KINDS: ReadonlySet<VjLibraryChange['kind']> =
+  new Set<VjLibraryChange['kind']>(['setlist_items_changed', 'scene_deleted']);
+
+/** An ack before `serverNow` is stamped: a success carries its own fields,
+ *  a refusal is the `vjAckFailure` one. */
+type VjUnstampedAck<Success extends object> =
+  ({ ok: true } & Success) | VjAckFailure;
+
+/** A `session:reauth` ack before `serverNow` is stamped. */
+type VjUnstampedReauthAck =
+  { ok: true; exp: number } | { ok: false; code: VjWsTransportCode };
+
+/**
+ * Stamps the server clock on an ack right before it leaves (contract 7.2),
+ * overwriting the time `vjAckFailure` read when the refusal was built, so a
+ * refusal that waited in the command queue still reports the time it left.
+ */
+export function withServerNow<Ack extends object>(
+  ack: Ack,
+): Ack & { serverNow: number } {
+  return { ...ack, serverNow: Date.now() };
+}
 
 /** Verified access-token claims the handshake reads. */
 interface AccessTokenClaims {
@@ -277,24 +345,34 @@ export class VjGateway
   );
   private readonly advanceLimiter = new TokenBucketLimiter(ADVANCE_RATE_LIMIT);
   private readonly statusLimiter = new TokenBucketLimiter(STATUS_RATE_LIMIT);
+  private readonly mixLimiter = new TokenBucketLimiter(VJ_MIX_RATE_LIMIT);
+  private readonly effectsLimiter = new TokenBucketLimiter(
+    VJ_EFFECTS_RATE_LIMIT,
+  );
+  private readonly identifyLimiter = new TokenBucketLimiter(
+    IDENTIFY_RATE_LIMIT,
+  );
+  private readonly clockSyncLimiter = new TokenBucketLimiter(
+    CLOCK_SYNC_RATE_LIMIT,
+  );
 
   constructor(
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly stages: VjStageService,
-    private readonly library: VjLibraryService,
+    private readonly reads: VjStageReadsService,
     @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(RefreshToken)
     private readonly refreshTokens: Repository<RefreshToken>,
   ) {}
 
-  /** The stage service broadcasts the strobe timeout through this binding. */
+  /** The stage service broadcasts its timer frames (strobe, overlay and
+   *  countdown) through this binding, queued on the next tick behind any
+   *  command frame already waiting so revisions reach clients in order. */
   afterInit(): void {
     this.stages.bindBroadcaster({
       broadcastState: (adminUserId: string, frame: VjStageFrame) => {
-        this.namespace
-          ?.to(vjStageRoomName(adminUserId))
-          .emit('stage:state', frame);
+        this.broadcastOnNextTick(adminUserId, frame);
       },
     });
   }
@@ -334,6 +412,10 @@ export class VjGateway
     this.commandLimiter.clear(client.id);
     this.advanceLimiter.clear(client.id);
     this.statusLimiter.clear(client.id);
+    this.mixLimiter.clear(client.id);
+    this.effectsLimiter.clear(client.id);
+    this.identifyLimiter.clear(client.id);
+    this.clockSyncLimiter.clear(client.id);
     const { userId, role } = client.data;
     if (userId === undefined || role === undefined) return;
     const { leadChange, hasScreenListChanged } = this.stages.detachSocket(
@@ -375,25 +457,39 @@ export class VjGateway
   /**
    * Relays a committed library change to every attached VJ socket, then
    * broadcasts the `stage:state` frame of each stage the change touched
-   * (a deleted active pack or live clip). Only the four contract fields are
-   * relayed.
+   * (contract 7.10) on the next tick, queued behind any command frame
+   * already waiting so revisions reach clients in order. Only the eight
+   * contract fields are relayed. A set list
+   * items change or a scene delete first reads the item count of each set
+   * list a stage has active; a failed read logs the kind and the ids only and
+   * the change applies with the counts that were read. Never rejects.
    */
   @OnEvent(VJ_LIBRARY_CHANGED)
-  handleLibraryChanged(change: VjLibraryChange): void {
+  async handleLibraryChanged(change: VjLibraryChange): Promise<void> {
     const relayed: VjLibraryChange = {
       kind: change.kind,
       packId: change.packId,
       clipId: change.clipId,
       packIds: [...change.packIds],
+      sceneId: change.sceneId,
+      setlistId: change.setlistId,
+      setlistIds: [...change.setlistIds],
+      eventId: change.eventId,
     };
     this.namespace?.to(VJ_LIBRARY_ROOM).emit('library:changed', relayed);
-    for (const { adminUserId, frame } of this.stages.applyLibraryChange(
-      relayed,
-      Date.now(),
-    )) {
-      this.namespace
-        ?.to(vjStageRoomName(adminUserId))
-        .emit('stage:state', frame);
+    try {
+      const setlistItemCounts = SETLIST_COUNT_CHANGE_KINDS.has(relayed.kind)
+        ? await this.readActiveSetlistCounts(relayed)
+        : new Map<string, number | null>();
+      for (const { adminUserId, frame } of this.stages.applyLibraryChange(
+        relayed,
+        Date.now(),
+        setlistItemCounts,
+      )) {
+        this.broadcastOnNextTick(adminUserId, frame);
+      }
+    } catch {
+      this.logger.error(`VJ library change apply failed: ${relayed.kind}`);
     }
   }
 
@@ -402,6 +498,302 @@ export class VjGateway
     @ConnectedSocket() client: VjSocket,
     @MessageBody() payload: VjReauthPayloadDto,
   ): Promise<VjReauthAck> {
+    return withServerNow(await this.reauth(client, payload));
+  }
+
+  /** `clock:sync` (contract 7.3): any admitted socket, attached or not, gets
+   *  the server clock. It runs outside the command queue (note 17), so a slow
+   *  command never inflates the round trip the clock sample measures. */
+  @SubscribeMessage('clock:sync')
+  async handleClockSync(
+    @ConnectedSocket() client: VjSocket,
+    // Declared so the pipe refuses any key; the frame carries nothing.
+    @MessageBody() _payload: VjClockSyncPayloadDto,
+  ): Promise<VjAck<object>> {
+    const gate = await this.frameGate(
+      client,
+      'clock:sync',
+      this.clockSyncLimiter,
+      null,
+    );
+    if (gate.failure !== null) return withServerNow(gate.failure);
+    return withServerNow<{ ok: true }>({ ok: true });
+  }
+
+  /** `screen:identify` from a remote: each target screen draws its number.
+   *  Outside the command queue (note 17); it changes no state. */
+  @SubscribeMessage('screen:identify')
+  async handleScreenIdentify(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjScreenIdentifyPayloadDto,
+  ): Promise<VjAck<{ identifiedCount: number }>> {
+    const frame = 'screen:identify';
+    const gate = await this.frameGate(
+      client,
+      frame,
+      this.identifyLimiter,
+      'remote',
+    );
+    if (gate.failure !== null) return withServerNow(gate.failure);
+    const identified = this.stages.identifyTargets(
+      gate.userId,
+      payload.screenId,
+    );
+    if (identified.failure !== null) {
+      return withServerNow(this.refusal(frame, client, identified.failure));
+    }
+    const { targets } = identified;
+    this.emitOnNextTick(gate.userId, () => {
+      for (const target of targets) {
+        const identifyFrame: VjScreenIdentifyFrame = {
+          number: target.number,
+          durationMs: VJ_LIMITS.identifyDurationMs,
+        };
+        this.namespace?.to(target.socketId).emit(frame, identifyFrame);
+      }
+    });
+    return withServerNow<{ ok: true; identifiedCount: number }>({
+      ok: true,
+      identifiedCount: targets.length,
+    });
+  }
+
+  @SubscribeMessage('vj:attach')
+  async handleAttach(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjAttachPayloadDto,
+  ): Promise<VjAck<VjAttachSuccess>> {
+    return withServerNow(await this.attach(client, payload));
+  }
+
+  @SubscribeMessage('stage:setPack')
+  handleSetPack(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetPackPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setPack', payload);
+  }
+
+  @SubscribeMessage('stage:goClip')
+  handleGoClip(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjGoClipPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:goClip', payload);
+  }
+
+  @SubscribeMessage('stage:goGenerator')
+  handleGoGenerator(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjGoGeneratorPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:goGenerator', payload);
+  }
+
+  @SubscribeMessage('stage:setTransition')
+  handleSetTransition(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetTransitionPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setTransition', payload);
+  }
+
+  @SubscribeMessage('stage:setOverlay')
+  handleSetOverlay(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetOverlayPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setOverlay', payload);
+  }
+
+  @SubscribeMessage('stage:setEffects')
+  handleSetEffects(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetEffectsPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setEffects', payload);
+  }
+
+  @SubscribeMessage('stage:setStrobe')
+  handleSetStrobe(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetStrobePayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setStrobe', payload);
+  }
+
+  @SubscribeMessage('stage:setShuffle')
+  handleSetShuffle(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetShufflePayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setShuffle', payload);
+  }
+
+  @SubscribeMessage('stage:setTempo')
+  handleSetTempo(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetTempoPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setTempo', payload);
+  }
+
+  @SubscribeMessage('stage:setMix')
+  handleSetMix(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetMixPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setMix', payload);
+  }
+
+  @SubscribeMessage('stage:swapMix')
+  handleSwapMix(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSwapMixPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:swapMix', payload);
+  }
+
+  @SubscribeMessage('stage:setScreenOverride')
+  handleSetScreenOverride(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetScreenOverridePayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setScreenOverride', payload);
+  }
+
+  @SubscribeMessage('stage:resetLook')
+  handleResetLook(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjResetLookPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:resetLook', payload);
+  }
+
+  @SubscribeMessage('stage:recallScene')
+  handleRecallScene(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjRecallScenePayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:recallScene', payload);
+  }
+
+  @SubscribeMessage('stage:setlistSelect')
+  handleSetlistSelect(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetlistSelectPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setlistSelect', payload);
+  }
+
+  @SubscribeMessage('stage:setlistNext')
+  handleSetlistNext(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetlistStepPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setlistNext', payload);
+  }
+
+  @SubscribeMessage('stage:setlistPrevious')
+  handleSetlistPrevious(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetlistStepPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setlistPrevious', payload);
+  }
+
+  @SubscribeMessage('stage:setCountdown')
+  handleSetCountdown(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetCountdownPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setCountdown', payload);
+  }
+
+  @SubscribeMessage('stage:setLogo')
+  handleSetLogo(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetLogoPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setLogo', payload);
+  }
+
+  @SubscribeMessage('stage:setEventCard')
+  handleSetEventCard(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetEventCardPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setEventCard', payload);
+  }
+
+  /** The lead screen's shuffle report: the stage's checks, its one
+   *  `packClip` read, then the shuffle step. */
+  @SubscribeMessage('screen:advance')
+  async handleScreenAdvance(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjScreenAdvancePayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    const frame = 'screen:advance';
+    const ack = await this.queueMeteredFrame(
+      client,
+      frame,
+      this.advanceLimiter,
+      async () => {
+        const gate = await this.frameGate(client, frame, null, 'screen');
+        if (gate.failure !== null) return gate.failure;
+        return this.landOutcome(client, gate.userId, frame, () =>
+          this.stages.runScreenAdvance(
+            gate.userId,
+            client.id,
+            toPayloadRecord(payload),
+          ),
+        );
+      },
+    );
+    return withServerNow(ack);
+  }
+
+  /** A screen's status report (contract 7.9); takes no ack, so every refusal
+   *  drops it silently. A lead's mic report may adopt the tempo, broadcast
+   *  as a `mic_tempo` frame. */
+  @SubscribeMessage('screen:status')
+  async handleScreenStatus(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjScreenStatusPayloadDto,
+  ): Promise<void> {
+    const admittedUserId =
+      client.data.userId ?? (await client.data.admission) ?? null;
+    if (admittedUserId === null) return;
+    const gate = await this.frameGate(
+      client,
+      'screen:status',
+      this.statusLimiter,
+      'screen',
+    );
+    if (gate.failure !== null) return;
+    let update: ReturnType<VjStageService['updateScreenStatus']>;
+    try {
+      update = this.stages.updateScreenStatus(
+        gate.userId,
+        client.id,
+        toPayloadRecord(payload),
+        Date.now(),
+      );
+    } catch {
+      // No ack to carry the code: the frame is dropped and the log carries
+      // the code and ids only.
+      this.refusal('screen:status', client, vjAckFailure('vj_server_error'));
+      return;
+    }
+    this.broadcastOnNextTick(gate.userId, update.frame);
+    if (update.isStored) this.scheduleScreensUpdate(gate.userId);
+  }
+
+  /** The reauth checks; the handler stamps `serverNow` on the answer. */
+  private async reauth(
+    client: VjSocket,
+    payload: VjReauthPayloadDto,
+  ): Promise<VjUnstampedReauthAck> {
     const userId = client.data.userId ?? (await client.data.admission) ?? null;
     if (userId === null) return { ok: false, code: 'UNAUTHORIZED' };
     if (!this.reauthLimiter.tryConsume(userId)) {
@@ -450,21 +842,29 @@ export class VjGateway
     return { ok: true, exp };
   }
 
-  @SubscribeMessage('vj:attach')
-  async handleAttach(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjAttachPayloadDto,
-  ): Promise<VjAck<VjAttachSuccess>> {
+  /**
+   * The attach checks in contract 7.1 order: the common checks,
+   * `vj_already_attached`, then `vj_client_outdated` for any
+   * `contractVersion` other than `VJ_CONTRACT_VERSION`, then the role's own.
+   * An outdated client never claims the role, so nothing stays claimed.
+   */
+  private async attach(
+    client: VjSocket,
+    payload: VjAttachPayloadDto,
+  ): Promise<VjUnstampedAck<VjAttachSuccess>> {
     const frame = 'vj:attach';
     const gate = await this.frameGate(client, frame, this.attachLimiter, null);
     if (gate.failure !== null) return gate.failure;
     if (client.data.role !== undefined) {
       return this.refusal(frame, client, vjAckFailure('vj_already_attached'));
     }
-    // Claimed in the same synchronous segment as the check above, so two
-    // attach frames in a burst cannot both pass it.
+    if (payload.contractVersion !== VJ_CONTRACT_VERSION) {
+      return this.refusal(frame, client, vjAckFailure('vj_client_outdated'));
+    }
+    // Claimed in the same synchronous segment as the checks above, so two
+    // attach frames in a burst cannot both pass them.
     client.data.role = payload.role;
-    let ack: VjAck<VjAttachSuccess>;
+    let ack: VjUnstampedAck<VjAttachSuccess>;
     try {
       ack =
         payload.role === 'screen'
@@ -477,120 +877,6 @@ export class VjGateway
     }
     if (!ack.ok) this.releaseAttachClaim(client);
     return ack;
-  }
-
-  @SubscribeMessage('stage:setPack')
-  handleSetPack(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjSetPackPayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    return this.runRemoteCommand(client, 'stage:setPack', payload);
-  }
-
-  @SubscribeMessage('stage:goClip')
-  handleGoClip(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjGoClipPayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    return this.runRemoteCommand(client, 'stage:goClip', payload);
-  }
-
-  @SubscribeMessage('stage:setTransition')
-  handleSetTransition(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjSetTransitionPayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    return this.runRemoteCommand(client, 'stage:setTransition', payload);
-  }
-
-  @SubscribeMessage('stage:setOverlay')
-  handleSetOverlay(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjSetOverlayPayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    return this.runRemoteCommand(client, 'stage:setOverlay', payload);
-  }
-
-  @SubscribeMessage('stage:setEffects')
-  handleSetEffects(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjSetEffectsPayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    return this.runRemoteCommand(client, 'stage:setEffects', payload);
-  }
-
-  @SubscribeMessage('stage:setStrobe')
-  handleSetStrobe(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjSetStrobePayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    return this.runRemoteCommand(client, 'stage:setStrobe', payload);
-  }
-
-  @SubscribeMessage('stage:setShuffle')
-  handleSetShuffle(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjSetShufflePayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    return this.runRemoteCommand(client, 'stage:setShuffle', payload);
-  }
-
-  /** The lead screen's shuffle report: one membership read, then the stage rules. */
-  @SubscribeMessage('screen:advance')
-  handleScreenAdvance(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjScreenAdvancePayloadDto,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    const frame = 'screen:advance';
-    return this.queueMeteredFrame(
-      client,
-      frame,
-      this.advanceLimiter,
-      async () => {
-        const gate = await this.frameGate(client, frame, null, 'screen');
-        if (gate.failure !== null) return gate.failure;
-        try {
-          return await this.advanceScreen(client, gate.userId, payload);
-        } catch {
-          // A stage or library failure answers the contract code; the log
-          // carries the code and ids only.
-          return this.refusal(frame, client, vjAckFailure('vj_server_error'));
-        }
-      },
-    );
-  }
-
-  /** A screen's fullscreen flag and preload report; takes no ack, so every refusal drops it silently. */
-  @SubscribeMessage('screen:status')
-  async handleScreenStatus(
-    @ConnectedSocket() client: VjSocket,
-    @MessageBody() payload: VjScreenStatusPayloadDto,
-  ): Promise<void> {
-    const admittedUserId =
-      client.data.userId ?? (await client.data.admission) ?? null;
-    if (admittedUserId === null) return;
-    const gate = await this.frameGate(
-      client,
-      'screen:status',
-      this.statusLimiter,
-      'screen',
-    );
-    if (gate.failure !== null) return;
-    let isStored: boolean;
-    try {
-      isStored = this.stages.updateScreenStatus(
-        gate.userId,
-        client.id,
-        toPayloadRecord(payload),
-        Date.now(),
-      );
-    } catch {
-      // No ack to carry the code: the frame is dropped and the log carries
-      // the code and ids only.
-      this.refusal('screen:status', client, vjAckFailure('vj_server_error'));
-      return;
-    }
-    if (isStored) this.scheduleScreensUpdate(gate.userId);
   }
 
   private async admit(client: VjSocket): Promise<string | null> {
@@ -748,30 +1034,33 @@ export class VjGateway
   }
 
   /**
-   * A screen attach: the two restore reads only while the stage would adopt
-   * a restore, then the stage rules, the rooms, the replaced socket, the ack,
-   * and on the next tick `stage:state`, `screen:role` and `screens:update`.
+   * A screen attach: the restore reads (contract 7.13) only while the stage
+   * would adopt a restore, then the stage rules, the rooms, the replaced
+   * socket, the ack, and on the next tick `stage:state`, `screen:role` and
+   * `screens:update`. A restore goes to the whole stage with `applyAt: null`;
+   * any other attach frame carries the pending `applyAt` to this socket. A
+   * malformed screen id answers vj_screen_id_invalid before any read.
    */
   private async attachScreen(
     client: VjSocket,
     userId: string,
     payload: VjAttachPayloadDto,
-  ): Promise<VjAck<VjAttachSuccess>> {
+  ): Promise<VjUnstampedAck<VjAttachSuccess>> {
     const frame = 'vj:attach';
-    const restoreLookups = { isActivePackKnown: false, isLiveClipKnown: false };
+    if (!isUuidString(payload.screenId)) {
+      return this.refusal(frame, client, vjAckFailure('vj_screen_id_invalid'));
+    }
+    let restoreReads: VjLookupResults | null = null;
     if (this.stages.shouldAdoptRestore(userId)) {
-      const lookupIds = this.stages.restoreLookupIds(payload.restoreState);
+      const lookups = this.stages.restoreLookupsOf(
+        payload.restoreState,
+        Date.now(),
+      );
       try {
-        const [isActivePackKnown, isLiveClipKnown] = await Promise.all([
-          lookupIds.packId === null
-            ? false
-            : this.library.packExists(lookupIds.packId),
-          lookupIds.clipId === null
-            ? false
-            : this.library.clipExists(lookupIds.clipId),
-        ]);
-        restoreLookups.isActivePackKnown = isActivePackKnown;
-        restoreLookups.isLiveClipKnown = isLiveClipKnown;
+        restoreReads =
+          lookups.length === 0
+            ? EMPTY_VJ_LOOKUP_RESULTS
+            : await resolveVjLookups(this.reads, lookups);
       } catch {
         return this.refusal(frame, client, vjAckFailure('vj_server_error'));
       }
@@ -785,7 +1074,7 @@ export class VjGateway
         socketId: client.id,
         screenId: payload.screenId,
         restoreState: payload.restoreState,
-        restoreLookups,
+        restoreReads,
       },
       Date.now(),
     );
@@ -797,14 +1086,34 @@ export class VjGateway
       this.dropReplacedScreen(outcome.replacedSocketId, userId);
     }
     await client.join([vjStageRoomName(userId), VJ_LIBRARY_ROOM]);
+    this.emitScreenAttachFrames(client, userId, outcome);
+    return {
+      ok: true,
+      role: 'screen',
+      connectionExpiresAt: (client.data.exp ?? 0) * 1000,
+      stageEpoch: outcome.state.stageEpoch,
+      isRestored: outcome.isRestored,
+      isLead: outcome.isLead,
+      screenNumber: outcome.screenNumber,
+    };
+  }
+
+  /** The frames after a screen attach's ack, on the next tick. */
+  private emitScreenAttachFrames(
+    client: VjSocket,
+    userId: string,
+    outcome: Extract<VjScreenAttachOutcome, { ok: true }>,
+  ): void {
     const promotedSocketId = outcome.leadChange?.promotedSocketId ?? null;
     this.emitOnNextTick(userId, () => {
-      const state = this.stages.getState(userId) ?? outcome.state;
-      const stageFrame: VjStageFrame = {
-        state,
-        cause: outcome.isRestored ? 'restore' : 'attach',
-        sourceClientId: null,
-      };
+      const stageFrame: VjStageFrame = outcome.isRestored
+        ? {
+            state: this.stages.getState(userId) ?? outcome.state,
+            cause: 'restore',
+            sourceClientId: null,
+            applyAt: null,
+          }
+        : this.liveAttachFrame(userId, outcome);
       if (outcome.isRestored) {
         this.namespace
           ?.to(vjStageRoomName(userId))
@@ -822,28 +1131,17 @@ export class VjGateway
       }
       this.scheduleScreensUpdate(userId);
     });
-    return {
-      ok: true,
-      role: 'screen',
-      connectionExpiresAt: (client.data.exp ?? 0) * 1000,
-      stageEpoch: outcome.state.stageEpoch,
-      isRestored: outcome.isRestored,
-      isLead: outcome.isLead,
-    };
   }
 
-  /** A remote attach: its rooms, the ack, then `stage:state` and the screen list to this socket alone. */
+  /** A remote attach: its rooms, the ack, then `stage:state` (with the
+   *  pending `applyAt`) and the screen list to this socket alone. */
   private async attachRemote(
     client: VjSocket,
     userId: string,
-  ): Promise<VjAck<VjAttachSuccess>> {
+  ): Promise<VjUnstampedAck<VjAttachSuccess>> {
     // A socket that left while the gate awaited must not join the stage.
     if (!client.connected) return vjAckFailure('vj_not_attached');
-    const attachedState = this.stages.attachRemote(
-      userId,
-      client.id,
-      Date.now(),
-    );
+    const attached = this.stages.attachRemote(userId, client.id, Date.now());
     client.data.isAttached = true;
     await client.join([
       vjStageRoomName(userId),
@@ -852,12 +1150,7 @@ export class VjGateway
     ]);
     this.emitOnNextTick(userId, () => {
       if (!client.connected) return;
-      const state: VjStageState = this.stages.getState(userId) ?? attachedState;
-      client.emit('stage:state', {
-        state,
-        cause: 'attach',
-        sourceClientId: null,
-      } satisfies VjStageFrame);
+      client.emit('stage:state', this.liveAttachFrame(userId, attached));
       client.emit('screens:update', {
         screens: this.stages.listScreens(userId, Date.now()),
       });
@@ -866,9 +1159,29 @@ export class VjGateway
       ok: true,
       role: 'remote',
       connectionExpiresAt: (client.data.exp ?? 0) * 1000,
-      stageEpoch: attachedState.stageEpoch,
+      stageEpoch: attached.state.stageEpoch,
       isRestored: false,
       isLead: null,
+      screenNumber: null,
+    };
+  }
+
+  /** An attach's `stage:state` frame, built on the next tick: the live state
+   *  with its pending `applyAt` read at the same moment (contract 7.4), or
+   *  the attach-time pair when the stage is gone. */
+  private liveAttachFrame(
+    userId: string,
+    attached: { state: VjStageState; applyAt: number | null },
+  ): VjStageFrame {
+    const liveState = this.stages.getState(userId);
+    return {
+      state: liveState ?? attached.state,
+      cause: 'attach',
+      sourceClientId: null,
+      applyAt:
+        liveState === null
+          ? attached.applyAt
+          : vjAttachApplyAt(this.stages.getPendingApplyAt(userId), Date.now()),
     };
   }
 
@@ -894,72 +1207,50 @@ export class VjGateway
     replaced.disconnect(true);
   }
 
-  /** The advance rules past the common checks: the stage's checks, the one membership read, then the shuffle step. */
-  private async advanceScreen(
-    client: VjSocket,
-    userId: string,
-    payload: unknown,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    const frame = 'screen:advance';
-    const fields = toPayloadRecord(payload);
-    const prepared = this.stages.prepareScreenAdvance(
-      userId,
-      client.id,
-      fields,
-    );
-    if (prepared.failure !== null) {
-      return this.refusal(frame, client, prepared.failure);
-    }
-    const isClipInPack = await this.library.isClipInPack(
-      prepared.packId,
-      prepared.clipId,
-    );
-    const outcome = this.stages.applyScreenAdvance(
-      userId,
-      client.id,
-      fields,
-      isClipInPack,
-      Date.now(),
-    );
-    if (!outcome.ok) return this.refusal(frame, client, outcome.failure);
-    this.broadcastOnNextTick(userId, outcome.frame);
-    return { ok: true, ...outcome.success };
-  }
-
   /**
-   * Every remote command: the common checks, the stage's client id, stale
-   * and field rules, the one existence read when the command names an id,
-   * then the stage applies it and the frame goes to the whole stage on the
-   * next tick, after the ack. Commands of one socket run in arrival order.
+   * Every remote command: the frame's bucket (`stage:setMix` and
+   * `stage:setEffects` have their own, every other `stage:*` frame shares
+   * the command bucket), the common checks, then the stage service runs the
+   * client id, stale and field rules, reads the command's lookups and lands
+   * it. The frame goes to the whole stage on the next tick, after the ack.
+   * Commands of one socket run in arrival order.
    */
-  private runRemoteCommand(
+  private async runRemoteCommand(
     client: VjSocket,
     name: VjRemoteCommandName,
     payload: unknown,
   ): Promise<VjAck<VjCommandSuccess>> {
-    return this.queueMeteredFrame(
+    const ack = await this.queueMeteredFrame(
       client,
       name,
-      this.commandLimiter,
+      this.commandLimiterOf(name),
       async () => {
         const gate = await this.frameGate(client, name, null, 'remote');
         if (gate.failure !== null) return gate.failure;
-        try {
-          return await this.applyCommand(client, gate.userId, name, payload);
-        } catch {
-          // A stage or library failure answers the contract code; the log
-          // carries the code and ids only.
-          return this.refusal(name, client, vjAckFailure('vj_server_error'));
-        }
+        return this.landOutcome(client, gate.userId, name, () =>
+          this.stages.runRemoteCommand(
+            gate.userId,
+            name,
+            toPayloadRecord(payload),
+          ),
+        );
       },
     );
+    return withServerNow(ack);
+  }
+
+  /** The bucket a remote command is metered on (contract 7.12). */
+  private commandLimiterOf(name: VjRemoteCommandName): TokenBucketLimiter {
+    if (name === 'stage:setMix') return this.mixLimiter;
+    if (name === 'stage:setEffects') return this.effectsLimiter;
+    return this.commandLimiter;
   }
 
   /**
    * Meters a frame on arrival, then queues `work` behind every command this
    * socket sent before it. A frame past its bucket answers
    * `vj_rate_limited` at once and never joins the queue, so a flood cannot
-   * grow it. Without the queue a command that awaits an existence read (a
+   * grow it. Without the queue a command that awaits a lookup read (a
    * `stage:goClip`) could be overtaken by a later one that reads nothing (a
    * fade slider frame), which records the higher sequence and turns the
    * earlier tap into `vj_stale_command`. A failed command never blocks the
@@ -969,8 +1260,8 @@ export class VjGateway
     client: VjSocket,
     frame: VjClientFrameName,
     limiter: TokenBucketLimiter,
-    work: () => Promise<VjAck<Success>>,
-  ): Promise<VjAck<Success>> {
+    work: () => Promise<VjUnstampedAck<Success>>,
+  ): Promise<VjUnstampedAck<Success>> {
     if (!limiter.tryConsume(client.id)) {
       return Promise.resolve(
         this.refusal(frame, client, vjAckFailure('vj_rate_limited')),
@@ -986,50 +1277,24 @@ export class VjGateway
   }
 
   /**
-   * The command rules past the common checks. A refusal from the prepare
-   * step is answered through `applyRemoteCommand`, which reruns the same
-   * checks and records the sequence (note 9), so a late duplicate of a
-   * refused command answers `vj_stale_command`.
+   * Runs a stage step and answers its ack: the refusal (logged by code), or
+   * the success with the frame broadcast on the next tick. A stage step that
+   * throws or rejects answers `vj_server_error`; the log carries the code and
+   * ids only.
    */
-  private async applyCommand(
+  private async landOutcome(
     client: VjSocket,
     userId: string,
-    name: VjRemoteCommandName,
-    payload: unknown,
-  ): Promise<VjAck<VjCommandSuccess>> {
-    const fields = toPayloadRecord(payload);
-    const prepared = this.stages.prepareRemoteCommand(userId, name, fields);
-    if (prepared.failure !== null) {
-      const recorded = this.stages.applyRemoteCommand(
-        userId,
-        name,
-        fields,
-        false,
-        Date.now(),
-      );
-      if (recorded.ok) {
-        // The prepare and the apply run in one synchronous segment on the
-        // same state, so this branch means the two disagree. Clients still
-        // get the applied state; the sender gets the server error.
-        this.broadcastOnNextTick(userId, recorded.frame);
-        return this.refusal(name, client, vjAckFailure('vj_server_error'));
-      }
-      return this.refusal(name, client, recorded.failure);
+    frame: VjClientFrameName,
+    runStage: () => Promise<VjStageOutcome>,
+  ): Promise<VjUnstampedAck<VjCommandSuccess>> {
+    let outcome: VjStageOutcome;
+    try {
+      outcome = await runStage();
+    } catch {
+      return this.refusal(frame, client, vjAckFailure('vj_server_error'));
     }
-    const isLookupKnown =
-      prepared.lookup === null
-        ? true
-        : prepared.lookup.kind === 'pack'
-          ? await this.library.packExists(prepared.lookup.id)
-          : await this.library.clipExists(prepared.lookup.id);
-    const outcome = this.stages.applyRemoteCommand(
-      userId,
-      name,
-      fields,
-      isLookupKnown,
-      Date.now(),
-    );
-    if (!outcome.ok) return this.refusal(name, client, outcome.failure);
+    if (!outcome.ok) return this.refusal(frame, client, outcome.failure);
     this.broadcastOnNextTick(userId, outcome.frame);
     return { ok: true, ...outcome.success };
   }
@@ -1106,7 +1371,46 @@ export class VjGateway
       this.commandLimiter,
       this.advanceLimiter,
       this.statusLimiter,
+      this.mixLimiter,
+      this.effectsLimiter,
+      this.identifyLimiter,
+      this.clockSyncLimiter,
     ];
+  }
+
+  /**
+   * The item count of each set list the change names that some stage has
+   * active, read in parallel. A failed read leaves its id out of the map and
+   * logs the change kind and the set list ids only.
+   */
+  private async readActiveSetlistCounts(
+    change: VjLibraryChange,
+  ): Promise<Map<string, number | null>> {
+    const activeSetlistIds = this.stages.activeSetlistIdsAmong(
+      change.setlistIds,
+    );
+    const counts = new Map<string, number | null>();
+    const settled = await Promise.allSettled(
+      activeSetlistIds.map((setlistId) =>
+        this.reads.setlistItemCount(setlistId),
+      ),
+    );
+    const failedSetlistIds: string[] = [];
+    settled.forEach((result, position) => {
+      const setlistId = activeSetlistIds[position];
+      if (setlistId === undefined) return;
+      if (result.status === 'fulfilled') {
+        counts.set(setlistId, result.value);
+      } else {
+        failedSetlistIds.push(setlistId);
+      }
+    });
+    if (failedSetlistIds.length > 0) {
+      this.logger.error(
+        `VJ set list count read failed: ${change.kind} set lists ${failedSetlistIds.join(',')}`,
+      );
+    }
+    return counts;
   }
 
   /** Signature, pinned algorithm and the claims-level status. */

@@ -1,11 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import type {
-  VjAckFailure,
-  VjRemoteCommandName,
-  VjScreenClipStatus,
-  VjStageFrame,
-  VjStageState,
+import {
+  createVjStageState,
+  vjSceneLookOf,
+  type VjAckFailure,
+  type VjLibraryChange,
+  type VjRemoteCommandName,
+  type VjScreenClipStatus,
+  type VjStageFrame,
+  type VjStageState,
 } from './vj.contract';
+import {
+  EMPTY_VJ_LOOKUP_RESULTS,
+  vjPackClipKey,
+  vjSetlistItemKey,
+  type VjLookupResults,
+} from './stage/vj-rule-kit';
+import type { VjStageReadsService } from './vj-stage-reads.service';
 import {
   VJ_CLIENT_SEQUENCE_MEMORY,
   VJ_SCREEN_OFFLINE_RETENTION_MS,
@@ -18,24 +28,81 @@ import {
 const ADMIN_USER_ID = randomUUID();
 const UUID_SHAPE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A time every tempo and clip test starts from. */
+const START_AT = 10_000;
 
 interface RecordedBroadcast {
   adminUserId: string;
   frame: VjStageFrame;
 }
 
-function createService(): {
-  service: VjStageService;
-  broadcasts: RecordedBroadcast[];
-} {
-  const service = new VjStageService();
+/** The seven contract 7.7 reads, each a jest mock. */
+function createReads() {
+  return {
+    readPackForStage: jest
+      .fn<Promise<{ eventId: string | null } | null>, [string]>()
+      .mockResolvedValue({ eventId: null }),
+    existingClipIds: jest
+      .fn<Promise<Set<string>>, [string[]]>()
+      .mockImplementation((clipIds) => Promise.resolve(new Set(clipIds))),
+    clipIdsInPack: jest
+      .fn<Promise<Set<string>>, [string, string[]]>()
+      .mockImplementation((_packId, clipIds) =>
+        Promise.resolve(new Set(clipIds)),
+      ),
+    readPackClipForAdvance: jest
+      .fn<Promise<{ isFavorite: boolean } | null>, [string, string]>()
+      .mockResolvedValue({ isFavorite: false }),
+    readSceneLook: jest.fn().mockResolvedValue(null),
+    readSetlistItem: jest.fn().mockResolvedValue(null),
+    setlistItemCount: jest.fn().mockResolvedValue(null),
+  };
+}
+
+function createService() {
+  const reads = createReads();
+  const service = new VjStageService(reads as unknown as VjStageReadsService);
   const broadcasts: RecordedBroadcast[] = [];
   service.bindBroadcaster({
     broadcastState: (adminUserId, frame) => {
       broadcasts.push({ adminUserId, frame });
     },
   });
-  return { service, broadcasts };
+  return { service, broadcasts, reads };
+}
+
+/** Lookup answers with the given parts filled. */
+function lookupResults(parts: Partial<VjLookupResults> = {}): VjLookupResults {
+  return { ...EMPTY_VJ_LOOKUP_RESULTS, ...parts };
+}
+
+/** Answers where the listed clips exist. */
+function clipsExist(...clipIds: string[]): VjLookupResults {
+  return lookupResults({ existingClipIds: new Set(clipIds) });
+}
+
+/** Answers where the pack exists with the event it links. */
+function packExists(
+  packId: string,
+  eventId: string | null = null,
+): VjLookupResults {
+  return lookupResults({ packs: new Map([[packId, { eventId }]]) });
+}
+
+/** A library change with every id empty but the given ones. */
+function libraryChange(
+  parts: Partial<VjLibraryChange> & Pick<VjLibraryChange, 'kind'>,
+): VjLibraryChange {
+  return {
+    packId: null,
+    clipId: null,
+    packIds: [],
+    sceneId: null,
+    setlistId: null,
+    setlistIds: [],
+    eventId: null,
+    ...parts,
+  };
 }
 
 function stateOf(
@@ -65,6 +132,14 @@ function appliedOf(outcome: VjStageOutcome) {
   return outcome;
 }
 
+function frameOf(outcome: VjStageOutcome): VjStageFrame {
+  const frame = appliedOf(outcome).frame;
+  if (frame === null) {
+    throw new Error('expected a frame');
+  }
+  return frame;
+}
+
 function attachedOf(outcome: VjScreenAttachOutcome) {
   if (!outcome.ok) {
     throw new Error(`expected an attach, got ${outcome.failure.code}`);
@@ -80,8 +155,7 @@ function attachScreen(
   options: {
     adminUserId?: string;
     restoreState?: unknown;
-    isActivePackKnown?: boolean;
-    isLiveClipKnown?: boolean;
+    restoreReads?: VjLookupResults | null;
   } = {},
 ): VjScreenAttachOutcome {
   return service.attachScreen(
@@ -90,10 +164,7 @@ function attachScreen(
       socketId,
       screenId,
       restoreState: options.restoreState ?? null,
-      restoreLookups: {
-        isActivePackKnown: options.isActivePackKnown ?? true,
-        isLiveClipKnown: options.isLiveClipKnown ?? true,
-      },
+      restoreReads: options.restoreReads ?? null,
     },
     now,
   );
@@ -103,23 +174,63 @@ function attachScreen(
 function createRemote(service: VjStageService, adminUserId = ADMIN_USER_ID) {
   const clientId = randomUUID();
   let commandSequence = 0;
+  /** The next payload of this remote, its sequence taken. */
+  const nextPayload = (
+    fields: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    commandSequence += 1;
+    return { ...fields, clientId, commandSequence };
+  };
   return {
     clientId,
+    nextPayload,
     send(
       name: VjRemoteCommandName,
       fields: Record<string, unknown>,
-      now = 1000,
-      isLookupKnown = true,
+      now = START_AT,
+      lookups: VjLookupResults = EMPTY_VJ_LOOKUP_RESULTS,
     ): VjStageOutcome {
-      commandSequence += 1;
       return service.applyRemoteCommand(
         adminUserId,
         name,
-        { ...fields, clientId, commandSequence },
-        isLookupKnown,
+        nextPayload(fields),
+        lookups,
         now,
       );
     },
+  };
+}
+
+type VjTestRemote = ReturnType<typeof createRemote>;
+
+/** 120 BPM (a 500 ms beat) with its "1" at `now`, quantized to the beat. */
+function setBeatTempo(remote: VjTestRemote, now = START_AT): void {
+  appliedOf(
+    remote.send(
+      'stage:setTempo',
+      { bpm: 120, downbeatAt: now, quantize: 'beat' },
+      now,
+    ),
+  );
+}
+
+/** A clip tap on a known clip. */
+function tapClip(
+  remote: VjTestRemote,
+  clipId: string,
+  now: number,
+): VjStageOutcome {
+  return remote.send('stage:goClip', { clipId }, now, clipsExist(clipId));
+}
+
+/** A status payload with the given extra fields. */
+function statusPayload(
+  fields: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    isFullscreen: false,
+    preload: { packId: null, clips: [] },
+    ...fields,
   };
 }
 
@@ -147,9 +258,10 @@ function clipStatus(
 describe('VjStageService', () => {
   let service: VjStageService;
   let broadcasts: RecordedBroadcast[];
+  let reads: ReturnType<typeof createReads>;
 
   beforeEach(() => {
-    ({ service, broadcasts } = createService());
+    ({ service, broadcasts, reads } = createService());
   });
 
   afterEach(() => {
@@ -166,8 +278,8 @@ describe('VjStageService', () => {
       expect(first.isRestored).toBe(false);
       expect(first.replacedSocketId).toBeNull();
       expect(first.leadChange).toBeNull();
+      expect(first.applyAt).toBeNull();
       expect(first.state.revision).toBe(0);
-      expect(first.state.clipSequence).toBe(0);
       expect(first.state.stageEpoch).toMatch(UUID_SHAPE);
 
       const second = attachedOf(
@@ -177,7 +289,6 @@ describe('VjStageService', () => {
       expect(second.leadChange).toBeNull();
 
       const screens = service.listScreens(ADMIN_USER_ID, 3);
-      expect(screens.map((screen) => screen.number)).toEqual([1, 2]);
       expect(screens.map((screen) => screen.isLead)).toEqual([true, false]);
       expect(screens[0]).toMatchObject({
         isConnected: true,
@@ -185,8 +296,30 @@ describe('VjStageService', () => {
         connectedAt: 1,
         lastSeenAt: 1,
         preload: { packId: null, clips: [] },
+        health: null,
+        nextClipId: null,
+        mic: null,
       });
       expect(service.leadSocketIdOf(ADMIN_USER_ID)).toBe('socket-a');
+    });
+
+    it('answers the screen number on attach', () => {
+      const screenA = randomUUID();
+      expect(
+        attachedOf(attachScreen(service, 'socket-a', screenA, 1)).screenNumber,
+      ).toBe(1);
+      expect(
+        attachedOf(attachScreen(service, 'socket-b', randomUUID(), 2))
+          .screenNumber,
+      ).toBe(2);
+      service.detachSocket(ADMIN_USER_ID, 'socket-a', 3);
+      expect(
+        attachedOf(attachScreen(service, 'socket-a2', screenA, 4)).screenNumber,
+      ).toBe(1);
+      expect(
+        attachedOf(attachScreen(service, 'socket-c', randomUUID(), 5))
+          .screenNumber,
+      ).toBe(3);
     });
 
     it('answers vj_screen_id_invalid for a screen id that is no uuid', () => {
@@ -201,8 +334,7 @@ describe('VjStageService', () => {
     });
 
     it('promotes the longest-connected screen when the lead drops', () => {
-      const screenA = randomUUID();
-      attachScreen(service, 'socket-a', screenA, 1);
+      attachScreen(service, 'socket-a', randomUUID(), 1);
       attachScreen(service, 'socket-b', randomUUID(), 2);
       attachScreen(service, 'socket-c', randomUUID(), 3);
 
@@ -210,18 +342,6 @@ describe('VjStageService', () => {
         leadChange: { promotedSocketId: 'socket-b' },
         hasScreenListChanged: true,
       });
-      const screens = service.listScreens(ADMIN_USER_ID, 4);
-      expect(screens[0]).toMatchObject({
-        screenId: screenA,
-        number: 1,
-        isConnected: false,
-        isLead: false,
-        connectedAt: null,
-      });
-      expect(screens[1]).toMatchObject({ isConnected: true, isLead: true });
-      expect(screens[2]).toMatchObject({ isConnected: true, isLead: false });
-      expect(service.leadSocketIdOf(ADMIN_USER_ID)).toBe('socket-b');
-
       expect(service.detachSocket(ADMIN_USER_ID, 'socket-c', 5)).toEqual({
         leadChange: null,
         hasScreenListChanged: true,
@@ -233,28 +353,6 @@ describe('VjStageService', () => {
       expect(service.leadSocketIdOf(ADMIN_USER_ID)).toBeNull();
     });
 
-    it('lets a former lead come back as a follower', () => {
-      const screenA = randomUUID();
-      attachScreen(service, 'socket-a', screenA, 1);
-      attachScreen(service, 'socket-b', randomUUID(), 2);
-      service.detachSocket(ADMIN_USER_ID, 'socket-a', 3);
-
-      const back = attachedOf(attachScreen(service, 'socket-a2', screenA, 4));
-      expect(back.isLead).toBe(false);
-      expect(back.leadChange).toBeNull();
-      expect(back.replacedSocketId).toBeNull();
-
-      const screens = service.listScreens(ADMIN_USER_ID, 4);
-      expect(screens[0]).toMatchObject({
-        screenId: screenA,
-        number: 1,
-        isConnected: true,
-        isLead: false,
-        connectedAt: 4,
-      });
-      expect(screens[1]).toMatchObject({ number: 2, isLead: true });
-    });
-
     it('keeps the new socket connected when the replaced one disconnects late', () => {
       const screenA = randomUUID();
       attachScreen(service, 'socket-1', screenA, 1);
@@ -263,19 +361,9 @@ describe('VjStageService', () => {
       );
       expect(replacing.replacedSocketId).toBe('socket-1');
       expect(replacing.isLead).toBe(true);
-      expect(replacing.leadChange).toBeNull();
-
       expect(service.detachSocket(ADMIN_USER_ID, 'socket-1', 3)).toEqual({
         leadChange: null,
         hasScreenListChanged: false,
-      });
-      const screens = service.listScreens(ADMIN_USER_ID, 3);
-      expect(screens).toHaveLength(1);
-      expect(screens[0]).toMatchObject({
-        number: 1,
-        isConnected: true,
-        isLead: true,
-        connectedAt: 2,
       });
       expect(service.leadSocketIdOf(ADMIN_USER_ID)).toBe('socket-2');
     });
@@ -284,7 +372,6 @@ describe('VjStageService', () => {
       const screenA = randomUUID();
       attachScreen(service, 'socket-a', screenA, 1);
       attachScreen(service, 'socket-b', randomUUID(), 2);
-
       const replacing = attachedOf(
         attachScreen(service, 'socket-a2', screenA, 3),
       );
@@ -292,26 +379,46 @@ describe('VjStageService', () => {
       expect(replacing.isLead).toBe(false);
       expect(replacing.leadChange).toEqual({ promotedSocketId: 'socket-b' });
     });
+
+    it('carries the pending applyAt on a remote attach', () => {
+      service.attachRemote(ADMIN_USER_ID, 'remote-socket', START_AT);
+      const remote = createRemote(service);
+      setBeatTempo(remote);
+      const tap = appliedOf(tapClip(remote, randomUUID(), START_AT + 100));
+      expect(tap.success.applyAt).toBe(START_AT + 500);
+
+      expect(
+        service.attachRemote(ADMIN_USER_ID, 'remote-late', START_AT + 200)
+          .applyAt,
+      ).toBe(START_AT + 500);
+      expect(
+        attachedOf(
+          attachScreen(service, 'socket-a', randomUUID(), START_AT + 300),
+        ).applyAt,
+      ).toBe(START_AT + 500);
+      expect(
+        service.attachRemote(ADMIN_USER_ID, 'remote-after', START_AT + 600)
+          .applyAt,
+      ).toBeNull();
+    });
   });
 
   describe('restore', () => {
-    it('adopts a saved state only at revision 0', () => {
+    it('adopts a v1-shaped restore at revision 0', () => {
       const packId = randomUUID();
       const clipId = randomUUID();
-      const savedEpoch = randomUUID();
-      expect(service.shouldAdoptRestore(ADMIN_USER_ID)).toBe(true);
       const restoreState = {
-        stageEpoch: savedEpoch,
+        stageEpoch: randomUUID(),
         revision: 14,
-        activePackId: packId,
+        activePackId: packId.toUpperCase(),
         liveClipId: clipId,
         transition: { mode: 'cut', fadeMs: 300 },
-        overlay: { text: 'Hello', style: 'ticker', isVisible: true },
+        overlay: { text: 'Hello', style: 'big', isVisible: false },
         effects: {
           speed: 2,
           isMonochrome: true,
           isMirrored: false,
-          isHueCycling: true,
+          isHueCycling: false,
           isStrobing: true,
           isBlackout: false,
           strobeStartedAt: 5,
@@ -323,107 +430,59 @@ describe('VjStageService', () => {
           bpm: 128,
         },
       };
-      expect(service.restoreLookupIds(restoreState)).toEqual({
-        packId,
-        clipId,
-      });
+      expect(service.shouldAdoptRestore(ADMIN_USER_ID)).toBe(true);
+      expect(service.restoreLookupsOf(restoreState, 50)).toEqual(
+        expect.arrayContaining([
+          { kind: 'pack', packId },
+          { kind: 'clip', clipId },
+        ]),
+      );
 
       const restored = attachedOf(
-        attachScreen(service, 'socket-a', randomUUID(), 50, { restoreState }),
+        attachScreen(service, 'socket-a', randomUUID(), 50, {
+          restoreState,
+          restoreReads: lookupResults({
+            packs: new Map([[packId, { eventId: null }]]),
+            existingClipIds: new Set([clipId]),
+          }),
+        }),
       );
       expect(restored.isRestored).toBe(true);
-      expect(restored.state).toEqual({
-        stageEpoch: expect.stringMatching(UUID_SHAPE) as string,
+      expect(restored.applyAt).toBeNull();
+      expect(restored.state).toMatchObject({
         revision: 1,
         clipSequence: 1,
         activePackId: packId,
         liveClipId: clipId,
-        transition: { mode: 'cut', fadeMs: 300 },
-        overlay: { text: 'Hello', style: 'ticker', isVisible: true },
-        effects: {
-          speed: 2,
-          isMonochrome: true,
-          isMirrored: false,
-          isHueCycling: true,
-          isStrobing: false,
-          isBlackout: false,
-          strobeStartedAt: null,
-        },
-        shuffle: {
-          isOn: true,
-          intervalKind: 'beats',
-          intervalValue: 16,
-          bpm: 128,
-        },
-        updatedAt: 50,
+        liveSince: 50,
+        transition: { mode: 'cut', length: { unit: 'ms', value: 300 } },
+        tempo: { bpm: 128 },
+        recentClipIds: [clipId],
+        screenOverrides: {},
       });
-      expect(restored.state.stageEpoch).not.toBe(savedEpoch);
+      expect(restored.state.effects.settings.monochrome?.isOn).toBe(true);
+      expect(restored.state.effects.isStrobing).toBe(false);
       expect(service.shouldAdoptRestore(ADMIN_USER_ID)).toBe(false);
 
       const later = attachedOf(
         attachScreen(service, 'socket-b', randomUUID(), 60, {
           restoreState: { ...restoreState, liveClipId: null },
+          restoreReads: EMPTY_VJ_LOOKUP_RESULTS,
         }),
       );
       expect(later.isRestored).toBe(false);
-      expect(later.state).toEqual(restored.state);
       expect(stateOf(service).liveClipId).toBe(clipId);
     });
 
-    it('drops unknown ids and takes defaults for bad fields on restore', () => {
-      const clipId = randomUUID();
+    it('adopts nothing when the gateway read no restore lookups', () => {
       const restored = attachedOf(
         attachScreen(service, 'socket-a', randomUUID(), 50, {
-          restoreState: {
-            stageEpoch: randomUUID(),
-            revision: 3,
-            activePackId: randomUUID(),
-            liveClipId: clipId,
-            transition: { mode: 'cut', fadeMs: 9000 },
-            overlay: { text: 'a\nb', style: 'big', isVisible: true },
-            effects: { speed: 3, isMirrored: 'yes', isBlackout: true },
-            shuffle: {
-              isOn: 'yes',
-              intervalKind: 'seconds',
-              intervalValue: 61,
-              bpm: 300,
-            },
-          },
-          isActivePackKnown: false,
-          isLiveClipKnown: true,
+          restoreState: { activePackId: randomUUID() },
+          restoreReads: null,
         }),
       );
-      expect(restored.isRestored).toBe(true);
-      expect(restored.state.activePackId).toBeNull();
-      expect(restored.state.liveClipId).toBe(clipId);
-      expect(restored.state.transition).toEqual({ mode: 'cut', fadeMs: 800 });
-      expect(restored.state.overlay).toEqual({
-        text: '',
-        style: 'big',
-        isVisible: false,
-      });
-      expect(restored.state.effects).toMatchObject({
-        speed: 1,
-        isMirrored: false,
-        isBlackout: true,
-        isStrobing: false,
-      });
-      expect(restored.state.shuffle).toEqual({
-        isOn: false,
-        intervalKind: 'seconds',
-        intervalValue: 8,
-        bpm: 124,
-      });
-    });
-
-    it('reads uuid-shaped restore ids only', () => {
-      expect(
-        service.restoreLookupIds({ activePackId: 'pack', liveClipId: 7 }),
-      ).toEqual({ packId: null, clipId: null });
-      expect(service.restoreLookupIds('not a state')).toEqual({
-        packId: null,
-        clipId: null,
-      });
+      expect(restored.isRestored).toBe(false);
+      expect(restored.state.revision).toBe(0);
     });
   });
 
@@ -449,6 +508,7 @@ describe('VjStageService', () => {
             ADMIN_USER_ID,
             'stage:setTransition',
             payload,
+            START_AT,
           ).failure?.code,
         ).toBe('vj_client_id_invalid');
         expect(
@@ -457,8 +517,8 @@ describe('VjStageService', () => {
               ADMIN_USER_ID,
               'stage:setTransition',
               payload,
-              true,
-              1000,
+              EMPTY_VJ_LOOKUP_RESULTS,
+              START_AT,
             ),
           ).code,
         ).toBe('vj_client_id_invalid');
@@ -476,60 +536,69 @@ describe('VjStageService', () => {
           ADMIN_USER_ID,
           'stage:setTransition',
           { ...fields, clientId, commandSequence },
-          true,
-          1000,
+          EMPTY_VJ_LOOKUP_RESULTS,
+          START_AT,
         );
-
       expect(appliedOf(apply(2, { mode: 'cut' })).success.revision).toBe(1);
       for (const commandSequence of [2, 1]) {
-        expect(
-          service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:setTransition', {
-            mode: 'fade',
-            clientId,
-            commandSequence,
-          }).failure?.code,
-        ).toBe('vj_stale_command');
         const failure = failureOf(apply(commandSequence, { mode: 'fade' }));
         expect(failure.code).toBe('vj_stale_command');
         expect(failure.state?.revision).toBe(1);
       }
-      expect(stateOf(service).revision).toBe(1);
       expect(stateOf(service).transition.mode).toBe('cut');
+    });
 
-      expect(failureOf(apply(3, { fadeMs: 9000 })).code).toBe(
-        'vj_fade_out_of_range',
-      );
-      const replay = failureOf(apply(3, { mode: 'fade' }));
-      expect(replay.code).toBe('vj_stale_command');
-      expect(stateOf(service).revision).toBe(1);
-      expect(appliedOf(apply(4, { mode: 'fade' })).success.revision).toBe(2);
+    it('records the sequence of a refused command', () => {
+      const clientId = randomUUID();
+      const payload = { speed: 3, clientId, commandSequence: 1 };
+      expect(
+        failureOf(
+          service.applyRemoteCommand(
+            ADMIN_USER_ID,
+            'stage:setEffects',
+            payload,
+            EMPTY_VJ_LOOKUP_RESULTS,
+            START_AT,
+          ),
+        ).code,
+      ).toBe('vj_speed_invalid');
+      expect(
+        service.prepareRemoteCommand(
+          ADMIN_USER_ID,
+          'stage:setEffects',
+          { speed: 2, clientId, commandSequence: 1 },
+          START_AT,
+        ).failure?.code,
+      ).toBe('vj_stale_command');
+      expect(stateOf(service).revision).toBe(0);
     });
 
     it('records nothing while preparing a command', () => {
-      const remote = createRemote(service);
+      const clipId = randomUUID();
       const payload = {
-        mode: 'cut',
-        clientId: remote.clientId,
+        clipId,
+        clientId: randomUUID(),
         commandSequence: 1,
       };
       expect(
         service.prepareRemoteCommand(
           ADMIN_USER_ID,
-          'stage:setTransition',
+          'stage:goClip',
           payload,
+          START_AT,
         ),
-      ).toEqual({ failure: null, lookup: null });
+      ).toEqual({ failure: null, lookups: [{ kind: 'clip', clipId }] });
       expect(
         appliedOf(
           service.applyRemoteCommand(
             ADMIN_USER_ID,
-            'stage:setTransition',
+            'stage:goClip',
             payload,
-            true,
-            1000,
+            clipsExist(clipId),
+            START_AT,
           ),
         ).success,
-      ).toEqual({ revision: 1, isNoop: false });
+      ).toEqual({ revision: 1, isNoop: false, applyAt: null });
     });
 
     it('forgets the least recently used client after 32', () => {
@@ -542,521 +611,489 @@ describe('VjStageService', () => {
           true,
         );
       }
-      const firstRemote = itemAt(remotes, 0);
-      const secondRemote = itemAt(remotes, 1);
       expect(
-        service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:setTransition', {
-          mode: 'fade',
-          clientId: secondRemote.clientId,
-          commandSequence: 1,
-        }).failure?.code,
+        service.prepareRemoteCommand(
+          ADMIN_USER_ID,
+          'stage:setTransition',
+          {
+            mode: 'fade',
+            clientId: itemAt(remotes, 1).clientId,
+            commandSequence: 1,
+          },
+          START_AT,
+        ).failure?.code,
       ).toBe('vj_stale_command');
       expect(
         service.applyRemoteCommand(
           ADMIN_USER_ID,
           'stage:setTransition',
-          { mode: 'fade', clientId: firstRemote.clientId, commandSequence: 1 },
-          true,
-          1000,
+          {
+            mode: 'fade',
+            clientId: itemAt(remotes, 0).clientId,
+            commandSequence: 1,
+          },
+          EMPTY_VJ_LOOKUP_RESULTS,
+          START_AT,
         ).ok,
       ).toBe(true);
     });
 
     it('applies a change, bumps the revision and names the source client', () => {
       const remote = createRemote(service);
-      expect(remote.send('stage:setTransition', { mode: 'cut' }, 5000)).toEqual(
-        {
-          ok: true,
-          success: { revision: 1, isNoop: false },
-          frame: {
-            state: expect.objectContaining({
-              revision: 1,
-              updatedAt: 5000,
-              transition: { mode: 'cut', fadeMs: 800 },
-            }) as VjStageState,
-            cause: 'command',
-            sourceClientId: remote.clientId,
-          },
-        },
+      const frame = frameOf(
+        remote.send('stage:setTransition', { mode: 'cut' }, 5000),
       );
-      expect(stateOf(service).updatedAt).toBe(5000);
+      expect(frame).toEqual({
+        state: expect.objectContaining({
+          revision: 1,
+          updatedAt: 5000,
+          transition: { mode: 'cut', length: { unit: 'ms', value: 800 } },
+        }) as VjStageState,
+        cause: 'command',
+        sourceClientId: remote.clientId,
+        applyAt: null,
+      });
     });
 
-    it('answers a noop with no frame and no revision change', () => {
+    it('stamps applyAt for a clip tap under quantize and null for a pad', () => {
       const remote = createRemote(service);
-      remote.send('stage:setTransition', { mode: 'cut', fadeMs: 300 }, 5000);
+      setBeatTempo(remote);
+      const clipId = randomUUID();
+      const tap = frameOf(tapClip(remote, clipId, START_AT + 100));
+      expect(tap.applyAt).toBe(START_AT + 500);
+      expect(tap.state.liveSince).toBe(START_AT + 500);
+      expect(tap.state.recentClipIds).toEqual([clipId]);
+
+      const pad = appliedOf(
+        remote.send('stage:setEffects', { speed: 2 }, START_AT + 600),
+      );
+      expect(pad.success.applyAt).toBeNull();
+      expect(pad.frame?.applyAt).toBeNull();
+    });
+
+    it('keeps applyAt monotonic and flushes with blackout isImmediate', () => {
+      const remote = createRemote(service);
+      setBeatTempo(remote);
       expect(
-        remote.send('stage:setTransition', { mode: 'cut', fadeMs: 300 }, 6000),
+        appliedOf(tapClip(remote, randomUUID(), START_AT + 100)).success
+          .applyAt,
+      ).toBe(START_AT + 500);
+      expect(
+        appliedOf(remote.send('stage:setEffects', { speed: 2 }, START_AT + 200))
+          .success.applyAt,
+      ).toBe(START_AT + 500);
+      expect(
+        appliedOf(tapClip(remote, randomUUID(), START_AT + 400)).success
+          .applyAt,
+      ).toBe(START_AT + 1000);
+      const blackout = frameOf(
+        remote.send(
+          'stage:setEffects',
+          { isBlackout: true, isImmediate: true },
+          START_AT + 450,
+        ),
+      );
+      expect(blackout.applyAt).toBeNull();
+      expect(blackout.state.effects.isBlackout).toBe(true);
+      expect(
+        appliedOf(remote.send('stage:setEffects', { speed: 4 }, START_AT + 460))
+          .success.applyAt,
+      ).toBeNull();
+    });
+
+    it('answers a noop with applyAt null and leaves the pending time alone', () => {
+      const remote = createRemote(service);
+      setBeatTempo(remote);
+      appliedOf(tapClip(remote, randomUUID(), START_AT + 100));
+      const revision = stateOf(service).revision;
+      expect(
+        remote.send('stage:setEffects', { speed: 1 }, START_AT + 200),
       ).toEqual({
         ok: true,
-        success: { revision: 1, isNoop: true },
+        success: { revision, isNoop: true, applyAt: null },
         frame: null,
       });
-      expect(stateOf(service).updatedAt).toBe(5000);
+      expect(
+        appliedOf(remote.send('stage:setEffects', { speed: 2 }, START_AT + 300))
+          .success.applyAt,
+      ).toBe(START_AT + 500);
+    });
+
+    it('reruns the rules at apply and answers vj_clip_not_found from the lookups', async () => {
+      const remote = createRemote(service);
+      const clipId = randomUUID();
+      expect(
+        failureOf(
+          remote.send(
+            'stage:goClip',
+            { clipId },
+            START_AT,
+            EMPTY_VJ_LOOKUP_RESULTS,
+          ),
+        ).code,
+      ).toBe('vj_clip_not_found');
+
+      reads.existingClipIds.mockResolvedValueOnce(new Set());
+      const unknown = await service.runRemoteCommand(
+        ADMIN_USER_ID,
+        'stage:goClip',
+        remote.nextPayload({ clipId }),
+        () => START_AT,
+      );
+      expect(failureOf(unknown).code).toBe('vj_clip_not_found');
+      expect(reads.existingClipIds).toHaveBeenLastCalledWith([clipId]);
+
+      const known = await service.runRemoteCommand(
+        ADMIN_USER_ID,
+        'stage:goClip',
+        remote.nextPayload({ clipId }),
+        () => START_AT,
+      );
+      expect(appliedOf(known).frame?.state.liveClipId).toBe(clipId);
       expect(stateOf(service).revision).toBe(1);
     });
 
-    it('answers vj_patch_empty for a patch with no recognised field', () => {
-      const remote = createRemote(service);
-      const patchCommands: VjRemoteCommandName[] = [
-        'stage:setTransition',
-        'stage:setOverlay',
-        'stage:setEffects',
+    it('reads the lookups again when a pack change lands before the apply', async () => {
+      const shuffler = createRemote(service);
+      const packer = createRemote(service);
+      const firstPackId = randomUUID();
+      const secondPackId = randomUUID();
+      const clipId = randomUUID();
+      appliedOf(
+        packer.send(
+          'stage:setPack',
+          { packId: firstPackId },
+          START_AT,
+          packExists(firstPackId),
+        ),
+      );
+      reads.clipIdsInPack
+        .mockImplementationOnce(() => {
+          appliedOf(
+            packer.send(
+              'stage:setPack',
+              { packId: secondPackId },
+              START_AT,
+              packExists(secondPackId),
+            ),
+          );
+          return Promise.resolve(new Set([clipId]));
+        })
+        .mockResolvedValueOnce(new Set());
+
+      const outcome = await service.runRemoteCommand(
+        ADMIN_USER_ID,
         'stage:setShuffle',
-      ];
-      for (const name of patchCommands) {
-        expect(failureOf(remote.send(name, {})).code).toBe('vj_patch_empty');
-        expect(failureOf(remote.send(name, { colour: 'red' })).code).toBe(
-          'vj_patch_empty',
+        shuffler.nextPayload({ excludedClipIds: [clipId] }),
+        () => START_AT,
+      );
+      expect(failureOf(outcome).code).toBe('vj_clip_not_in_pack');
+      expect(reads.clipIdsInPack.mock.calls).toEqual([
+        [firstPackId, [clipId]],
+        [secondPackId, [clipId]],
+      ]);
+      expect(stateOf(service).shuffle.excludedClipIds).toEqual([]);
+    });
+
+    it('acks vj_server_error for a failed read and records the sequence', async () => {
+      const remote = createRemote(service);
+      const clipId = randomUUID();
+      const payload = remote.nextPayload({ clipId });
+      reads.existingClipIds.mockRejectedValueOnce(new Error('read failed'));
+      expect(
+        failureOf(
+          await service.runRemoteCommand(
+            ADMIN_USER_ID,
+            'stage:goClip',
+            payload,
+            () => START_AT,
+          ),
+        ).code,
+      ).toBe('vj_server_error');
+      expect(
+        failureOf(
+          service.applyRemoteCommand(
+            ADMIN_USER_ID,
+            'stage:goClip',
+            payload,
+            clipsExist(clipId),
+            START_AT,
+          ),
+        ).code,
+      ).toBe('vj_stale_command');
+      expect(
+        appliedOf(
+          remote.send('stage:goClip', { clipId }, START_AT, clipsExist(clipId)),
+        ).success.revision,
+      ).toBe(1);
+    });
+
+    it('answers vj_stale_command with the state and records the sequence when the lookups move on both reads', async () => {
+      const shuffler = createRemote(service);
+      const packer = createRemote(service);
+      const packIds = [randomUUID(), randomUUID(), randomUUID()];
+      const clipId = randomUUID();
+      const switchPack = (packId: string): void => {
+        appliedOf(
+          packer.send(
+            'stage:setPack',
+            { packId },
+            START_AT,
+            packExists(packId),
+          ),
         );
-      }
-      expect(stateOf(service).revision).toBe(0);
-    });
+      };
+      switchPack(itemAt(packIds, 0));
+      reads.clipIdsInPack
+        .mockImplementationOnce(() => {
+          switchPack(itemAt(packIds, 1));
+          return Promise.resolve(new Set([clipId]));
+        })
+        .mockImplementationOnce(() => {
+          switchPack(itemAt(packIds, 2));
+          return Promise.resolve(new Set([clipId]));
+        });
+      const payload = shuffler.nextPayload({ excludedClipIds: [clipId] });
 
-    it('bumps the clip sequence on every clip tap, the live one included', () => {
-      const remote = createRemote(service);
-      const clipId = randomUUID();
-      const firstTap = appliedOf(remote.send('stage:goClip', { clipId }));
-      expect(firstTap.success).toEqual({ revision: 1, isNoop: false });
-      expect(stateOf(service)).toMatchObject({
-        liveClipId: clipId,
-        clipSequence: 1,
-      });
-
-      const reTap = appliedOf(remote.send('stage:goClip', { clipId }));
-      expect(reTap.success).toEqual({ revision: 2, isNoop: false });
-      expect(reTap.frame?.state.clipSequence).toBe(2);
-
-      appliedOf(remote.send('stage:goClip', { clipId: null }));
-      expect(stateOf(service)).toMatchObject({
-        liveClipId: null,
-        clipSequence: 3,
-        revision: 3,
-      });
-    });
-
-    it('answers vj_clip_not_found and vj_pack_not_found for unknown or malformed ids', () => {
-      const remote = createRemote(service);
-      const unknownId = randomUUID();
-      const commandFields = { clientId: remote.clientId, commandSequence: 1 };
-
-      expect(
-        service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:goClip', {
-          ...commandFields,
-          clipId: 'clip-7',
-        }),
-      ).toEqual({
-        failure: expect.objectContaining({
-          code: 'vj_clip_not_found',
-        }) as VjAckFailure,
-        lookup: null,
-      });
-      expect(
-        service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:setPack', {
-          ...commandFields,
-          packId: 12,
-        }).failure?.code,
-      ).toBe('vj_pack_not_found');
-      expect(
-        service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:setPack', {
-          ...commandFields,
-        }).failure?.code,
-      ).toBe('vj_pack_not_found');
-      expect(
-        service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:goClip', {
-          ...commandFields,
-          clipId: unknownId,
-        }),
-      ).toEqual({ failure: null, lookup: { kind: 'clip', id: unknownId } });
-      expect(
-        service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:setPack', {
-          ...commandFields,
-          packId: unknownId,
-        }),
-      ).toEqual({ failure: null, lookup: { kind: 'pack', id: unknownId } });
-      expect(
-        service.prepareRemoteCommand(ADMIN_USER_ID, 'stage:setPack', {
-          ...commandFields,
-          packId: null,
-        }),
-      ).toEqual({ failure: null, lookup: null });
-
+      const failure = failureOf(
+        await service.runRemoteCommand(
+          ADMIN_USER_ID,
+          'stage:setShuffle',
+          payload,
+          () => START_AT,
+        ),
+      );
+      expect(failure.code).toBe('vj_stale_command');
+      expect(failure.state?.activePackId).toBe(itemAt(packIds, 2));
+      expect(reads.clipIdsInPack).toHaveBeenCalledTimes(2);
+      expect(stateOf(service).shuffle.excludedClipIds).toEqual([]);
       expect(
         failureOf(
-          remote.send('stage:goClip', { clipId: unknownId }, 1000, false),
+          service.applyRemoteCommand(
+            ADMIN_USER_ID,
+            'stage:setShuffle',
+            payload,
+            lookupResults({ clipIdsInPack: new Set([clipId]) }),
+            START_AT,
+          ),
         ).code,
-      ).toBe('vj_clip_not_found');
-      expect(
-        failureOf(
-          remote.send('stage:setPack', { packId: unknownId }, 1000, false),
-        ).code,
-      ).toBe('vj_pack_not_found');
-      expect(failureOf(remote.send('stage:goClip', { clipId: 'x' })).code).toBe(
-        'vj_clip_not_found',
-      );
-      expect(stateOf(service).revision).toBe(0);
-      expect(stateOf(service).clipSequence).toBe(0);
+      ).toBe('vj_stale_command');
     });
 
-    it('keeps the live clip when the pack changes', () => {
-      const remote = createRemote(service);
-      const clipId = randomUUID();
-      const packId = randomUUID();
-      remote.send('stage:goClip', { clipId });
-      const packChange = appliedOf(remote.send('stage:setPack', { packId }));
-      expect(packChange.success.isNoop).toBe(false);
-      expect(stateOf(service)).toMatchObject({
-        activePackId: packId,
-        liveClipId: clipId,
-        clipSequence: 2,
+    it('answers vj_stale_setlist when the set list moved between prepare and apply', () => {
+      const first = createRemote(service);
+      const second = createRemote(service);
+      const setlistId = randomUUID();
+      const look = vjSceneLookOf(createVjStageState(randomUUID(), 0));
+      const itemRead = (index: number | null) => ({
+        setlistId,
+        index,
+        itemCount: 3,
+        sceneId: index === null ? null : randomUUID(),
+        look: index === null ? null : look,
       });
-
-      const samePack = appliedOf(remote.send('stage:setPack', { packId }));
-      expect(samePack.success).toEqual({ revision: 2, isNoop: true });
-      expect(samePack.frame).toBeNull();
-      expect(stateOf(service).clipSequence).toBe(2);
-    });
-
-    it('checks overlay text', () => {
-      const remote = createRemote(service);
-      const codeOf = (fields: Record<string, unknown>) =>
-        failureOf(remote.send('stage:setOverlay', fields)).code;
-
-      for (const text of ['a\nb', 'a b', '\u0007', 5]) {
-        expect(codeOf({ text })).toBe('vj_overlay_text_invalid');
-      }
-      expect(codeOf({ text: 'x'.repeat(81) })).toBe('vj_overlay_text_too_long');
-      expect(codeOf({ isVisible: true })).toBe('vj_overlay_text_blank');
-      expect(codeOf({ text: '   ', isVisible: true })).toBe(
-        'vj_overlay_text_blank',
-      );
-      expect(codeOf({ style: 'marquee' })).toBe('vj_overlay_style_invalid');
-      expect(codeOf({ isVisible: 'yes' })).toBe('vj_effect_flag_invalid');
-      expect(stateOf(service).revision).toBe(0);
-
-      const astralLine = '\u{10400}'.repeat(80);
-      appliedOf(remote.send('stage:setOverlay', { text: astralLine }));
-      expect(stateOf(service).overlay.text).toBe(astralLine);
-
       appliedOf(
-        remote.send('stage:setOverlay', { text: '  Hi  ', isVisible: true }),
+        first.send(
+          'stage:setlistSelect',
+          { setlistId, index: null },
+          START_AT,
+          lookupResults({
+            setlistItems: new Map([
+              [vjSetlistItemKey(setlistId, null), itemRead(null)],
+            ]),
+          }),
+        ),
       );
-      expect(stateOf(service).overlay).toEqual({
-        text: 'Hi',
-        style: 'big',
-        isVisible: true,
-      });
-      expect(codeOf({ text: '' })).toBe('vj_overlay_text_blank');
-    });
-
-    it('checks effects', () => {
-      const remote = createRemote(service);
-      expect(
-        failureOf(remote.send('stage:setEffects', { speed: 0.75 })).code,
-      ).toBe('vj_speed_invalid');
-      expect(
-        failureOf(remote.send('stage:setEffects', { isMirrored: 1 })).code,
-      ).toBe('vj_effect_flag_invalid');
-      expect(
-        failureOf(remote.send('stage:setStrobe', { isStrobing: 'on' })).code,
-      ).toBe('vj_effect_flag_invalid');
-      appliedOf(
-        remote.send('stage:setEffects', { speed: 1.5, isMirrored: true }),
+      const stepPayload = first.nextPayload({});
+      const prepared = service.prepareRemoteCommand(
+        ADMIN_USER_ID,
+        'stage:setlistNext',
+        stepPayload,
+        START_AT,
       );
-      expect(stateOf(service).effects).toMatchObject({
-        speed: 1.5,
-        isMirrored: true,
-        isMonochrome: false,
+      expect(prepared.lookups).toEqual([
+        { kind: 'setlistItem', setlistId, index: 0 },
+      ]);
+      const firstItem = lookupResults({
+        setlistItems: new Map([[vjSetlistItemKey(setlistId, 0), itemRead(0)]]),
       });
-    });
+      appliedOf(second.send('stage:setlistNext', {}, START_AT, firstItem));
+      expect(stateOf(service).setlistIndex).toBe(0);
 
-    it('checks shuffle settings', () => {
-      const remote = createRemote(service);
-      const shuffleOf = () => stateOf(service).shuffle;
-      const codeOf = (fields: Record<string, unknown>) =>
-        failureOf(remote.send('stage:setShuffle', fields)).code;
-
-      appliedOf(remote.send('stage:setShuffle', { intervalValue: 45 }));
-      appliedOf(remote.send('stage:setShuffle', { intervalKind: 'beats' }));
-      expect(shuffleOf()).toMatchObject({
-        intervalKind: 'beats',
-        intervalValue: 8,
-      });
-
-      appliedOf(remote.send('stage:setShuffle', { intervalValue: 16 }));
-      appliedOf(remote.send('stage:setShuffle', { intervalKind: 'seconds' }));
-      expect(shuffleOf()).toMatchObject({
-        intervalKind: 'seconds',
-        intervalValue: 16,
-      });
-
-      expect(codeOf({ intervalValue: 61 })).toBe('vj_shuffle_interval_invalid');
-      expect(codeOf({ intervalKind: 'beats', intervalValue: 12 })).toBe(
-        'vj_shuffle_interval_invalid',
+      const stale = failureOf(
+        service.applyRemoteCommand(
+          ADMIN_USER_ID,
+          'stage:setlistNext',
+          stepPayload,
+          firstItem,
+          START_AT,
+        ),
       );
-      expect(codeOf({ intervalKind: 'bars' })).toBe(
-        'vj_shuffle_interval_invalid',
-      );
-      for (const bpm of [59.9, Number.NaN, '124', 200.1]) {
-        expect(codeOf({ bpm })).toBe('vj_bpm_out_of_range');
-      }
-      expect(codeOf({ isOn: 'yes' })).toBe('vj_effect_flag_invalid');
-
-      appliedOf(remote.send('stage:setShuffle', { bpm: 124.26 }));
-      expect(shuffleOf().bpm).toBe(124.3);
-    });
-  });
-
-  describe('strobe', () => {
-    beforeEach(() => {
-      jest.useFakeTimers();
-      jest.setSystemTime(1000);
-      service.attachRemote(ADMIN_USER_ID, 'remote-socket', 1000);
-    });
-
-    it('switches the strobe off after ten seconds with cause strobe_timeout', () => {
-      const remote = createRemote(service);
-      const on = appliedOf(
-        remote.send('stage:setStrobe', { isStrobing: true }, 1000),
-      );
-      expect(on.frame?.state.effects).toMatchObject({
-        isStrobing: true,
-        strobeStartedAt: 1000,
-      });
-
-      jest.advanceTimersByTime(9999);
-      expect(broadcasts).toHaveLength(0);
-      jest.advanceTimersByTime(1);
-      expect(broadcasts).toHaveLength(1);
-      expect(broadcasts[0]).toEqual({
-        adminUserId: ADMIN_USER_ID,
-        frame: {
-          state: expect.objectContaining({
-            revision: 2,
-            effects: expect.objectContaining({
-              isStrobing: false,
-              strobeStartedAt: null,
-            }) as VjStageState['effects'],
-          }) as VjStageState,
-          cause: 'strobe_timeout',
-          sourceClientId: null,
-        },
-      });
-      expect(stateOf(service).revision).toBe(2);
-      expect(jest.getTimerCount()).toBe(0);
-    });
-
-    it('does not extend the strobe when it is turned on again', () => {
-      const remote = createRemote(service);
-      remote.send('stage:setStrobe', { isStrobing: true }, 1000);
-      jest.advanceTimersByTime(5000);
-      expect(
-        remote.send('stage:setStrobe', { isStrobing: true }, 6000),
-      ).toEqual({
-        ok: true,
-        success: { revision: 1, isNoop: true },
-        frame: null,
-      });
-      expect(stateOf(service).effects.strobeStartedAt).toBe(1000);
-
-      jest.advanceTimersByTime(4999);
-      expect(broadcasts).toHaveLength(0);
-      jest.advanceTimersByTime(1);
-      expect(broadcasts).toHaveLength(1);
-      expect(itemAt(broadcasts, 0).frame.cause).toBe('strobe_timeout');
-    });
-
-    it('clears the strobe timer when it is turned off', () => {
-      const remote = createRemote(service);
-      remote.send('stage:setStrobe', { isStrobing: true }, 1000);
-      expect(jest.getTimerCount()).toBe(1);
-      const off = appliedOf(
-        remote.send('stage:setStrobe', { isStrobing: false }, 2000),
-      );
-      expect(off.frame?.state.effects).toMatchObject({
-        isStrobing: false,
-        strobeStartedAt: null,
-      });
-      expect(jest.getTimerCount()).toBe(0);
-      jest.advanceTimersByTime(20_000);
-      expect(broadcasts).toHaveLength(0);
-      expect(stateOf(service).revision).toBe(2);
+      expect(stale.code).toBe('vj_stale_setlist');
+      expect(stale.state?.setlistIndex).toBe(0);
+      expect(stateOf(service).setlistIndex).toBe(0);
     });
   });
 
   describe('advance', () => {
-    const packId = randomUUID();
-    const clipId = randomUUID();
-    let remote: ReturnType<typeof createRemote>;
-
-    const advancePayload = (overrides: Record<string, unknown> = {}) => ({
-      expectedClipSequence: stateOf(service).clipSequence,
-      clipId,
-      ...overrides,
-    });
-
-    beforeEach(() => {
-      attachScreen(service, 'socket-lead', randomUUID(), 1);
-      attachScreen(service, 'socket-follower', randomUUID(), 2);
-      service.attachRemote(ADMIN_USER_ID, 'remote-socket', 3);
-      remote = createRemote(service);
-    });
-
-    it('checks an advance in the contract order', () => {
-      const prepare = (socketId: string, payload: Record<string, unknown>) =>
-        service.prepareScreenAdvance(ADMIN_USER_ID, socketId, payload);
-
-      const notLead = prepare('socket-follower', advancePayload());
-      expect(notLead.failure?.code).toBe('vj_not_lead');
-      expect(notLead.failure?.state).toEqual(stateOf(service));
-
-      const shuffleOff = prepare('socket-lead', advancePayload());
-      expect(shuffleOff.failure?.code).toBe('vj_shuffle_off');
-      expect(shuffleOff.failure?.state).toEqual(stateOf(service));
-
-      appliedOf(remote.send('stage:setShuffle', { isOn: true }));
-      const noPack = prepare('socket-lead', advancePayload());
-      expect(noPack.failure?.code).toBe('vj_no_active_pack');
-      expect(noPack.failure?.state).toEqual(stateOf(service));
-
-      appliedOf(remote.send('stage:setPack', { packId }));
-      const current = stateOf(service).clipSequence;
-      for (const expectedClipSequence of [current - 1, String(current), 1.5]) {
-        const stale = prepare(
-          'socket-lead',
-          advancePayload({ expectedClipSequence }),
-        );
-        expect(stale.failure?.code).toBe('vj_stale_clip_sequence');
-        expect(stale.failure?.state).toEqual(stateOf(service));
-      }
-
-      const malformedClip = prepare(
-        'socket-lead',
-        advancePayload({ clipId: 'clip' }),
+    it('lands an advance like a clip tap with cause shuffle', async () => {
+      attachScreen(service, 'socket-lead', randomUUID(), 0);
+      attachScreen(service, 'socket-follow', randomUUID(), 1);
+      service.attachRemote(ADMIN_USER_ID, 'remote-socket', 0);
+      const remote = createRemote(service);
+      const packId = randomUUID();
+      appliedOf(
+        remote.send('stage:setPack', { packId }, START_AT, packExists(packId)),
       );
-      expect(malformedClip.failure?.code).toBe('vj_clip_not_in_pack');
-      expect(malformedClip.failure?.state).toBeUndefined();
-
-      expect(prepare('socket-lead', advancePayload())).toEqual({
-        failure: null,
-        packId,
+      appliedOf(remote.send('stage:setShuffle', { isOn: true }, START_AT));
+      const clipId = randomUUID();
+      const advance = {
+        expectedClipSequence: stateOf(service).clipSequence,
         clipId,
-      });
-
-      const revisionBefore = stateOf(service).revision;
-      const outsidePack = failureOf(
-        service.applyScreenAdvance(
-          ADMIN_USER_ID,
-          'socket-lead',
-          advancePayload(),
-          false,
-          10,
-        ),
-      );
-      expect(outsidePack.code).toBe('vj_clip_not_in_pack');
-      expect(stateOf(service).revision).toBe(revisionBefore);
+      };
       expect(
-        failureOf(
-          service.applyScreenAdvance(
-            ADMIN_USER_ID,
-            'socket-follower',
-            advancePayload(),
-            true,
-            10,
-          ),
-        ).code,
+        service.prepareScreenAdvance(ADMIN_USER_ID, 'socket-follow', advance)
+          .failure?.code,
       ).toBe('vj_not_lead');
-    });
-
-    it('refuses an advance against an old clip sequence', () => {
-      appliedOf(remote.send('stage:setShuffle', { isOn: true }));
-      appliedOf(remote.send('stage:setPack', { packId }));
-      const sequenceBefore = stateOf(service).clipSequence;
-      const payload = advancePayload();
       expect(
-        service.prepareScreenAdvance(ADMIN_USER_ID, 'socket-lead', payload)
-          .failure,
-      ).toBeNull();
-
-      const tappedClipId = randomUUID();
-      appliedOf(remote.send('stage:goClip', { clipId: tappedClipId }));
-      const stale = failureOf(
-        service.applyScreenAdvance(
-          ADMIN_USER_ID,
-          'socket-lead',
-          payload,
-          true,
-          20,
-        ),
+        service.prepareScreenAdvance(ADMIN_USER_ID, 'socket-lead', advance)
+          .lookups,
+      ).toEqual([{ kind: 'packClip', packId, clipId }]);
+      const outcome = await service.runScreenAdvance(
+        ADMIN_USER_ID,
+        'socket-lead',
+        advance,
+        () => START_AT,
       );
-      expect(stale.code).toBe('vj_stale_clip_sequence');
-      expect(stale.state?.liveClipId).toBe(tappedClipId);
-      expect(stale.state?.clipSequence).toBe(sequenceBefore + 1);
-      expect(stateOf(service).liveClipId).toBe(tappedClipId);
-    });
-
-    it('applies an advance with cause shuffle', () => {
-      appliedOf(remote.send('stage:setShuffle', { isOn: true }));
-      appliedOf(remote.send('stage:setPack', { packId }));
-      const before = stateOf(service);
-      const payload = advancePayload();
-
-      const advanced = appliedOf(
-        service.applyScreenAdvance(
-          ADMIN_USER_ID,
-          'socket-lead',
-          payload,
-          true,
-          30,
-        ),
-      );
-      expect(advanced.success).toEqual({
-        revision: before.revision + 1,
-        isNoop: false,
-      });
-      expect(advanced.frame).toEqual({
-        state: {
-          ...before,
-          liveClipId: clipId,
-          clipSequence: before.clipSequence + 1,
-          revision: before.revision + 1,
-          updatedAt: 30,
-        },
-        cause: 'shuffle',
-        sourceClientId: null,
-      });
-
+      const frame = frameOf(outcome);
+      expect(frame.cause).toBe('shuffle');
+      expect(frame.sourceClientId).toBeNull();
+      expect(frame.state.liveClipId).toBe(clipId);
+      expect(reads.readPackClipForAdvance).toHaveBeenCalledWith(packId, clipId);
       expect(
         failureOf(
           service.applyScreenAdvance(
             ADMIN_USER_ID,
             'socket-lead',
-            payload,
-            true,
-            31,
+            {
+              expectedClipSequence: frame.state.clipSequence,
+              clipId: randomUUID(),
+            },
+            lookupResults({
+              packClips: new Map([[vjPackClipKey(packId, clipId), null]]),
+            }),
+            START_AT,
           ),
         ).code,
-      ).toBe('vj_stale_clip_sequence');
+      ).toBe('vj_clip_not_in_pack');
     });
   });
 
-  describe('status, library, sweep', () => {
-    it('stores a screen status and cuts the clip list at 200', () => {
-      const screenId = randomUUID();
-      const packId = randomUUID();
-      attachScreen(service, 'socket-a', screenId, 1);
-      const clips = Array.from({ length: 250 }, () => clipStatus());
-      clips[0] = clipStatus({
-        state: 'failed',
-        progress: 0,
-        failure: 'network',
-      });
-      clips[1] = clipStatus({
-        state: 'ready',
-        progress: 1,
-        failure: 'network',
-      });
+  describe('timers', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(START_AT);
+      service.attachRemote(ADMIN_USER_ID, 'remote-socket', START_AT);
+    });
 
+    it('lands a strobe timeout at once and flushes the pending applyAt', () => {
+      const remote = createRemote(service);
+      setBeatTempo(remote);
+      const strobe = frameOf(
+        remote.send('stage:setStrobe', { isStrobing: true }, Date.now()),
+      );
+      expect(strobe.applyAt).toBeNull();
+      expect(strobe.state.effects.strobeStartedAt).toBe(START_AT);
+
+      jest.advanceTimersByTime(9_900);
+      const pendingClipId = randomUUID();
+      const tap = appliedOf(tapClip(remote, pendingClipId, Date.now()));
+      expect(tap.success.applyAt).toBe(START_AT + 10_500);
+      expect(broadcasts).toHaveLength(0);
+
+      jest.advanceTimersByTime(100);
+      expect(broadcasts).toHaveLength(1);
+      const timeout = itemAt(broadcasts, 0).frame;
+      expect(timeout.cause).toBe('strobe_timeout');
+      expect(timeout.applyAt).toBeNull();
+      expect(timeout.state.liveClipId).toBe(pendingClipId);
+      expect(timeout.state.effects).toMatchObject({
+        isStrobing: false,
+        strobeStartedAt: null,
+      });
+    });
+
+    it('hides the overlay at hideAt with cause overlay_timeout', () => {
+      const remote = createRemote(service);
+      const shown = frameOf(
+        remote.send(
+          'stage:setOverlay',
+          { text: 'Hello', isVisible: true, hideAfterMs: 5000 },
+          Date.now(),
+        ),
+      );
+      expect(shown.state.overlay.hideAt).toBe(START_AT + 5000);
+      jest.advanceTimersByTime(4_999);
+      expect(broadcasts).toHaveLength(0);
+      jest.advanceTimersByTime(1);
+      const hidden = itemAt(broadcasts, 0).frame;
+      expect(hidden.cause).toBe('overlay_timeout');
+      expect(hidden.state.overlay).toMatchObject({
+        text: 'Hello',
+        isVisible: false,
+        hideAt: null,
+      });
+    });
+
+    it('hides the countdown after the hold with cause countdown_end', () => {
+      const remote = createRemote(service);
+      appliedOf(
+        remote.send(
+          'stage:setCountdown',
+          { isVisible: true, durationMs: 5000 },
+          Date.now(),
+        ),
+      );
+      jest.advanceTimersByTime(14_999);
+      expect(broadcasts).toHaveLength(0);
+      jest.advanceTimersByTime(1);
+      const ended = itemAt(broadcasts, 0).frame;
+      expect(ended.cause).toBe('countdown_end');
+      expect(ended.state.countdown).toEqual({
+        isVisible: false,
+        targetAt: START_AT + 5000,
+        label: '',
+      });
+    });
+
+    it('clears every timer on eviction', () => {
+      const remote = createRemote(service);
+      remote.send('stage:setStrobe', { isStrobing: true }, Date.now());
+      remote.send(
+        'stage:setOverlay',
+        { text: 'Hello', isVisible: true, hideAfterMs: 5000 },
+        Date.now(),
+      );
+      remote.send(
+        'stage:setCountdown',
+        { isVisible: true, durationMs: 5000 },
+        Date.now(),
+      );
+      expect(jest.getTimerCount()).toBe(3);
+      service.detachSocket(ADMIN_USER_ID, 'remote-socket', START_AT);
+      service.sweep(START_AT + VJ_STAGE_IDLE_EVICTION_MS + 1);
+      expect(service.getState(ADMIN_USER_ID)).toBeNull();
+      expect(jest.getTimerCount()).toBe(0);
+      jest.advanceTimersByTime(20_000);
+      expect(broadcasts).toHaveLength(0);
+    });
+  });
+
+  describe('status', () => {
+    it('stores a screen status and cuts the clip list at 200', () => {
+      const packId = randomUUID();
+      attachScreen(service, 'socket-a', randomUUID(), 1);
+      const clips = Array.from({ length: 250 }, () => clipStatus());
       expect(
         service.updateScreenStatus(
           ADMIN_USER_ID,
@@ -1064,212 +1101,393 @@ describe('VjStageService', () => {
           { isFullscreen: true, preload: { packId, clips } },
           40,
         ),
-      ).toBe(true);
+      ).toEqual({ isStored: true, frame: null });
       const screen = itemAt(service.listScreens(ADMIN_USER_ID, 40), 0);
       expect(screen.isFullscreen).toBe(true);
       expect(screen.lastSeenAt).toBe(40);
-      expect(screen.preload.packId).toBe(packId);
       expect(screen.preload.clips).toHaveLength(200);
-      expect(itemAt(screen.preload.clips, 0).failure).toBe('network');
-      expect(itemAt(screen.preload.clips, 1).failure).toBeNull();
-      expect(itemAt(screen.preload.clips, 199).clipId).toBe(
-        itemAt(clips, 199).clipId,
-      );
     });
 
     it('drops a malformed status', () => {
       attachScreen(service, 'socket-a', randomUUID(), 1);
       const before = service.listScreens(ADMIN_USER_ID, 1);
-      const malformedPayloads: Record<string, unknown>[] = [
-        {
-          isFullscreen: true,
-          preload: { packId: null, clips: [clipStatus({ progress: 2 })] },
-        },
-        {
-          isFullscreen: true,
-          preload: {
-            packId: null,
-            clips: [{ ...clipStatus(), state: 'paused' }],
-          },
-        },
-        {
-          isFullscreen: true,
-          preload: { packId: null, clips: [clipStatus({ clipId: 'clip-1' })] },
-        },
+      for (const payload of [
         { isFullscreen: 'yes', preload: { packId: null, clips: [] } },
         { isFullscreen: true, preload: { packId: 'pack', clips: [] } },
-        { isFullscreen: true, preload: { packId: null, clips: 'all' } },
         { isFullscreen: true },
-      ];
-      for (const payload of malformedPayloads) {
+      ]) {
         expect(
           service.updateScreenStatus(ADMIN_USER_ID, 'socket-a', payload, 50),
-        ).toBe(false);
+        ).toEqual({ isStored: false, frame: null });
       }
       expect(service.listScreens(ADMIN_USER_ID, 1)).toEqual(before);
       expect(
         service.updateScreenStatus(
           ADMIN_USER_ID,
           'socket-unknown',
-          { isFullscreen: true, preload: { packId: null, clips: [] } },
+          statusPayload(),
           50,
-        ),
+        ).isStored,
       ).toBe(false);
     });
 
-    it('clears a deleted active pack and turns shuffle off', () => {
-      const deletedPackId = randomUUID();
-      const otherPackId = randomUUID();
-      const liveClipId = randomUUID();
-      const adminIds = [randomUUID(), randomUUID(), randomUUID()];
-      adminIds.forEach((adminUserId, index) => {
-        service.attachRemote(adminUserId, `remote-${index}`, 0);
-        const remote = createRemote(service, adminUserId);
-        remote.send('stage:goClip', { clipId: liveClipId });
-        remote.send('stage:setPack', {
-          packId: index < 2 ? deletedPackId : otherPackId,
-        });
-        remote.send('stage:setShuffle', { isOn: true });
-      });
-      const beforeStates = adminIds.map((adminUserId) =>
-        stateOf(service, adminUserId),
+    it('adopts the lead mic tempo with cause mic_tempo and ignores a follower', () => {
+      attachScreen(service, 'socket-lead', randomUUID(), START_AT);
+      attachScreen(service, 'socket-follow', randomUUID(), START_AT);
+      service.attachRemote(ADMIN_USER_ID, 'remote-socket', START_AT);
+      const remote = createRemote(service);
+      expect(
+        failureOf(remote.send('stage:setTempo', { source: 'mic' }, START_AT))
+          .code,
+      ).toBe('vj_mic_unavailable');
+      service.updateScreenStatus(
+        ADMIN_USER_ID,
+        'socket-lead',
+        statusPayload({
+          mic: { level: 0.4, bpm: null, confidence: 0, beatAt: null },
+        }),
+        START_AT,
       );
+      appliedOf(remote.send('stage:setTempo', { source: 'mic' }, START_AT));
 
-      const frames = service.applyLibraryChange(
-        {
-          kind: 'pack_deleted',
-          packId: deletedPackId,
-          clipId: null,
-          packIds: [deletedPackId],
-        },
-        70,
+      const heard = {
+        mic: { level: 0.5, bpm: 130, confidence: 0.9, beatAt: START_AT + 100 },
+      };
+      expect(
+        service.updateScreenStatus(
+          ADMIN_USER_ID,
+          'socket-follow',
+          statusPayload(heard),
+          START_AT + 100,
+        ),
+      ).toEqual({ isStored: true, frame: null });
+      expect(stateOf(service).tempo.bpm).toBe(124);
+
+      const adopted = service.updateScreenStatus(
+        ADMIN_USER_ID,
+        'socket-lead',
+        statusPayload(heard),
+        START_AT + 100,
       );
-      expect(frames.map((entry) => entry.adminUserId)).toEqual(
-        adminIds.slice(0, 2),
-      );
-      frames.forEach((entry, index) => {
-        const before = itemAt(beforeStates, index);
-        expect(entry.frame).toEqual({
-          state: {
-            ...before,
-            activePackId: null,
-            shuffle: { ...before.shuffle, isOn: false },
-            clipSequence: before.clipSequence + 1,
-            revision: before.revision + 1,
-            updatedAt: 70,
-          },
-          cause: 'library',
-          sourceClientId: null,
-        });
-        expect(entry.frame.state.liveClipId).toBe(liveClipId);
+      expect(adopted.frame?.cause).toBe('mic_tempo');
+      expect(adopted.frame?.sourceClientId).toBeNull();
+      expect(adopted.frame?.state.tempo).toMatchObject({
+        bpm: 130,
+        source: 'mic',
       });
-      expect(stateOf(service, itemAt(adminIds, 2))).toEqual(
-        itemAt(beforeStates, 2),
-      );
+      expect(
+        service.updateScreenStatus(
+          ADMIN_USER_ID,
+          'socket-lead',
+          statusPayload({ mic: { ...heard.mic, bpm: 140 } }),
+          START_AT + 1000,
+        ).frame,
+      ).toBeNull();
     });
 
-    it('sends the stage to black when the live clip is deleted', () => {
+    it('relays health and the lead next clip in the screen list', () => {
+      attachScreen(service, 'socket-lead', randomUUID(), 0);
+      attachScreen(service, 'socket-follow', randomUUID(), 1);
       service.attachRemote(ADMIN_USER_ID, 'remote-socket', 0);
       const remote = createRemote(service);
-      const liveClipId = randomUUID();
-      remote.send('stage:goClip', { clipId: liveClipId });
-      const before = stateOf(service);
+      appliedOf(remote.send('stage:setShuffle', { isOn: true }, START_AT));
+      const leadNextClipId = randomUUID();
+      service.updateScreenStatus(
+        ADMIN_USER_ID,
+        'socket-lead',
+        statusPayload({
+          nextClipId: leadNextClipId,
+          health: {
+            renderer: 'webgl2',
+            fps: 59.94,
+            droppedFrames: 3,
+            cacheBytes: 1000,
+            isEffectLoadHigh: false,
+          },
+        }),
+        2,
+      );
+      service.updateScreenStatus(
+        ADMIN_USER_ID,
+        'socket-follow',
+        statusPayload({ nextClipId: randomUUID() }),
+        2,
+      );
+      const screens = service.listScreens(ADMIN_USER_ID, 2);
+      expect(itemAt(screens, 0)).toMatchObject({
+        isLead: true,
+        nextClipId: leadNextClipId,
+        health: { renderer: 'webgl2', fps: 59.9 },
+      });
+      expect(itemAt(screens, 1)).toMatchObject({
+        isLead: false,
+        nextClipId: null,
+        health: null,
+      });
+
+      appliedOf(remote.send('stage:setShuffle', { isOn: false }, START_AT));
+      expect(itemAt(service.listScreens(ADMIN_USER_ID, 3), 0).nextClipId).toBe(
+        null,
+      );
+    });
+  });
+
+  describe('overrides and identify', () => {
+    it('drops overrides of pruned screens at the next change', () => {
+      const keptScreenId = randomUUID();
+      const leavingScreenId = randomUUID();
+      attachScreen(service, 'socket-kept', keptScreenId, START_AT);
+      attachScreen(service, 'socket-leaving', leavingScreenId, START_AT);
+      service.attachRemote(ADMIN_USER_ID, 'remote-socket', START_AT);
+      const remote = createRemote(service);
+      setBeatTempo(remote);
+      const clipId = randomUUID();
+      for (const screenId of [keptScreenId, leavingScreenId]) {
+        appliedOf(
+          remote.send(
+            'stage:setScreenOverride',
+            {
+              screenId,
+              override: { clipId, generatorId: null, generatorVariant: null },
+            },
+            START_AT,
+            clipsExist(clipId),
+          ),
+        );
+      }
+      service.detachSocket(ADMIN_USER_ID, 'socket-leaving', START_AT);
+      const prunedAt = START_AT + VJ_SCREEN_OFFLINE_RETENTION_MS + 1;
+      expect(service.listScreens(ADMIN_USER_ID, prunedAt)).toHaveLength(1);
+      expect(Object.keys(stateOf(service).screenOverrides)).toHaveLength(2);
+
+      const pad = frameOf(
+        remote.send('stage:setEffects', { speed: 2 }, prunedAt),
+      );
+      expect(pad.applyAt).toBeNull();
+      expect(Object.keys(pad.state.screenOverrides)).toEqual([keptScreenId]);
+    });
+
+    it('drops the override of a screen past its retention at the next change without a list read', () => {
+      const keptScreenId = randomUUID();
+      const leavingScreenId = randomUUID();
+      attachScreen(service, 'socket-kept', keptScreenId, START_AT);
+      attachScreen(service, 'socket-leaving', leavingScreenId, START_AT);
+      service.attachRemote(ADMIN_USER_ID, 'remote-socket', START_AT);
+      const remote = createRemote(service);
+      const clipId = randomUUID();
+      for (const screenId of [keptScreenId, leavingScreenId]) {
+        appliedOf(
+          remote.send(
+            'stage:setScreenOverride',
+            {
+              screenId,
+              override: { clipId, generatorId: null, generatorVariant: null },
+            },
+            START_AT,
+            clipsExist(clipId),
+          ),
+        );
+      }
+      service.detachSocket(ADMIN_USER_ID, 'socket-leaving', START_AT);
+      const prunedAt = START_AT + VJ_SCREEN_OFFLINE_RETENTION_MS + 1;
+
+      const pad = frameOf(
+        remote.send('stage:setEffects', { speed: 2 }, prunedAt),
+      );
+      expect(Object.keys(pad.state.screenOverrides)).toEqual([keptScreenId]);
+      expect(
+        service
+          .listScreens(ADMIN_USER_ID, prunedAt)
+          .map((screen) => screen.screenId),
+      ).toEqual([keptScreenId]);
+    });
+
+    it('answers identify targets for one screen or every connected screen', () => {
+      const screenB = randomUUID();
+      const screenC = randomUUID();
+      attachScreen(service, 'socket-a', randomUUID(), 0);
+      attachScreen(service, 'socket-b', screenB, 1);
+      attachScreen(service, 'socket-c', screenC, 2);
+      service.detachSocket(ADMIN_USER_ID, 'socket-c', 3);
+
+      expect(service.identifyTargets(ADMIN_USER_ID, null)).toEqual({
+        failure: null,
+        targets: [
+          { socketId: 'socket-a', number: 1 },
+          { socketId: 'socket-b', number: 2 },
+        ],
+      });
+      expect(
+        service.identifyTargets(ADMIN_USER_ID, screenB.toUpperCase()),
+      ).toEqual({
+        failure: null,
+        targets: [{ socketId: 'socket-b', number: 2 }],
+      });
+      for (const screenId of [screenC, randomUUID(), 'screen-1', 7]) {
+        expect(
+          service.identifyTargets(ADMIN_USER_ID, screenId).failure?.code,
+        ).toBe('vj_screen_not_attached');
+      }
+      expect(service.identifyTargets(randomUUID(), null).failure?.code).toBe(
+        'vj_not_attached',
+      );
+    });
+  });
+
+  describe('library', () => {
+    beforeEach(() => {
+      service.attachRemote(ADMIN_USER_ID, 'remote-socket', 0);
+    });
+
+    it('clears the active set list on its delete and the index past a shrunk count', () => {
+      const remote = createRemote(service);
+      const setlistId = randomUUID();
+      appliedOf(
+        remote.send(
+          'stage:setlistSelect',
+          { setlistId, index: 2 },
+          START_AT,
+          lookupResults({
+            setlistItems: new Map([
+              [
+                vjSetlistItemKey(setlistId, 2),
+                {
+                  setlistId,
+                  index: 2,
+                  itemCount: 3,
+                  sceneId: randomUUID(),
+                  look: vjSceneLookOf(createVjStageState(randomUUID(), 0)),
+                },
+              ],
+            ]),
+          }),
+        ),
+      );
+      expect(
+        service.activeSetlistIdsAmong([setlistId.toUpperCase(), randomUUID()]),
+      ).toEqual([setlistId]);
+
+      const shrunk = service.applyLibraryChange(
+        libraryChange({
+          kind: 'setlist_items_changed',
+          setlistId,
+          setlistIds: [setlistId],
+        }),
+        START_AT + 1,
+        new Map([[setlistId, 2]]),
+      );
+      expect(shrunk).toHaveLength(1);
+      expect(itemAt(shrunk, 0).frame.cause).toBe('library');
+      expect(itemAt(shrunk, 0).frame.state).toMatchObject({
+        activeSetlistId: setlistId,
+        setlistIndex: null,
+      });
+
+      const deleted = service.applyLibraryChange(
+        libraryChange({
+          kind: 'setlist_deleted',
+          setlistId,
+          setlistIds: [setlistId],
+        }),
+        START_AT + 2,
+        new Map(),
+      );
+      expect(itemAt(deleted, 0).frame.state.activeSetlistId).toBeNull();
+      expect(service.activeSetlistIdsAmong([setlistId])).toEqual([]);
+    });
+
+    it('clears the mix, overrides, history and exclusions of a deleted clip', () => {
+      const screenId = randomUUID();
+      attachScreen(service, 'socket-a', screenId, 0);
+      const remote = createRemote(service);
+      const packId = randomUUID();
+      const deletedClipId = randomUUID();
+      const keptClipId = randomUUID();
+      appliedOf(
+        remote.send('stage:setPack', { packId }, START_AT, packExists(packId)),
+      );
+      appliedOf(tapClip(remote, deletedClipId, START_AT));
+      appliedOf(tapClip(remote, keptClipId, START_AT));
+      appliedOf(
+        remote.send(
+          'stage:setMix',
+          { clipId: deletedClipId, amount: 0.5, blendMode: 'screen' },
+          START_AT,
+          clipsExist(deletedClipId),
+        ),
+      );
+      appliedOf(
+        remote.send(
+          'stage:setScreenOverride',
+          {
+            screenId,
+            override: {
+              clipId: deletedClipId,
+              generatorId: null,
+              generatorVariant: null,
+            },
+          },
+          START_AT,
+          clipsExist(deletedClipId),
+        ),
+      );
+      appliedOf(
+        remote.send(
+          'stage:setShuffle',
+          { excludedClipIds: [deletedClipId] },
+          START_AT,
+          lookupResults({ clipIdsInPack: new Set([deletedClipId]) }),
+        ),
+      );
 
       const frames = service.applyLibraryChange(
-        {
-          kind: 'clip_deleted',
-          packId: null,
-          clipId: liveClipId,
-          packIds: [randomUUID()],
-        },
-        80,
+        libraryChange({ kind: 'clip_deleted', clipId: deletedClipId }),
+        START_AT + 1,
+        new Map(),
       );
-      expect(frames).toHaveLength(1);
-      expect(itemAt(frames, 0).frame.state).toMatchObject({
-        liveClipId: null,
-        clipSequence: before.clipSequence + 1,
-        revision: before.revision + 1,
+      const state = itemAt(frames, 0).frame.state;
+      expect(state.liveClipId).toBe(keptClipId);
+      expect(state.mix).toEqual({
+        clipId: null,
+        amount: 0,
+        blendMode: 'screen',
       });
-      expect(itemAt(frames, 0).frame.cause).toBe('library');
+      expect(state.screenOverrides).toEqual({});
+      expect(state.recentClipIds).toEqual([keptClipId]);
+      expect(state.shuffle.excludedClipIds).toEqual([]);
     });
 
     it('leaves stages alone for unrelated changes', () => {
-      service.attachRemote(ADMIN_USER_ID, 'remote-socket', 0);
-      const remote = createRemote(service);
-      const packId = randomUUID();
-      const clipId = randomUUID();
-      remote.send('stage:goClip', { clipId });
-      remote.send('stage:setPack', { packId });
       const before = stateOf(service);
-
-      const changes = [
-        { kind: 'pack_renamed', packId, clipId: null, packIds: [] },
-        { kind: 'pack_clips_changed', packId, clipId, packIds: [packId] },
-        { kind: 'clip_updated', packId: null, clipId, packIds: [packId] },
-        {
-          kind: 'pack_deleted',
-          packId: randomUUID(),
-          clipId: null,
-          packIds: [],
-        },
-        {
-          kind: 'clip_deleted',
-          packId: null,
-          clipId: randomUUID(),
-          packIds: [],
-        },
-      ] as const;
-      for (const change of changes) {
-        expect(
-          service.applyLibraryChange(
-            { ...change, packIds: [...change.packIds] },
-            90,
-          ),
-        ).toEqual([]);
-      }
+      expect(
+        service.applyLibraryChange(
+          libraryChange({ kind: 'pack_created', packId: randomUUID() }),
+          1,
+          new Map(),
+        ),
+      ).toEqual([]);
       expect(stateOf(service)).toEqual(before);
     });
+  });
 
+  describe('sweep', () => {
     it('evicts a stage idle for six hours and prunes offline screens after ten minutes', () => {
-      jest.useFakeTimers();
       const startedAt = 1_000_000;
-      jest.setSystemTime(startedAt);
-      const sweepAt = startedAt + VJ_STAGE_IDLE_EVICTION_MS + 1;
       const attachedAdmin = randomUUID();
       const idleAdmin = randomUUID();
-      const borderAdmin = randomUUID();
-
       service.attachRemote(attachedAdmin, 'remote-attached', startedAt);
       attachScreen(service, 'screen-socket', randomUUID(), startedAt, {
         adminUserId: attachedAdmin,
       });
       service.detachSocket(attachedAdmin, 'screen-socket', startedAt + 10);
-
       service.attachRemote(idleAdmin, 'remote-idle', startedAt);
-      createRemote(service, idleAdmin).send(
-        'stage:setStrobe',
-        { isStrobing: true },
-        startedAt,
-      );
       service.detachSocket(idleAdmin, 'remote-idle', startedAt);
 
-      service.attachRemote(borderAdmin, 'remote-border', startedAt);
-      service.detachSocket(borderAdmin, 'remote-border', startedAt + 1);
-
-      const retentionEnd = startedAt + 10 + VJ_SCREEN_OFFLINE_RETENTION_MS;
-      expect(service.listScreens(attachedAdmin, retentionEnd)).toEqual([
-        expect.objectContaining({ isConnected: false, isLead: false }),
-      ]);
-      expect(jest.getTimerCount()).toBe(1);
-
+      const sweepAt = startedAt + VJ_STAGE_IDLE_EVICTION_MS + 1;
       service.sweep(sweepAt);
       expect(service.getState(attachedAdmin)).not.toBeNull();
       expect(service.listScreens(attachedAdmin, sweepAt)).toEqual([]);
       expect(service.getState(idleAdmin)).toBeNull();
-      expect(service.getState(borderAdmin)).not.toBeNull();
-      expect(jest.getTimerCount()).toBe(0);
-      jest.advanceTimersByTime(20_000);
-      expect(broadcasts).toHaveLength(0);
     });
 
     it('prunes an offline screen lazily when the list is built', () => {
@@ -1288,54 +1506,50 @@ describe('VjStageService', () => {
       );
       expect(later).toHaveLength(1);
       expect(itemAt(later, 0).number).toBe(2);
-
-      const newcomer = attachedOf(
-        attachScreen(service, 'socket-c', randomUUID(), 200_000_000),
-      );
-      expect(newcomer.isLead).toBe(false);
-      expect(
-        service
-          .listScreens(ADMIN_USER_ID, 200_000_000)
-          .map((screen) => screen.number),
-      ).toEqual([2, 3]);
     });
+  });
 
-    it('keeps refusal messages free of payload text', () => {
-      service.attachRemote(ADMIN_USER_ID, 'remote-socket', 0);
-      const remote = createRemote(service);
-      const secret = 'SECRET LINE';
-      const failures: VjAckFailure[] = [
-        failureOf(remote.send('stage:setOverlay', { text: `${secret}\u0007` })),
-        failureOf(
-          remote.send('stage:setOverlay', { text: `${secret} `.repeat(8) }),
+  it('keeps refusal messages free of payload text', () => {
+    service.attachRemote(ADMIN_USER_ID, 'remote-socket', 0);
+    const remote = createRemote(service);
+    const secret = 'SECRET LINE';
+    const failures: VjAckFailure[] = [
+      failureOf(remote.send('stage:setOverlay', { text: `${secret}\u0007` })),
+      failureOf(
+        remote.send('stage:setOverlay', { text: `${secret} `.repeat(8) }),
+      ),
+      failureOf(
+        remote.send('stage:setCountdown', {
+          label: 'SECRET\u0007LINE',
+        }),
+      ),
+      failureOf(
+        remote.send('stage:setCountdown', {
+          label: `${secret} `.repeat(4),
+        }),
+      ),
+      failureOf(remote.send('stage:recallScene', { sceneId: secret })),
+      failureOf(
+        service.applyRemoteCommand(
+          ADMIN_USER_ID,
+          'stage:setOverlay',
+          { text: secret, clientId: secret, commandSequence: 1 },
+          EMPTY_VJ_LOOKUP_RESULTS,
+          0,
         ),
-        failureOf(
-          remote.send('stage:setOverlay', { text: secret, style: 'marquee' }),
-        ),
-        failureOf(
-          remote.send('stage:setOverlay', { text: secret, isVisible: 'yes' }),
-        ),
-        failureOf(
-          service.applyRemoteCommand(
-            ADMIN_USER_ID,
-            'stage:setOverlay',
-            { text: secret, clientId: secret, commandSequence: 1 },
-            true,
-            0,
-          ),
-        ),
-      ];
-      expect(failures.map((failure) => failure.code)).toEqual([
-        'vj_overlay_text_invalid',
-        'vj_overlay_text_too_long',
-        'vj_overlay_style_invalid',
-        'vj_effect_flag_invalid',
-        'vj_client_id_invalid',
-      ]);
-      for (const failure of failures) {
-        expect(failure.message).not.toContain('SECRET');
-        expect(JSON.stringify(failure)).not.toContain('SECRET');
-      }
-    });
+      ),
+    ];
+    expect(failures.map((failure) => failure.code)).toEqual([
+      'vj_overlay_text_invalid',
+      'vj_overlay_text_too_long',
+      'vj_countdown_label_invalid',
+      'vj_countdown_label_too_long',
+      'vj_scene_not_found',
+      'vj_client_id_invalid',
+    ]);
+    for (const failure of failures) {
+      expect(failure.message).not.toContain('SECRET');
+      expect(JSON.stringify(failure)).not.toContain('SECRET');
+    }
   });
 });

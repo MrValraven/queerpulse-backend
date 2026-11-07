@@ -1,14 +1,17 @@
 import { HttpException, Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, EntityManager, In, QueryFailedError } from 'typeorm';
-import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { DataSource, EntityManager, In } from 'typeorm';
 import {
   isQuickTimeBrand,
   magicBytesMatchContentType,
 } from '../storage/served-object';
-import { isVjClipKey, isVjThumbnailKey } from '../storage/storage-key';
+import {
+  isVjClipKey,
+  isVjPreviewKey,
+  isVjThumbnailKey,
+  vjPreviewContentTypeForKey,
+} from '../storage/storage-key';
 import { StorageService } from '../storage/storage.service';
-import { Profile } from '../users/entities/profile.entity';
 import type {
   AddVjPackClipDto,
   CreateVjClipDto,
@@ -16,46 +19,72 @@ import type {
   RenameVjPackDto,
   ReorderVjPackClipsDto,
   ReorderVjPacksDto,
+  SetVjClipPreviewDto,
   UpdateVjClipDto,
+  VjClipsMediaQuery,
   VjPackMediaQuery,
 } from './dto/vj.dto';
 import { VjClip } from './entities/vj-clip.entity';
 import { VjPackClip } from './entities/vj-pack-clip.entity';
 import { VjPack } from './entities/vj-pack.entity';
+import { VjScene } from './entities/vj-scene.entity';
 import {
+  checkVjLoopPoints,
   isUuidText,
   type NormalizedVjClipCreate,
+  type NormalizedVjClipUpdate,
   normalizeClipCreate,
   normalizeClipUpdate,
   normalizeIdPermutation,
   normalizePackName,
   parseMediaClipIds,
+  parseRequiredClipIds,
 } from './vj-input';
+import {
+  buildVjLibraryChange,
+  deleteVjStoredObject,
+  lowercaseIdOrRefuse,
+  runVjTransaction,
+  type VjCaller,
+  type VjTransactionRefusals,
+} from './vj-library-kit';
+import {
+  readVjClipDto,
+  readVjClipPackIds,
+  readVjCreatorProfiles,
+  readVjPackDto,
+  readVjPackSummaries,
+  toVjClipDtos,
+} from './vj-library-reads';
 import {
   toVjClip,
   toVjClipMedia,
   toVjPack,
+  toVjPackEventSummary,
   type VjClipDeletedDTO,
   type VjClipDTO,
   type VjClipListDTO,
-  type VjCreatorProfileRow,
+  type VjClipMediaListDTO,
   type VjPackClipsDTO,
   type VjPackDeletedDTO,
   type VjPackDTO,
   type VjPackListDTO,
   type VjPackMediaDTO,
-  type VjPackSummaryRow,
 } from './vj-response';
+import {
+  normalizeStoredVjSceneLook,
+  withoutVjSceneClip,
+} from './vj-scene-look';
+import { LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL } from './vj-scene.service';
 import { vjError } from './vj.constants';
 import {
   VJ_LIBRARY_CHANGED,
   VJ_LIMITS,
   type VjLibraryChange,
+  type VjLibraryChangeKind,
 } from './vj.contract';
 
-/** Who runs a VJ library write: the admin whose id lands in
- *  `created_by_user_id`. */
-export type VjCaller = Pick<CurrentUserData, 'userId'>;
+export type { VjCaller } from './vj-library-kit';
 
 /** Pack create, rename, reorder and delete take this first, so the 50 cap,
  *  the case-insensitive name check and the dense positions hold under two
@@ -68,6 +97,13 @@ export const LOCK_VJ_PACKS_SQL =
 export const LOCK_VJ_CLIPS_SQL =
   'LOCK TABLE "vj_clips" IN SHARE ROW EXCLUSIVE MODE';
 
+/** Clip PATCH and preview PUT take this before the clip row, so their row
+ *  update waits behind a clip create or delete holding `LOCK_VJ_CLIPS_SQL`,
+ *  and never holds the clip row while it waits on that table lock. Row
+ *  exclusive lets two clip edits run at once. */
+export const LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL =
+  'LOCK TABLE "vj_clips" IN ROW EXCLUSIVE MODE';
+
 /** Clip delete takes this right after `LOCK_VJ_CLIPS_SQL` (the clip create
  *  lock order), so its position rewrite in every pack holding the clip never
  *  interleaves with a membership add, remove or reorder. */
@@ -76,7 +112,9 @@ export const LOCK_VJ_PACK_CLIPS_SQL =
 
 /** `$1` one pack id, or null for every pack. One row per pack in position
  *  order with its clip count, the summed byte size of its clips and the
- *  thumbnail key of its first clip. */
+ *  thumbnail key of its first clip. The v1 read, kept for its spec; the
+ *  service reads `VJ_PACK_SUMMARY_V2_SQL` (`vj-library-reads.ts`), which
+ *  adds the linked event's summary. */
 export const VJ_PACK_SUMMARY_SQL = `SELECT "pack"."id", "pack"."name", "pack"."position", "pack"."created_by_user_id", "pack"."created_at", "pack"."updated_at",
   COUNT("clip"."id")::int AS "clip_count",
   COALESCE(SUM("clip"."byte_size"), 0)::bigint AS "total_byte_size",
@@ -110,26 +148,74 @@ export const DENSIFY_VJ_PACK_CLIPS_SQL = `UPDATE "vj_pack_clips" AS "pack_clip" 
 FROM (SELECT "pack_id", "clip_id", (ROW_NUMBER() OVER (PARTITION BY "pack_id" ORDER BY "position", "added_at", "clip_id") - 1)::int AS "dense_position" FROM "vj_pack_clips" WHERE "pack_id" = ANY($1::uuid[])) AS "ranked"
 WHERE "pack_clip"."pack_id" = "ranked"."pack_id" AND "pack_clip"."clip_id" = "ranked"."clip_id" AND "pack_clip"."position" <> "ranked"."dense_position"`;
 
-const POSTGRES_UNIQUE_VIOLATION = '23505';
-const POSTGRES_FOREIGN_KEY_VIOLATION = '23503';
+/** `$1` a deleted clip's id. Every scene whose look names the clip as its
+ *  source or its mix clip, read `FOR UPDATE` inside the clip delete after
+ *  the clip row lock and `LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL`, so the delete
+ *  rewrites each look in its transaction. */
+export const VJ_SCENES_NAMING_CLIP_SQL = `SELECT "id", "look" FROM "vj_scenes" WHERE "look"->'source'->>'clipId' = $1 OR "look"->'mix'->>'clipId' = $1 FOR UPDATE`;
+
 /** The membership row's reference to its clip; it fires when a clip delete
  *  commits between an add's clip read and its membership insert. */
 const PACK_CLIP_CLIP_FOREIGN_KEY = 'FK_vj_pack_clips_clip';
 const CLIP_STORAGE_KEY_UNIQUE = 'UQ_vj_clips_storage_key';
 const CLIP_THUMBNAIL_KEY_UNIQUE = 'UQ_vj_clips_thumbnail_storage_key';
+const CLIP_PREVIEW_KEY_UNIQUE = 'UQ_vj_clips_preview_storage_key';
 const THUMBNAIL_CONTENT_TYPE = 'image/webp';
 
-/** One row of `VJ_PACK_SUMMARY_SQL` as the driver hands it back. */
-interface VjPackSummaryRawRow {
+/** Every library write: a membership insert whose clip a concurrent delete
+ *  removed answers `VJ_CLIP_NOT_FOUND`. */
+const LIBRARY_WRITE_REFUSALS: VjTransactionRefusals = {
+  onForeignKey: new Map<string, () => HttpException>([
+    [PACK_CLIP_CLIP_FOREIGN_KEY, () => vjError('VJ_CLIP_NOT_FOUND')],
+  ]),
+};
+
+/** Clip create and preview writes: a key unique index that fires answers
+ *  `VJ_CLIP_KEY_IN_USE` naming its field. */
+const CLIP_KEY_WRITE_REFUSALS: VjTransactionRefusals = {
+  onUnique: new Map<string, () => HttpException>([
+    [
+      CLIP_STORAGE_KEY_UNIQUE,
+      () => vjError('VJ_CLIP_KEY_IN_USE', { field: 'storageKey' }),
+    ],
+    [
+      CLIP_THUMBNAIL_KEY_UNIQUE,
+      () => vjError('VJ_CLIP_KEY_IN_USE', { field: 'thumbnailStorageKey' }),
+    ],
+    [
+      CLIP_PREVIEW_KEY_UNIQUE,
+      () => vjError('VJ_CLIP_KEY_IN_USE', { field: 'previewStorageKey' }),
+    ],
+  ]),
+  onForeignKey: LIBRARY_WRITE_REFUSALS.onForeignKey,
+};
+
+/** Every field a clip PATCH may change (contract 6.3). */
+const VJ_CLIP_UPDATE_FIELDS = [
+  'title',
+  'fitMode',
+  'isFavorite',
+  'defaultSpeed',
+  'loopInMs',
+  'loopOutMs',
+  'loopMode',
+] as const satisfies readonly (keyof NormalizedVjClipUpdate)[];
+
+type VjClipUpdateField = (typeof VJ_CLIP_UPDATE_FIELDS)[number];
+
+/** The playback defaults a stage picks up on a tap (contract 7.10:
+ *  `clip_defaults_changed`). */
+const VJ_CLIP_DEFAULT_FIELDS: readonly VjClipUpdateField[] = [
+  'defaultSpeed',
+  'loopInMs',
+  'loopOutMs',
+  'loopMode',
+];
+
+/** One row of `VJ_SCENES_NAMING_CLIP_SQL`. */
+interface VjSceneLookRow {
   id: string;
-  name: string;
-  position: number;
-  created_by_user_id: string | null;
-  created_at: Date | string;
-  updated_at: Date | string;
-  clip_count: number | string;
-  total_byte_size: number | string;
-  cover_thumbnail_key: string | null;
+  look: unknown;
 }
 
 /** One row of `VJ_CLIP_PACK_IDS_SQL`. */
@@ -138,19 +224,26 @@ interface VjClipPackIdRow {
   pack_id: string;
 }
 
-/** How one uploaded object of a clip create is checked (contract 5.3 steps
- *  8 to 10). */
+/** What a preview write changed: whether the key moved, and the key it
+ *  replaced (null when the clip had no preview). */
+interface VjPreviewWrite {
+  isChanged: boolean;
+  replacedKey: string | null;
+}
+
+/** How one uploaded object is checked (contract 5.3 steps 8 to 10, and
+ *  contract 6.4 steps 3 and 4 for a preview). */
 interface VjUploadCheck {
   key: string;
-  field: 'storageKey' | 'thumbnailStorageKey';
-  kind: 'vj_clip' | 'vj_thumbnail';
+  field: 'storageKey' | 'thumbnailStorageKey' | 'previewStorageKey';
+  kind: 'vj_clip' | 'vj_thumbnail' | 'vj_preview';
   maxBytes: number;
-  contentType: string;
+  contentType: string | null;
   isKeyOfKind: (value: string) => boolean;
 }
 
-/** Why an upload check failed, and whether the failure means both uploads
- *  can never become a clip. */
+/** Why an upload check failed, and whether the failure means the upload
+ *  can never become usable. */
 class VjUploadRefusal extends Error {
   constructor(
     readonly refusal: HttpException,
@@ -160,92 +253,55 @@ class VjUploadRefusal extends Error {
   }
 }
 
-/** A refusal for a write that guards no unique index. */
-function noUniqueRefusal(): HttpException | null {
-  return null;
+/** Whether a normalized clip update carries any field at all. */
+function hasClipUpdateFields(changes: NormalizedVjClipUpdate): boolean {
+  return VJ_CLIP_UPDATE_FIELDS.some((field) => changes[field] !== undefined);
 }
 
-/** `VJ_CLIP_KEY_IN_USE` naming the field whose unique index fired, or null
- *  for any other constraint. */
-function clipKeyUniqueRefusal(constraint: string): HttpException | null {
-  if (constraint === CLIP_STORAGE_KEY_UNIQUE) {
-    return vjError('VJ_CLIP_KEY_IN_USE', { field: 'storageKey' });
-  }
-  if (constraint === CLIP_THUMBNAIL_KEY_UNIQUE) {
-    return vjError('VJ_CLIP_KEY_IN_USE', { field: 'thumbnailStorageKey' });
-  }
-  return null;
-}
-
-/** The constraint name of a unique violation, or null for any other error. */
-function violatedUniqueConstraintOf(error: unknown): string | null {
-  if (!(error instanceof QueryFailedError)) {
-    return null;
-  }
-  const driverError = error.driverError as
-    { code?: unknown; constraint?: unknown } | undefined;
-  if (
-    driverError?.code !== POSTGRES_UNIQUE_VIOLATION ||
-    typeof driverError.constraint !== 'string'
-  ) {
-    return null;
-  }
-  return driverError.constraint;
-}
-
-/** True when `error` is a foreign key violation on `constraint`. */
-function isForeignKeyViolationOn(error: unknown, constraint: string): boolean {
-  if (!(error instanceof QueryFailedError)) {
-    return false;
-  }
-  const driverError = error.driverError as
-    { code?: unknown; constraint?: unknown } | undefined;
-  return (
-    driverError?.code === POSTGRES_FOREIGN_KEY_VIOLATION &&
-    driverError.constraint === constraint
+/** The update fields whose value differs from the stored clip, in the
+ *  contract's field order. */
+function changedClipFields(
+  clip: VjClip,
+  changes: NormalizedVjClipUpdate,
+): VjClipUpdateField[] {
+  return VJ_CLIP_UPDATE_FIELDS.filter(
+    (field) => changes[field] !== undefined && changes[field] !== clip[field],
   );
 }
 
-/** A route or body id lowercased, the form Postgres answers and the `/vj`
- *  gateway compares against; anything but a uuid answers `code`. */
-function lowercaseIdOrRefuse(
-  value: unknown,
-  code: 'VJ_PACK_NOT_FOUND' | 'VJ_CLIP_NOT_FOUND',
-): string {
-  if (!isUuidText(value)) {
-    throw vjError(code);
+/** The change kind contract 7.10 gives a clip PATCH: a title or fit mode
+ *  change is `clip_updated`, else a loop or speed default change is
+ *  `clip_defaults_changed`, else the favorite flag changed. */
+function clipUpdateKindOf(
+  fields: readonly VjClipUpdateField[],
+): VjLibraryChangeKind {
+  if (fields.includes('title') || fields.includes('fitMode')) {
+    return 'clip_updated';
   }
-  return value.toLowerCase();
+  if (fields.some((field) => VJ_CLIP_DEFAULT_FIELDS.includes(field))) {
+    return 'clip_defaults_changed';
+  }
+  return 'clip_favorite_changed';
 }
 
-/** A Date from a driver timestamp, which arrives as a Date or as text. */
-function asDate(value: Date | string): Date {
-  return value instanceof Date ? value : new Date(value);
-}
-
-/** A summary row with camelCase fields and its count and size text read as numbers. */
-function toPackSummaryRow(raw: VjPackSummaryRawRow): VjPackSummaryRow {
-  return {
-    id: raw.id,
-    name: raw.name,
-    position: Number(raw.position),
-    createdByUserId: raw.created_by_user_id,
-    createdAt: asDate(raw.created_at),
-    updatedAt: asDate(raw.updated_at),
-    clipCount: Number(raw.clip_count),
-    totalByteSize: Number(raw.total_byte_size),
-    coverThumbnailKey: raw.cover_thumbnail_key,
-  };
+/** The `previewStorageKey` body field as a preview key; anything else
+ *  answers `VJ_CLIP_KEY_INVALID` (contract 6.4 step 2). */
+function readPreviewStorageKey(value: unknown): string {
+  if (typeof value !== 'string' || !isVjPreviewKey(value)) {
+    throw vjError('VJ_CLIP_KEY_INVALID', { field: 'previewStorageKey' });
+  }
+  return value;
 }
 
 /**
  * The shared VJ library behind `admin/vj`: packs, clips, pack memberships,
- * the preload URLs a screen fetches, and the existence reads the `/vj`
- * socket runs. Every refusal goes through `vjError` with its contract code,
- * in the contract's check order, and a malformed id answers its not-found
- * code before any read. Ordered tables stay dense (`0..n-1`); every write
- * emits `VJ_LIBRARY_CHANGED` after its transaction commits. Nothing logs a
- * clip title or a pack name: log lines carry storage keys only.
+ * clip defaults and previews, the preload URLs a screen fetches, and the
+ * existence reads the `/vj` socket runs. Every refusal goes through `vjError`
+ * with its contract code, in the contract's check order, and a malformed id
+ * answers its not-found code before any read. Ordered tables stay dense
+ * (`0..n-1`); every write emits `VJ_LIBRARY_CHANGED` after its transaction
+ * commits. Nothing logs a clip title, a pack name or a scene look: log lines
+ * carry storage keys only.
  */
 @Injectable()
 export class VjLibraryService {
@@ -257,15 +313,19 @@ export class VjLibraryService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  /** Every pack in position order. */
+  /** Every pack in position order, each with its linked event's summary. */
   async listPacks(): Promise<VjPackListDTO> {
     const manager = this.dataSource.manager;
-    const rows = await this.readPackSummaries(manager, null);
-    const profiles = await this.readCreatorProfiles(
+    const rows = await readVjPackSummaries(manager, null);
+    const profiles = await readVjCreatorProfiles(
       manager,
-      rows.map((row) => row.createdByUserId),
+      rows.map((row) => row.summary.createdByUserId),
     );
-    return { items: rows.map((row) => toVjPack(row, profiles)) };
+    return {
+      items: rows.map((row) =>
+        toVjPack(row.summary, profiles, toVjPackEventSummary(row.event)),
+      ),
+    };
   }
 
   /** Appends a pack at the end of the list. The name is checked before the
@@ -289,13 +349,8 @@ export class VjLibraryService {
       });
       const saved = await manager.save(VjPack, pack);
       return saved.id;
-    }, noUniqueRefusal);
-    this.emitChange({
-      kind: 'pack_created',
-      packId,
-      clipId: null,
-      packIds: [],
     });
+    this.emitChange('pack_created', { packId });
     return this.readPack(packId);
   }
 
@@ -322,14 +377,9 @@ export class VjLibraryService {
       await this.assertPackNameFree(manager, name, packId);
       await manager.update(VjPack, { id: packId }, { name });
       return true;
-    }, noUniqueRefusal);
+    });
     if (isRenamed) {
-      this.emitChange({
-        kind: 'pack_renamed',
-        packId,
-        clipId: null,
-        packIds: [],
-      });
+      this.emitChange('pack_renamed', { packId });
     }
     return this.readPack(packId);
   }
@@ -359,14 +409,9 @@ export class VjLibraryService {
         }
       }
       return hasChange;
-    }, noUniqueRefusal);
+    });
     if (isReordered) {
-      this.emitChange({
-        kind: 'packs_reordered',
-        packId: null,
-        clipId: null,
-        packIds: [],
-      });
+      this.emitChange('packs_reordered', {});
     }
     return this.listPacks();
   }
@@ -390,13 +435,8 @@ export class VjLibraryService {
       await manager.delete(VjPack, { id: packId });
       await manager.query(DENSIFY_VJ_PACKS_SQL);
       return memberCount;
-    }, noUniqueRefusal);
-    this.emitChange({
-      kind: 'pack_deleted',
-      packId,
-      clipId: null,
-      packIds: [packId],
     });
+    this.emitChange('pack_deleted', { packId, packIds: [packId] });
     return { deletedPackId: packId, clipsKeptCount };
   }
 
@@ -438,6 +478,32 @@ export class VjLibraryService {
     return { packId, items };
   }
 
+  /** Presigned GET URLs for listed clips from any pack, in the query's
+   *  order (contract 6.2 "Clips media"). One read; an unknown id is left
+   *  out, which a screen reads as `not_found`. No item carries a storage
+   *  key. */
+  async getClipsMedia(query: VjClipsMediaQuery): Promise<VjClipMediaListDTO> {
+    const clipIds = parseRequiredClipIds(query.clipIds);
+    const clips = await this.dataSource.manager.find(VjClip, {
+      where: { id: In(clipIds) },
+      select: { id: true, storageKey: true, mimeType: true, byteSize: true },
+    });
+    const clipById = new Map(clips.map((clip) => [clip.id, clip]));
+    const listedClips = clipIds
+      .map((clipId) => clipById.get(clipId))
+      .filter((clip): clip is VjClip => clip !== undefined);
+    const items = await Promise.all(
+      listedClips.map(async (clip) => {
+        const signed = await this.storage.createPresignedVjClipDownload(
+          clip.storageKey,
+          clip.mimeType,
+        );
+        return toVjClipMedia(clip, signed);
+      }),
+    );
+    return { items };
+  }
+
   /** Appends a library clip at the end of a pack. The pack row is locked
    *  first, so the 200 cap and the end position hold. */
   async addPackClip(
@@ -471,9 +537,8 @@ export class VjLibraryService {
         position: memberCount,
       });
       return candidateClipId;
-    }, noUniqueRefusal);
-    this.emitChange({
-      kind: 'pack_clips_changed',
+    });
+    this.emitChange('pack_clips_changed', {
       packId,
       clipId,
       packIds: [packId],
@@ -515,20 +580,15 @@ export class VjLibraryService {
         }
       }
       return hasChange;
-    }, noUniqueRefusal);
+    });
     if (isReordered) {
-      this.emitChange({
-        kind: 'pack_clips_changed',
-        packId,
-        clipId: null,
-        packIds: [packId],
-      });
+      this.emitChange('pack_clips_changed', { packId, packIds: [packId] });
     }
     return this.readPackClips(packId);
   }
 
-  /** Takes a clip out of a pack and closes the gap. The clip and both of
-   *  its stored objects stay in the library. */
+  /** Takes a clip out of a pack and closes the gap. The clip and its
+   *  stored objects stay in the library. */
   async removePackClip(
     requestedPackId: string,
     requestedClipId: string,
@@ -551,9 +611,8 @@ export class VjLibraryService {
       await manager.delete(VjPackClip, { packId, clipId: memberClipId });
       await manager.query(DENSIFY_VJ_PACK_CLIPS_SQL, [[packId]]);
       return memberClipId;
-    }, noUniqueRefusal);
-    this.emitChange({
-      kind: 'pack_clips_changed',
+    });
+    this.emitChange('pack_clips_changed', {
       packId,
       clipId,
       packIds: [packId],
@@ -563,10 +622,11 @@ export class VjLibraryService {
 
   /** Every library clip, newest first. */
   async listClips(): Promise<VjClipListDTO> {
-    const clips = await this.dataSource.manager.find(VjClip, {
+    const manager = this.dataSource.manager;
+    const clips = await manager.find(VjClip, {
       order: { createdAt: 'DESC', id: 'DESC' },
     });
-    return { items: await this.toClipDtos(this.dataSource.manager, clips) };
+    return { items: await toVjClipDtos(manager, clips) };
   }
 
   /**
@@ -583,20 +643,15 @@ export class VjLibraryService {
   ): Promise<VjClipDTO> {
     const normalized = normalizeClipCreate(body);
     const byteSize = await this.inspectUploads(normalized);
-    const clipId = await this.runVjWrite(
+    const clipId = await runVjTransaction(
+      this.dataSource,
       (manager) => this.insertClip(manager, caller, normalized, byteSize),
-      clipKeyUniqueRefusal,
+      CLIP_KEY_WRITE_REFUSALS,
     );
     if (normalized.packId === null) {
-      this.emitChange({
-        kind: 'clip_created',
-        packId: null,
-        clipId,
-        packIds: [],
-      });
+      this.emitChange('clip_created', { clipId });
     } else {
-      this.emitChange({
-        kind: 'pack_clips_changed',
+      this.emitChange('pack_clips_changed', {
         packId: normalized.packId,
         clipId,
         packIds: [normalized.packId],
@@ -605,39 +660,70 @@ export class VjLibraryService {
     return this.readClip(clipId);
   }
 
-  /** Changes a clip's title or fit mode. An absent property is left as it
-   *  is, and an empty body answers the current clip with no write. */
+  /**
+   * Changes a clip's title, fit mode, favorite flag or playback defaults
+   * (contract 6.3). Steps 2 to 7 run before any read; the clip is then read
+   * `FOR UPDATE` and the merged loop points are checked against it. An
+   * empty body answers the current clip with no transaction, and a body
+   * equal to the stored values writes nothing and emits nothing. The kind
+   * emitted follows contract 7.10.
+   */
   async updateClip(
     requestedClipId: string,
     body: UpdateVjClipDto,
   ): Promise<VjClipDTO> {
     const clipId = lowercaseIdOrRefuse(requestedClipId, 'VJ_CLIP_NOT_FOUND');
     const changes = normalizeClipUpdate(body);
-    const hasChanges =
-      changes.title !== undefined || changes.fitMode !== undefined;
-    if (!hasChanges) {
+    if (!hasClipUpdateFields(changes)) {
       return this.readClip(clipId);
     }
-    await this.runVjWrite(async (manager) => {
-      await this.assertClipExists(manager, clipId);
-      await manager.update(VjClip, { id: clipId }, changes);
-    }, noUniqueRefusal);
+    const changeKind = await this.runVjWrite((manager) =>
+      this.writeClipUpdate(manager, clipId, changes),
+    );
     const clip = await this.readClip(clipId);
-    this.emitChange({
-      kind: 'clip_updated',
-      packId: null,
-      clipId,
-      packIds: clip.packIds,
-    });
+    if (changeKind !== null) {
+      this.emitChange(changeKind, { clipId, packIds: clip.packIds });
+    }
     return clip;
   }
 
-  /** Deletes a clip (its memberships cascade), closes the gap in every pack
-   *  that held it, then deletes both stored objects after the commit. The
-   *  clip table lock comes first and the membership table lock second (the
-   *  clip create order), so no membership write interleaves with the
-   *  position rewrite. A failed object delete is logged with the key only
-   *  and left to the orphan sweep. */
+  /**
+   * Stores a clip's animated preview (contract 6.4). The key passes its
+   * shape check, then the uploaded object its size and first bytes; an
+   * unusable upload no clip holds is deleted. Under the clip row lock a key
+   * another clip stores answers `VJ_CLIP_KEY_IN_USE`. The clip's current key
+   * again is a no-op; a replaced older preview is deleted after the commit.
+   */
+  async setClipPreview(
+    requestedClipId: string,
+    body: SetVjClipPreviewDto,
+  ): Promise<VjClipDTO> {
+    const clipId = lowercaseIdOrRefuse(requestedClipId, 'VJ_CLIP_NOT_FOUND');
+    const previewKey = readPreviewStorageKey(body.previewStorageKey);
+    await this.inspectPreviewUpload(previewKey);
+    const write = await runVjTransaction(
+      this.dataSource,
+      (manager) => this.writeClipPreview(manager, clipId, previewKey),
+      CLIP_KEY_WRITE_REFUSALS,
+    );
+    const clip = await this.readClip(clipId);
+    if (write.isChanged) {
+      this.emitChange('clip_preview_changed', {
+        clipId,
+        packIds: clip.packIds,
+      });
+      await this.deleteStoredObject(write.replacedKey);
+    }
+    return clip;
+  }
+
+  /** Deletes a clip (its memberships cascade), rewrites every scene look
+   *  naming it, closes the gap in every pack that held it, then deletes its
+   *  three stored objects after the commit. The clip table lock comes first
+   *  and the membership table lock second (the clip create order), then
+   *  the clip row, the scene table lock in row exclusive mode and the
+   *  scenes naming it `FOR UPDATE`. A failed object
+   *  delete is logged with the key only and left to the orphan sweep. */
   async deleteClip(requestedClipId: string): Promise<VjClipDeletedDTO> {
     const clipId = lowercaseIdOrRefuse(requestedClipId, 'VJ_CLIP_NOT_FOUND');
     const deleted = await this.runVjWrite(async (manager) => {
@@ -645,12 +731,18 @@ export class VjLibraryService {
       await manager.query(LOCK_VJ_PACK_CLIPS_SQL);
       const clip = await manager.findOne(VjClip, {
         where: { id: clipId },
-        select: { id: true, storageKey: true, thumbnailStorageKey: true },
+        select: {
+          id: true,
+          storageKey: true,
+          thumbnailStorageKey: true,
+          previewStorageKey: true,
+        },
         lock: { mode: 'pessimistic_write' },
       });
       if (!clip) {
         throw vjError('VJ_CLIP_NOT_FOUND');
       }
+      await this.rewriteScenesNamingClip(manager, clipId);
       const rows: VjClipPackIdRow[] = await manager.query(
         VJ_CLIP_PACK_IDS_SQL,
         [[clipId]],
@@ -660,20 +752,12 @@ export class VjLibraryService {
       if (packIds.length > 0) {
         await manager.query(DENSIFY_VJ_PACK_CLIPS_SQL, [packIds]);
       }
-      return {
-        storageKey: clip.storageKey,
-        thumbnailStorageKey: clip.thumbnailStorageKey,
-        packIds,
-      };
-    }, noUniqueRefusal);
-    this.emitChange({
-      kind: 'clip_deleted',
-      packId: null,
-      clipId,
-      packIds: deleted.packIds,
+      return { clip, packIds };
     });
-    await this.deleteStoredObject(deleted.storageKey);
-    await this.deleteStoredObject(deleted.thumbnailStorageKey);
+    this.emitChange('clip_deleted', { clipId, packIds: deleted.packIds });
+    await this.deleteStoredObject(deleted.clip.storageKey);
+    await this.deleteStoredObject(deleted.clip.thumbnailStorageKey);
+    await this.deleteStoredObject(deleted.clip.previewStorageKey);
     return {
       deletedClipId: clipId,
       removedFromPackCount: deleted.packIds.length,
@@ -714,6 +798,142 @@ export class VjLibraryService {
       where: { packId: packId.toLowerCase(), clipId: clipId.toLowerCase() },
     });
     return count > 0;
+  }
+
+  /** Contract 6.3 steps 8 and 9 inside the transaction: the clip table
+   *  lock in row exclusive mode, the clip read `FOR UPDATE`, the merged loop
+   *  points checked, then only the fields that differ written. Answers the
+   *  change kind, or null when the body equals the stored clip. */
+  private async writeClipUpdate(
+    manager: EntityManager,
+    clipId: string,
+    changes: NormalizedVjClipUpdate,
+  ): Promise<VjLibraryChangeKind | null> {
+    await manager.query(LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL);
+    const clip = await manager.findOne(VjClip, {
+      where: { id: clipId },
+      select: {
+        id: true,
+        mediaKind: true,
+        durationMs: true,
+        title: true,
+        fitMode: true,
+        isFavorite: true,
+        defaultSpeed: true,
+        loopInMs: true,
+        loopOutMs: true,
+        loopMode: true,
+      },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!clip) {
+      throw vjError('VJ_CLIP_NOT_FOUND');
+    }
+    checkVjLoopPoints(
+      clip,
+      changes.loopInMs === undefined ? clip.loopInMs : changes.loopInMs,
+      changes.loopOutMs === undefined ? clip.loopOutMs : changes.loopOutMs,
+    );
+    const changedFields = changedClipFields(clip, changes);
+    if (changedFields.length === 0) {
+      return null;
+    }
+    const values: Record<string, unknown> = {};
+    for (const field of changedFields) {
+      values[field] = changes[field];
+    }
+    await manager.update(VjClip, { id: clipId }, values);
+    return clipUpdateKindOf(changedFields);
+  }
+
+  /** Contract 6.4 step 5 inside the transaction: the clip table lock in
+   *  row exclusive mode, the clip read `FOR UPDATE`, the current key again
+   *  left as it is, a key another clip stores refused, then the new key
+   *  set. */
+  private async writeClipPreview(
+    manager: EntityManager,
+    clipId: string,
+    previewKey: string,
+  ): Promise<VjPreviewWrite> {
+    await manager.query(LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL);
+    const clip = await manager.findOne(VjClip, {
+      where: { id: clipId },
+      select: { id: true, previewStorageKey: true },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!clip) {
+      throw vjError('VJ_CLIP_NOT_FOUND');
+    }
+    if (clip.previewStorageKey === previewKey) {
+      return { isChanged: false, replacedKey: null };
+    }
+    const holder = await manager.findOne(VjClip, {
+      where: { previewStorageKey: previewKey },
+      select: { id: true },
+    });
+    if (holder) {
+      throw vjError('VJ_CLIP_KEY_IN_USE', { field: 'previewStorageKey' });
+    }
+    await manager.update(
+      VjClip,
+      { id: clipId },
+      { previewStorageKey: previewKey },
+    );
+    return { isChanged: true, replacedKey: clip.previewStorageKey };
+  }
+
+  /** Rewrites every scene look naming a deleted clip, inside the clip
+   *  delete: each stored look goes through the read normaliser, then loses
+   *  the clip (source to null, mix to no clip at amount 0). */
+  private async rewriteScenesNamingClip(
+    manager: EntityManager,
+    clipId: string,
+  ): Promise<void> {
+    await manager.query(LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL);
+    const scenes: VjSceneLookRow[] = await manager.query(
+      VJ_SCENES_NAMING_CLIP_SQL,
+      [clipId],
+    );
+    for (const scene of scenes) {
+      const look = withoutVjSceneClip(
+        normalizeStoredVjSceneLook(scene.look),
+        clipId,
+      );
+      if (look !== null) {
+        await manager.update(VjScene, { id: scene.id }, { look });
+      }
+    }
+  }
+
+  /** Contract 6.4 steps 3 and 4: the uploaded preview is present, non-empty,
+   *  under 512 KB, and its first bytes match the type its extension names
+   *  (a QuickTime brand never does). An empty, oversize or mismatched upload
+   *  no clip holds is deleted before the refusal is thrown; a missing one is
+   *  left alone. */
+  private async inspectPreviewUpload(previewKey: string): Promise<void> {
+    try {
+      await this.inspectUpload({
+        key: previewKey,
+        field: 'previewStorageKey',
+        kind: 'vj_preview',
+        maxBytes: VJ_LIMITS.previewMaxBytes,
+        contentType: vjPreviewContentTypeForKey(previewKey),
+        isKeyOfKind: isVjPreviewKey,
+      });
+    } catch (error) {
+      if (!(error instanceof VjUploadRefusal)) {
+        throw error;
+      }
+      if (error.shouldDiscardUploads) {
+        const holderCount = await this.dataSource.manager.count(VjClip, {
+          where: { previewStorageKey: previewKey },
+        });
+        if (holderCount === 0) {
+          await this.deleteStoredObject(previewKey);
+        }
+      }
+      throw error.refusal;
+    }
   }
 
   /** Contract 5.3 steps 8 to 10: the clip object, then the thumbnail. A
@@ -777,7 +997,9 @@ export class VjLibraryService {
 
   /** One uploaded object: present, non-empty, under its cap, and its first
    *  bytes match the type its key names. The key passes its VJ shape check
-   *  before any storage read. Answers the stored size. */
+   *  before any storage read. A QuickTime brand answers
+   *  `VJ_UPLOAD_FORMAT_MOV` for a clip and `VJ_UPLOAD_CONTENT_MISMATCH` for
+   *  a preview. Answers the stored size. */
   private async inspectUpload(check: VjUploadCheck): Promise<number> {
     if (!check.isKeyOfKind(check.key)) {
       throw new VjUploadRefusal(
@@ -819,11 +1041,13 @@ export class VjLibraryService {
       }
       throw error;
     }
-    if (check.kind === 'vj_clip' && isQuickTimeBrand(bytes)) {
-      throw new VjUploadRefusal(
-        vjError('VJ_UPLOAD_FORMAT_MOV', { field: check.field }),
-        true,
-      );
+    if (check.kind !== 'vj_thumbnail' && isQuickTimeBrand(bytes)) {
+      throw check.kind === 'vj_clip'
+        ? new VjUploadRefusal(
+            vjError('VJ_UPLOAD_FORMAT_MOV', { field: check.field }),
+            true,
+          )
+        : mismatch;
     }
     if (!magicBytesMatchContentType(bytes, check.contentType)) {
       throw mismatch;
@@ -940,62 +1164,17 @@ export class VjLibraryService {
     }
   }
 
-  /** Summary rows for one pack, or every pack when `packId` is null. */
-  private async readPackSummaries(
-    manager: EntityManager,
-    packId: string | null,
-  ): Promise<VjPackSummaryRow[]> {
-    const rows: VjPackSummaryRawRow[] = await manager.query(
-      VJ_PACK_SUMMARY_SQL,
-      [packId],
-    );
-    return rows.map(toPackSummaryRow);
-  }
-
-  /** The creator names for a set of user ids, in one read. */
-  private async readCreatorProfiles(
-    manager: EntityManager,
-    userIds: readonly (string | null)[],
-  ): Promise<Map<string, VjCreatorProfileRow>> {
-    const uniqueIds = [
-      ...new Set(userIds.filter((userId): userId is string => userId !== null)),
-    ];
-    const profiles = new Map<string, VjCreatorProfileRow>();
-    if (uniqueIds.length === 0) {
-      return profiles;
-    }
-    const rows = await manager.find(Profile, {
-      where: { userId: In(uniqueIds) },
-      select: { userId: true, firstName: true, lastName: true },
-    });
-    for (const row of rows) {
-      profiles.set(row.userId, {
-        userId: row.userId,
-        firstName: row.firstName,
-        lastName: row.lastName,
-      });
-    }
-    return profiles;
-  }
-
-  /** One pack's DTO; a pack gone since the write answers
-   *  `VJ_PACK_NOT_FOUND`. */
+  /** One pack's DTO with its event summary; a pack gone since the write
+   *  answers `VJ_PACK_NOT_FOUND`. */
   private async readPack(packId: string): Promise<VjPackDTO> {
-    const manager = this.dataSource.manager;
-    const [row] = await this.readPackSummaries(manager, packId);
-    if (!row) {
-      throw vjError('VJ_PACK_NOT_FOUND');
-    }
-    const profiles = await this.readCreatorProfiles(manager, [
-      row.createdByUserId,
-    ]);
-    return toVjPack(row, profiles);
+    return readVjPackDto(this.dataSource.manager, packId);
   }
 
-  /** A pack with its clips in pack order, creators read in one batch. */
+  /** A pack (with its event summary) and its clips in pack order, creators
+   *  read in one batch. */
   private async readPackClips(packId: string): Promise<VjPackClipsDTO> {
     const manager = this.dataSource.manager;
-    const [row] = await this.readPackSummaries(manager, packId);
+    const [row] = await readVjPackSummaries(manager, packId);
     if (!row) {
       throw vjError('VJ_PACK_NOT_FOUND');
     }
@@ -1005,16 +1184,16 @@ export class VjLibraryService {
       order: { position: 'ASC', addedAt: 'ASC', clipId: 'ASC' },
     });
     const clips = memberships.map((membership) => membership.clip);
-    const profiles = await this.readCreatorProfiles(manager, [
-      row.createdByUserId,
+    const profiles = await readVjCreatorProfiles(manager, [
+      row.summary.createdByUserId,
       ...clips.map((clip) => clip.createdByUserId),
     ]);
-    const packIdsByClip = await this.readClipPackIds(
+    const packIdsByClip = await readVjClipPackIds(
       manager,
       clips.map((clip) => clip.id),
     );
     return {
-      pack: toVjPack(row, profiles),
+      pack: toVjPack(row.summary, profiles, toVjPackEventSummary(row.event)),
       items: clips.map((clip) =>
         toVjClip(clip, packIdsByClip.get(clip.id) ?? [], profiles),
       ),
@@ -1023,94 +1202,34 @@ export class VjLibraryService {
 
   /** One clip's DTO; an unknown id answers `VJ_CLIP_NOT_FOUND`. */
   private async readClip(clipId: string): Promise<VjClipDTO> {
-    const manager = this.dataSource.manager;
-    const clip = await manager.findOne(VjClip, { where: { id: clipId } });
-    if (!clip) {
-      throw vjError('VJ_CLIP_NOT_FOUND');
-    }
-    const [dto] = await this.toClipDtos(manager, [clip]);
-    if (!dto) {
-      throw vjError('VJ_CLIP_NOT_FOUND');
-    }
-    return dto;
+    return readVjClipDto(this.dataSource.manager, clipId);
   }
 
-  /** Clip DTOs with their pack lists and creators, each read in one batch. */
-  private async toClipDtos(
-    manager: EntityManager,
-    clips: VjClip[],
-  ): Promise<VjClipDTO[]> {
-    if (clips.length === 0) {
-      return [];
-    }
-    const packIdsByClip = await this.readClipPackIds(
-      manager,
-      clips.map((clip) => clip.id),
-    );
-    const profiles = await this.readCreatorProfiles(
-      manager,
-      clips.map((clip) => clip.createdByUserId),
-    );
-    return clips.map((clip) =>
-      toVjClip(clip, packIdsByClip.get(clip.id) ?? [], profiles),
-    );
-  }
-
-  /** Each clip's pack ids in pack position order, in one read. */
-  private async readClipPackIds(
-    manager: EntityManager,
-    clipIds: readonly string[],
-  ): Promise<Map<string, string[]>> {
-    const packIdsByClip = new Map<string, string[]>();
-    if (clipIds.length === 0) {
-      return packIdsByClip;
-    }
-    const rows: VjClipPackIdRow[] = await manager.query(VJ_CLIP_PACK_IDS_SQL, [
-      clipIds,
-    ]);
-    for (const row of rows) {
-      const packIds = packIdsByClip.get(row.clip_id) ?? [];
-      packIds.push(row.pack_id);
-      packIdsByClip.set(row.clip_id, packIds);
-    }
-    return packIdsByClip;
-  }
-
-  /** Runs one library write in a transaction. A unique index that fires
-   *  answers the refusal `onUnique` names for its constraint. A membership
-   *  insert whose clip a concurrent delete removed answers
-   *  `VJ_CLIP_NOT_FOUND`. Any other error is rethrown unchanged. */
-  private async runVjWrite<Result>(
+  /** Runs one library write in a transaction. A membership insert whose
+   *  clip a concurrent delete removed answers `VJ_CLIP_NOT_FOUND`; any other
+   *  error is rethrown unchanged. */
+  private runVjWrite<Result>(
     work: (manager: EntityManager) => Promise<Result>,
-    onUnique: (constraint: string) => HttpException | null,
   ): Promise<Result> {
-    try {
-      return await this.dataSource.transaction(work);
-    } catch (error) {
-      if (isForeignKeyViolationOn(error, PACK_CLIP_CLIP_FOREIGN_KEY)) {
-        throw vjError('VJ_CLIP_NOT_FOUND');
-      }
-      const constraint = violatedUniqueConstraintOf(error);
-      const refusal = constraint === null ? null : onUnique(constraint);
-      if (refusal) {
-        throw refusal;
-      }
-      throw error;
-    }
+    return runVjTransaction(this.dataSource, work, LIBRARY_WRITE_REFUSALS);
   }
 
-  /** Announces a committed library write to the `/vj` gateway. */
-  private emitChange(change: VjLibraryChange): void {
-    this.eventEmitter.emit(VJ_LIBRARY_CHANGED, change);
+  /** Announces a committed library write to the `/vj` gateway, every field
+   *  the write leaves unset filled with null or an empty list. */
+  private emitChange(
+    kind: VjLibraryChangeKind,
+    fields: Partial<Omit<VjLibraryChange, 'kind'>>,
+  ): void {
+    this.eventEmitter.emit(
+      VJ_LIBRARY_CHANGED,
+      buildVjLibraryChange(kind, fields),
+    );
   }
 
   /** Deletes one stored object, best effort. A failure logs the key only
-   *  and leaves the object to the orphan sweep. */
-  private async deleteStoredObject(key: string): Promise<void> {
-    try {
-      await this.storage.deleteObjectByKey(key);
-    } catch {
-      this.logger.warn(`VJ object delete failed: ${key}`);
-    }
+   *  and leaves the object to the orphan sweep; a null key deletes
+   *  nothing. */
+  private async deleteStoredObject(key: string | null): Promise<void> {
+    await deleteVjStoredObject(this.storage, this.logger, key);
   }
 }

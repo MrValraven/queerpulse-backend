@@ -1,4 +1,8 @@
 import type { EntityManager } from 'typeorm';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import type { MediaCropService } from '../media-crops/media-crops.service';
 import {
   SubprofileKind,
@@ -27,6 +31,10 @@ import {
 } from './listing-team-visibility';
 
 const LISTING_ID = 'listing-1';
+const MEMBER_AVATAR_KEY =
+  'avatars/33333333-3333-4333-8333-333333333333/44444444-4444-4444-8444-444444444444.jpg';
+const PERSONA_AVATAR_KEY =
+  'persona/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.jpg';
 
 /** A team row the SQL returns for a persona entry. */
 function personaRow(subprofileId: string, roleLabel: string | null) {
@@ -46,7 +54,7 @@ function makeMemberProfile(
     slug: 'ana-silva',
     firstName: 'Ana',
     lastName: 'Silva',
-    avatarUrl: 'uploads/ana.jpg',
+    avatarUrl: MEMBER_AVATAR_KEY,
     photoVisible: true,
     ...overrides,
   };
@@ -93,7 +101,7 @@ function makePersona(
     handle: 'ink-ana',
     displayName: 'Ink Ana',
     kind: SubprofileKind.Musician,
-    avatarUrl: 'uploads/ink-ana.jpg',
+    avatarUrl: PERSONA_AVATAR_KEY,
     linkVisibility: SubprofileLinkVisibility.Unlinked,
     ...overrides,
   };
@@ -102,6 +110,14 @@ function makePersona(
 describe('loadPublicTeam', () => {
   let manager: { query: jest.Mock; find: jest.Mock };
   let mediaCropService: { getMany: jest.Mock };
+
+  beforeAll(() => {
+    setImageUrlBase('https://api.test');
+  });
+
+  afterAll(() => {
+    resetImageUrlBaseForTesting();
+  });
 
   beforeEach(() => {
     manager = {
@@ -198,9 +214,7 @@ describe('loadPublicTeam', () => {
     ]);
     expect(subjectsOf(team)).toEqual(['rui-sound', 'ink-ana']);
     expect(mediaCropService.getMany).toHaveBeenCalledTimes(1);
-    expect(mediaCropService.getMany).toHaveBeenCalledWith([
-      'uploads/ink-ana.jpg',
-    ]);
+    expect(mediaCropService.getMany).toHaveBeenCalledWith([PERSONA_AVATAR_KEY]);
     expect(manager.find).toHaveBeenCalledTimes(1);
     expect(
       team.map((entry) =>
@@ -370,9 +384,9 @@ describe('loadPublicTeam', () => {
       expect(manager.find).toHaveBeenCalledTimes(2);
       expect(mediaCropService.getMany).toHaveBeenCalledTimes(1);
       expect(mediaCropService.getMany).toHaveBeenCalledWith([
-        'uploads/ink-ana.jpg',
-        'uploads/ana.jpg',
-        'uploads/ana.jpg',
+        PERSONA_AVATAR_KEY,
+        MEMBER_AVATAR_KEY,
+        MEMBER_AVATAR_KEY,
       ]);
     });
 
@@ -380,7 +394,7 @@ describe('loadPublicTeam', () => {
       manager.query.mockResolvedValue([memberRow('user-ana', null)]);
       manager.find.mockResolvedValueOnce([makeMemberProfile()]);
       mediaCropService.getMany.mockResolvedValue(
-        new Map([['uploads/ana.jpg', { x: 0.1, y: 0.2, w: 0.5, h: 0.5 }]]),
+        new Map([[MEMBER_AVATAR_KEY, { x: 0.1, y: 0.2, w: 0.5, h: 0.5 }]]),
       );
 
       const entry = entryOf(
@@ -393,7 +407,7 @@ describe('loadPublicTeam', () => {
         member: { slug: 'ana-silva', name: 'Ana Silva' },
       });
       expect(memberOf(entry).avatarUrl).toEqual(
-        expect.stringContaining('uploads/ana.jpg'),
+        expect.stringContaining(MEMBER_AVATAR_KEY),
       );
       expect(memberOf(entry).avatarCrop).toBeDefined();
     });

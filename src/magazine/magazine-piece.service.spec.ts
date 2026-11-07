@@ -355,6 +355,17 @@ describe('MagazinePieceService', () => {
       makeStageEntryQueryBuilder([]),
     );
 
+    // Real `CreateDateColumn` / `UpdateDateColumn` values are filled by the
+    // database on insert, so a piece the service builds with `create()` and
+    // saves comes back carrying both timestamps. `deriveStageEnteredAt` reads
+    // them when the trail has no stage-entry event, so the mock stamps them
+    // the way the insert would. `create()` stays an in-memory stub otherwise.
+    pieces.create.mockImplementation((entity: Partial<MagazinePiece>) => ({
+      createdAt: new Date('2026-08-10T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-10T00:00:00.000Z'),
+      ...entity,
+    }));
+
     service = module.get(MagazinePieceService);
     // The article-draft response resolves stored image keys through
     // `toImageUrl`, which throws `Service temporarily unavailable` when the
@@ -2533,6 +2544,124 @@ describe('MagazinePieceService', () => {
       );
       expect(decks.save).not.toHaveBeenCalled();
       expect(notifications.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unpublishPiece', () => {
+    const LIVE_INSTANT = new Date('2026-08-01T09:00:00.000Z');
+    const LIVE_ARTICLE_PIECE: MagazinePiece = {
+      ...PIECE,
+      stage: 'published',
+      articleId: 'article-1',
+    };
+    const recordedActions = (): string[] =>
+      pieceEvents.create.mock.calls.map(
+        ([event]: [{ action: string }]) => event.action,
+      );
+
+    it('lands a published piece at ready when no stage is given', async () => {
+      const piece = { ...LIVE_ARTICLE_PIECE };
+      pieces.findOne.mockResolvedValue(piece);
+      const article = { ...ARTICLE, publishedAt: LIVE_INSTANT };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.unpublishPiece('piece-1', 'editor-1');
+
+      expect(article.publishedAt).toBeNull();
+      expect(piece.stage).toBe('ready');
+      expect(recordedActions()).toEqual(['article_unpublished']);
+    });
+
+    it('sends a published piece to drafting and records the stage move', async () => {
+      const piece = { ...LIVE_ARTICLE_PIECE };
+      pieces.findOne.mockResolvedValue(piece);
+      const article = { ...ARTICLE, publishedAt: LIVE_INSTANT };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.unpublishPiece('piece-1', 'editor-1', 'drafting');
+
+      expect(article.publishedAt).toBeNull();
+      expect(piece.stage).toBe('drafting');
+      expect(pieces.save).toHaveBeenCalledWith(piece);
+      expect(recordedActions()).toEqual([
+        'article_unpublished',
+        'stage_changed',
+      ]);
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pieceId: 'piece-1',
+          action: 'stage_changed',
+          detail: 'drafting',
+        }),
+      );
+    });
+
+    it('sends a published deck piece to in review', async () => {
+      const piece: MagazinePiece = {
+        ...LIVE_ARTICLE_PIECE,
+        format: 'deck',
+        articleId: null,
+        deckId: 'deck-1',
+      };
+      pieces.findOne.mockResolvedValue(piece);
+      const deck = { id: 'deck-1', publishedAt: LIVE_INSTANT };
+      decks.findOne.mockResolvedValue(deck);
+
+      await service.unpublishPiece('piece-1', 'editor-1', 'in_review');
+
+      expect(deck.publishedAt).toBeNull();
+      expect(piece.stage).toBe('in_review');
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'stage_changed',
+          detail: 'in_review',
+        }),
+      );
+    });
+
+    it('moves a scheduled piece parked at ready to the chosen stage', async () => {
+      const piece: MagazinePiece = { ...LIVE_ARTICLE_PIECE, stage: 'ready' };
+      pieces.findOne.mockResolvedValue(piece);
+      const article = {
+        ...ARTICLE,
+        publishedAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.unpublishPiece('piece-1', 'editor-1', 'in_review');
+
+      expect(article.publishedAt).toBeNull();
+      expect(piece.stage).toBe('in_review');
+      expect(recordedActions()).toEqual([
+        'article_unpublished',
+        'stage_changed',
+      ]);
+    });
+
+    it('leaves the stage alone when the piece was neither live, scheduled nor published', async () => {
+      const piece: MagazinePiece = { ...LIVE_ARTICLE_PIECE, stage: 'edit' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({ ...ARTICLE, publishedAt: null });
+
+      await service.unpublishPiece('piece-1', 'editor-1', 'drafting');
+
+      expect(piece.stage).toBe('edit');
+      expect(pieces.save).not.toHaveBeenCalled();
+      expect(recordedActions()).toEqual(['article_unpublished']);
+    });
+
+    it('writes no stage_changed row when the piece is already at the chosen stage', async () => {
+      const piece: MagazinePiece = { ...LIVE_ARTICLE_PIECE, stage: 'drafting' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({
+        ...ARTICLE,
+        publishedAt: LIVE_INSTANT,
+      });
+
+      await service.unpublishPiece('piece-1', 'editor-1', 'drafting');
+
+      expect(piece.stage).toBe('drafting');
+      expect(recordedActions()).toEqual(['article_unpublished']);
     });
   });
 

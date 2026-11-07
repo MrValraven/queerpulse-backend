@@ -437,6 +437,17 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     idColumn: 'id',
     labelColumns: ['title'],
   }),
+  plainSource({
+    // The clip's animated preview loop, kept referenced for the same reason.
+    // The source matches with `In(candidates)`, so a clip with no preview
+    // (a null key) never matches.
+    type: 'vj-preview',
+    field: 'VjClip.previewStorageKey',
+    entity: VjClip,
+    column: 'previewStorageKey',
+    idColumn: 'id',
+    labelColumns: ['title'],
+  }),
 ];
 
 // --- persona-item — SPECIAL source, not the generic plainSource. ---------

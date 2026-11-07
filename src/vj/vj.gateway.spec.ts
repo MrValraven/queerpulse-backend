@@ -8,13 +8,18 @@ import { socketTicketService } from '../auth/socket-ticket.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import type { VjAttachPayloadDto } from './dto/vj-socket-payloads';
 import {
+  vjAckFailure,
   VJ_NOT_ADMIN_MESSAGE,
   VJ_SCREEN_REPLACED_MESSAGE,
 } from './vj.constants';
 import {
   createVjStageState,
+  VJ_CONTRACT_VERSION,
+  VJ_LIMITS,
+  vjSceneLookOf,
   type VjAck,
   type VjLibraryChange,
+  type VjSceneLook,
   type VjStageFrame,
   type VjStageRestore,
 } from './vj.contract';
@@ -25,7 +30,7 @@ import {
   vjRemotesRoomName,
   vjStageRoomName,
 } from './vj.gateway';
-import type { VjLibraryService } from './vj-library.service';
+import type { VjStageReadsService } from './vj-stage-reads.service';
 import { VjStageService } from './vj-stage.service';
 
 const ADMIN_USER_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -37,6 +42,11 @@ const CLIENT_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const PACK_ID = '11111111-1111-4111-8111-111111111111';
 const CLIP_ID = '22222222-2222-4222-8222-222222222222';
 const RESTORED_EPOCH = '33333333-3333-4333-8333-333333333333';
+const MIX_CLIP_ID = '44444444-4444-4444-8444-444444444444';
+const EXCLUDED_CLIP_ID = '55555555-5555-4555-8555-555555555555';
+const SETLIST_ID = '66666666-6666-4666-8666-666666666666';
+const OTHER_SETLIST_ID = '77777777-7777-4777-8777-777777777777';
+const SCENE_ID = '88888888-8888-4888-8888-888888888888';
 const START = Date.UTC(2026, 10, 5, 22, 0, 0);
 
 type GatewayClient = Parameters<VjGateway['handleConnection']>[0];
@@ -60,6 +70,43 @@ interface RoomEmit {
   payload: unknown;
 }
 
+/** The seven contract 7.7 reads, each a jest mock: every pack and clip
+ *  exists, nothing else does. */
+function createReads() {
+  return {
+    readPackForStage: jest
+      .fn<Promise<{ eventId: string | null } | null>, [string]>()
+      .mockResolvedValue({ eventId: null }),
+    existingClipIds: jest
+      .fn<Promise<Set<string>>, [string[]]>()
+      .mockImplementation((clipIds) => Promise.resolve(new Set(clipIds))),
+    clipIdsInPack: jest
+      .fn<Promise<Set<string>>, [string, string[]]>()
+      .mockImplementation((_packId, clipIds) =>
+        Promise.resolve(new Set(clipIds)),
+      ),
+    readPackClipForAdvance: jest
+      .fn<Promise<{ isFavorite: boolean } | null>, [string, string]>()
+      .mockResolvedValue({ isFavorite: false }),
+    readSceneLook: jest
+      .fn<Promise<VjSceneLook | null>, [string]>()
+      .mockResolvedValue(null),
+    readSetlistItem: jest
+      .fn<
+        Promise<{
+          itemCount: number;
+          sceneId: string | null;
+          look: VjSceneLook | null;
+        } | null>,
+        [string, number | null]
+      >()
+      .mockResolvedValue(null),
+    setlistItemCount: jest
+      .fn<Promise<number | null>, [string]>()
+      .mockResolvedValue(null),
+  };
+}
+
 interface Harness {
   gateway: VjGateway;
   stages: VjStageService;
@@ -70,11 +117,7 @@ interface Harness {
   users: { findOne: jest.Mock };
   refreshTokens: { exists: jest.Mock };
   jwt: { verifyAsync: jest.Mock };
-  library: {
-    packExists: jest.Mock;
-    clipExists: jest.Mock;
-    isClipInPack: jest.Mock;
-  };
+  reads: ReturnType<typeof createReads>;
 }
 
 function createHarness(): Harness {
@@ -115,17 +158,13 @@ function createHarness(): Harness {
       }),
     ),
   };
-  const library = {
-    packExists: jest.fn(() => Promise.resolve(true)),
-    clipExists: jest.fn(() => Promise.resolve(true)),
-    isClipInPack: jest.fn(() => Promise.resolve(true)),
-  };
-  const stages = new VjStageService();
+  const reads = createReads();
+  const stages = new VjStageService(reads as unknown as VjStageReadsService);
   const gateway = new VjGateway(
     jwt as unknown as JwtService,
     { getOrThrow: () => 'secret' } as unknown as ConfigService,
     stages,
-    library as unknown as VjLibraryService,
+    reads as unknown as VjStageReadsService,
     users as unknown as Repository<User>,
     refreshTokens as unknown as Repository<RefreshToken>,
   );
@@ -141,7 +180,7 @@ function createHarness(): Harness {
     users,
     refreshTokens,
     jwt,
-    library,
+    reads,
   };
 }
 
@@ -184,6 +223,17 @@ function joinedRooms(client: FakeClient): unknown[] {
   return client.join.mock.calls.flatMap((call: unknown[]) => [call[0]].flat());
 }
 
+/** Every argument any Logger method received, one joined line per call. */
+function spyOnEveryLogLine(): () => string[] {
+  const spies = (['log', 'debug', 'warn', 'error', 'verbose'] as const).map(
+    (method) => jest.spyOn(Logger.prototype, method),
+  );
+  return () =>
+    spies.flatMap((spy) =>
+      spy.mock.calls.map((call) => call.map(String).join(' ')),
+    );
+}
+
 async function connect(
   harness: Harness,
   socketId: string,
@@ -203,10 +253,11 @@ function attachScreen(
   harness: Harness,
   client: FakeClient,
   screenId: string = SCREEN_ID,
-  restoreState: VjStageRestore | null = null,
+  restoreState: unknown = null,
 ) {
   const payload: VjAttachPayloadDto = {
     role: 'screen',
+    contractVersion: VJ_CONTRACT_VERSION,
     screenId,
     restoreState,
   };
@@ -214,7 +265,10 @@ function attachScreen(
 }
 
 function attachRemote(harness: Harness, client: FakeClient) {
-  return harness.gateway.handleAttach(asClient(client), { role: 'remote' });
+  return harness.gateway.handleAttach(asClient(client), {
+    role: 'remote',
+    contractVersion: VJ_CONTRACT_VERSION,
+  });
 }
 
 async function attachedRemote(
@@ -238,16 +292,18 @@ async function attachedScreen(
   return client;
 }
 
-function setEffects(
+/** `stage:setEffects` toggling blackout: an immediate change, or a noop when
+ *  blackout already holds that value. */
+function setBlackout(
   harness: Harness,
   client: FakeClient,
   commandSequence: number,
-  isMirrored: boolean,
+  isBlackout: boolean,
 ) {
   return harness.gateway.handleSetEffects(asClient(client), {
     clientId: CLIENT_ID,
     commandSequence,
-    isMirrored,
+    isBlackout,
   });
 }
 
@@ -264,29 +320,73 @@ function setPack(
   });
 }
 
+/** `stage:setTransition` with a fade of `value` ms. */
+function setFadeLength(
+  harness: Harness,
+  client: FakeClient,
+  commandSequence: number,
+  value: number,
+) {
+  return harness.gateway.handleSetTransition(asClient(client), {
+    clientId: CLIENT_ID,
+    commandSequence,
+    length: { unit: 'ms', value },
+  });
+}
+
 function sendStatus(
   harness: Harness,
   client: FakeClient,
   isFullscreen: boolean,
+  extraFields: Record<string, unknown> = {},
 ): Promise<void> {
   return harness.gateway.handleScreenStatus(asClient(client), {
     isFullscreen,
     preload: { packId: null, clips: [] },
+    ...extraFields,
   });
 }
 
-/** A restore naming PACK_ID and CLIP_ID from a stage the server lost. */
-function buildRestoreState(): VjStageRestore {
+/** A v2 restore naming PACK_ID and CLIP_ID from a stage the server lost. */
+function buildRestoreState(
+  parts: Partial<VjStageRestore> = {},
+): VjStageRestore {
   const base = createVjStageState(RESTORED_EPOCH, START - 60_000);
   return {
     stageEpoch: base.stageEpoch,
     revision: 7,
     activePackId: PACK_ID,
     liveClipId: CLIP_ID,
+    liveGeneratorId: null,
+    liveGeneratorVariant: null,
     transition: base.transition,
     overlay: base.overlay,
-    effects: { ...base.effects, isMirrored: true },
+    countdown: base.countdown,
+    logo: base.logo,
+    eventCard: base.eventCard,
+    effects: base.effects,
+    mix: base.mix,
+    tempo: base.tempo,
     shuffle: base.shuffle,
+    activeSetlistId: null,
+    setlistIndex: null,
+    ...parts,
+  };
+}
+
+/** A library change with every id empty but the given ones. */
+function libraryChange(
+  parts: Partial<VjLibraryChange> & Pick<VjLibraryChange, 'kind'>,
+): VjLibraryChange {
+  return {
+    packId: null,
+    clipId: null,
+    packIds: [],
+    sceneId: null,
+    setlistId: null,
+    setlistIds: [],
+    eventId: null,
+    ...parts,
   };
 }
 
@@ -294,6 +394,13 @@ function stageFrames(harness: Harness): RoomEmit[] {
   return roomEmitsOf(harness, 'stage:state').filter(
     (record) => record.room === vjStageRoomName(ADMIN_USER_ID),
   );
+}
+
+function payloadOf(record: RoomEmit | undefined): VjStageFrame {
+  if (record === undefined) {
+    throw new Error('expected a stage:state frame');
+  }
+  return record.payload as VjStageFrame;
 }
 
 describe('VjGateway', () => {
@@ -410,7 +517,11 @@ describe('VjGateway', () => {
         ticket,
       });
 
-      expect(ack).toEqual({ ok: false, code: 'FORBIDDEN' });
+      expect(ack).toEqual({
+        ok: false,
+        code: 'FORBIDDEN',
+        serverNow: Date.now(),
+      });
       await flushImmediate();
       expect(clientEmits(client, 'exception')).toEqual([
         {
@@ -445,7 +556,11 @@ describe('VjGateway', () => {
         ticket,
       });
 
-      expect(ack).toEqual({ ok: true, exp: expect.any(Number) as number });
+      expect(ack).toEqual({
+        ok: true,
+        exp: expect.any(Number) as number,
+        serverNow: Date.now(),
+      });
       if (!ack.ok) return;
       expect(ack.exp).toBeGreaterThan(handshakeExp);
       expect(client.data.exp).toBe(ack.exp);
@@ -461,17 +576,17 @@ describe('VjGateway', () => {
       expect(harness.users.findOne).toHaveBeenCalledTimes(1);
 
       jest.advanceTimersByTime(VJ_ROLE_RECHECK_MS + 1);
-      expect((await setEffects(harness, remote, 1, true)).ok).toBe(true);
+      expect((await setBlackout(harness, remote, 1, true)).ok).toBe(true);
       expect(harness.users.findOne).toHaveBeenCalledTimes(2);
 
       jest.advanceTimersByTime(2000);
-      expect((await setEffects(harness, remote, 2, false)).ok).toBe(true);
+      expect((await setBlackout(harness, remote, 2, false)).ok).toBe(true);
       jest.advanceTimersByTime(2999);
-      expect((await setEffects(harness, remote, 3, true)).ok).toBe(true);
+      expect((await setBlackout(harness, remote, 3, true)).ok).toBe(true);
       expect(harness.users.findOne).toHaveBeenCalledTimes(2);
 
       jest.advanceTimersByTime(2);
-      expect((await setEffects(harness, remote, 4, false)).ok).toBe(true);
+      expect((await setBlackout(harness, remote, 4, false)).ok).toBe(true);
       expect(harness.users.findOne).toHaveBeenCalledTimes(3);
     });
 
@@ -480,12 +595,13 @@ describe('VjGateway', () => {
       harness.roleByUserId.set(ADMIN_USER_ID, UserRole.Moderator);
       jest.advanceTimersByTime(VJ_ROLE_RECHECK_MS);
 
-      const ack = await setEffects(harness, remote, 1, true);
+      const ack = await setBlackout(harness, remote, 1, true);
 
       expect(ack).toEqual({
         ok: false,
         code: 'vj_not_admin',
         message: VJ_NOT_ADMIN_MESSAGE,
+        serverNow: Date.now(),
       });
       expect(remote.disconnect).not.toHaveBeenCalled();
       expect(clientEmits(remote, 'exception')).toEqual([]);
@@ -524,7 +640,7 @@ describe('VjGateway', () => {
           }),
       );
 
-      const commandPending = setEffects(harness, remote, 1, true);
+      const commandPending = setBlackout(harness, remote, 1, true);
       await flushImmediate();
       expect(harness.users.findOne).toHaveBeenCalledTimes(2);
 
@@ -537,7 +653,7 @@ describe('VjGateway', () => {
       );
       expect(
         await harness.gateway.handleReauth(asClient(remote), { ticket }),
-      ).toEqual({ ok: false, code: 'FORBIDDEN' });
+      ).toMatchObject({ ok: false, code: 'FORBIDDEN' });
 
       // The read started before the demotion still finds an Admin.
       resolveRoleRead({
@@ -563,7 +679,7 @@ describe('VjGateway', () => {
         new Error('read failed near SECRET-DB-DETAIL'),
       );
 
-      const ack = await setEffects(harness, remote, 1, true);
+      const ack = await setBlackout(harness, remote, 1, true);
 
       expect(codeOf(ack)).toBe('vj_server_error');
       await flushImmediate();
@@ -595,6 +711,8 @@ describe('VjGateway', () => {
         stageEpoch: state?.stageEpoch,
         isRestored: false,
         isLead: true,
+        screenNumber: 1,
+        serverNow: START,
       });
       expect(joinedRooms(screen)).toEqual(
         expect.arrayContaining([
@@ -616,6 +734,7 @@ describe('VjGateway', () => {
           }) as unknown,
           cause: 'attach',
           sourceClientId: null,
+          applyAt: null,
         },
       ]);
       expect(clientEmits(screen, 'screen:role')).toEqual([{ isLead: true }]);
@@ -636,6 +755,15 @@ describe('VjGateway', () => {
       });
     });
 
+    it('answers the second screen its number', async () => {
+      await attachedScreen(harness, 'socket-first');
+      const second = await connect(harness, 'socket-second');
+
+      const ack = await attachScreen(harness, second, OTHER_SCREEN_ID);
+
+      expect(ack).toMatchObject({ ok: true, isLead: false, screenNumber: 2 });
+    });
+
     it('attaches a remote with the remotes room and its own screen list', async () => {
       const remote = await connect(harness, 'socket-remote');
 
@@ -648,6 +776,8 @@ describe('VjGateway', () => {
         stageEpoch: harness.stages.getState(ADMIN_USER_ID)?.stageEpoch,
         isRestored: false,
         isLead: null,
+        screenNumber: null,
+        serverNow: START,
       });
       expect(joinedRooms(remote)).toEqual(
         expect.arrayContaining([
@@ -659,7 +789,11 @@ describe('VjGateway', () => {
 
       await flushImmediate();
       expect(clientEmits(remote, 'stage:state')).toEqual([
-        expect.objectContaining({ cause: 'attach', sourceClientId: null }),
+        expect.objectContaining({
+          cause: 'attach',
+          sourceClientId: null,
+          applyAt: null,
+        }),
       ]);
       expect(clientEmits(remote, 'screens:update')).toEqual([{ screens: [] }]);
     });
@@ -673,10 +807,34 @@ describe('VjGateway', () => {
       expect(remote.data.role).toBe('remote');
     });
 
+    it('answers vj_client_outdated to an attach without contractVersion 2 and releases the claim', async () => {
+      const screen = await connect(harness, 'socket-screen');
+
+      const missing = await harness.gateway.handleAttach(asClient(screen), {
+        role: 'screen',
+        screenId: SCREEN_ID,
+        restoreState: null,
+      });
+      const older = await harness.gateway.handleAttach(asClient(screen), {
+        role: 'remote',
+        contractVersion: 1,
+      });
+
+      expect(codeOf(missing)).toBe('vj_client_outdated');
+      expect(codeOf(older)).toBe('vj_client_outdated');
+      expect(screen.data.role).toBeUndefined();
+      expect(screen.data.isAttached).toBeUndefined();
+      expect(harness.stages.getState(ADMIN_USER_ID)).toBeNull();
+      expect(await attachScreen(harness, screen)).toMatchObject({
+        ok: true,
+        role: 'screen',
+      });
+    });
+
     it('answers vj_not_attached for a command before attach', async () => {
       const client = await connect(harness, 'socket-fresh');
 
-      expect(codeOf(await setEffects(harness, client, 1, true))).toBe(
+      expect(codeOf(await setBlackout(harness, client, 1, true))).toBe(
         'vj_not_attached',
       );
     });
@@ -685,7 +843,7 @@ describe('VjGateway', () => {
       const screen = await attachedScreen(harness, 'socket-screen');
       const remote = await attachedRemote(harness, 'socket-remote');
 
-      expect(codeOf(await setEffects(harness, screen, 1, true))).toBe(
+      expect(codeOf(await setBlackout(harness, screen, 1, true))).toBe(
         'vj_wrong_role',
       );
       const advance = await harness.gateway.handleScreenAdvance(
@@ -695,34 +853,29 @@ describe('VjGateway', () => {
       expect(codeOf(advance)).toBe('vj_wrong_role');
     });
 
-    it('broadcasts a restore to the whole stage', async () => {
-      const base = createVjStageState(RESTORED_EPOCH, START - 60_000);
-      const restoreState: VjStageRestore = {
-        stageEpoch: base.stageEpoch,
-        revision: 7,
-        activePackId: PACK_ID,
-        liveClipId: CLIP_ID,
-        transition: base.transition,
-        overlay: base.overlay,
-        effects: { ...base.effects, isMirrored: true },
-        shuffle: base.shuffle,
-      };
+    it('broadcasts a restore to the whole stage with applyAt null', async () => {
       const screen = await connect(harness, 'socket-screen');
 
-      const ack = await attachScreen(harness, screen, SCREEN_ID, restoreState);
+      const ack = await attachScreen(
+        harness,
+        screen,
+        SCREEN_ID,
+        buildRestoreState(),
+      );
 
       expect(ack).toMatchObject({ ok: true, isRestored: true, isLead: true });
-      expect(harness.library.packExists).toHaveBeenCalledTimes(1);
-      expect(harness.library.packExists).toHaveBeenCalledWith(PACK_ID);
-      expect(harness.library.clipExists).toHaveBeenCalledTimes(1);
-      expect(harness.library.clipExists).toHaveBeenCalledWith(CLIP_ID);
+      expect(harness.reads.readPackForStage).toHaveBeenCalledTimes(1);
+      expect(harness.reads.readPackForStage).toHaveBeenCalledWith(PACK_ID);
+      expect(harness.reads.existingClipIds).toHaveBeenCalledTimes(1);
+      expect(harness.reads.existingClipIds).toHaveBeenCalledWith([CLIP_ID]);
 
       await flushImmediate();
       const frames = stageFrames(harness);
       expect(frames).toHaveLength(1);
-      const frame = frames[0]?.payload as VjStageFrame;
+      const frame = payloadOf(frames[0]);
       expect(frame.cause).toBe('restore');
       expect(frame.sourceClientId).toBeNull();
+      expect(frame.applyAt).toBeNull();
       expect(frame.state.activePackId).toBe(PACK_ID);
       expect(frame.state.liveClipId).toBe(CLIP_ID);
       expect(frame.state.revision).toBe(1);
@@ -730,11 +883,127 @@ describe('VjGateway', () => {
       expect(clientEmits(screen, 'stage:state')).toEqual([]);
     });
 
-    it('answers vj_not_attached for a frame sent while a screen attach awaits its restore reads', async () => {
-      let resolvePackRead: (isKnown: boolean) => void = () => undefined;
-      harness.library.packExists.mockImplementationOnce(
+    it('seeds a v2 stage from a v1-shaped restore', async () => {
+      const base = createVjStageState(RESTORED_EPOCH, START - 60_000);
+      const restoreState = {
+        stageEpoch: base.stageEpoch,
+        revision: 7,
+        activePackId: PACK_ID,
+        liveClipId: CLIP_ID,
+        transition: { mode: 'cut', fadeMs: 300 },
+        overlay: { text: 'Hello', style: 'big', isVisible: false },
+        effects: {
+          speed: 2,
+          isMonochrome: true,
+          isMirrored: false,
+          isHueCycling: false,
+          isStrobing: true,
+          isBlackout: false,
+          strobeStartedAt: 5,
+        },
+        shuffle: {
+          isOn: true,
+          intervalKind: 'beats',
+          intervalValue: 16,
+          bpm: 128,
+        },
+      };
+      const screen = await connect(harness, 'socket-screen');
+
+      const ack = await attachScreen(harness, screen, SCREEN_ID, restoreState);
+
+      expect(ack).toMatchObject({ ok: true, isRestored: true });
+      expect(harness.reads.readPackForStage).toHaveBeenCalledWith(PACK_ID);
+      expect(harness.reads.existingClipIds).toHaveBeenCalledWith([CLIP_ID]);
+      await flushImmediate();
+      const frame = payloadOf(stageFrames(harness)[0]);
+      expect(frame.cause).toBe('restore');
+      expect(frame.applyAt).toBeNull();
+      expect(frame.state).toMatchObject({
+        revision: 1,
+        activePackId: PACK_ID,
+        liveClipId: CLIP_ID,
+        transition: { mode: 'cut', length: { unit: 'ms', value: 300 } },
+        tempo: { bpm: 128 },
+      });
+      expect(frame.state.effects.settings.monochrome?.isOn).toBe(true);
+      expect(frame.state.effects.isStrobing).toBe(false);
+    });
+
+    it('resolves each lookup once and in parallel', async () => {
+      let resolvePackRead: (pack: { eventId: string | null }) => void = () =>
+        undefined;
+      harness.reads.readPackForStage.mockImplementationOnce(
         () =>
-          new Promise<boolean>((resolve) => {
+          new Promise((resolve) => {
+            resolvePackRead = resolve;
+          }),
+      );
+      const base = createVjStageState(RESTORED_EPOCH, START - 60_000);
+      const restoreState = buildRestoreState({
+        mix: { ...base.mix, clipId: MIX_CLIP_ID, amount: 0.5 },
+        shuffle: { ...base.shuffle, excludedClipIds: [EXCLUDED_CLIP_ID] },
+        activeSetlistId: SETLIST_ID,
+      });
+      const screen = await connect(harness, 'socket-screen');
+
+      const attachPending = attachScreen(
+        harness,
+        screen,
+        SCREEN_ID,
+        restoreState,
+      );
+      await flushImmediate();
+
+      // Every other read started while the pack read still waits.
+      expect(harness.reads.readPackForStage).toHaveBeenCalledTimes(1);
+      expect(harness.reads.existingClipIds).toHaveBeenCalledTimes(1);
+      expect(
+        [...(harness.reads.existingClipIds.mock.calls[0]?.[0] ?? [])].sort(),
+      ).toEqual([CLIP_ID, MIX_CLIP_ID]);
+      expect(harness.reads.clipIdsInPack).toHaveBeenCalledTimes(1);
+      expect(harness.reads.clipIdsInPack).toHaveBeenCalledWith(PACK_ID, [
+        EXCLUDED_CLIP_ID,
+      ]);
+      expect(harness.reads.readSetlistItem).toHaveBeenCalledTimes(1);
+      expect(harness.reads.readSetlistItem).toHaveBeenCalledWith(
+        SETLIST_ID,
+        null,
+      );
+
+      resolvePackRead({ eventId: null });
+      expect(await attachPending).toMatchObject({
+        ok: true,
+        isRestored: true,
+      });
+      expect(harness.reads.readPackForStage).toHaveBeenCalledTimes(1);
+      expect(harness.reads.existingClipIds).toHaveBeenCalledTimes(1);
+    });
+
+    it('acks vj_server_error when a restore read fails and attaches nothing', async () => {
+      harness.reads.existingClipIds.mockRejectedValueOnce(
+        new Error('read failed near SECRET-DB-DETAIL'),
+      );
+      const screen = await connect(harness, 'socket-screen');
+
+      const ack = await attachScreen(
+        harness,
+        screen,
+        SCREEN_ID,
+        buildRestoreState(),
+      );
+
+      expect(codeOf(ack)).toBe('vj_server_error');
+      expect(screen.data.role).toBeUndefined();
+      expect(screen.data.isAttached).toBeUndefined();
+    });
+
+    it('answers vj_not_attached for a frame sent while a screen attach awaits its restore reads', async () => {
+      let resolvePackRead: (pack: { eventId: string | null }) => void = () =>
+        undefined;
+      harness.reads.readPackForStage.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
             resolvePackRead = resolve;
           }),
       );
@@ -746,24 +1015,122 @@ describe('VjGateway', () => {
         buildRestoreState(),
       );
       await flushImmediate();
-      expect(harness.library.packExists).toHaveBeenCalledTimes(1);
+      expect(harness.reads.readPackForStage).toHaveBeenCalledTimes(1);
 
       const advance = await harness.gateway.handleScreenAdvance(
         asClient(screen),
         { expectedClipSequence: 0, clipId: CLIP_ID },
       );
-      const command = await setEffects(harness, screen, 1, true);
+      const command = await setBlackout(harness, screen, 1, true);
 
       expect(codeOf(advance)).toBe('vj_not_attached');
       expect(codeOf(command)).toBe('vj_not_attached');
-      expect(harness.library.isClipInPack).not.toHaveBeenCalled();
+      expect(harness.reads.readPackClipForAdvance).not.toHaveBeenCalled();
 
-      resolvePackRead(true);
+      resolvePackRead({ eventId: null });
       expect(await attachPending).toMatchObject({
         ok: true,
         isRestored: true,
       });
       expect(screen.data.isAttached).toBe(true);
+    });
+
+    it('carries applyAt on the attach frame while a change is pending', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      const tempo = await harness.gateway.handleSetTempo(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        bpm: 120,
+        downbeatAt: START,
+        quantize: 'beat',
+      });
+      expect(tempo).toMatchObject({ ok: true, applyAt: null });
+      jest.setSystemTime(START + 100);
+
+      const tap = await harness.gateway.handleGoClip(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 2,
+        clipId: CLIP_ID,
+      });
+      expect(tap).toEqual({
+        ok: true,
+        revision: 2,
+        isNoop: false,
+        applyAt: START + 500,
+        serverNow: START + 100,
+      });
+
+      const lateRemote = await attachedRemote(harness, 'socket-late-remote');
+      const lateScreen = await attachedScreen(harness, 'socket-late-screen');
+      await flushImmediate();
+      expect(clientEmits(lateRemote, 'stage:state')).toEqual([
+        expect.objectContaining({ cause: 'attach', applyAt: START + 500 }),
+      ]);
+      expect(clientEmits(lateScreen, 'stage:state')).toEqual([
+        expect.objectContaining({ cause: 'attach', applyAt: START + 500 }),
+      ]);
+
+      jest.setSystemTime(START + 600);
+      const afterLanding = await attachedRemote(harness, 'socket-after');
+      await flushImmediate();
+      expect(clientEmits(afterLanding, 'stage:state')).toEqual([
+        expect.objectContaining({ cause: 'attach', applyAt: null }),
+      ]);
+    });
+
+    it('reads the attach frame applyAt with the state it sends on the next tick', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      const tempo = await harness.gateway.handleSetTempo(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        bpm: 120,
+        downbeatAt: START,
+        quantize: 'beat',
+      });
+      expect(tempo).toMatchObject({ ok: true, applyAt: null });
+      await flushImmediate();
+      jest.setSystemTime(START + 100);
+
+      const lateRemote = await attachedRemote(harness, 'socket-late-remote');
+      const lateScreen = await attachedScreen(harness, 'socket-late-screen');
+      const tap = await harness.gateway.handleGoClip(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 2,
+        clipId: CLIP_ID,
+      });
+      expect(tap).toMatchObject({ ok: true, applyAt: START + 500 });
+      await flushImmediate();
+
+      for (const client of [lateRemote, lateScreen]) {
+        expect(clientEmits(client, 'stage:state')).toEqual([
+          expect.objectContaining({
+            cause: 'attach',
+            applyAt: START + 500,
+            state: expect.objectContaining({
+              revision: 2,
+              liveClipId: CLIP_ID,
+            }) as unknown,
+          }),
+        ]);
+      }
+    });
+
+    it('answers vj_screen_id_invalid before any restore read', async () => {
+      const screen = await connect(harness, 'socket-screen');
+
+      const ack = await attachScreen(
+        harness,
+        screen,
+        'not-a-screen-id',
+        buildRestoreState(),
+      );
+
+      expect(codeOf(ack)).toBe('vj_screen_id_invalid');
+      expect(harness.reads.readPackForStage).not.toHaveBeenCalled();
+      expect(harness.reads.existingClipIds).not.toHaveBeenCalled();
+      expect(screen.data.role).toBeUndefined();
+      expect(screen.data.isAttached).toBeUndefined();
+      expect(harness.stages.getState(ADMIN_USER_ID)).toBeNull();
     });
 
     it('replaces an older socket with the same screen id', async () => {
@@ -791,26 +1158,33 @@ describe('VjGateway', () => {
       const remote = await attachedRemote(harness, 'socket-remote');
       await flushImmediate();
 
-      const ack = await setEffects(harness, remote, 1, true);
+      const ack = await setBlackout(harness, remote, 1, true);
 
-      expect(ack).toEqual({ ok: true, revision: 1, isNoop: false });
+      expect(ack).toEqual({
+        ok: true,
+        revision: 1,
+        isNoop: false,
+        applyAt: null,
+        serverNow: START,
+      });
       expect(stageFrames(harness)).toEqual([]);
       await flushImmediate();
       const frames = stageFrames(harness);
       expect(frames).toHaveLength(1);
-      const frame = frames[0]?.payload as VjStageFrame;
+      const frame = payloadOf(frames[0]);
       expect(frame.cause).toBe('command');
       expect(frame.sourceClientId).toBe(CLIENT_ID);
-      expect(frame.state.effects.isMirrored).toBe(true);
+      expect(frame.applyAt).toBeNull();
+      expect(frame.state.effects.isBlackout).toBe(true);
       expect(frame.state.revision).toBe(1);
     });
 
     it('applies a goClip awaiting its clip read before a later setTransition', async () => {
       const remote = await attachedRemote(harness, 'socket-remote');
-      let resolveClipRead: (isKnown: boolean) => void = () => undefined;
-      harness.library.clipExists.mockImplementationOnce(
+      let resolveClipRead: (clipIds: Set<string>) => void = () => undefined;
+      harness.reads.existingClipIds.mockImplementationOnce(
         () =>
-          new Promise<boolean>((resolve) => {
+          new Promise((resolve) => {
             resolveClipRead = resolve;
           }),
       );
@@ -820,33 +1194,34 @@ describe('VjGateway', () => {
         commandSequence: 5,
         clipId: CLIP_ID,
       });
-      const transitionPending = harness.gateway.handleSetTransition(
-        asClient(remote),
-        { clientId: CLIENT_ID, commandSequence: 6, fadeMs: 1200 },
-      );
+      const transitionPending = setFadeLength(harness, remote, 6, 1200);
       await flushImmediate();
 
       // The later command waits behind the earlier one's read.
-      expect(harness.library.clipExists).toHaveBeenCalledTimes(1);
+      expect(harness.reads.existingClipIds).toHaveBeenCalledTimes(1);
       expect(harness.stages.getState(ADMIN_USER_ID)?.revision).toBe(0);
 
-      resolveClipRead(true);
+      resolveClipRead(new Set([CLIP_ID]));
       const goClipAck = await goClipPending;
       const transitionAck = await transitionPending;
 
-      expect(goClipAck).toEqual({ ok: true, revision: 1, isNoop: false });
-      expect(transitionAck).toEqual({ ok: true, revision: 2, isNoop: false });
+      expect(goClipAck).toMatchObject({ ok: true, revision: 1, isNoop: false });
+      expect(transitionAck).toMatchObject({
+        ok: true,
+        revision: 2,
+        isNoop: false,
+      });
       const state = harness.stages.getState(ADMIN_USER_ID);
       expect(state?.liveClipId).toBe(CLIP_ID);
-      expect(state?.transition.fadeMs).toBe(1200);
+      expect(state?.transition.length).toEqual({ unit: 'ms', value: 1200 });
     });
 
     it('refuses a frame past the bucket on arrival while earlier commands wait in the queue', async () => {
       const remote = await attachedRemote(harness, 'socket-remote');
-      let resolveClipRead: (isKnown: boolean) => void = () => undefined;
-      harness.library.clipExists.mockImplementationOnce(
+      let resolveClipRead: (clipIds: Set<string>) => void = () => undefined;
+      harness.reads.existingClipIds.mockImplementationOnce(
         () =>
-          new Promise<boolean>((resolve) => {
+          new Promise((resolve) => {
             resolveClipRead = resolve;
           }),
       );
@@ -859,24 +1234,17 @@ describe('VjGateway', () => {
       const queuedTransitions: Promise<VjAck<object>>[] = [];
       for (let sequence = 2; sequence <= 40; sequence += 1) {
         queuedTransitions.push(
-          harness.gateway.handleSetTransition(asClient(remote), {
-            clientId: CLIENT_ID,
-            commandSequence: sequence,
-            fadeMs: sequence * 10,
-          }),
+          setFadeLength(harness, remote, sequence, sequence * 10),
         );
       }
 
       // The 41st frame answers while the goClip read still holds the queue.
-      const refused = await harness.gateway.handleSetTransition(
-        asClient(remote),
-        { clientId: CLIENT_ID, commandSequence: 41, fadeMs: 2000 },
-      );
+      const refused = await setFadeLength(harness, remote, 41, 2000);
       expect(codeOf(refused)).toBe('vj_rate_limited');
       expect(harness.stages.getState(ADMIN_USER_ID)?.revision).toBe(0);
 
-      resolveClipRead(true);
-      expect(await goClipPending).toEqual({
+      resolveClipRead(new Set([CLIP_ID]));
+      expect(await goClipPending).toMatchObject({
         ok: true,
         revision: 1,
         isNoop: false,
@@ -886,31 +1254,80 @@ describe('VjGateway', () => {
       const state = harness.stages.getState(ADMIN_USER_ID);
       expect(state?.revision).toBe(40);
       expect(state?.liveClipId).toBe(CLIP_ID);
-      expect(state?.transition.fadeMs).toBe(400);
+      expect(state?.transition.length).toEqual({ unit: 'ms', value: 400 });
+    });
+
+    it('meters setMix and setEffects on their own buckets', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      const mixCodes: (string | null)[] = [];
+      for (let sequence = 1; sequence <= 61; sequence += 1) {
+        const ack = await harness.gateway.handleSetMix(asClient(remote), {
+          clientId: CLIENT_ID,
+          commandSequence: sequence,
+          amount: (sequence % 10) / 10,
+        });
+        mixCodes.push(codeOf(ack));
+      }
+      expect(
+        mixCodes.filter((code) => code === 'vj_rate_limited'),
+      ).toHaveLength(1);
+      expect(mixCodes[60]).toBe('vj_rate_limited');
+
+      const effectsCodes: (string | null)[] = [];
+      for (let sequence = 62; sequence <= 122; sequence += 1) {
+        const ack = await harness.gateway.handleSetEffects(asClient(remote), {
+          clientId: CLIENT_ID,
+          commandSequence: sequence,
+          speed: sequence % 2 === 0 ? 2 : 1,
+        });
+        effectsCodes.push(codeOf(ack));
+      }
+      expect(effectsCodes.slice(0, 60)).toEqual(
+        Array.from({ length: 60 }, () => null),
+      );
+      expect(effectsCodes[60]).toBe('vj_rate_limited');
+
+      // The command bucket is untouched by both.
+      const tap = await harness.gateway.handleGoClip(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 123,
+        clipId: CLIP_ID,
+      });
+      expect(tap).toMatchObject({ ok: true, isNoop: false });
     });
 
     it('runs the next command after a command that failed', async () => {
       const remote = await attachedRemote(harness, 'socket-remote');
       jest
-        .spyOn(harness.stages, 'applyRemoteCommand')
+        .spyOn(harness.stages, 'runRemoteCommand')
         .mockImplementationOnce(() => {
           throw new Error('stage broke');
         });
 
-      const failed = setEffects(harness, remote, 1, true);
-      const next = setEffects(harness, remote, 2, true);
+      const failed = setBlackout(harness, remote, 1, true);
+      const next = setBlackout(harness, remote, 2, true);
 
       expect(codeOf(await failed)).toBe('vj_server_error');
-      expect(await next).toEqual({ ok: true, revision: 1, isNoop: false });
+      expect(await next).toMatchObject({
+        ok: true,
+        revision: 1,
+        isNoop: false,
+      });
     });
 
     it('broadcasts nothing for a noop', async () => {
       const remote = await attachedRemote(harness, 'socket-remote');
       await flushImmediate();
 
-      const ack = await setEffects(harness, remote, 1, false);
+      const ack = await setBlackout(harness, remote, 1, false);
 
-      expect(ack).toEqual({ ok: true, revision: 0, isNoop: true });
+      expect(ack).toEqual({
+        ok: true,
+        revision: 0,
+        isNoop: true,
+        applyAt: null,
+        serverNow: START,
+      });
       await flushImmediate();
       expect(stageFrames(harness)).toEqual([]);
     });
@@ -939,16 +1356,14 @@ describe('VjGateway', () => {
       );
     });
 
-    it('acks vj_server_error when the stage throws and logs the code only', async () => {
+    it('acks vj_server_error when the stage rejects and logs the code only', async () => {
       const debugSpy = jest.spyOn(Logger.prototype, 'debug');
       const remote = await attachedRemote(harness, 'socket-remote');
       jest
-        .spyOn(harness.stages, 'applyRemoteCommand')
-        .mockImplementation(() => {
-          throw new Error('stage broke near SECRET-STAGE-DETAIL');
-        });
+        .spyOn(harness.stages, 'runRemoteCommand')
+        .mockRejectedValue(new Error('stage broke near SECRET-STAGE-DETAIL'));
 
-      const ack = await setEffects(harness, remote, 1, true);
+      const ack = await setBlackout(harness, remote, 1, true);
 
       expect(codeOf(ack)).toBe('vj_server_error');
       await flushImmediate();
@@ -964,6 +1379,24 @@ describe('VjGateway', () => {
       );
     });
 
+    it('acks vj_server_error when a lookup read fails', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      harness.reads.existingClipIds.mockRejectedValueOnce(
+        new Error('read failed'),
+      );
+
+      const ack = await harness.gateway.handleGoClip(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        clipId: CLIP_ID,
+      });
+
+      expect(codeOf(ack)).toBe('vj_server_error');
+      expect(harness.stages.getState(ADMIN_USER_ID)?.liveClipId).toBeNull();
+      await flushImmediate();
+      expect(stageFrames(harness)).toEqual([]);
+    });
+
     it("keeps a second admin's frames out of the first admin's stage", async () => {
       harness.roleByUserId.set(SECOND_ADMIN_USER_ID, UserRole.Admin);
       const firstRemote = await attachedRemote(harness, 'socket-first');
@@ -976,7 +1409,7 @@ describe('VjGateway', () => {
       await flushImmediate();
       harness.roomEmits.length = 0;
 
-      expect((await setEffects(harness, secondRemote, 1, true)).ok).toBe(true);
+      expect((await setBlackout(harness, secondRemote, 1, true)).ok).toBe(true);
       await flushImmediate();
 
       expect(
@@ -998,19 +1431,19 @@ describe('VjGateway', () => {
       const remote = await attachedRemote(harness, 'socket-remote');
 
       expect((await setPack(harness, remote, 1, PACK_ID)).ok).toBe(true);
-      expect(harness.library.packExists).toHaveBeenCalledTimes(1);
-      expect(harness.library.packExists).toHaveBeenCalledWith(PACK_ID);
+      expect(harness.reads.readPackForStage).toHaveBeenCalledTimes(1);
+      expect(harness.reads.readPackForStage).toHaveBeenCalledWith(PACK_ID);
 
       const stale = await setPack(harness, remote, 1, PACK_ID);
 
       expect(codeOf(stale)).toBe('vj_stale_command');
       expect(stale.ok ? undefined : stale.state?.activePackId).toBe(PACK_ID);
-      expect(harness.library.packExists).toHaveBeenCalledTimes(1);
+      expect(harness.reads.readPackForStage).toHaveBeenCalledTimes(1);
     });
 
     it('answers vj_pack_not_found when the pack read finds nothing', async () => {
       const remote = await attachedRemote(harness, 'socket-remote');
-      harness.library.packExists.mockResolvedValueOnce(false);
+      harness.reads.readPackForStage.mockResolvedValueOnce(null);
 
       expect(codeOf(await setPack(harness, remote, 1, PACK_ID))).toBe(
         'vj_pack_not_found',
@@ -1022,16 +1455,11 @@ describe('VjGateway', () => {
       const remote = await attachedRemote(harness, 'socket-remote');
 
       for (let sequence = 1; sequence <= 40; sequence += 1) {
-        const ack = await setEffects(
-          harness,
-          remote,
-          sequence,
-          sequence % 2 === 1,
-        );
+        const ack = await setFadeLength(harness, remote, sequence, sequence);
         expect(ack.ok).toBe(true);
       }
 
-      expect(codeOf(await setEffects(harness, remote, 41, true))).toBe(
+      expect(codeOf(await setFadeLength(harness, remote, 41, 41))).toBe(
         'vj_rate_limited',
       );
     });
@@ -1054,7 +1482,7 @@ describe('VjGateway', () => {
       expect(ack.ok ? undefined : ack.state).toEqual(
         harness.stages.getState(ADMIN_USER_ID),
       );
-      expect(harness.library.isClipInPack).not.toHaveBeenCalled();
+      expect(harness.reads.readPackClipForAdvance).not.toHaveBeenCalled();
     });
 
     it('throttles screens:update to one frame per 250 ms per stage', async () => {
@@ -1089,6 +1517,36 @@ describe('VjGateway', () => {
       expect(screen.disconnect).not.toHaveBeenCalled();
     });
 
+    it('broadcasts a mic tempo adoption from the lead status', async () => {
+      const lead = await attachedScreen(harness, 'socket-lead');
+      const remote = await attachedRemote(harness, 'socket-remote');
+      await sendStatus(harness, lead, true, {
+        mic: { level: 0.4, bpm: null, confidence: 0, beatAt: null },
+      });
+      const toMic = await harness.gateway.handleSetTempo(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        source: 'mic',
+      });
+      expect(toMic.ok).toBe(true);
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+      jest.setSystemTime(START + 100);
+
+      await sendStatus(harness, lead, true, {
+        mic: { level: 0.5, bpm: 130, confidence: 0.9, beatAt: START + 100 },
+      });
+
+      expect(stageFrames(harness)).toEqual([]);
+      await flushImmediate();
+      const frames = stageFrames(harness);
+      expect(frames).toHaveLength(1);
+      const frame = payloadOf(frames[0]);
+      expect(frame.cause).toBe('mic_tempo');
+      expect(frame.sourceClientId).toBeNull();
+      expect(frame.state.tempo).toMatchObject({ bpm: 130, source: 'mic' });
+    });
+
     it('tells the promoted screen it leads when the lead disconnects', async () => {
       const lead = await attachedScreen(harness, 'socket-lead');
       jest.advanceTimersByTime(1000);
@@ -1116,24 +1574,146 @@ describe('VjGateway', () => {
       expect((await setPack(harness, remote, 1, PACK_ID)).ok).toBe(true);
       await flushImmediate();
       harness.roomEmits.length = 0;
-      const change: VjLibraryChange = {
+      const change = libraryChange({
         kind: 'pack_deleted',
         packId: PACK_ID,
-        clipId: null,
         packIds: [PACK_ID],
-      };
+      });
 
-      harness.gateway.handleLibraryChanged(change);
+      await harness.gateway.handleLibraryChanged(change);
 
       expect(roomEmitsOf(harness, 'library:changed')).toEqual([
         { room: VJ_LIBRARY_ROOM, event: 'library:changed', payload: change },
       ]);
+      expect(stageFrames(harness)).toEqual([]);
+      await flushImmediate();
       const frames = stageFrames(harness);
       expect(frames).toHaveLength(1);
-      const frame = frames[0]?.payload as VjStageFrame;
+      const frame = payloadOf(frames[0]);
       expect(frame.cause).toBe('library');
       expect(frame.sourceClientId).toBeNull();
       expect(frame.state.activePackId).toBeNull();
+      expect(harness.reads.setlistItemCount).not.toHaveBeenCalled();
+    });
+
+    it('keeps a library frame behind a command frame still waiting for its tick', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+
+      expect((await setPack(harness, remote, 1, PACK_ID)).ok).toBe(true);
+      expect(stageFrames(harness)).toEqual([]);
+      await harness.gateway.handleLibraryChanged(
+        libraryChange({
+          kind: 'pack_deleted',
+          packId: PACK_ID,
+          packIds: [PACK_ID],
+        }),
+      );
+      await flushImmediate();
+
+      const frames = stageFrames(harness).map(payloadOf);
+      expect(
+        frames.map((frame) => [frame.cause, frame.state.revision]),
+      ).toEqual([
+        ['command', 1],
+        ['library', 2],
+      ]);
+    });
+
+    it('relays the eight library change fields and reads set list counts for the active set list', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      harness.reads.readSetlistItem.mockResolvedValue({
+        itemCount: 3,
+        sceneId: SCENE_ID,
+        look: vjSceneLookOf(createVjStageState(RESTORED_EPOCH, START)),
+      });
+      const select = await harness.gateway.handleSetlistSelect(
+        asClient(remote),
+        {
+          clientId: CLIENT_ID,
+          commandSequence: 1,
+          setlistId: SETLIST_ID,
+          index: 2,
+        },
+      );
+      expect(select.ok).toBe(true);
+      expect(harness.stages.getState(ADMIN_USER_ID)).toMatchObject({
+        activeSetlistId: SETLIST_ID,
+        setlistIndex: 2,
+      });
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+      harness.reads.setlistItemCount.mockResolvedValueOnce(2);
+      const change: VjLibraryChange = {
+        kind: 'setlist_items_changed',
+        packId: PACK_ID,
+        clipId: CLIP_ID,
+        packIds: [PACK_ID],
+        sceneId: SCENE_ID,
+        setlistId: SETLIST_ID,
+        setlistIds: [SETLIST_ID, OTHER_SETLIST_ID],
+        eventId: null,
+      };
+
+      await harness.gateway.handleLibraryChanged(change);
+
+      const relayed = roomEmitsOf(harness, 'library:changed');
+      expect(relayed).toEqual([
+        { room: VJ_LIBRARY_ROOM, event: 'library:changed', payload: change },
+      ]);
+      const relayedPayload = relayed[0]?.payload as VjLibraryChange;
+      expect(relayedPayload).not.toBe(change);
+      expect(relayedPayload.setlistIds).not.toBe(change.setlistIds);
+      expect(harness.reads.setlistItemCount).toHaveBeenCalledTimes(1);
+      expect(harness.reads.setlistItemCount).toHaveBeenCalledWith(SETLIST_ID);
+      await flushImmediate();
+      const frame = payloadOf(stageFrames(harness)[0]);
+      expect(frame.cause).toBe('library');
+      expect(frame.state.activeSetlistId).toBe(SETLIST_ID);
+      expect(frame.state.setlistIndex).toBeNull();
+    });
+
+    it('applies a set list change with the counts it has when a read fails and logs ids only', async () => {
+      const readLogLines = spyOnEveryLogLine();
+      const remote = await attachedRemote(harness, 'socket-remote');
+      harness.reads.readSetlistItem.mockResolvedValue({
+        itemCount: 3,
+        sceneId: SCENE_ID,
+        look: vjSceneLookOf(createVjStageState(RESTORED_EPOCH, START)),
+      });
+      await harness.gateway.handleSetlistSelect(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        setlistId: SETLIST_ID,
+        index: 2,
+      });
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+      harness.reads.setlistItemCount.mockRejectedValueOnce(
+        new Error('read failed near SECRET-SETLIST-NAME'),
+      );
+
+      await harness.gateway.handleLibraryChanged(
+        libraryChange({
+          kind: 'scene_deleted',
+          sceneId: SCENE_ID,
+          setlistIds: [SETLIST_ID],
+        }),
+      );
+      await flushImmediate();
+
+      expect(stageFrames(harness)).toEqual([]);
+      expect(harness.stages.getState(ADMIN_USER_ID)?.setlistIndex).toBe(2);
+      const logged = readLogLines();
+      expect(
+        logged.some(
+          (line) => line.includes('scene_deleted') && line.includes(SETLIST_ID),
+        ),
+      ).toBe(true);
+      expect(logged.some((line) => line.includes('SECRET-SETLIST-NAME'))).toBe(
+        false,
+      );
     });
 
     it('broadcasts the strobe timeout through the bound broadcaster', async () => {
@@ -1148,19 +1728,19 @@ describe('VjGateway', () => {
       harness.roomEmits.length = 0;
 
       jest.advanceTimersByTime(10_000);
+      expect(stageFrames(harness)).toEqual([]);
+      await flushImmediate();
 
       const frames = stageFrames(harness);
       expect(frames).toHaveLength(1);
-      const frame = frames[0]?.payload as VjStageFrame;
+      const frame = payloadOf(frames[0]);
       expect(frame.cause).toBe('strobe_timeout');
       expect(frame.state.effects.isStrobing).toBe(false);
       expect(frame.state.effects.strobeStartedAt).toBeNull();
     });
 
     it('never logs overlay text from a refused frame', async () => {
-      const spies = (['log', 'debug', 'warn', 'error', 'verbose'] as const).map(
-        (method) => jest.spyOn(Logger.prototype, method),
-      );
+      const readLogLines = spyOnEveryLogLine();
       const remote = await attachedRemote(harness, 'socket-remote');
 
       await harness.gateway.handleSetOverlay(asClient(remote), {
@@ -1178,13 +1758,319 @@ describe('VjGateway', () => {
       await flushImmediate();
 
       expect(codeOf(refused)).toBe('vj_overlay_text_invalid');
-      const logged = spies.flatMap((spy) =>
-        spy.mock.calls.map((call) => call.map(String).join(' ')),
-      );
+      const logged = readLogLines();
       expect(
         logged.some((line) => line.includes('vj_overlay_text_invalid')),
       ).toBe(true);
       expect(logged.some((line) => line.includes('SECRET LINE'))).toBe(false);
+    });
+
+    it('never logs a countdown label or a scene payload', async () => {
+      const readLogLines = spyOnEveryLogLine();
+      const remote = await attachedRemote(harness, 'socket-remote');
+
+      const countdown = await harness.gateway.handleSetCountdown(
+        asClient(remote),
+        {
+          clientId: CLIENT_ID,
+          commandSequence: 1,
+          isVisible: true,
+          durationMs: 60_000,
+          label: 'SECRET LABEL\nSECOND LINE',
+        },
+      );
+      const recall = await harness.gateway.handleRecallScene(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 2,
+        sceneId: 'SECRET SCENE NAME',
+      });
+      await flushImmediate();
+
+      expect(codeOf(countdown)).toBe('vj_countdown_label_invalid');
+      expect(codeOf(recall)).toBe('vj_scene_not_found');
+      const logged = readLogLines();
+      expect(
+        logged.some((line) => line.includes('vj_countdown_label_invalid')),
+      ).toBe(true);
+      expect(logged.some((line) => line.includes('vj_scene_not_found'))).toBe(
+        true,
+      );
+      expect(logged.some((line) => line.includes('SECRET LABEL'))).toBe(false);
+      expect(logged.some((line) => line.includes('SECRET SCENE'))).toBe(false);
+    });
+  });
+
+  describe('clock sync, identify and serverNow', () => {
+    it('answers clock:sync before attach and refuses the 11th in a burst', async () => {
+      const client = await connect(harness, 'socket-fresh');
+
+      for (let attempt = 1; attempt <= 10; attempt += 1) {
+        expect(
+          await harness.gateway.handleClockSync(asClient(client), {}),
+        ).toEqual({ ok: true, serverNow: START });
+      }
+      const eleventh = await harness.gateway.handleClockSync(
+        asClient(client),
+        {},
+      );
+
+      expect(codeOf(eleventh)).toBe('vj_rate_limited');
+      expect(eleventh.serverNow).toBe(START);
+      expect(client.data.role).toBeUndefined();
+      expect(harness.stages.getState(ADMIN_USER_ID)).toBeNull();
+    });
+
+    it('acks vj_not_admin to a demoted admin on clock:sync', async () => {
+      const client = await connect(harness, 'socket-fresh');
+      harness.roleByUserId.set(ADMIN_USER_ID, UserRole.Member);
+      jest.advanceTimersByTime(VJ_ROLE_RECHECK_MS);
+
+      const ack = await harness.gateway.handleClockSync(asClient(client), {});
+
+      expect(ack).toEqual({
+        ok: false,
+        code: 'vj_not_admin',
+        message: VJ_NOT_ADMIN_MESSAGE,
+        serverNow: Date.now(),
+      });
+      await flushImmediate();
+      expect(clientEmits(client, 'exception')).toEqual([
+        expect.objectContaining({
+          code: 'FORBIDDEN',
+          domainCode: 'vj_not_admin',
+        }),
+      ]);
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it('answers clock:sync while a slow command holds the queue', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      harness.reads.existingClipIds.mockImplementationOnce(
+        () => new Promise<Set<string>>(() => undefined),
+      );
+      void harness.gateway.handleGoClip(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        clipId: CLIP_ID,
+      });
+      await flushImmediate();
+
+      expect(
+        await harness.gateway.handleClockSync(asClient(remote), {}),
+      ).toEqual({ ok: true, serverNow: START });
+    });
+
+    it('relays screen:identify to one screen or to every screen', async () => {
+      const first = await attachedScreen(harness, 'socket-first');
+      const second = await attachedScreen(
+        harness,
+        'socket-second',
+        OTHER_SCREEN_ID,
+      );
+      const remote = await attachedRemote(harness, 'socket-remote');
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+
+      const one = await harness.gateway.handleScreenIdentify(asClient(remote), {
+        screenId: OTHER_SCREEN_ID.toUpperCase(),
+      });
+
+      expect(one).toEqual({ ok: true, identifiedCount: 1, serverNow: START });
+      // Nothing leaves before the ack.
+      expect(roomEmitsOf(harness, 'screen:identify')).toEqual([]);
+      await flushImmediate();
+      expect(roomEmitsOf(harness, 'screen:identify')).toEqual([
+        {
+          room: second.id,
+          event: 'screen:identify',
+          payload: { number: 2, durationMs: VJ_LIMITS.identifyDurationMs },
+        },
+      ]);
+      harness.roomEmits.length = 0;
+
+      const every = await harness.gateway.handleScreenIdentify(
+        asClient(remote),
+        { screenId: null },
+      );
+
+      expect(every).toEqual({ ok: true, identifiedCount: 2, serverNow: START });
+      await flushImmediate();
+      expect(roomEmitsOf(harness, 'screen:identify')).toEqual([
+        {
+          room: first.id,
+          event: 'screen:identify',
+          payload: { number: 1, durationMs: VJ_LIMITS.identifyDurationMs },
+        },
+        {
+          room: second.id,
+          event: 'screen:identify',
+          payload: { number: 2, durationMs: VJ_LIMITS.identifyDurationMs },
+        },
+      ]);
+      expect(harness.stages.getState(ADMIN_USER_ID)?.revision).toBe(0);
+    });
+
+    it('answers vj_wrong_role to identify from a screen', async () => {
+      const screen = await attachedScreen(harness, 'socket-screen');
+
+      const ack = await harness.gateway.handleScreenIdentify(asClient(screen), {
+        screenId: null,
+      });
+
+      expect(codeOf(ack)).toBe('vj_wrong_role');
+    });
+
+    it('answers vj_screen_not_attached for an offline screen', async () => {
+      await attachedScreen(harness, 'socket-online');
+      const offline = await attachedScreen(
+        harness,
+        'socket-offline',
+        OTHER_SCREEN_ID,
+      );
+      const remote = await attachedRemote(harness, 'socket-remote');
+      offline.connected = false;
+      harness.gateway.handleDisconnect(asClient(offline));
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+
+      const ack = await harness.gateway.handleScreenIdentify(asClient(remote), {
+        screenId: OTHER_SCREEN_ID,
+      });
+
+      expect(codeOf(ack)).toBe('vj_screen_not_attached');
+      await flushImmediate();
+      expect(roomEmitsOf(harness, 'screen:identify')).toEqual([]);
+    });
+
+    it('refuses the 6th identify in a burst', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const ack = await harness.gateway.handleScreenIdentify(
+          asClient(remote),
+          { screenId: null },
+        );
+        expect(ack.ok).toBe(true);
+      }
+
+      const sixth = await harness.gateway.handleScreenIdentify(
+        asClient(remote),
+        { screenId: null },
+      );
+      expect(codeOf(sixth)).toBe('vj_rate_limited');
+    });
+
+    const SENT_AT = START + 1234;
+
+    /** Each frame with an ack: the setup, then `markSent` right before the
+     *  frame goes, so the ack's clock is the one read at return. */
+    const ackCases: [
+      string,
+      (harness: Harness, markSent: () => void) => Promise<object>,
+    ][] = [
+      [
+        'attach',
+        async (subject, markSent) => {
+          const client = await connect(subject, 'socket-attach');
+          markSent();
+          return attachRemote(subject, client);
+        },
+      ],
+      [
+        'reauth',
+        async (subject, markSent) => {
+          const client = await connect(subject, 'socket-reauth');
+          const { ticket } = socketTicketService.mint(
+            ADMIN_USER_ID,
+            `family-${ADMIN_USER_ID}`,
+            UserStatus.Active,
+            15 * 60_000,
+          );
+          markSent();
+          return subject.gateway.handleReauth(asClient(client), { ticket });
+        },
+      ],
+      [
+        'clock sync',
+        async (subject, markSent) => {
+          const client = await connect(subject, 'socket-clock');
+          markSent();
+          return subject.gateway.handleClockSync(asClient(client), {});
+        },
+      ],
+      [
+        'a command success',
+        async (subject, markSent) => {
+          const remote = await attachedRemote(subject, 'socket-remote');
+          markSent();
+          return setBlackout(subject, remote, 1, true);
+        },
+      ],
+      [
+        'a command refusal',
+        async (subject, markSent) => {
+          const remote = await attachedRemote(subject, 'socket-remote');
+          markSent();
+          return subject.gateway.handleSetEffects(asClient(remote), {
+            clientId: CLIENT_ID,
+            commandSequence: 1,
+            speed: 3,
+          });
+        },
+      ],
+      [
+        'advance',
+        async (subject, markSent) => {
+          const screen = await attachedScreen(subject, 'socket-screen');
+          markSent();
+          return subject.gateway.handleScreenAdvance(asClient(screen), {
+            expectedClipSequence: 0,
+            clipId: CLIP_ID,
+          });
+        },
+      ],
+      [
+        'identify',
+        async (subject, markSent) => {
+          const remote = await attachedRemote(subject, 'socket-remote');
+          markSent();
+          return subject.gateway.handleScreenIdentify(asClient(remote), {
+            screenId: null,
+          });
+        },
+      ],
+    ];
+
+    it.each(ackCases)(
+      'puts serverNow on every ack: %s',
+      async (_name, send) => {
+        const ack = await send(harness, () => {
+          jest.setSystemTime(SENT_AT);
+        });
+
+        expect(ack).toMatchObject({ serverNow: SENT_AT });
+      },
+    );
+
+    it('stamps serverNow when a refusal leaves, past the time it was built', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      jest.spyOn(harness.stages, 'runRemoteCommand').mockResolvedValueOnce({
+        ok: false,
+        failure: { ...vjAckFailure('vj_clip_not_found'), serverNow: 1 },
+      });
+      jest.setSystemTime(SENT_AT);
+
+      const ack = await harness.gateway.handleGoClip(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        clipId: CLIP_ID,
+      });
+
+      expect(ack).toMatchObject({
+        ok: false,
+        code: 'vj_clip_not_found',
+        serverNow: SENT_AT,
+      });
     });
   });
 });

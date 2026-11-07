@@ -25,6 +25,7 @@ import {
   LISTING_MENU_UPLOAD_TYPES,
   STUDIO_AUDIO_UPLOAD_TYPES,
   VJ_CLIP_UPLOAD_TYPES,
+  VJ_PREVIEW_UPLOAD_TYPES,
   VJ_THUMBNAIL_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
@@ -138,6 +139,7 @@ export class StorageService {
   ): Readonly<Record<string, { extension: string }>> {
     if (kind === 'vj_clip') return VJ_CLIP_UPLOAD_TYPES;
     if (kind === 'vj_thumbnail') return VJ_THUMBNAIL_UPLOAD_TYPES;
+    if (kind === 'vj_preview') return VJ_PREVIEW_UPLOAD_TYPES;
     if (kind === 'studio_audio') return STUDIO_AUDIO_UPLOAD_TYPES;
     if (kind === 'listing-menu') return LISTING_MENU_UPLOAD_TYPES;
     return StorageService.DOCUMENT_KINDS.has(kind)
@@ -178,7 +180,11 @@ export class StorageService {
     }
     // VJ media is platform artwork under keys that name nobody, so it has its
     // own admin-only presign.
-    if (kind === 'vj_clip' || kind === 'vj_thumbnail') {
+    if (
+      kind === 'vj_clip' ||
+      kind === 'vj_thumbnail' ||
+      kind === 'vj_preview'
+    ) {
       throw new BadRequestException(
         'VJ uploads are presigned by presignVjUpload',
       );
@@ -346,15 +352,15 @@ export class StorageService {
   }
 
   /**
-   * VJ (contract 3.2): presign a clip or thumbnail upload under
-   * `<prefix>/<uuid>/<uuid><ext>`, both segments random, so the key names no
-   * member and account erasure never reaches the shared library. The caller
-   * has already checked the Admin role. A content type outside the kind's
-   * table answers `VJ_UPLOAD_TYPE_UNSUPPORTED` and an over-cap size
-   * `VJ_UPLOAD_TOO_LARGE`, in that order.
+   * VJ (contract 3.2, v2 4.1): presign a clip, thumbnail or animated preview
+   * upload under `<prefix>/<uuid>/<uuid><ext>`, both segments random, so the
+   * key names no member and account erasure never reaches the shared
+   * library. The caller has already checked the Admin role. A content type
+   * outside the kind's table answers `VJ_UPLOAD_TYPE_UNSUPPORTED` and an
+   * over-cap size `VJ_UPLOAD_TOO_LARGE`, in that order.
    */
   async presignVjUpload(params: {
-    kind: 'vj_clip' | 'vj_thumbnail';
+    kind: 'vj_clip' | 'vj_thumbnail' | 'vj_preview';
     contentType: string;
     byteSize: number;
   }): Promise<PresignedUpload> {

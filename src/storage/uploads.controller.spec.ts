@@ -366,6 +366,46 @@ describe('UploadsController', () => {
       });
     });
 
+    it('refuses a preview presign for a moderator with VJ_UPLOAD_NOT_ADMIN', () => {
+      for (const caller of [moderator, user]) {
+        for (const contentType of ['video/webm', 'video/mp4']) {
+          let refusal: unknown;
+          try {
+            void controller.presign(caller, {
+              kind: 'vj_preview',
+              contentType,
+              byteSize: 4096,
+            });
+          } catch (error) {
+            refusal = error;
+          }
+          expect(refusal).toBeInstanceOf(HttpException);
+          expect((refusal as HttpException).getStatus()).toBe(403);
+          expect((refusal as HttpException).getResponse()).toEqual(
+            expect.objectContaining({ code: 'VJ_UPLOAD_NOT_ADMIN' }),
+          );
+        }
+      }
+      expect(storage.presignVjUpload).not.toHaveBeenCalled();
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
+    });
+
+    it('passes an admin preview presign to presignVjUpload', async () => {
+      const result = await controller.presign(admin, {
+        kind: 'vj_preview',
+        contentType: 'video/webm',
+        byteSize: 4096,
+      });
+      expect(storage.presignVjUpload).toHaveBeenCalledWith({
+        kind: 'vj_preview',
+        contentType: 'video/webm',
+        byteSize: 4096,
+      });
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
+      expect(studioAudioUploads.presign).not.toHaveBeenCalled();
+      expect(result).toBe(VJ_PRESIGNED);
+    });
+
     it('refuses a subprofileId on a VJ presign', () => {
       expect(() =>
         controller.presign(admin, {

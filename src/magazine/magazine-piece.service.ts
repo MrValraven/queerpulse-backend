@@ -50,6 +50,7 @@ import { ReplyArticleCommentDto } from './dto/reply-article-comment.dto';
 import { ResolveArticleCommentDto } from './dto/resolve-article-comment.dto';
 import { SubmitPitchDto } from './dto/submit-pitch.dto';
 import { TriagePitchDto } from './dto/triage-pitch.dto';
+import { UnpublishTargetStage } from './dto/unpublish-piece.dto';
 import { UpdateArticleDto } from './dto/update-article.dto';
 import { UpdateBylineDto } from './dto/update-byline.dto';
 import { UpdateCoverDto } from './dto/update-cover.dto';
@@ -867,18 +868,27 @@ export class MagazinePieceService {
   }
 
   /**
-   * PRD-119 — takes a live (or scheduled) piece back down, for both formats.
+   * PRD-119: takes a live (or scheduled) piece back down, for both formats.
    *
    * NEVER gated. A takedown is the one publish-pipeline action that must work
    * on a piece in any shape whatsoever: the reason to pull something down is
    * usually that something about it is wrong, and a readiness or care check
    * standing between an editor and that button would be a safety hazard.
+   *
+   * `targetStage` picks where the piece lands. Left out, a published piece
+   * goes to `ready`, as it always has. Given, a piece that was live,
+   * scheduled or settled at `published` lands there instead (a scheduled
+   * piece is covered because its publish date is what gets cleared), and a
+   * piece that was none of those keeps its stage, so this endpoint never
+   * becomes a back door around the stage-change rules.
    */
   async unpublishPiece(
     pieceId: string,
     actorId: string,
+    targetStage?: UnpublishTargetStage,
   ): Promise<PieceRecordFull> {
     const piece = await this.loadPieceOr404(pieceId);
+    let hadPublishDate = false;
 
     if (piece.format === 'deck') {
       const deck =
@@ -886,6 +896,7 @@ export class MagazinePieceService {
           ? null
           : await this.decks.findOne({ where: { id: piece.deckId } });
       if (deck !== null && deck.publishedAt !== null) {
+        hadPublishDate = true;
         deck.publishedAt = null;
         await this.decks.save(deck);
       }
@@ -895,17 +906,32 @@ export class MagazinePieceService {
           ? null
           : await this.articles.findOne({ where: { id: piece.articleId } });
       if (article !== null && article.publishedAt !== null) {
+        hadPublishDate = true;
         article.publishedAt = null;
         await this.articles.save(article);
       }
     }
 
-    if (piece.stage === 'published') {
-      piece.stage = 'ready';
+    const wasPublishedStage = piece.stage === 'published';
+    const nextStage: PieceStage | null =
+      targetStage !== undefined && (hadPublishDate || wasPublishedStage)
+        ? targetStage
+        : wasPublishedStage
+          ? 'ready'
+          : null;
+    const isStageChange = nextStage !== null && nextStage !== piece.stage;
+    if (nextStage !== null && isStageChange) {
+      piece.stage = nextStage;
       await this.pieces.save(piece);
     }
 
     await this.recordEvent(pieceId, actorId, 'article_unpublished');
+    // The stage-entry clock reads `stage_changed` rows for every stage but
+    // `ready` (`STAGE_ENTRY_ACTIONS`), so a piece sent back to drafting or
+    // review needs its own row to show the right days in stage.
+    if (isStageChange && targetStage !== undefined) {
+      await this.recordEvent(pieceId, actorId, 'stage_changed', targetStage);
+    }
 
     return this.getPieceRecordFull(pieceId);
   }

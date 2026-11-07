@@ -72,8 +72,13 @@ describe('Studio track bodies', () => {
       }),
     ).toEqual(['credits', 'isExplicit', 'title']);
     expect(await errorsFor(UpdateStudioTrackDto, { lyrics: null })).toEqual([]);
+    // The body allows the transcript cap; the 10000 cap of a song format is
+    // applied by the track write (studioLyricsMaxLengthFor), not by the DTO.
     expect(
       await errorsFor(UpdateStudioTrackDto, { lyrics: 'x'.repeat(10001) }),
+    ).toEqual([]);
+    expect(
+      await errorsFor(UpdateStudioTrackDto, { lyrics: 'x'.repeat(60001) }),
     ).toEqual(['lyrics']);
   });
 

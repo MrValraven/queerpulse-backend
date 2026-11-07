@@ -105,3 +105,10 @@ export const VJ_THUMBNAIL_UPLOAD_TYPES: Readonly<Record<string, VjUploadSpec>> =
   {
     'image/webp': { extension: '.webp' },
   };
+
+/** VJ: the formats of a clip's animated preview. The browser records WebM
+ *  where `MediaRecorder` supports it and MP4 otherwise (Safari). */
+export const VJ_PREVIEW_UPLOAD_TYPES: Readonly<Record<string, VjUploadSpec>> = {
+  'video/webm': { extension: '.webm' },
+  'video/mp4': { extension: '.mp4' },
+};

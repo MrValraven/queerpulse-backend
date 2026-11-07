@@ -18,9 +18,13 @@ import {
   DEFAULT_VJ_FIT_MODE,
   VJ_FIT_MODES,
   VJ_LIMITS,
+  VJ_LOOP_MODES,
+  VJ_SPEEDS,
   type VjClipMimeType,
   type VjFitMode,
+  type VjLoopMode,
   type VjMediaKind,
+  type VjSpeed,
 } from './vj.contract';
 
 /** How many code points a string holds, so an emoji counts once. */
@@ -125,7 +129,11 @@ export function isUuidText(value: unknown): value is string {
 export function normalizeIdPermutation(
   value: unknown,
   expectedIds: readonly string[],
-  code: 'VJ_PACK_REORDER_MISMATCH' | 'VJ_PACK_CLIPS_REORDER_MISMATCH',
+  code:
+    | 'VJ_PACK_REORDER_MISMATCH'
+    | 'VJ_PACK_CLIPS_REORDER_MISMATCH'
+    | 'VJ_SCENE_REORDER_MISMATCH'
+    | 'VJ_SETLIST_REORDER_MISMATCH',
 ): string[] {
   if (!Array.isArray(value) || value.length !== expectedIds.length) {
     throw vjError(code);
@@ -235,18 +243,190 @@ export function normalizeClipCreate(
   };
 }
 
-/** Reads a clip update: an absent property is left out of the result, a
- *  present one is checked (title first, then fit mode). */
-export function normalizeClipUpdate(body: UpdateVjClipDto): {
+/** A clip update after steps 2 to 7 of contract 6.3. An absent property is
+ *  left out; a loop point may be null, which clears it. */
+export interface NormalizedVjClipUpdate {
   title?: string;
   fitMode?: VjFitMode;
-} {
-  const update: { title?: string; fitMode?: VjFitMode } = {};
+  isFavorite?: boolean;
+  defaultSpeed?: VjSpeed;
+  loopMode?: VjLoopMode;
+  loopInMs?: number | null;
+  loopOutMs?: number | null;
+}
+
+/** A loop point as the body sends it: null, or a safe integer of at least 0
+ *  milliseconds. Answers `VJ_CLIP_LOOP_INVALID`. */
+function normalizeLoopPoint(value: unknown): number | null {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw vjError('VJ_CLIP_LOOP_INVALID');
+  }
+  return value;
+}
+
+/** Reads a clip update with contract 6.3 steps 2 to 7, in order: title, fit
+ *  mode, favorite, default speed, loop mode, then the two loop points. An
+ *  absent property is left out of the result; a present one is checked. The
+ *  merged loop points are checked against the clip later, with
+ *  `checkVjLoopPoints`. */
+export function normalizeClipUpdate(
+  body: UpdateVjClipDto,
+): NormalizedVjClipUpdate {
+  const update: NormalizedVjClipUpdate = {};
   if (body.title !== undefined) {
     update.title = normalizeClipTitle(body.title);
   }
   if (body.fitMode !== undefined) {
     update.fitMode = normalizeFitMode(body.fitMode);
   }
+  if (body.isFavorite !== undefined) {
+    if (typeof body.isFavorite !== 'boolean') {
+      throw vjError('VJ_CLIP_FAVORITE_INVALID');
+    }
+    update.isFavorite = body.isFavorite;
+  }
+  if (body.defaultSpeed !== undefined) {
+    const defaultSpeed = VJ_SPEEDS.find(
+      (candidate) => candidate === body.defaultSpeed,
+    );
+    if (defaultSpeed === undefined) {
+      throw vjError('VJ_CLIP_SPEED_INVALID');
+    }
+    update.defaultSpeed = defaultSpeed;
+  }
+  if (body.loopMode !== undefined) {
+    const loopMode = VJ_LOOP_MODES.find(
+      (candidate) => candidate === body.loopMode,
+    );
+    if (loopMode === undefined) {
+      throw vjError('VJ_CLIP_LOOP_MODE_INVALID');
+    }
+    update.loopMode = loopMode;
+  }
+  if (body.loopInMs !== undefined) {
+    update.loopInMs = normalizeLoopPoint(body.loopInMs);
+  }
+  if (body.loopOutMs !== undefined) {
+    update.loopOutMs = normalizeLoopPoint(body.loopOutMs);
+  }
   return update;
+}
+
+/** Checks a clip's merged loop points with the `CHK_vj_clips_loop_points`
+ *  rule (contract 6.3 step 9): both null always passes; otherwise the clip is
+ *  a video with a duration, each point lies within `0..durationMs`, and the
+ *  span from `loopInMs` (or 0) to `loopOutMs` (or the duration) is at least
+ *  `VJ_LIMITS.loopMinLengthMs`. Answers `VJ_CLIP_LOOP_INVALID`. */
+export function checkVjLoopPoints(
+  clip: { mediaKind: VjMediaKind; durationMs: number | null },
+  loopInMs: number | null,
+  loopOutMs: number | null,
+): void {
+  if (loopInMs === null && loopOutMs === null) {
+    return;
+  }
+  const durationMs = clip.durationMs;
+  if (clip.mediaKind !== 'video' || durationMs === null) {
+    throw vjError('VJ_CLIP_LOOP_INVALID');
+  }
+  const isPointInside = (point: number | null): boolean =>
+    point === null || (point >= 0 && point <= durationMs);
+  if (!isPointInside(loopInMs) || !isPointInside(loopOutMs)) {
+    throw vjError('VJ_CLIP_LOOP_INVALID');
+  }
+  const spanMs = (loopOutMs ?? durationMs) - (loopInMs ?? 0);
+  if (spanMs < VJ_LIMITS.loopMinLengthMs) {
+    throw vjError('VJ_CLIP_LOOP_INVALID');
+  }
+}
+
+/** A scene name, trimmed. Answers `VJ_SCENE_NAME_REQUIRED` or
+ *  `VJ_SCENE_NAME_TOO_LONG`. */
+export function normalizeSceneName(value: unknown): string {
+  return normalizeBoundedText(
+    value,
+    VJ_LIMITS.sceneNameMax,
+    'VJ_SCENE_NAME_REQUIRED',
+    'VJ_SCENE_NAME_TOO_LONG',
+  );
+}
+
+/** A set list name, trimmed. Answers `VJ_SETLIST_NAME_REQUIRED` or
+ *  `VJ_SETLIST_NAME_TOO_LONG`. */
+export function normalizeSetlistName(value: unknown): string {
+  return normalizeBoundedText(
+    value,
+    VJ_LIMITS.setlistNameMax,
+    'VJ_SETLIST_NAME_REQUIRED',
+    'VJ_SETLIST_NAME_TOO_LONG',
+  );
+}
+
+/** Reads an optional `packId` body field: absent gives undefined (the stored
+ *  pack stays), null gives null, a uuid comes back lowercased. Anything else
+ *  answers `VJ_PACK_NOT_FOUND`. */
+export function readOptionalPackId(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) {
+    return value;
+  }
+  if (!isUuidText(value)) {
+    throw vjError('VJ_PACK_NOT_FOUND');
+  }
+  return value.toLowerCase();
+}
+
+/** Reads the `eventId` body of `PATCH packs/:id/event`: null unlinks, a uuid
+ *  comes back lowercased. Anything else, an absent field included, answers
+ *  `VJ_EVENT_NOT_FOUND`. */
+export function readEventIdBody(value: unknown): string | null {
+  if (value === null) {
+    return null;
+  }
+  if (!isUuidText(value)) {
+    throw vjError('VJ_EVENT_NOT_FOUND');
+  }
+  return value.toLowerCase();
+}
+
+/** Reads the required `clipIds` query of `GET clips/media`: 1 to 200
+ *  comma-separated uuids, lowercased, a repeat kept once at its first place,
+ *  in the query's order. Absent or empty answers `VJ_CLIP_IDS_INVALID`, as
+ *  does every value `parseMediaClipIds` refuses. */
+export function parseRequiredClipIds(value: unknown): string[] {
+  if (value === undefined || value === '') {
+    throw vjError('VJ_CLIP_IDS_INVALID');
+  }
+  const clipIds = parseMediaClipIds(value);
+  if (clipIds === null || clipIds.length === 0) {
+    throw vjError('VJ_CLIP_IDS_INVALID');
+  }
+  return clipIds;
+}
+
+/** Reads a set list's `sceneIds`: an array of uuid strings, lowercased, in
+ *  order, a repeat kept (a scene may play more than once). Anything but such
+ *  an array, an absent value included, answers `VJ_SETLIST_ITEMS_INVALID`;
+ *  over 100 entries answers `VJ_SETLIST_FULL` with `setlistId` when the set
+ *  list exists. A create with no `sceneIds` passes `[]` itself. */
+export function normalizeSetlistSceneIds(
+  value: unknown,
+  setlistId: string | null,
+): string[] {
+  if (!Array.isArray(value)) {
+    throw vjError('VJ_SETLIST_ITEMS_INVALID');
+  }
+  const sceneIds: string[] = [];
+  for (const entry of value as unknown[]) {
+    if (!isUuidText(entry)) {
+      throw vjError('VJ_SETLIST_ITEMS_INVALID');
+    }
+    sceneIds.push(entry.toLowerCase());
+  }
+  if (sceneIds.length > VJ_LIMITS.setlistItemsMax) {
+    throw vjError('VJ_SETLIST_FULL', { setlistId: setlistId ?? undefined });
+  }
+  return sceneIds;
 }

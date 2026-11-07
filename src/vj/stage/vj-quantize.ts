@@ -1,0 +1,140 @@
+import {
+  vjIsQuantizedChange,
+  vjQuantizedApplyAt,
+  type VjStageCause,
+  type VjStageState,
+} from '../vj.contract';
+
+/** The causes whose change may land on the tempo grid. Timer causes
+ *  (`overlay_timeout`, `countdown_end`, `mic_tempo`) and `library` never
+ *  compute a grid time; they only inherit a pending one (contract 7.4). */
+const VJ_GRID_CAUSES: readonly VjStageCause[] = ['command', 'shuffle'];
+
+/** The causes that always land at once with every pending change: the 10 s
+ *  strobe cap is absolute, so strobe-off never waits for a pending bar
+ *  (contract 7.4). */
+const VJ_IMMEDIATE_CAUSES: readonly VjStageCause[] = ['strobe_timeout'];
+
+/** What contract 7.4 steps 2 and 3 read to place one applied change. */
+export interface VjApplyAtInput {
+  previous: VjStageState;
+  next: VjStageState;
+  /** Recall and set list steps land on the grid even when the source stays. */
+  isLookSwitch: boolean;
+  isImmediate: boolean;
+  /** Why the change happens: only `command` and `shuffle` compute a grid time. */
+  cause: VjStageCause;
+  /** The stage's last stamped applyAt (memory only). */
+  pendingApplyAt: number | null;
+  now: number;
+}
+
+/** Contract 7.4 steps 2 and 3: the server time every client applies this
+ *  change at, or null to apply at once. A change never lands before a
+ *  pending one, and an immediate change or a strobe timeout lands at once
+ *  with every pending change (the state is cumulative). */
+export function vjApplyAtFor(input: VjApplyAtInput): number | null {
+  if (input.isImmediate || VJ_IMMEDIATE_CAUSES.includes(input.cause)) {
+    return null;
+  }
+  const isOnGrid =
+    VJ_GRID_CAUSES.includes(input.cause) &&
+    (input.isLookSwitch || vjIsQuantizedChange(input.previous, input.next));
+  const computed = isOnGrid
+    ? vjQuantizedApplyAt(input.next.tempo, input.now)
+    : null;
+  const pending =
+    input.pendingApplyAt !== null && input.pendingApplyAt > input.now
+      ? input.pendingApplyAt
+      : null;
+  return pending === null ? computed : Math.max(pending, computed ?? pending);
+}
+
+/** Whether something is live: a clip or a generator. */
+function isVjSourceLive(state: VjStageState): boolean {
+  return state.liveClipId !== null || state.liveGeneratorId !== null;
+}
+
+/** liveSince (plan note 12): stampAt when the live source changed or
+ *  clipSequence grew while a source is live, null when nothing is live,
+ *  else kept. */
+function stampedLiveSince(
+  previous: VjStageState,
+  next: VjStageState,
+  stampAt: number,
+): number | null {
+  if (!isVjSourceLive(next)) {
+    return null;
+  }
+  const isSourceChanged =
+    previous.liveClipId !== next.liveClipId ||
+    previous.liveGeneratorId !== next.liveGeneratorId ||
+    previous.liveGeneratorVariant !== next.liveGeneratorVariant ||
+    next.clipSequence > previous.clipSequence;
+  return isSourceChanged ? stampAt : (next.liveSince ?? stampAt);
+}
+
+/** strobeStartedAt: stampAt when the strobe goes on, kept while it stays on,
+ *  null while off. */
+function stampedStrobeStartedAt(
+  previous: VjStageState,
+  next: VjStageState,
+  stampAt: number,
+): number | null {
+  if (!next.effects.isStrobing) {
+    return null;
+  }
+  if (!previous.effects.isStrobing) {
+    return stampAt;
+  }
+  return next.effects.strobeStartedAt ?? stampAt;
+}
+
+/** overlay.hideAt: null while hidden; otherwise undefined keeps it, null
+ *  clears it and a number stamps stampAt + value. */
+function stampedOverlayHideAt(
+  next: VjStageState,
+  stampAt: number,
+  overlayHideAfterMs: number | null | undefined,
+): number | null {
+  if (!next.overlay.isVisible) {
+    return null;
+  }
+  if (overlayHideAfterMs === undefined) {
+    return next.overlay.hideAt;
+  }
+  return overlayHideAfterMs === null ? null : stampAt + overlayHideAfterMs;
+}
+
+/** Contract 7.4 step 5 with plan note 12: `liveSince`, `strobeStartedAt` and
+ *  `overlay.hideAt` stamped from `stampAt` (the change's applyAt, or now). */
+export function stampVjChangeTimes(
+  previous: VjStageState,
+  next: VjStageState,
+  stampAt: number,
+  overlayHideAfterMs: number | null | undefined,
+): VjStageState {
+  return {
+    ...next,
+    liveSince: stampedLiveSince(previous, next, stampAt),
+    effects: {
+      ...next.effects,
+      strobeStartedAt: stampedStrobeStartedAt(previous, next, stampAt),
+    },
+    overlay: {
+      ...next.overlay,
+      hideAt: stampedOverlayHideAt(next, stampAt, overlayHideAfterMs),
+    },
+  };
+}
+
+/** The applyAt an attach frame carries (contract 7.4): the pending applyAt
+ *  while it is in the future, else null. */
+export function vjAttachApplyAt(
+  pendingApplyAt: number | null,
+  now: number,
+): number | null {
+  return pendingApplyAt !== null && pendingApplyAt > now
+    ? pendingApplyAt
+    : null;
+}

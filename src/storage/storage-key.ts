@@ -3,6 +3,7 @@ import {
   IMAGE_UPLOAD_TYPES,
   STUDIO_AUDIO_UPLOAD_TYPES,
   VJ_CLIP_UPLOAD_TYPES,
+  VJ_PREVIEW_UPLOAD_TYPES,
   VJ_THUMBNAIL_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKindSpec } from './upload-kinds';
@@ -26,12 +27,15 @@ import type { VjClipMimeType } from '../vj/vj.contract';
 // VJ keys (`vj-clips/...`, `vj-thumbnails/...`) are left out for the same
 // reason: they carry two random segments, so the owner check must never read
 // the middle one.
+// VJ v2: preview keys (`vj-previews/...`) carry two random segments too and
+// stay out on the same terms.
 const UPLOAD_PREFIXES = Object.values(UPLOAD_KIND_SPECS)
   .filter(
     (spec) =>
       spec !== UPLOAD_KIND_SPECS.studio_audio &&
       spec !== UPLOAD_KIND_SPECS.vj_clip &&
-      spec !== UPLOAD_KIND_SPECS.vj_thumbnail,
+      spec !== UPLOAD_KIND_SPECS.vj_thumbnail &&
+      spec !== UPLOAD_KIND_SPECS.vj_preview,
   )
   .map((spec) => spec.prefix);
 
@@ -191,6 +195,10 @@ const VJ_THUMBNAIL_EXTENSIONS = Object.values(VJ_THUMBNAIL_UPLOAD_TYPES).map(
   (spec) => spec.extension,
 );
 
+const VJ_PREVIEW_EXTENSIONS = Object.values(VJ_PREVIEW_UPLOAD_TYPES).map(
+  (spec) => spec.extension,
+);
+
 /** `vj-clips/<uuid>/<uuid>.mp4|.webm|.gif`, as `presignVjUpload` mints it. */
 export const VJ_CLIP_KEY_PATTERN = new RegExp(
   `^${escapeForRegex(UPLOAD_KIND_SPECS.vj_clip.prefix)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${VJ_CLIP_EXTENSIONS.map(escapeForRegex).join('|')})$`,
@@ -199,6 +207,11 @@ export const VJ_CLIP_KEY_PATTERN = new RegExp(
 /** `vj-thumbnails/<uuid>/<uuid>.webp`, as `presignVjUpload` mints it. */
 export const VJ_THUMBNAIL_KEY_PATTERN = new RegExp(
   `^${escapeForRegex(UPLOAD_KIND_SPECS.vj_thumbnail.prefix)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${VJ_THUMBNAIL_EXTENSIONS.map(escapeForRegex).join('|')})$`,
+);
+
+/** `vj-previews/<uuid>/<uuid>.webm|.mp4`, as `presignVjUpload` mints it. */
+export const VJ_PREVIEW_KEY_PATTERN = new RegExp(
+  `^${escapeForRegex(UPLOAD_KIND_SPECS.vj_preview.prefix)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${VJ_PREVIEW_EXTENSIONS.map(escapeForRegex).join('|')})$`,
 );
 
 /** Whether a value is a VJ clip key. */
@@ -211,9 +224,14 @@ export function isVjThumbnailKey(value: string): boolean {
   return typeof value === 'string' && VJ_THUMBNAIL_KEY_PATTERN.test(value);
 }
 
-/** Whether a value is a VJ clip key or a VJ thumbnail key. */
+/** Whether a value is a VJ animated preview key. */
+export function isVjPreviewKey(value: string): boolean {
+  return typeof value === 'string' && VJ_PREVIEW_KEY_PATTERN.test(value);
+}
+
+/** Whether a value is a VJ clip, thumbnail or preview key. */
 export function isVjKey(value: string): boolean {
-  return isVjClipKey(value) || isVjThumbnailKey(value);
+  return isVjClipKey(value) || isVjThumbnailKey(value) || isVjPreviewKey(value);
 }
 
 /** The content type a VJ clip key's extension stands for, or null. */
@@ -226,6 +244,22 @@ export function vjClipContentTypeForKey(value: string): VjClipMimeType | null {
     ([, spec]) => spec.extension === extension,
   );
   return matchingEntry ? (matchingEntry[0] as VjClipMimeType) : null;
+}
+
+/** The content type a VJ preview key's extension stands for, or null. */
+export function vjPreviewContentTypeForKey(
+  value: string,
+): 'video/webm' | 'video/mp4' | null {
+  if (!isVjPreviewKey(value)) {
+    return null;
+  }
+  const extension = value.slice(value.lastIndexOf('.'));
+  const matchingEntry = Object.entries(VJ_PREVIEW_UPLOAD_TYPES).find(
+    ([, spec]) => spec.extension === extension,
+  );
+  return matchingEntry
+    ? (matchingEntry[0] as 'video/webm' | 'video/mp4')
+    : null;
 }
 
 /**
@@ -252,6 +286,9 @@ export function parseStorageKey(value: string): UploadKindSpec | null {
   }
   if (VJ_THUMBNAIL_KEY_PATTERN.test(value)) {
     return UPLOAD_KIND_SPECS.vj_thumbnail;
+  }
+  if (VJ_PREVIEW_KEY_PATTERN.test(value)) {
+    return UPLOAD_KIND_SPECS.vj_preview;
   }
   const match = STORAGE_KEY_PATTERN.exec(value);
   if (!match) {

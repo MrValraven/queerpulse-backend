@@ -5,10 +5,20 @@ import {
   AddVjPackClipDto,
   CreateVjClipDto,
   CreateVjPackDto,
+  CreateVjSceneDto,
+  CreateVjSetlistDto,
   RenameVjPackDto,
+  RenameVjSetlistDto,
   ReorderVjPackClipsDto,
   ReorderVjPacksDto,
+  ReorderVjScenesDto,
+  ReorderVjSetlistsDto,
+  SetVjClipPreviewDto,
+  SetVjPackEventDto,
+  SetVjSetlistItemsDto,
   UpdateVjClipDto,
+  UpdateVjSceneDto,
+  VjClipsMediaQuery,
   VjPackMediaQuery,
 } from './vj.dto';
 
@@ -63,6 +73,80 @@ describe('VJ DTOs', () => {
     const { instance, errors } = await validated(VjPackMediaQuery, plain);
     expect(errors).toHaveLength(0);
     expect({ ...instance }).toEqual(plain);
+  });
+
+  it('lets every v2 clip update value through', async () => {
+    const plain = {
+      title: 'Peak hour',
+      fitMode: 'fit',
+      isFavorite: 'true',
+      defaultSpeed: '1',
+      loopInMs: -1,
+      loopOutMs: null,
+      loopMode: 7,
+    };
+    const { instance, errors } = await validated(UpdateVjClipDto, plain);
+    expect(errors).toHaveLength(0);
+    expect({ ...instance }).toEqual(plain);
+  });
+
+  it('lets every field of each new DTO through so the service answers its code', async () => {
+    const cases: Array<[new () => object, Record<string, unknown>]> = [
+      [SetVjClipPreviewDto, { previewStorageKey: 5 }],
+      [SetVjPackEventDto, { eventId: null }],
+      [SetVjPackEventDto, { eventId: 'nope' }],
+      [CreateVjSceneDto, { name: 5, packId: 'nope', look: 'flat' }],
+      [
+        CreateVjSceneDto,
+        { name: 'Glow', packId: null, look: { source: null } },
+      ],
+      [UpdateVjSceneDto, { name: null, packId: 7, look: [] }],
+      [ReorderVjScenesDto, { sceneIds: 'a,b' }],
+      [CreateVjSetlistDto, { name: [], sceneIds: [1, 2] }],
+      [RenameVjSetlistDto, { name: 5 }],
+      [ReorderVjSetlistsDto, { setlistIds: { first: 'a' } }],
+      [SetVjSetlistItemsDto, { sceneIds: 'a' }],
+      [VjClipsMediaQuery, { clipIds: ['a', 'b'] }],
+    ];
+    for (const [dtoClass, plain] of cases) {
+      const { instance, errors } = await validated(dtoClass, plain);
+      expect(errors).toHaveLength(0);
+      expect({ ...instance }).toEqual(plain);
+    }
+  });
+
+  it('lets an empty body through each new DTO', async () => {
+    const dtoClasses: Array<new () => object> = [
+      SetVjClipPreviewDto,
+      SetVjPackEventDto,
+      CreateVjSceneDto,
+      UpdateVjSceneDto,
+      ReorderVjScenesDto,
+      CreateVjSetlistDto,
+      RenameVjSetlistDto,
+      ReorderVjSetlistsDto,
+      SetVjSetlistItemsDto,
+      VjClipsMediaQuery,
+    ];
+    for (const dtoClass of dtoClasses) {
+      const { errors } = await validated(dtoClass, {});
+      expect(errors).toHaveLength(0);
+    }
+  });
+
+  it('refuses an undeclared property on the new DTOs', async () => {
+    const scene = await validated(CreateVjSceneDto, {
+      name: 'Glow',
+      position: 3,
+    });
+    expect(scene.errors).toHaveLength(1);
+    expect(scene.errors[0]?.property).toBe('position');
+    const items = await validated(SetVjSetlistItemsDto, {
+      sceneIds: [],
+      setlistId: 'x',
+    });
+    expect(items.errors).toHaveLength(1);
+    expect(items.errors[0]?.property).toBe('setlistId');
   });
 
   it('still refuses an undeclared property', async () => {

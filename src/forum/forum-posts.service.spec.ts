@@ -37,6 +37,9 @@ function build() {
     createdAt: new Date(),
     editedAt: null as Date | null,
     deletedAt: null as Date | null,
+    // Who tombstoned the post (BE-COM-01): null is a live post or a legacy
+    // tombstone, which `assertCanRestore` leaves to the author-or-moderator gate.
+    deletedById: null as string | null,
   };
   // `updatePostBody` now snapshots + saves inside `posts.manager.transaction`,
   // so the edit row and the mutated post go through the transaction `manager`
@@ -182,6 +185,16 @@ describe('ForumPostsService authorization', () => {
       expect.objectContaining({ deletedAt: null }),
     );
   });
+
+  it('restorePost: the author cannot undo a moderator takedown (BE-COM-01)', async () => {
+    const { service, post, managerSave } = build();
+    post.deletedAt = new Date();
+    post.deletedById = mod.userId;
+    await expect(service.restorePost('p1', author)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(managerSave).not.toHaveBeenCalled();
+  });
 });
 
 // --- ENG-132: a tombstoned reply stops being counted -------------------------
@@ -217,6 +230,8 @@ describe('ForumPostsService reply count on delete/restore', () => {
   it('increments it again when the reply is restored', async () => {
     const { service, post, managerUpdate } = build();
     post.deletedAt = new Date();
+    // The author's own delete, so the author may restore it.
+    post.deletedById = author.userId;
 
     await service.restorePost('p1', author);
 
@@ -919,6 +934,9 @@ function buildListPosts(options: {
       query: jest
         .fn()
         .mockResolvedValue((options.descendantIds ?? []).map((id) => ({ id }))),
+      // `photoRowsByPost`, the batched `forum_post_photo` read every post mapper
+      // goes through. Default: no photo rows.
+      find: jest.fn().mockResolvedValue([]),
     },
   };
   const votes = { find: jest.fn().mockResolvedValue([]) };

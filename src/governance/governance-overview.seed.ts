@@ -85,13 +85,11 @@ const principles: OverviewPrinciple[] = [
   { key: 'accessNotConditional', icon: 'accessible' },
 ];
 
-// Short decision key → `governance:decisions.<key>.lead` / `.body`. Order = array order.
-const decisions: OverviewDecision[] = [
-  { key: 'slidingScale' },
-  { key: 'forumLaunched' },
-  { key: 'visibilityDefaults' },
-  { key: 'languageToggle' },
-];
+// The decision log starts empty. It shipped with four dated entries (sliding
+// scale, forum launch, visibility defaults, language toggle) credited to a
+// council that is still being appointed; none of them was a recorded decision.
+// Real entries are authored by the governance team on the Policy tab.
+const decisions: OverviewDecision[] = [];
 
 export const governanceOverviewSeed = {
   id: GOVERNANCE_OVERVIEW_ID,

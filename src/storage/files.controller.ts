@@ -677,12 +677,14 @@ export class FilesController {
         }
       } else if (
         kindSpec === UPLOAD_KIND_SPECS.vj_clip ||
-        kindSpec === UPLOAD_KIND_SPECS.vj_thumbnail
+        kindSpec === UPLOAD_KIND_SPECS.vj_thumbnail ||
+        kindSpec === UPLOAD_KIND_SPECS.vj_preview
       ) {
-        // VJ keys name nobody and are served to admins only. This branch sits
-        // inside the chain so a VJ key never reaches the uploader-only
-        // fallback below, which would 404 every admin. A 404 keeps the route
-        // from revealing which keys exist.
+        // VJ keys (clips, thumbnails and animated previews) name nobody and
+        // are served to admins only. This branch sits inside the chain so a
+        // VJ key never reaches the uploader-only fallback below, which would
+        // 404 every admin. A 404 keeps the route from revealing which keys
+        // exist.
         if ((user.role as UserRole) !== UserRole.Admin) {
           throw new NotFoundException();
         }

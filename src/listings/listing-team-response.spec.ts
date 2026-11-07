@@ -1,4 +1,8 @@
-import { toImageUrl } from '../common/image-url';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+  toImageUrl,
+} from '../common/image-url';
 import type { CropRect } from '../media-crops/crop-rect';
 import { toBareKey } from '../storage/bare-key';
 import {
@@ -31,7 +35,8 @@ import {
   type ListingTeamPersonaColumns,
 } from './listing-team-response';
 
-const AVATAR_KEY = 'uploads/persona-avatar.jpg';
+const AVATAR_KEY =
+  'persona/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.jpg';
 const CROP: CropRect = {
   x: 0.1,
   y: 0.2,
@@ -54,7 +59,10 @@ function makePersona(
   };
 }
 
-const MEMBER_AVATAR_KEY = 'uploads/member-avatar.jpg';
+const MEMBER_AVATAR_KEY =
+  'avatars/33333333-3333-4333-8333-333333333333/44444444-4444-4444-8444-444444444444.jpg';
+const OTHER_MEMBER_AVATAR_KEY =
+  'avatars/55555555-5555-4555-8555-555555555555/66666666-6666-4666-8666-666666666666.jpg';
 
 function makeMemberProfile(
   overrides: Partial<ListingTeamMemberColumns> = {},
@@ -143,6 +151,14 @@ function makeMember(
 }
 
 describe('listing team response mappers', () => {
+  beforeAll(() => {
+    setImageUrlBase('https://api.test');
+  });
+
+  afterAll(() => {
+    resetImageUrlBaseForTesting();
+  });
+
   it('carries the avatar like the public view and omits the crop key when none was saved', () => {
     const crops = new Map<string, CropRect>([[toBareKey(AVATAR_KEY), CROP]]);
     const withCrop = toListingTeamPersona(makePersona(), crops, null);
@@ -367,7 +383,7 @@ describe('listing team response mappers', () => {
       memberAvatarKeys([
         makeMemberProfile(),
         makeMemberProfile({
-          avatarUrl: 'uploads/other.jpg',
+          avatarUrl: OTHER_MEMBER_AVATAR_KEY,
           photoVisible: false,
         }),
         makeMemberProfile({ avatarUrl: null }),

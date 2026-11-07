@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { Event } from '../events/entities/event.entity';
 import { StorageModule } from '../storage/storage.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
@@ -10,14 +11,23 @@ import { AdminVjController } from './admin-vj.controller';
 import { VjClip } from './entities/vj-clip.entity';
 import { VjPackClip } from './entities/vj-pack-clip.entity';
 import { VjPack } from './entities/vj-pack.entity';
+import { VjScene } from './entities/vj-scene.entity';
+import { VjSetlistItem } from './entities/vj-setlist-item.entity';
+import { VjSetlist } from './entities/vj-setlist.entity';
+import { VjEventLinkService } from './vj-event-link.service';
 import { VjGateway } from './vj.gateway';
 import { VjLibraryService } from './vj-library.service';
+import { VjSceneService } from './vj-scene.service';
+import { VjSetlistService } from './vj-setlist.service';
+import { VjStageReadsService } from './vj-stage-reads.service';
 import { VjStageService } from './vj-stage.service';
 
 /**
- * The VJ feature: the admin library at `admin/vj` (packs and clips), the
- * in-memory stages and the `/vj` socket namespace that drives them. Exports
- * nothing; no other module reads VJ.
+ * The VJ feature: the admin library at `admin/vj` (packs, clips, pack event
+ * links, scenes and set lists), the in-memory stages and the `/vj` socket
+ * namespace that drives them. Exports nothing; no other module reads VJ.
+ * `ConfigService` (the event card's frontend URL, the socket secret) comes
+ * from the global config module, so no `ConfigModule` import.
  */
 @Module({
   imports: [
@@ -26,6 +36,12 @@ import { VjStageService } from './vj-stage.service';
       VjClip,
       VjPack,
       VjPackClip,
+      VjScene,
+      VjSetlist,
+      VjSetlistItem,
+      // Read-only: the pack event link check, the event card and the
+      // upcoming events list read `events`; nothing here writes it.
+      Event,
       // `Profile` gives clips and packs their creator names, and `User` backs
       // the role check.
       Profile,
@@ -46,6 +62,14 @@ import { VjStageService } from './vj-stage.service';
     JwtModule.register({}),
   ],
   controllers: [AdminVjController],
-  providers: [VjLibraryService, VjStageService, VjGateway],
+  providers: [
+    VjLibraryService,
+    VjStageService,
+    VjStageReadsService,
+    VjEventLinkService,
+    VjSceneService,
+    VjSetlistService,
+    VjGateway,
+  ],
 })
 export class VjModule {}

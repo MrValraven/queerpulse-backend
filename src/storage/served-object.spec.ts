@@ -136,4 +136,20 @@ describe('VJ video signatures', () => {
       contentTypeForStorageKey(`vj-clips/${FIRST_UUID}/${SECOND_UUID}.gif`),
     ).toBe('image/gif');
   });
+
+  it('serves .webm and .mp4 preview keys as video', () => {
+    const FIRST_UUID = '0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b';
+    const SECOND_UUID = '5d1e7c90-2a3b-4c4d-8e5f-6a7b8c9d0e1f';
+    expect(
+      contentTypeForStorageKey(`vj-previews/${FIRST_UUID}/${SECOND_UUID}.webm`),
+    ).toBe('video/webm');
+    expect(
+      contentTypeForStorageKey(`vj-previews/${FIRST_UUID}/${SECOND_UUID}.mp4`),
+    ).toBe('video/mp4');
+    expect(
+      inlineContentDispositionForStorageKey(
+        `vj-previews/${FIRST_UUID}/${SECOND_UUID}.webm`,
+      ),
+    ).toBe(`inline; filename="${SECOND_UUID}.webm"`);
+  });
 });

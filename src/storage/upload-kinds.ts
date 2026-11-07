@@ -22,7 +22,8 @@ export type UploadKind =
   | 'sticker'
   | 'studio_audio'
   | 'vj_clip'
-  | 'vj_thumbnail';
+  | 'vj_thumbnail'
+  | 'vj_preview';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -299,6 +300,13 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   vj_thumbnail: {
     prefix: 'vj-thumbnails',
     maxBytes: 256 * 1024,
+    requiresSession: true,
+  },
+  // VJ: the short animated preview the browser records from a clip
+  // (about 2 s, 240 px long edge). Admin only, key with two random segments.
+  vj_preview: {
+    prefix: 'vj-previews',
+    maxBytes: 512 * 1024,
     requiresSession: true,
   },
 };

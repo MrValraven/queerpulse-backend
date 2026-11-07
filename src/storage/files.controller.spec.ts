@@ -20,6 +20,10 @@ import {
 } from '../messaging/mailbox-seats';
 import { FilesController } from './files.controller';
 import { PersonaImageKeysService } from './persona-image-keys.service';
+import {
+  contentTypeForStorageKey,
+  magicBytesMatchContentType,
+} from './served-object';
 import { StorageService } from './storage.service';
 
 const PRESIGNED_DOWNLOAD =
@@ -1195,6 +1199,74 @@ describe('FilesController', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(storage.validateImageMagicBytes).toHaveBeenCalledWith(VJ_CLIP_KEY);
       expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    // v2: the clip's animated preview, recorded in the browser.
+    const VJ_WEBM_PREVIEW_KEY = `vj-previews/${USER_SEGMENT}/${FILE_SEGMENT}.webm`;
+    const VJ_MP4_PREVIEW_KEY = `vj-previews/${USER_SEGMENT}/${FILE_SEGMENT}.mp4`;
+
+    it('serves a preview key to an admin and 404s it for a moderator', async () => {
+      for (const key of [VJ_WEBM_PREVIEW_KEY, VJ_MP4_PREVIEW_KEY]) {
+        await expect(serve(key, null)).rejects.toBeInstanceOf(
+          UnauthorizedException,
+        );
+        await expect(serve(key, MODERATOR)).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        await expect(serve(key, MEMBER)).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        // The member whose id is the key's middle segment gets no pass from
+        // the uploader-only fallback.
+        await expect(
+          serve(key, { ...LOGGED_IN, role: 'member' }),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      }
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+
+      for (const key of [VJ_WEBM_PREVIEW_KEY, VJ_MP4_PREVIEW_KEY]) {
+        response.redirect.mockClear();
+        response.setHeader.mockClear();
+        await serve(key, { ...OTHER_MEMBER, role: 'admin' });
+        expect(storage.createPresignedDownload).toHaveBeenLastCalledWith(key, {
+          asAttachment: false,
+        });
+        expect(response.setHeader).toHaveBeenCalledWith(
+          'Cache-Control',
+          'private, no-store',
+        );
+        expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+      }
+      expect(users.findOne).not.toHaveBeenCalled();
+    });
+
+    it('404s a .mp4 preview whose brand is QuickTime', async () => {
+      // An `ftyp` box whose major brand is `qt  `: a MOV, which a browser
+      // recorder never writes.
+      const quickTimeBytes = Uint8Array.from([
+        0, 0, 0, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20, 0, 0, 0,
+        0,
+      ]);
+      const mp4ContentType = contentTypeForStorageKey(VJ_MP4_PREVIEW_KEY);
+      expect(mp4ContentType).toBe('video/mp4');
+      storage.validateImageMagicBytes.mockImplementation((key: string) =>
+        Promise.resolve(
+          magicBytesMatchContentType(
+            quickTimeBytes,
+            contentTypeForStorageKey(key),
+          )
+            ? 'valid'
+            : 'mismatch',
+        ),
+      );
+      await expect(
+        serve(VJ_MP4_PREVIEW_KEY, { ...OTHER_MEMBER, role: 'admin' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(storage.validateImageMagicBytes).toHaveBeenCalledWith(
+        VJ_MP4_PREVIEW_KEY,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+      expect(response.redirect).not.toHaveBeenCalled();
     });
   });
 });

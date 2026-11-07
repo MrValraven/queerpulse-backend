@@ -8,6 +8,7 @@ import {
 import {
   CopyObjectCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -15,6 +16,7 @@ import { StorageService, studioStreamExpirySeconds } from './storage.service';
 import {
   STUDIO_AUDIO_KEY_PATTERN,
   VJ_CLIP_KEY_PATTERN,
+  VJ_PREVIEW_KEY_PATTERN,
   VJ_THUMBNAIL_KEY_PATTERN,
   isStudioLandingScopedKey,
 } from './storage-key';
@@ -890,6 +892,132 @@ describe('StorageService', () => {
           byteSize: 1024,
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('mints preview keys with two random segments', async () => {
+      const service = buildService();
+      const createPresignedUpload = jest.spyOn(
+        service,
+        'createPresignedUpload',
+      );
+      const webmPreview = await service.presignVjUpload({
+        kind: 'vj_preview',
+        contentType: 'video/webm',
+        byteSize: 4096,
+      });
+      const mp4Preview = await service.presignVjUpload({
+        kind: 'vj_preview',
+        contentType: 'video/mp4',
+        byteSize: 4096,
+      });
+      expect(webmPreview.key).toMatch(VJ_PREVIEW_KEY_PATTERN);
+      expect(webmPreview.key.startsWith('vj-previews/')).toBe(true);
+      expect(webmPreview.key.endsWith('.webm')).toBe(true);
+      expect(mp4Preview.key).toMatch(VJ_PREVIEW_KEY_PATTERN);
+      expect(mp4Preview.key.endsWith('.mp4')).toBe(true);
+      // Both segments are minted fresh on every call, so a preview key names
+      // nobody.
+      const [, webmMiddleSegment, webmLastSegment] = webmPreview.key.split('/');
+      const [, mp4MiddleSegment, mp4LastSegment] = mp4Preview.key.split('/');
+      expect(webmMiddleSegment).not.toBe(mp4MiddleSegment);
+      expect(webmLastSegment).not.toBe(mp4LastSegment);
+      expect(createPresignedUpload).toHaveBeenCalledWith(
+        webmPreview.key,
+        'video/webm',
+        4096,
+      );
+      expect(webmPreview.expiresIn).toBe(300);
+    });
+
+    it('answers the VJ codes for a preview of the wrong type or size', async () => {
+      const service = buildService();
+      const gifPreview = await vjRefusalOf(
+        service.presignVjUpload({
+          kind: 'vj_preview',
+          contentType: 'image/gif',
+          byteSize: 10,
+        }),
+      );
+      expect(gifPreview.status).toBe(400);
+      expect(gifPreview.body).toEqual(
+        expect.objectContaining({
+          code: 'VJ_UPLOAD_TYPE_UNSUPPORTED',
+          kind: 'vj_preview',
+        }),
+      );
+
+      const oversizePreview = await vjRefusalOf(
+        service.presignVjUpload({
+          kind: 'vj_preview',
+          contentType: 'video/webm',
+          byteSize: 524289,
+        }),
+      );
+      expect(oversizePreview.status).toBe(413);
+      expect(oversizePreview.body).toEqual(
+        expect.objectContaining({
+          code: 'VJ_UPLOAD_TOO_LARGE',
+          kind: 'vj_preview',
+          maxBytes: 524288,
+        }),
+      );
+
+      await expect(
+        service.presignVjUpload({
+          kind: 'vj_preview',
+          contentType: 'video/mp4',
+          byteSize: 524288,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ expiresIn: 300 }));
+    });
+
+    it('refuses vj_preview on the image presign', async () => {
+      await expect(
+        buildService().presignImageUpload({
+          kind: 'vj_preview',
+          userId: 'user-1',
+          contentType: 'video/webm',
+          byteSize: 1024,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('leaves preview keys out of a user object sweep', async () => {
+      const userId = '99999999-8888-4777-8666-555555555555';
+      const service = buildService();
+      const previewKey = (
+        await service.presignVjUpload({
+          kind: 'vj_preview',
+          contentType: 'video/webm',
+          byteSize: 4096,
+        })
+      ).key;
+      const send = jest
+        .spyOn(S3Client.prototype, 'send')
+        .mockResolvedValue({ Contents: [], IsTruncated: false } as never);
+      try {
+        await expect(service.deleteUserObjects(userId)).resolves.toBe(0);
+        const listedPrefixes = send.mock.calls
+          .map(([command]) => command as unknown)
+          .filter(
+            (command): command is ListObjectsV2Command =>
+              command instanceof ListObjectsV2Command,
+          )
+          .map((command) => command.input.Prefix);
+        // The sweep lists the preview prefix under the member's id, and no
+        // preview key ever sits there: its middle segment is a fresh uuid.
+        expect(listedPrefixes).toContain(`vj-previews/${userId}/`);
+        expect(previewKey.startsWith(`vj-previews/${userId}/`)).toBe(false);
+        expect(previewKey).not.toContain(userId);
+        // Only list calls went out; nothing was deleted.
+        expect(
+          send.mock.calls.every(
+            ([command]) => command instanceof ListObjectsV2Command,
+          ),
+        ).toBe(true);
+      } finally {
+        send.mockRestore();
+      }
     });
 
     it('signs a 900 second clip GET with the stored type', async () => {

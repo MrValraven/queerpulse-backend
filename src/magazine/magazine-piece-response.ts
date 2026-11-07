@@ -262,8 +262,10 @@ export function deriveWaitingOn(
  * other paths set the stage themselves and log their own action instead:
  * a writer filing (`filed`, commissioned/drafting to in_review), a publish
  * (`article_published`), an issue ship (`issue_shipped`), taking a live
- * piece down (`article_unpublished`, published to ready), and rescheduling a
- * live piece to a future instant (`article_scheduled`, published to ready).
+ * piece down (`article_unpublished`, published to ready; an unpublish sent to
+ * drafting or in review also writes a `stage_changed` row for that stage), and
+ * rescheduling a live piece to a future instant (`article_scheduled`,
+ * published to ready).
  *
  * Each of those actions can also fire WITHOUT a stage move (a refile while
  * already in review, a re-save of a live piece, unscheduling a piece still at
