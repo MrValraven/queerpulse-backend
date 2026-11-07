@@ -355,7 +355,8 @@ export class StorageService {
    * VJ (contract 3.2, v2 4.1): presign a clip, thumbnail or animated preview
    * upload under `<prefix>/<uuid>/<uuid><ext>`, both segments random, so the
    * key names no member and account erasure never reaches the shared
-   * library. The caller has already checked the Admin role. A content type
+   * library. The caller has already checked VJ access (the Admin role or the
+   * `vj_operator` staff grant). A content type
    * outside the kind's table answers `VJ_UPLOAD_TYPE_UNSUPPORTED` and an
    * over-cap size `VJ_UPLOAD_TOO_LARGE`, in that order.
    */

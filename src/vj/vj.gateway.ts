@@ -2,23 +2,34 @@
  * VJ (`vj`) socket namespace `/vj`. The handshake copies the Pulse Live one
  * (origin allowlist, cookie or `auth.token`, pinned JWT verify, a handshake
  * bucket on the verified user, the live user row and a live refresh-token
- * family) and admits active Admins only: any other role gets
- * `exception FORBIDDEN` with `domainCode: 'vj_not_admin'` and is dropped.
- * Admins always pass lockdown, so the namespace reads no lockdown setting.
- * The socket is dropped at the token's `exp` with `TOKEN_EXPIRED`;
- * `session:reauth` with a socket ticket extends it and reads the role again.
+ * family) and admits an active Admin or an active holder of the
+ * `vj_operator` staff grant (`isAdminOrHoldsStaffRole`, the rule
+ * `RolesOrStaffGuard` applies to `admin/vj`). Anyone else gets
+ * `exception FORBIDDEN` with `domainCode: 'vj_not_admin'` and is dropped; the
+ * wire code keeps its name, and its message names the missing VJ access.
+ * Each caller drives a stage of their own, keyed by their user id.
  *
- * Every client frame rechecks the caller's live role, cached on the socket
- * for `VJ_ROLE_RECHECK_MS`, so a demoted admin loses the socket at their
- * next frame past the cache: the frame acks `vj_not_admin`, then the
- * `exception` frame and the drop follow on the next tick.
+ * Lockdown: an Admin always passes. A grant holder meets the
+ * `PlatformLockdownGuard` rule at the handshake and at `session:reauth`
+ * (a moderator passes when the lockdown allows moderators, everyone else gets
+ * `PLATFORM_LOCKED`), and switching a lockdown on drops every socket admitted
+ * through the grant so the handshake decides who comes back. Single replica,
+ * like the Pulse Live and desk presence gateways.
+ * The socket is dropped at the token's `exp` with `TOKEN_EXPIRED`;
+ * `session:reauth` with a socket ticket extends it and reads the access again.
+ *
+ * Every client frame rechecks the caller's live role and grant, cached on the
+ * socket for `VJ_ROLE_RECHECK_MS`, so a demoted admin or an operator whose
+ * grant was revoked loses the socket at their next frame past the cache: the
+ * frame acks `vj_not_admin`, then the `exception` frame and the drop follow
+ * on the next tick.
  *
  * Stage state lives in memory in `VjStageService`, which also reads the
  * lookups of every stage command (contract 7.7). This gateway reads the
  * restore lookups of a screen attach and the set list counts a library change
  * needs, stamps `serverNow` on every ack (contract 7.2) and fans the frames
- * out to the rooms of contract 6.3. Log lines name frames, codes, the admin
- * user id, socket ids and entity ids only: payloads, overlay text, clip
+ * out to the rooms of contract 6.3. Log lines name frames, codes, the stage
+ * owner's user id, socket ids and entity ids only: payloads, overlay text, clip
  * titles, pack, scene and set list names, countdown labels and event titles
  * stay out.
  */
@@ -50,6 +61,7 @@ import type { DefaultEventsMap, Namespace, Socket } from 'socket.io';
 import { IsNull, MoreThan, Repository } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { socketTicketService } from '../auth/socket-ticket.service';
+import { isAdminOrHoldsStaffRole } from '../auth/staff-grant-access';
 import {
   USER_SESSION_REVOKED,
   type UserSessionRevokedEvent,
@@ -62,12 +74,17 @@ import {
   type ChatWsErrorFrame,
 } from '../chat/ws-error';
 import { TokenBucketLimiter } from '../chat/ws-rate-limiter';
+import { DEFAULT_LOCKDOWN_MESSAGE } from '../common/lockdown.constants';
 import { VALIDATION_PIPE_OPTIONS } from '../common/validation-pipe.options';
 import {
   resolveAllowedOrigins,
   resolveFrontendOrigins,
 } from '../config/frontend-origins';
+import { PLATFORM_LOCKDOWN_ENABLED } from '../platform-settings/platform-settings.events';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import type { StaffRoleId } from '../users/staff-roles.registry';
 import {
   VjAttachPayloadDto,
   VjClockSyncPayloadDto,
@@ -154,7 +171,11 @@ const IDENTIFY_RATE_LIMIT = { capacity: 5, refillPerSecond: 0.5 };
 /** `clock:sync` per socket: 10, then one per second. */
 const CLOCK_SYNC_RATE_LIMIT = { capacity: 10, refillPerSecond: 1 };
 
-/** How long a socket's admin verdict is trusted before a frame reads `users.role` again. */
+/** The staff grant that opens VJ to a caller who is not an Admin. */
+const VJ_STAFF_ROLES: readonly StaffRoleId[] = ['vj_operator'];
+
+/** How long a socket's access verdict (an active Admin or an active
+ *  `vj_operator` holder) is trusted before a frame reads it again. */
 export const VJ_ROLE_RECHECK_MS = 5000;
 /** How often idle buckets are reclaimed and idle stages swept. */
 const VJ_SWEEP_INTERVAL_MS = 600_000;
@@ -164,12 +185,13 @@ const SCREENS_UPDATE_THROTTLE_MS = 250;
 /** `setTimeout` clamps a longer delay to 1 ms, so the expiry timer chains legs of at most this length. */
 const MAX_SET_TIMEOUT_DELAY_MS = 2_147_483_647;
 
-/** The room every screen and remote of one admin joins; it receives `stage:state`. */
+/** The room every screen and remote of one stage owner (an Admin or a VJ
+ *  operator) joins; it receives `stage:state`. */
 export function vjStageRoomName(adminUserId: string): string {
   return `vj:${adminUserId}`;
 }
 
-/** The room of one admin's remote sockets; it receives `screens:update`. */
+/** The room of one stage owner's remote sockets; it receives `screens:update`. */
 export function vjRemotesRoomName(adminUserId: string): string {
   return `vj:${adminUserId}:remotes`;
 }
@@ -237,12 +259,17 @@ interface VjSocketData {
   isAttached?: boolean;
   /** The screen id of a screen socket. */
   screenId?: string;
-  /** Epoch ms of the last read that found an active Admin. */
-  adminCheckedAt?: number;
-  /** The role read in flight, shared by frames that arrive while it runs. */
-  pendingAdminCheck?: Promise<boolean>;
-  /** Set once a read found no active Admin; the drop is already scheduled. */
-  hasLostAdmin?: boolean;
+  /** Epoch ms of the last read that found VJ access (an active Admin or an
+   *  active `vj_operator` holder). */
+  accessCheckedAt?: number;
+  /** The access read in flight, shared by frames that arrive while it runs. */
+  pendingAccessCheck?: Promise<VjAccess>;
+  /** Set once a read found no VJ access; the drop is already scheduled. */
+  hasLostVjAccess?: boolean;
+  /** Whether the last access read admitted this socket through the
+   *  `vj_operator` grant (a caller who is not an Admin). A lockdown drops
+   *  these sockets. */
+  isAdmittedByGrant?: boolean;
   /** The tail of this socket's command queue: every `stage:*` command and
    *  `screen:advance` runs after the one before it settles, so a command
    *  with an existence read cannot be overtaken by a later one. Never rejects. */
@@ -255,6 +282,10 @@ type VjSocket = Socket<
   DefaultEventsMap,
   VjSocketData
 >;
+
+/** What one access read found: no VJ access, an Admin, or a caller let in by
+ *  the `vj_operator` grant alone. */
+type VjAccess = 'none' | 'admin' | 'grant';
 
 /** The verdict of the checks every frame runs before its own rules. */
 type VjFrameGate =
@@ -284,12 +315,13 @@ function toPayloadRecord(payload: unknown): Record<string, unknown> {
   return { ...(payload as Record<string, unknown>) };
 }
 
-/** Reads the lost-admin flag afresh, so a check after an await is not narrowed by one before it. */
-function hasLostAdminNow(data: VjSocketData): boolean {
-  return data.hasLostAdmin === true;
+/** Reads the lost-access flag afresh, so a check after an await is not narrowed by one before it. */
+function hasLostVjAccessNow(data: VjSocketData): boolean {
+  return data.hasLostVjAccess === true;
 }
 
-/** The `exception` frame sent before a socket whose caller is no longer an active Admin is dropped. */
+/** The `exception` frame sent before a socket whose caller has no VJ access
+ *  (neither an active Admin nor an active `vj_operator` holder) is dropped. */
 function notAdminFrame(): ChatWsErrorFrame {
   return buildChatWsErrorFrame(
     'FORBIDDEN',
@@ -333,7 +365,7 @@ export class VjGateway
   @WebSocketServer() namespace!: Namespace;
   private readonly logger = new Logger(VjGateway.name);
   private sweepTimer: NodeJS.Timeout | null = null;
-  /** One trailing `screens:update` timer per admin user id. */
+  /** One trailing `screens:update` timer per stage owner's user id. */
   private readonly screensUpdateTimers = new Map<string, NodeJS.Timeout>();
   private readonly handshakeLimiter = new TokenBucketLimiter(
     HANDSHAKE_RATE_LIMIT,
@@ -364,6 +396,9 @@ export class VjGateway
     @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(RefreshToken)
     private readonly refreshTokens: Repository<RefreshToken>,
+    @InjectRepository(UserStaffRole)
+    private readonly staffRoles: Repository<UserStaffRole>,
+    private readonly platformSettings: PlatformSettingsService,
   ) {}
 
   /** The stage service broadcasts its timer frames (strobe, overlay and
@@ -451,6 +486,36 @@ export class VjGateway
       } else if (memberSocket.data.familyId === undefined) {
         memberSocket.disconnect(true);
       }
+    }
+  }
+
+  /**
+   * Lockdown is the platform kill switch. An Admin always passes it, so only
+   * the sockets the `vj_operator` grant admitted get `PLATFORM_LOCKED` and
+   * are dropped; the handshake decides who may come back (a moderator holding
+   * the grant, when the lockdown allows moderators).
+   */
+  @OnEvent(PLATFORM_LOCKDOWN_ENABLED)
+  async handleLockdownEnabled(): Promise<void> {
+    const grantSockets = [...(this.namespace?.sockets.values() ?? [])].filter(
+      (socket) => (socket as VjSocket).data.isAdmittedByGrant === true,
+    );
+    if (grantSockets.length === 0) return;
+    this.logger.warn(
+      `Lockdown enabled: disconnecting ${grantSockets.length} VJ operator sockets`,
+    );
+    let lockdownMessage = DEFAULT_LOCKDOWN_MESSAGE;
+    try {
+      lockdownMessage =
+        (await this.platformSettings.get()).lockdownMessage ||
+        DEFAULT_LOCKDOWN_MESSAGE;
+    } catch {
+      // The drop matters more than the wording; the default copy stands in.
+    }
+    const frame = buildChatWsErrorFrame('PLATFORM_LOCKED', lockdownMessage);
+    for (const socket of grantSockets) {
+      socket.emit('exception', frame);
+      socket.disconnect(true);
     }
   }
 
@@ -801,6 +866,7 @@ export class VjGateway
     }
     let exp: number;
     let familyId: string | undefined;
+    let access: VjAccess;
     const checkStartedAt = Date.now();
     try {
       const record = socketTicketService.redeem(payload.ticket, userId);
@@ -811,9 +877,11 @@ export class VjGateway
         throw new ChatWsException('SESSION_REVOKED', 'Unauthorized');
       }
       const user = await this.loadAdmittableUser(userId);
-      if (user.role !== UserRole.Admin) {
+      access = await this.accessOf(user);
+      if (access === 'none') {
         throw new ChatWsException('FORBIDDEN', VJ_NOT_ADMIN_MESSAGE);
       }
+      await this.assertNotLockedOut(user.role);
       await this.assertSessionLive(record.sessionId);
       exp = record.exp;
       familyId = record.sessionId;
@@ -821,10 +889,15 @@ export class VjGateway
       const code: ChatWsErrorCode =
         error instanceof ChatWsException ? error.code : 'SERVER_ERROR';
       this.logger.debug(
-        `VJ session:reauth refused: ${code} admin ${userId} socket ${client.id}`,
+        `VJ session:reauth refused: ${code} user ${userId} socket ${client.id}`,
       );
       if (code === 'FORBIDDEN') {
-        this.dropForLostAdmin(client);
+        this.dropForLostVjAccess(client);
+      } else if (
+        code === 'PLATFORM_LOCKED' &&
+        error instanceof ChatWsException
+      ) {
+        this.refuseHandshake(client, error.getError() as ChatWsErrorFrame);
       } else {
         this.dropForExpiredCredential(client);
       }
@@ -835,7 +908,8 @@ export class VjGateway
     if (client.data.expiryTimer) clearTimeout(client.data.expiryTimer);
     client.data.exp = exp;
     client.data.familyId = familyId;
-    client.data.adminCheckedAt = checkStartedAt;
+    client.data.accessCheckedAt = checkStartedAt;
+    client.data.isAdmittedByGrant = access === 'grant';
     if (!this.scheduleTokenExpiry(client, exp)) {
       return { ok: false, code: 'TOKEN_EXPIRED' };
     }
@@ -891,20 +965,23 @@ export class VjGateway
       }
       const checkStartedAt = Date.now();
       const user = await this.loadAdmittableUser(claims.sub);
-      if (user.role !== UserRole.Admin) {
+      const access = await this.accessOf(user);
+      if (access === 'none') {
         this.logger.debug(
-          `VJ handshake refused: FORBIDDEN vj_not_admin socket ${client.id}`,
+          `VJ handshake refused: FORBIDDEN vj_not_admin (no Admin role or VJ operator grant) socket ${client.id}`,
         );
         this.refuseHandshake(client, notAdminFrame());
         return null;
       }
+      await this.assertNotLockedOut(user.role);
       await this.assertSessionLive(claims.sid);
       // The client may have gone while the checks above awaited.
       if (!client.connected) return null;
       client.data.userId = user.id;
       client.data.exp = claims.exp;
       client.data.familyId = claims.sid;
-      client.data.adminCheckedAt = checkStartedAt;
+      client.data.accessCheckedAt = checkStartedAt;
+      client.data.isAdmittedByGrant = access === 'grant';
       if (!this.scheduleTokenExpiry(client, claims.exp)) {
         client.data.userId = undefined;
         return null;
@@ -937,7 +1014,7 @@ export class VjGateway
 
   /**
    * The checks every frame runs before its own rules (note 8): admission,
-   * the frame's bucket, the admin recheck, then for every frame but attach
+   * the frame's bucket, the VJ access recheck, then for every frame but attach
    * `vj_not_attached` and `vj_wrong_role`. The bucket runs before the
    * recheck so a flood never reaches the database. A null `limiter` means
    * the frame was metered on arrival by `queueMeteredFrame`.
@@ -956,8 +1033,8 @@ export class VjGateway
     if (limiter !== null && !limiter.tryConsume(client.id)) {
       return deny('vj_rate_limited');
     }
-    const adminRefusal = await this.recheckAdmin(client, userId);
-    if (adminRefusal !== null) return deny(adminRefusal);
+    const accessRefusal = await this.recheckVjAccess(client, userId);
+    if (accessRefusal !== null) return deny(accessRefusal);
     if (expectedRole !== null) {
       if (client.data.isAttached !== true) return deny('vj_not_attached');
       if (client.data.role !== expectedRole) return deny('vj_wrong_role');
@@ -966,66 +1043,100 @@ export class VjGateway
   }
 
   /**
-   * Null while the caller is an active Admin. The verdict is trusted for
-   * `VJ_ROLE_RECHECK_MS`; an older one reads `users.role, users.status`
-   * first, shared by every frame that arrives while the read runs. A caller
-   * who lost the role gets `vj_not_admin` and is dropped after the ack.
+   * Null while the caller is an active Admin or an active `vj_operator`
+   * holder. The verdict is trusted for `VJ_ROLE_RECHECK_MS`; an older one
+   * reads `users.role, users.status` (and, for a caller who is not an Admin,
+   * their `vj_operator` grant) first, shared by every frame that arrives
+   * while the read runs. A caller who lost the role or whose grant was
+   * revoked gets `vj_not_admin` and is dropped after the ack.
    */
-  private async recheckAdmin(
+  private async recheckVjAccess(
     client: VjSocket,
     userId: string,
   ): Promise<VjSocketErrorCode | null> {
-    if (client.data.hasLostAdmin === true) return 'vj_not_admin';
+    if (client.data.hasLostVjAccess === true) return 'vj_not_admin';
     const checkStartedAt = Date.now();
-    const checkedAt = client.data.adminCheckedAt;
+    const checkedAt = client.data.accessCheckedAt;
     if (
       checkedAt !== undefined &&
       checkStartedAt - checkedAt < VJ_ROLE_RECHECK_MS
     ) {
       return null;
     }
-    let isActiveAdmin: boolean;
+    let access: VjAccess;
     try {
-      client.data.pendingAdminCheck ??= this.readIsActiveAdmin(userId).finally(
+      client.data.pendingAccessCheck ??= this.readHasVjAccess(userId).finally(
         () => {
-          client.data.pendingAdminCheck = undefined;
+          client.data.pendingAccessCheck = undefined;
         },
       );
-      isActiveAdmin = await client.data.pendingAdminCheck;
+      access = await client.data.pendingAccessCheck;
     } catch {
       return 'vj_server_error';
     }
-    // A `session:reauth` that found the role gone while this read awaited
+    // A `session:reauth` that found the access gone while this read awaited
     // has already scheduled the drop; this frame must not apply.
-    if (hasLostAdminNow(client.data)) return 'vj_not_admin';
-    if (!isActiveAdmin) {
-      this.dropForLostAdmin(client);
+    if (hasLostVjAccessNow(client.data)) return 'vj_not_admin';
+    if (access === 'none') {
+      this.dropForLostVjAccess(client);
       return 'vj_not_admin';
     }
-    client.data.adminCheckedAt = Math.max(
-      client.data.adminCheckedAt ?? 0,
+    client.data.isAdmittedByGrant = access === 'grant';
+    client.data.accessCheckedAt = Math.max(
+      client.data.accessCheckedAt ?? 0,
       checkStartedAt,
     );
     return null;
   }
 
-  private async readIsActiveAdmin(userId: string): Promise<boolean> {
+  /** The live access of a user id: their row, then (when they are not an
+   *  Admin) their `vj_operator` grant. An inactive or missing row has none. */
+  private async readHasVjAccess(userId: string): Promise<VjAccess> {
     const user = await this.users.findOne({
       where: { id: userId },
       select: { id: true, role: true, status: true },
     });
-    return (
-      user !== null &&
-      user.role === UserRole.Admin &&
-      user.status === UserStatus.Active
+    if (user === null || user.status !== UserStatus.Active) return 'none';
+    return this.accessOf(user);
+  }
+
+  /** An active row's VJ access: Admin on the role alone (no query), anyone
+   *  else through the `vj_operator` grant (one indexed lookup). */
+  private async accessOf(user: Pick<User, 'id' | 'role'>): Promise<VjAccess> {
+    if (user.role === UserRole.Admin) return 'admin';
+    const hasGrant = await isAdminOrHoldsStaffRole(
+      this.staffRoles,
+      { userId: user.id, role: user.role },
+      VJ_STAFF_ROLES,
+    );
+    return hasGrant ? 'grant' : 'none';
+  }
+
+  /**
+   * The `PlatformLockdownGuard` predicate: an Admin passes, a moderator when
+   * the lockdown allows moderators, and anyone else (a member holding the
+   * `vj_operator` grant) gets `PLATFORM_LOCKED` with the lockdown message.
+   * Settings come from an in-process cache, so an unlocked platform pays
+   * nothing here.
+   */
+  private async assertNotLockedOut(role: UserRole): Promise<void> {
+    if (role === UserRole.Admin) return;
+    const settings = await this.platformSettings.get();
+    if (!settings.lockdownEnabled) return;
+    if (role === UserRole.Moderator && settings.lockdownAllowsModerators) {
+      return;
+    }
+    throw new ChatWsException(
+      'PLATFORM_LOCKED',
+      settings.lockdownMessage || DEFAULT_LOCKDOWN_MESSAGE,
     );
   }
 
   /** The `exception FORBIDDEN vj_not_admin` frame and the drop, on the next tick so the frame's ack leaves first. */
-  private dropForLostAdmin(client: VjSocket): void {
-    // Scheduled once per socket, however many frames find the role gone.
-    if (client.data.hasLostAdmin === true) return;
-    client.data.hasLostAdmin = true;
+  private dropForLostVjAccess(client: VjSocket): void {
+    // Scheduled once per socket, however many frames find the access gone.
+    if (client.data.hasLostVjAccess === true) return;
+    client.data.hasLostVjAccess = true;
     setImmediate(() => {
       if (!client.connected) return;
       client.emit('exception', notAdminFrame());
@@ -1194,7 +1305,7 @@ export class VjGateway
   private dropReplacedScreen(socketId: string, userId: string): void {
     const replaced = this.namespace?.sockets.get(socketId);
     if (replaced === undefined) return;
-    this.logger.debug(`VJ screen replaced: admin ${userId} socket ${socketId}`);
+    this.logger.debug(`VJ screen replaced: user ${userId} socket ${socketId}`);
     replaced.emit(
       'exception',
       buildChatWsErrorFrame(
@@ -1312,13 +1423,13 @@ export class VjGateway
     });
   }
 
-  /** Runs a frame builder on the next tick, after the handler's ack; a builder that throws logs the admin id only. */
+  /** Runs a frame builder on the next tick, after the handler's ack; a builder that throws logs the stage owner's id only. */
   private emitOnNextTick(adminUserId: string, emitFrames: () => void): void {
     setImmediate(() => {
       try {
         emitFrames();
       } catch {
-        this.logger.error(`VJ frame emit failed: admin ${adminUserId}`);
+        this.logger.error(`VJ frame emit failed: user ${adminUserId}`);
       }
     });
   }
@@ -1349,7 +1460,7 @@ export class VjGateway
   ): VjAckFailure {
     if (!UNLOGGED_REFUSALS.has(failure.code)) {
       this.logger.debug(
-        `VJ ${frame} refused: ${failure.code} admin ${client.data.userId ?? 'none'} socket ${client.id}`,
+        `VJ ${frame} refused: ${failure.code} user ${client.data.userId ?? 'none'} socket ${client.id}`,
       );
     }
     return failure;

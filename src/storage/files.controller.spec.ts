@@ -4,6 +4,7 @@ import { Response } from 'express';
 import { PassThrough, Readable } from 'stream';
 import { Repository } from 'typeorm';
 import { IdentityKind } from '../identities/entities/identity.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User } from '../users/entities/user.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Message } from '../messaging/entities/message.entity';
@@ -70,6 +71,9 @@ describe('FilesController', () => {
   };
   let messages: { createQueryBuilder: jest.Mock };
   let personaImageKeys: { findServingRegistration: jest.Mock };
+  // The staff grants each user id holds, read by the VJ key branch.
+  let grantsByUserId: Map<string, string[]>;
+  let staffRoles: { exists: jest.Mock };
   let response: { redirect: jest.Mock; setHeader: jest.Mock };
 
   beforeEach(() => {
@@ -109,11 +113,26 @@ describe('FilesController', () => {
     personaImageKeys = {
       findServingRegistration: jest.fn().mockResolvedValue(null),
     };
+    // Default: nobody holds a staff grant.
+    grantsByUserId = new Map();
+    staffRoles = {
+      exists: jest.fn(
+        (options: { where: { userId: string; role: string }[] }) =>
+          Promise.resolve(
+            options.where.some((condition) =>
+              (grantsByUserId.get(condition.userId) ?? []).includes(
+                condition.role,
+              ),
+            ),
+          ),
+      ),
+    };
     controller = new FilesController(
       storage as unknown as StorageService,
       users as unknown as Repository<User>,
       messages as unknown as Repository<Message>,
       personaImageKeys as unknown as PersonaImageKeysService,
+      staffRoles as unknown as Repository<UserStaffRole>,
     );
   });
 
@@ -1155,8 +1174,9 @@ describe('FilesController', () => {
     });
   });
 
-  // VJ keys name nobody and are served to admins only, as a 404 to everyone
-  // else so the route never reveals which keys exist.
+  // VJ keys name nobody and are served to an admin and to a holder of the
+  // vj_operator grant, as a 404 to everyone else so the route never reveals
+  // which keys exist.
   describe('VJ keys', () => {
     const VJ_CLIP_KEY = `vj-clips/${USER_SEGMENT}/${FILE_SEGMENT}.mp4`;
     const VJ_THUMBNAIL_KEY = `vj-thumbnails/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
@@ -1209,6 +1229,31 @@ describe('FilesController', () => {
       await serve(VJ_CLIP_KEY, { ...OTHER_MEMBER, role: 'admin' });
       await serve(VJ_THUMBNAIL_KEY, { ...OTHER_MEMBER, role: 'admin' });
       expect(users.findOne).not.toHaveBeenCalled();
+      // An admin is answered on the role alone.
+      expect(staffRoles.exists).not.toHaveBeenCalled();
+    });
+
+    it('serves a VJ key to a member holding the vj_operator grant', async () => {
+      grantsByUserId.set(OTHER_MEMBER.userId, ['vj_operator']);
+      for (const key of [VJ_CLIP_KEY, VJ_THUMBNAIL_KEY]) {
+        response.redirect.mockClear();
+        await serve(key, MEMBER);
+        expect(storage.createPresignedDownload).toHaveBeenLastCalledWith(key, {
+          asAttachment: false,
+        });
+        expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+      }
+      expect(staffRoles.exists).toHaveBeenCalledWith({
+        where: [{ userId: OTHER_MEMBER.userId, role: 'vj_operator' }],
+      });
+    });
+
+    it('404s a VJ key for a member holding an unrelated grant', async () => {
+      grantsByUserId.set(OTHER_MEMBER.userId, ['music_manager_producer']);
+      await expect(serve(VJ_CLIP_KEY, MEMBER)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
     });
 
     it('404s a .mp4 key whose bytes are no MP4', async () => {

@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager } from 'typeorm';
+import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { Event } from '../events/entities/event.entity';
 import { gatheringPath } from '../events/event-paths';
 import type { SetVjPackEventDto } from './dto/vj.dto';
@@ -21,8 +23,10 @@ import {
   vjEventCardUnavailableReason,
   type VjEventOptionListDTO,
   type VjEventRow,
+  type VjPackClipsDTO,
   type VjPackDTO,
   type VjPackEventDTO,
+  type VjPackListDTO,
 } from './vj-response';
 import { vjError } from './vj.constants';
 import { VJ_LIBRARY_CHANGED } from './vj.contract';
@@ -60,6 +64,22 @@ export const VJ_PACK_EVENT_CARD_SQL = `SELECT "pack"."id" AS "pack_id", "event".
 FROM "vj_packs" "pack"
 LEFT JOIN "events" "event" ON "event"."id" = "pack"."event_id"
 WHERE "pack"."id" = $1::uuid`;
+
+/** `$1` event ids. The ids among them that a member's event listings leave
+ *  out although their status and visibility would list them: an event
+ *  moderation hid or removed (the rule of `EventsService
+ *  .excludeModeratedEvents`), and an event hosted by a space (spaces never
+ *  appear in Discover, `EventAudienceGateService.scopedVisibilityWhere`).
+ *  Selects the id alone. Read only for a caller outside the platform staff
+ *  tiers, so a VJ operator never reaches an event a plain member could not
+ *  find. */
+export const VJ_MEMBER_WITHHELD_EVENT_IDS_SQL = `SELECT "event"."id"
+FROM "events" "event"
+WHERE "event"."id" = ANY($1::uuid[]) AND (EXISTS (SELECT 1 FROM "content_moderation" "moderation" WHERE "moderation"."subject_type" = 'event' AND "moderation"."subject_id" = "event"."id"::text AND ("moderation"."hidden_at" IS NOT NULL OR "moderation"."removed_at" IS NOT NULL)) OR EXISTS (SELECT 1 FROM "communities" "host_community" WHERE "host_community"."id" = "event"."community_id" AND "host_community"."parent_id" IS NOT NULL))`;
+
+/** Who is reading an event card, list or pack: the account tier decides how
+ *  much of an event the answer carries. */
+export type VjEventViewer = Pick<CurrentUserData, 'role'>;
 
 /** The pack event link takes this before the pack row, so its row update
  *  waits behind a pack rename, reorder or delete holding
@@ -148,6 +168,14 @@ function toLinkedEventRow(raw: VjPackEventCardRawRow): VjEventRow | null {
  * reaches a card. The link write emits `VJ_LIBRARY_CHANGED` after commit.
  * Nothing here logs: an event title, slug or URL never reaches a log line or
  * a refusal message.
+ *
+ * Admins and moderators read every listed event. A caller outside the
+ * platform staff tiers (a holder of the `vj_operator` grant) reads only what
+ * a plain member could find in the event listings
+ * (`VJ_MEMBER_WITHHELD_EVENT_IDS_SQL`): the upcoming list leaves the rest out,
+ * the card answers `not_listed`, the link answers `VJ_EVENT_NOT_LINKABLE`, and
+ * a pack linked to an event members can no longer see arrives with the event
+ * id and `isAvailable: false` only (`packsAsSeenBy`).
  */
 @Injectable()
 export class VjEventLinkService {
@@ -159,7 +187,10 @@ export class VjEventLinkService {
 
   /** The pack's event card, or the reason the card may not show the linked
    *  event. A pack with no link answers a null card and a null reason. */
-  async getPackEvent(requestedPackId: string): Promise<VjPackEventDTO> {
+  async getPackEvent(
+    requestedPackId: string,
+    viewer: VjEventViewer,
+  ): Promise<VjPackEventDTO> {
     const packId = lowercaseIdOrRefuse(requestedPackId, 'VJ_PACK_NOT_FOUND');
     const rows: VjPackEventCardRawRow[] = await this.dataSource.manager.query(
       VJ_PACK_EVENT_CARD_SQL,
@@ -176,6 +207,14 @@ export class VjEventLinkService {
     const unavailableReason = vjEventCardUnavailableReason(event);
     if (unavailableReason !== null) {
       return { packId, card: null, unavailableReason };
+    }
+    if (
+      !isPlatformStaffTier(viewer.role) &&
+      (
+        await readMemberWithheldEventIds(this.dataSource.manager, [event.id])
+      ).has(event.id)
+    ) {
+      return { packId, card: null, unavailableReason: 'not_listed' };
     }
     return {
       packId,
@@ -197,12 +236,13 @@ export class VjEventLinkService {
   async setPackEvent(
     requestedPackId: string,
     body: SetVjPackEventDto,
+    viewer: VjEventViewer,
   ): Promise<VjPackDTO> {
     const packId = lowercaseIdOrRefuse(requestedPackId, 'VJ_PACK_NOT_FOUND');
     const eventId = readEventIdBody(body.eventId);
     const isChanged = await runVjTransaction(
       this.dataSource,
-      (manager) => this.writePackEvent(manager, packId, eventId),
+      (manager) => this.writePackEvent(manager, packId, eventId, viewer),
       PACK_EVENT_LINK_REFUSALS,
     );
     if (isChanged) {
@@ -211,15 +251,112 @@ export class VjEventLinkService {
         buildVjLibraryChange('pack_event_changed', { packId, eventId }),
       );
     }
-    return readVjPackDto(this.dataSource.manager, packId);
+    return this.packAsSeenBy(
+      await readVjPackDto(this.dataSource.manager, packId),
+      viewer,
+    );
   }
 
-  /** The events a pack may link to now, soonest first. */
-  async listUpcomingEvents(): Promise<VjEventOptionListDTO> {
+  /** The events a pack may link to now, soonest first. A caller outside the
+   *  platform staff tiers gets the ones a member could find in the event
+   *  listings, so their page can hold fewer than 50. */
+  async listUpcomingEvents(
+    viewer: VjEventViewer,
+  ): Promise<VjEventOptionListDTO> {
     const rows: VjEventRawRow[] = await this.dataSource.manager.query(
       VJ_UPCOMING_EVENTS_SQL,
     );
-    return { items: rows.map((row) => toVjEventOption(toVjEventRow(row))) };
+    const visibleRows = isPlatformStaffTier(viewer.role)
+      ? rows
+      : await this.withoutMemberWithheld(rows);
+    return {
+      items: visibleRows.map((row) => toVjEventOption(toVjEventRow(row))),
+    };
+  }
+
+  /**
+   * The packs as this viewer may read them. Admins and moderators get them
+   * as they are. A caller outside the platform staff tiers gets each linked
+   * event members can no longer see (not listed by status or visibility, or
+   * withheld by `VJ_MEMBER_WITHHELD_EVENT_IDS_SQL`) as its id and
+   * `isAvailable: false`, with the title and the start left out. One read for
+   * the whole list, none when no pack links a listed event.
+   */
+  async packsAsSeenBy(
+    packs: readonly VjPackDTO[],
+    viewer: VjEventViewer,
+  ): Promise<VjPackDTO[]> {
+    if (isPlatformStaffTier(viewer.role)) {
+      return [...packs];
+    }
+    const listedEventIds = packs.flatMap((pack) =>
+      pack.event !== null && pack.event.isAvailable ? [pack.event.id] : [],
+    );
+    const withheldEventIds = await readMemberWithheldEventIds(
+      this.dataSource.manager,
+      listedEventIds,
+    );
+    return packs.map((pack) => {
+      const event = pack.event;
+      if (
+        event === null ||
+        (event.isAvailable && !withheldEventIds.has(event.id))
+      ) {
+        return pack;
+      }
+      return { ...pack, event: { id: event.id, isAvailable: false } };
+    });
+  }
+
+  /** One pack as this viewer may read it (`packsAsSeenBy`). */
+  async packAsSeenBy(
+    pack: VjPackDTO,
+    viewer: VjEventViewer,
+  ): Promise<VjPackDTO> {
+    if (isPlatformStaffTier(viewer.role)) {
+      return pack;
+    }
+    const [seenPack] = await this.packsAsSeenBy([pack], viewer);
+    return seenPack ?? pack;
+  }
+
+  /** The pack list as this viewer may read it (`packsAsSeenBy`). */
+  async packListAsSeenBy(
+    packList: VjPackListDTO,
+    viewer: VjEventViewer,
+  ): Promise<VjPackListDTO> {
+    if (isPlatformStaffTier(viewer.role)) {
+      return packList;
+    }
+    return {
+      ...packList,
+      items: await this.packsAsSeenBy(packList.items, viewer),
+    };
+  }
+
+  /** A pack and its clips as this viewer may read them (`packsAsSeenBy`). */
+  async packClipsAsSeenBy(
+    packClips: VjPackClipsDTO,
+    viewer: VjEventViewer,
+  ): Promise<VjPackClipsDTO> {
+    if (isPlatformStaffTier(viewer.role)) {
+      return packClips;
+    }
+    return {
+      ...packClips,
+      pack: await this.packAsSeenBy(packClips.pack, viewer),
+    };
+  }
+
+  /** The upcoming rows a member could find in the event listings. */
+  private async withoutMemberWithheld(
+    rows: VjEventRawRow[],
+  ): Promise<VjEventRawRow[]> {
+    const withheldEventIds = await readMemberWithheldEventIds(
+      this.dataSource.manager,
+      rows.map((row) => row.id),
+    );
+    return rows.filter((row) => !withheldEventIds.has(row.id));
   }
 
   /** The link write inside its transaction; answers whether a row changed.
@@ -229,6 +366,7 @@ export class VjEventLinkService {
     manager: EntityManager,
     packId: string,
     eventId: string | null,
+    viewer: VjEventViewer,
   ): Promise<boolean> {
     await manager.query(LOCK_VJ_PACKS_ROW_EXCLUSIVE_SQL);
     const pack = await manager.findOne(VjPack, {
@@ -243,7 +381,7 @@ export class VjEventLinkService {
       return false;
     }
     if (eventId !== null) {
-      await this.assertEventLinkable(manager, eventId);
+      await this.assertEventLinkable(manager, eventId, viewer);
     }
     await manager.update(VjPack, { id: packId }, { eventId });
     return true;
@@ -251,10 +389,13 @@ export class VjEventLinkService {
 
   /** An unknown event answers `VJ_EVENT_NOT_FOUND`; a draft, a cancelled
    *  event or a visibility outside public and members answers
-   *  `VJ_EVENT_NOT_LINKABLE`. Reads the id, status and visibility only. */
+   *  `VJ_EVENT_NOT_LINKABLE`, and so does, for a caller outside the platform
+   *  staff tiers, an event members could not find in the event listings.
+   *  Reads the id, status and visibility only. */
   private async assertEventLinkable(
     manager: EntityManager,
     eventId: string,
+    viewer: VjEventViewer,
   ): Promise<void> {
     const event = await manager.findOne(Event, {
       where: { id: eventId },
@@ -266,5 +407,27 @@ export class VjEventLinkService {
     if (!isVjEventListed(event)) {
       throw vjError('VJ_EVENT_NOT_LINKABLE');
     }
+    if (
+      !isPlatformStaffTier(viewer.role) &&
+      (await readMemberWithheldEventIds(manager, [event.id])).has(event.id)
+    ) {
+      throw vjError('VJ_EVENT_NOT_LINKABLE');
+    }
   }
+}
+
+/** The ids among `eventIds` that `VJ_MEMBER_WITHHELD_EVENT_IDS_SQL` names;
+ *  no read for an empty list. */
+async function readMemberWithheldEventIds(
+  manager: EntityManager,
+  eventIds: readonly string[],
+): Promise<Set<string>> {
+  if (eventIds.length === 0) {
+    return new Set<string>();
+  }
+  const rows: { id: string }[] = await manager.query(
+    VJ_MEMBER_WITHHELD_EVENT_IDS_SQL,
+    [[...new Set(eventIds)]],
+  );
+  return new Set(rows.map((row) => row.id));
 }

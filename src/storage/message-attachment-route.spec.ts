@@ -20,6 +20,7 @@ import {
   MESSAGE_SUBJECT_TYPE,
   notModeratedMessagePredicate,
 } from '../messaging/message-visibility-predicates';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
 import { PersonaImageKeysService } from './persona-image-keys.service';
@@ -297,6 +298,10 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
       {
         findServingRegistration: jest.fn().mockResolvedValue(null),
       } as unknown as PersonaImageKeysService,
+      // No VJ key is served here, so no staff grant is read.
+      {
+        exists: jest.fn().mockResolvedValue(false),
+      } as unknown as Repository<UserStaffRole>,
     );
   });
 

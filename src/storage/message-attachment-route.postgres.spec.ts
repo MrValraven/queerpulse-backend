@@ -2,7 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { EventEmitter } from 'events';
 import { Response } from 'express';
 import { PassThrough, Readable } from 'stream';
-import { DataSource } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Identity, IdentityKind } from '../identities/entities/identity.entity';
@@ -16,6 +16,7 @@ import { MESSAGE_SUBJECT_TYPE } from '../messaging/message-visibility-predicates
 import { MessagingCoreService } from '../messaging/messaging-core.service';
 import { Block } from '../social/entities/block.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
 import { PersonaImageKeysService } from './persona-image-keys.service';
@@ -354,6 +355,10 @@ describeWithDatabase(
         {
           findServingRegistration: jest.fn().mockResolvedValue(null),
         } as unknown as PersonaImageKeysService,
+        // No VJ key is served here, so no staff grant is read.
+        {
+          exists: jest.fn().mockResolvedValue(false),
+        } as unknown as Repository<UserStaffRole>,
       );
     });
 

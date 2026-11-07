@@ -8,6 +8,7 @@ import { StaffRoleId } from '../../users/staff-roles.registry';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 import { STAFF_ROLES_KEY } from '../decorators/staff-roles.decorator';
 import { CurrentUserData } from '../decorators/current-user.decorator';
+import { isAdminOrHoldsStaffRole } from '../staff-grant-access';
 
 /**
  * The union gate: pass on the account TIER (`@Roles(...)`) OR on an additive
@@ -74,13 +75,12 @@ export class RolesOrStaffGuard implements CanActivate {
       return true;
     }
     if (!hasStaffRequirement) return false;
-    if (role === UserRole.Admin) return true; // superset of every grant, no query
-
-    return this.staffRoles.exists({
-      where: requiredStaffRoles.map((staffRoleId) => ({
-        userId: user.userId,
-        role: staffRoleId,
-      })),
-    });
+    // Admin is a superset of every grant (no query); everyone else needs one
+    // of the required grants. Shared with the surfaces no guard covers.
+    return isAdminOrHoldsStaffRole(
+      this.staffRoles,
+      { userId: user.userId, role },
+      requiredStaffRoles,
+    );
   }
 }

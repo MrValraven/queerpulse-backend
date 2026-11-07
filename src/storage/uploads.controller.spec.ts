@@ -1,4 +1,5 @@
 import { BadRequestException, HttpException } from '@nestjs/common';
+import { Repository } from 'typeorm';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
@@ -11,6 +12,7 @@ import { ALLOWED_IMAGE_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
 import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UploadsController } from './uploads.controller';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 
 const user: CurrentUserData = {
   userId: 'user-1',
@@ -47,6 +49,9 @@ describe('UploadsController', () => {
   let studioAudioUploads: { presign: jest.Mock };
   let mediaCropService: { upsert: jest.Mock };
   let personaImageKeys: { isMemberOfKeyPersona: jest.Mock };
+  // The staff grants each user id holds, read by the VJ kinds.
+  let grantsByUserId: Map<string, string[]>;
+  let staffRoles: { exists: jest.Mock };
 
   beforeEach(() => {
     storage = {
@@ -62,11 +67,26 @@ describe('UploadsController', () => {
     personaImageKeys = {
       isMemberOfKeyPersona: jest.fn().mockResolvedValue(false),
     };
+    // Default: nobody holds a staff grant.
+    grantsByUserId = new Map();
+    staffRoles = {
+      exists: jest.fn(
+        (options: { where: { userId: string; role: string }[] }) =>
+          Promise.resolve(
+            options.where.some((condition) =>
+              (grantsByUserId.get(condition.userId) ?? []).includes(
+                condition.role,
+              ),
+            ),
+          ),
+      ),
+    };
     controller = new UploadsController(
       storage as unknown as StorageService,
       mediaCropService as unknown as MediaCropService,
       personaImageKeys as unknown as PersonaImageKeysService,
       studioAudioUploads as unknown as StudioAudioUploadsService,
+      staffRoles as unknown as Repository<UserStaffRole>,
     );
   });
 
@@ -314,23 +334,33 @@ describe('UploadsController', () => {
     });
   });
 
-  // VJ media is admin only, with a coded refusal the frontend can name.
+  // VJ media is open to an admin and to a holder of the vj_operator grant,
+  // with a coded refusal the frontend can name.
   describe('VJ presign', () => {
     const moderator: CurrentUserData = { ...user, role: 'moderator' };
     const admin: CurrentUserData = { ...user, role: 'admin' };
 
-    it('refuses a VJ presign for a moderator with VJ_UPLOAD_NOT_ADMIN', () => {
+    /** The refusal a presign rejects with, or undefined when it resolves. */
+    async function refusalOf(
+      presign: () => Promise<PresignedUpload>,
+    ): Promise<unknown> {
+      try {
+        await presign();
+        return undefined;
+      } catch (error) {
+        return error;
+      }
+    }
+
+    it('refuses a VJ presign for a moderator with VJ_UPLOAD_NOT_ADMIN', async () => {
       for (const caller of [moderator, user]) {
         for (const request of [
           { kind: 'vj_clip' as const, contentType: 'video/mp4' },
           { kind: 'vj_thumbnail' as const, contentType: 'image/webp' },
         ]) {
-          let refusal: unknown;
-          try {
-            void controller.presign(caller, { ...request, byteSize: 4096 });
-          } catch (error) {
-            refusal = error;
-          }
+          const refusal = await refusalOf(() =>
+            controller.presign(caller, { ...request, byteSize: 4096 }),
+          );
           expect(refusal).toBeInstanceOf(HttpException);
           expect((refusal as HttpException).getStatus()).toBe(403);
           expect((refusal as HttpException).getResponse()).toEqual(
@@ -369,19 +399,16 @@ describe('UploadsController', () => {
       });
     });
 
-    it('refuses a preview presign for a moderator with VJ_UPLOAD_NOT_ADMIN', () => {
+    it('refuses a preview presign for a moderator with VJ_UPLOAD_NOT_ADMIN', async () => {
       for (const caller of [moderator, user]) {
         for (const contentType of ['video/webm', 'video/mp4']) {
-          let refusal: unknown;
-          try {
-            void controller.presign(caller, {
+          const refusal = await refusalOf(() =>
+            controller.presign(caller, {
               kind: 'vj_preview',
               contentType,
               byteSize: 4096,
-            });
-          } catch (error) {
-            refusal = error;
-          }
+            }),
+          );
           expect(refusal).toBeInstanceOf(HttpException);
           expect((refusal as HttpException).getStatus()).toBe(403);
           expect((refusal as HttpException).getResponse()).toEqual(
@@ -407,6 +434,59 @@ describe('UploadsController', () => {
       expect(storage.presignImageUpload).not.toHaveBeenCalled();
       expect(studioAudioUploads.presign).not.toHaveBeenCalled();
       expect(result).toBe(VJ_PRESIGNED);
+    });
+
+    it('passes a vj_operator holder to presignVjUpload for every VJ kind', async () => {
+      grantsByUserId.set(user.userId, ['vj_operator']);
+      for (const request of [
+        { kind: 'vj_clip' as const, contentType: 'video/mp4' },
+        { kind: 'vj_thumbnail' as const, contentType: 'image/webp' },
+        { kind: 'vj_preview' as const, contentType: 'video/webm' },
+      ]) {
+        const result = await controller.presign(user, {
+          ...request,
+          byteSize: 4096,
+        });
+        expect(storage.presignVjUpload).toHaveBeenLastCalledWith({
+          ...request,
+          byteSize: 4096,
+        });
+        expect(result).toBe(VJ_PRESIGNED);
+      }
+      expect(staffRoles.exists).toHaveBeenCalledWith({
+        where: [{ userId: user.userId, role: 'vj_operator' }],
+      });
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
+    });
+
+    it('refuses a holder of an unrelated grant with VJ_UPLOAD_NOT_ADMIN', async () => {
+      grantsByUserId.set(user.userId, ['music_manager_producer']);
+      const refusal = await refusalOf(() =>
+        controller.presign(user, {
+          kind: 'vj_clip',
+          contentType: 'video/mp4',
+          byteSize: 4096,
+        }),
+      );
+      expect(refusal).toBeInstanceOf(HttpException);
+      expect((refusal as HttpException).getStatus()).toBe(403);
+      expect((refusal as HttpException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'VJ_UPLOAD_NOT_ADMIN' }),
+      );
+      expect(storage.presignVjUpload).not.toHaveBeenCalled();
+    });
+
+    it('refuses a subprofileId on a vj_operator presign', async () => {
+      grantsByUserId.set(user.userId, ['vj_operator']);
+      await expect(
+        controller.presign(user, {
+          kind: 'vj_clip',
+          contentType: 'video/mp4',
+          byteSize: 4096,
+          subprofileId: PERSONA_ID,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(storage.presignVjUpload).not.toHaveBeenCalled();
     });
 
     it('refuses a subprofileId on a VJ presign', () => {

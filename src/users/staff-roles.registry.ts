@@ -50,7 +50,8 @@ export type StaffRoleId =
   | 'partnerships'
   | 'product_manager'
   | 'cultural_producer'
-  | 'music_manager_producer';
+  | 'music_manager_producer'
+  | 'vj_operator';
 
 export interface StaffRoleDef {
   id: StaffRoleId;
@@ -68,7 +69,7 @@ export interface StaffRoleDef {
    * OTHER members' content or membership. Someone who can decline a housing
    * listing or spike a magazine piece is acting as the platform, and the member
    * on the other side of that decision deserves to know it without having to
-   * ask. Four roles are deliberately left unbadged, and a new role should have
+   * ask. Five roles are deliberately left unbadged, and a new role should have
    * to clear the same bar rather than inherit a default:
    *
    *   - `magazine_writer` holds no power over anyone. Its own `grants` list says
@@ -89,6 +90,10 @@ export interface StaffRoleDef {
    *     member may post or whether they stay.
    *   - `cultural_producer` keeps the platform's own public-face pages (the
    *     landing slots and the press kit). It decides nothing about another
+   *     member's content or membership.
+   *   - `vj_operator` runs the platform's own visuals (the VJ library, the
+   *     projector screen and the phone remote). Its clips, packs, scenes and
+   *     set lists belong to the platform, so it decides nothing about another
    *     member's content or membership.
    *
    * Account tiers are a separate axis entirely: moderators and admins are on the
@@ -224,6 +229,18 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       'Curate Studio home (admin/studio/curation, admin/studio/scenes, admin/studio/spotlight): the featured release, Staff picks, New this week, Local scenes, Artist of the month, New stars',
       'NOT the Studio page, founding artists, Waiting for Studio, or any Studio moderation queue',
       'Keep the leads directory (admin/leads): add, edit and delete leads, their links, notes and follow-ups, and link a lead to a persona',
+    ],
+  },
+  vj_operator: {
+    id: 'vj_operator',
+    hasPublicStaffBadge: false,
+    grants: [
+      'Run the VJ library (admin/vj): packs, clips and their uploads (the vj_clip, vj_thumbnail and vj_preview presigns and the VJ files they serve), pack event links, scenes and set lists',
+      'Drive the projector screen and the phone remote over the `/vj` socket, on a stage of your own',
+      'Link a pack to an event a member could find in the event listings: the upcoming list, the link check and the projector card leave out events moderation hid or removed and events hosted by a space',
+      'NOT the title or start of a linked event members can no longer see: a pack linked to an event that was cancelled, unpublished, narrowed to a private audience or hidden by moderation arrives with the event id and `isAvailable: false` only',
+      'NOT the socket during a platform lockdown: the handshake applies the lockdown rule, and switching a lockdown on drops every socket admitted through this grant',
+      'NOT any other admin surface: the grant opens the VJ routes, the VJ uploads and the `/vj` socket and nothing else',
     ],
   },
 };

@@ -5,6 +5,8 @@ import type { Namespace } from 'socket.io';
 import type { Repository } from 'typeorm';
 import type { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { socketTicketService } from '../auth/socket-ticket.service';
+import type { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import type { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import type { VjAttachPayloadDto } from './dto/vj-socket-payloads';
 import {
@@ -36,6 +38,10 @@ import { VjStageService } from './vj-stage.service';
 const ADMIN_USER_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const MEMBER_USER_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const SECOND_ADMIN_USER_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+/** A plain member holding the `vj_operator` grant. */
+const OPERATOR_USER_ID = '99999999-9999-4999-8999-999999999999';
+/** A plain member holding an unrelated grant. */
+const MUSIC_PRODUCER_USER_ID = '12121212-1212-4121-8121-121212121212';
 const SCREEN_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const OTHER_SCREEN_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const CLIENT_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
@@ -114,6 +120,14 @@ interface Harness {
   roomEmits: RoomEmit[];
   roleByUserId: Map<string, UserRole>;
   statusByUserId: Map<string, UserStatus>;
+  /** The staff grants each user id holds. */
+  grantsByUserId: Map<string, string[]>;
+  staffRoles: { exists: jest.Mock };
+  lockdown: {
+    lockdownEnabled: boolean;
+    lockdownAllowsModerators: boolean;
+    lockdownMessage: string;
+  };
   users: { findOne: jest.Mock };
   refreshTokens: { exists: jest.Mock };
   jwt: { verifyAsync: jest.Mock };
@@ -148,6 +162,27 @@ function createHarness(): Harness {
     ),
   };
   const refreshTokens = { exists: jest.fn(() => Promise.resolve(true)) };
+  const grantsByUserId = new Map<string, string[]>([
+    [OPERATOR_USER_ID, ['vj_operator']],
+    [MUSIC_PRODUCER_USER_ID, ['music_manager_producer']],
+  ]);
+  const staffRoles = {
+    exists: jest.fn((options: { where: { userId: string; role: string }[] }) =>
+      Promise.resolve(
+        options.where.some((condition) =>
+          (grantsByUserId.get(condition.userId) ?? []).includes(condition.role),
+        ),
+      ),
+    ),
+  };
+  const lockdown = {
+    lockdownEnabled: false,
+    lockdownAllowsModerators: false,
+    lockdownMessage: '',
+  };
+  const platformSettings = {
+    get: jest.fn(() => Promise.resolve({ ...lockdown })),
+  };
   const jwt = {
     verifyAsync: jest.fn((token: string) =>
       Promise.resolve({
@@ -167,6 +202,8 @@ function createHarness(): Harness {
     reads as unknown as VjStageReadsService,
     users as unknown as Repository<User>,
     refreshTokens as unknown as Repository<RefreshToken>,
+    staffRoles as unknown as Repository<UserStaffRole>,
+    platformSettings as unknown as PlatformSettingsService,
   );
   gateway.namespace = namespace;
   gateway.afterInit();
@@ -177,6 +214,9 @@ function createHarness(): Harness {
     roomEmits,
     roleByUserId,
     statusByUserId,
+    grantsByUserId,
+    staffRoles,
+    lockdown,
     users,
     refreshTokens,
     jwt,
@@ -566,6 +606,154 @@ describe('VjGateway', () => {
       expect(client.data.exp).toBe(ack.exp);
       jest.advanceTimersByTime(120_000);
       expect(client.disconnect).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the vj_operator grant', () => {
+    it('admits a member holding the grant and attaches them to a stage of their own', async () => {
+      const client = await connect(
+        harness,
+        'socket-operator',
+        OPERATOR_USER_ID,
+      );
+
+      expect(clientEmits(client, 'exception')).toEqual([]);
+      expect(client.disconnect).not.toHaveBeenCalled();
+      expect(client.data.userId).toBe(OPERATOR_USER_ID);
+      expect(harness.staffRoles.exists).toHaveBeenCalledWith({
+        where: [{ userId: OPERATOR_USER_ID, role: 'vj_operator' }],
+      });
+
+      const ack = await attachRemote(harness, client);
+      expect(ack.ok).toBe(true);
+      expect(joinedRooms(client)).toEqual(
+        expect.arrayContaining([
+          vjStageRoomName(OPERATOR_USER_ID),
+          vjRemotesRoomName(OPERATOR_USER_ID),
+          VJ_LIBRARY_ROOM,
+        ]),
+      );
+      expect(harness.stages.getState(OPERATOR_USER_ID)).not.toBeNull();
+      expect(harness.stages.getState(ADMIN_USER_ID)).toBeNull();
+    });
+
+    it('refuses a member holding an unrelated grant with FORBIDDEN vj_not_admin', async () => {
+      const client = await connect(
+        harness,
+        'socket-music',
+        MUSIC_PRODUCER_USER_ID,
+      );
+
+      expect(clientEmits(client, 'exception')).toEqual([
+        {
+          status: 'error',
+          code: 'FORBIDDEN',
+          message: VJ_NOT_ADMIN_MESSAGE,
+          domainCode: 'vj_not_admin',
+        },
+      ]);
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(client.data.userId).toBeUndefined();
+    });
+
+    it('names the missing VJ access in the refusal message', () => {
+      expect(VJ_NOT_ADMIN_MESSAGE).toContain('VJ operator grant');
+      expect(VJ_NOT_ADMIN_MESSAGE).toContain('Admin role');
+    });
+
+    it('acks vj_not_admin past the cache once the grant is revoked, then drops the socket', async () => {
+      const client = await connect(
+        harness,
+        'socket-operator',
+        OPERATOR_USER_ID,
+      );
+      expect((await attachRemote(harness, client)).ok).toBe(true);
+
+      jest.advanceTimersByTime(VJ_ROLE_RECHECK_MS + 1);
+      expect((await setBlackout(harness, client, 1, true)).ok).toBe(true);
+
+      harness.grantsByUserId.delete(OPERATOR_USER_ID);
+      jest.advanceTimersByTime(VJ_ROLE_RECHECK_MS + 1);
+      const ack = await setBlackout(harness, client, 2, false);
+
+      expect(ack).toEqual({
+        ok: false,
+        code: 'vj_not_admin',
+        message: VJ_NOT_ADMIN_MESSAGE,
+        serverNow: Date.now(),
+      });
+      await flushImmediate();
+      expect(clientEmits(client, 'exception')).toEqual([
+        expect.objectContaining({
+          code: 'FORBIDDEN',
+          domainCode: 'vj_not_admin',
+        }),
+      ]);
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it('refuses a reauth once the grant is revoked', async () => {
+      const client = await connect(
+        harness,
+        'socket-operator',
+        OPERATOR_USER_ID,
+      );
+      harness.grantsByUserId.delete(OPERATOR_USER_ID);
+      const { ticket } = socketTicketService.mint(
+        OPERATOR_USER_ID,
+        `family-${OPERATOR_USER_ID}`,
+        UserStatus.Active,
+        15 * 60_000,
+      );
+
+      const ack = await harness.gateway.handleReauth(asClient(client), {
+        ticket,
+      });
+
+      expect(ack).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+      await flushImmediate();
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it('refuses a grant holder during a lockdown and admits an admin', async () => {
+      harness.lockdown.lockdownEnabled = true;
+      harness.lockdown.lockdownMessage = 'Back after the maintenance window';
+
+      const operator = await connect(
+        harness,
+        'socket-operator',
+        OPERATOR_USER_ID,
+      );
+      expect(clientEmits(operator, 'exception')).toEqual([
+        expect.objectContaining({
+          code: 'PLATFORM_LOCKED',
+          message: 'Back after the maintenance window',
+        }),
+      ]);
+      expect(operator.disconnect).toHaveBeenCalledWith(true);
+
+      const admin = await connect(harness, 'socket-admin');
+      expect(admin.disconnect).not.toHaveBeenCalled();
+      expect(admin.data.userId).toBe(ADMIN_USER_ID);
+    });
+
+    it('drops only the grant sockets when a lockdown is switched on', async () => {
+      const operator = await connect(
+        harness,
+        'socket-operator',
+        OPERATOR_USER_ID,
+      );
+      const admin = await connect(harness, 'socket-admin');
+      harness.lockdown.lockdownEnabled = true;
+
+      await harness.gateway.handleLockdownEnabled();
+
+      expect(clientEmits(operator, 'exception')).toEqual([
+        expect.objectContaining({ code: 'PLATFORM_LOCKED' }),
+      ]);
+      expect(operator.disconnect).toHaveBeenCalledWith(true);
+      expect(clientEmits(admin, 'exception')).toEqual([]);
+      expect(admin.disconnect).not.toHaveBeenCalled();
     });
   });
 

@@ -59,13 +59,24 @@ import { VjSceneService } from './vj-scene.service';
 import { VjSetlistService } from './vj-setlist.service';
 
 /**
- * The admin routes of the VJ library: ordered packs of clips, the clips
- * themselves (MP4, WebM and GIF) with their previews and playback defaults,
- * the event a pack links to, saved scenes and set lists of scenes.
+ * The routes of the VJ library: ordered packs of clips, the clips themselves
+ * (MP4, WebM and GIF) with their previews and playback defaults, the event a
+ * pack links to, saved scenes and set lists of scenes.
  *
- * Admin only. The class carries `@Roles(UserRole.Admin)` and an EMPTY
- * `@StaffRoles()`: the empty list switches the grant axis off, so a Moderator
- * and a holder of a staff grant are both refused, as on the persona wall.
+ * Open to an Admin and to a holder of the `vj_operator` staff grant. The
+ * class carries `@Roles(UserRole.Admin)` and `@StaffRoles('vj_operator')`, so
+ * `RolesOrStaffGuard` admits the Admin tier on its own and anyone else through
+ * that one grant. A Moderator without the grant and a holder of any other
+ * grant are refused. Every route is open to the grant: the library is
+ * platform artwork under keys that name nobody, so there is no write here to
+ * close again with an empty `@StaffRoles()`.
+ *
+ * The one place an answer carries more than VJ data is the linked event.
+ * The event reads (`VjEventLinkService`) take the caller, and a caller
+ * outside the platform staff tiers (`isPlatformStaffTier`) gets only the
+ * events a plain member could find in the event listings: every route that
+ * can answer a linked pack passes it through `packsAsSeenBy` first (a new
+ * pack links no event, so `createPack` answers as it is).
  * There is no `@Feature(...)` and no cache interceptor. Every GET answers
  * `Cache-Control: no-store`, the media URLs above all.
  *
@@ -111,11 +122,13 @@ import { VjSetlistService } from './vj-setlist.service';
 @ApiTags('Admin - VJ')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role or the vj_operator staff grant.',
+})
 @Controller('admin/vj')
 @UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
-@StaffRoles()
+@StaffRoles('vj_operator')
 export class AdminVjController {
   constructor(
     private readonly library: VjLibraryService,
@@ -129,11 +142,14 @@ export class AdminVjController {
   @ApiOperation({
     summary: 'List the VJ packs',
     description:
-      'Every pack in position order, with its clip count, total size, the thumbnail of its first clip and the summary of its linked event.',
+      'Every pack in position order, with its clip count, total size, the thumbnail of its first clip and the summary of its linked event. A caller with the vj_operator grant gets a linked event members can no longer see as its id and `isAvailable: false`, with the title and start left out.',
   })
   @ApiOkResponse({ description: 'The packs in position order.' })
-  listPacks() {
-    return this.library.listPacks();
+  async listPacks(@CurrentUser() user: CurrentUserData) {
+    return this.eventLinks.packListAsSeenBy(
+      await this.library.listPacks(),
+      user,
+    );
   }
 
   @Post('packs')
@@ -168,8 +184,14 @@ export class AdminVjController {
     description:
       'Code `VJ_PACK_REORDER_MISMATCH`: the ids are not exactly the current packs.',
   })
-  reorderPacks(@Body() body: ReorderVjPacksDto) {
-    return this.library.reorderPacks(body);
+  async reorderPacks(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: ReorderVjPacksDto,
+  ) {
+    return this.eventLinks.packListAsSeenBy(
+      await this.library.reorderPacks(body),
+      user,
+    );
   }
 
   @Get('packs/:id/clips')
@@ -183,8 +205,14 @@ export class AdminVjController {
     description:
       'Code `VJ_PACK_NOT_FOUND`: no pack has that id, or the id is not a uuid.',
   })
-  getPackClips(@Param('id') packId: string) {
-    return this.library.getPackClips(packId);
+  async getPackClips(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id') packId: string,
+  ) {
+    return this.eventLinks.packClipsAsSeenBy(
+      await this.library.getPackClips(packId),
+      user,
+    );
   }
 
   @Get('packs/:id/media')
@@ -212,15 +240,18 @@ export class AdminVjController {
   @ApiOperation({
     summary: 'Get the event card of a VJ pack',
     description:
-      'The card the projector shows for the linked event. A pack with no link answers a null card and a null reason; a cancelled event answers `unavailableReason: cancelled`, and a draft or an event outside the public and members listings answers `not_listed`. Checks: `VJ_PACK_NOT_FOUND`.',
+      'The card the projector shows for the linked event. A pack with no link answers a null card and a null reason; a cancelled event answers `unavailableReason: cancelled`, and a draft or an event outside the public and members listings answers `not_listed`. For a caller with the vj_operator grant, an event moderation hid or removed, or one hosted by a space, also answers `not_listed`. Checks: `VJ_PACK_NOT_FOUND`.',
   })
   @ApiOkResponse({ description: 'The pack id, its card and the reason.' })
   @ApiNotFoundResponse({
     description:
       'Code `VJ_PACK_NOT_FOUND`: no pack has that id, or the id is not a uuid.',
   })
-  getPackEvent(@Param('id') packId: string) {
-    return this.eventLinks.getPackEvent(packId);
+  getPackEvent(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id') packId: string,
+  ) {
+    return this.eventLinks.getPackEvent(packId, user);
   }
 
   @Post('packs/:id/clips')
@@ -236,8 +267,15 @@ export class AdminVjController {
   @ApiConflictResponse({
     description: 'Code `VJ_CLIP_ALREADY_IN_PACK` or `VJ_PACK_FULL`.',
   })
-  addPackClip(@Param('id') packId: string, @Body() body: AddVjPackClipDto) {
-    return this.library.addPackClip(packId, body);
+  async addPackClip(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id') packId: string,
+    @Body() body: AddVjPackClipDto,
+  ) {
+    return this.eventLinks.packClipsAsSeenBy(
+      await this.library.addPackClip(packId, body),
+      user,
+    );
   }
 
   @Patch('packs/:id/clips/reorder')
@@ -252,18 +290,22 @@ export class AdminVjController {
     description:
       'Code `VJ_PACK_CLIPS_REORDER_MISMATCH`: the ids are not exactly the clips of the pack.',
   })
-  reorderPackClips(
+  async reorderPackClips(
+    @CurrentUser() user: CurrentUserData,
     @Param('id') packId: string,
     @Body() body: ReorderVjPackClipsDto,
   ) {
-    return this.library.reorderPackClips(packId, body);
+    return this.eventLinks.packClipsAsSeenBy(
+      await this.library.reorderPackClips(packId, body),
+      user,
+    );
   }
 
   @Patch('packs/:id/event')
   @ApiOperation({
     summary: 'Link a VJ pack to an event, or unlink it',
     description:
-      '`eventId: null` unlinks. A linked event must be published and listed to the public or to members; it may have ended. Linking the event already linked writes nothing. Checks run in this order: `VJ_PACK_NOT_FOUND` (malformed id), `VJ_EVENT_NOT_FOUND` (`eventId` neither null nor a uuid), `VJ_PACK_NOT_FOUND`, `VJ_EVENT_NOT_FOUND`, `VJ_EVENT_NOT_LINKABLE`.',
+      '`eventId: null` unlinks. A linked event must be published and listed to the public or to members; it may have ended. Linking the event already linked writes nothing. Checks run in this order: `VJ_PACK_NOT_FOUND` (malformed id), `VJ_EVENT_NOT_FOUND` (`eventId` neither null nor a uuid), `VJ_PACK_NOT_FOUND`, `VJ_EVENT_NOT_FOUND`, `VJ_EVENT_NOT_LINKABLE`. For a caller with the vj_operator grant, an event moderation hid or removed, or one hosted by a space, also answers `VJ_EVENT_NOT_LINKABLE`.',
   })
   @ApiOkResponse({ description: 'The pack with its event summary.' })
   @ApiNotFoundResponse({
@@ -271,10 +313,14 @@ export class AdminVjController {
   })
   @ApiConflictResponse({
     description:
-      'Code `VJ_EVENT_NOT_LINKABLE`: the event is a draft, cancelled, or listed outside the public and members listings.',
+      'Code `VJ_EVENT_NOT_LINKABLE`: the event is a draft, cancelled, or listed outside the public and members listings, or (for a caller with the vj_operator grant) hidden from the event listings.',
   })
-  setPackEvent(@Param('id') packId: string, @Body() body: SetVjPackEventDto) {
-    return this.eventLinks.setPackEvent(packId, body);
+  setPackEvent(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id') packId: string,
+    @Body() body: SetVjPackEventDto,
+  ) {
+    return this.eventLinks.setPackEvent(packId, body, user);
   }
 
   @Delete('packs/:id/clips/:clipId')
@@ -288,8 +334,15 @@ export class AdminVjController {
     description:
       'Code `VJ_PACK_NOT_FOUND`, `VJ_CLIP_NOT_FOUND` or `VJ_CLIP_NOT_IN_PACK`.',
   })
-  removePackClip(@Param('id') packId: string, @Param('clipId') clipId: string) {
-    return this.library.removePackClip(packId, clipId);
+  async removePackClip(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id') packId: string,
+    @Param('clipId') clipId: string,
+  ) {
+    return this.eventLinks.packClipsAsSeenBy(
+      await this.library.removePackClip(packId, clipId),
+      user,
+    );
   }
 
   @Patch('packs/:id')
@@ -304,8 +357,15 @@ export class AdminVjController {
   })
   @ApiNotFoundResponse({ description: 'Code `VJ_PACK_NOT_FOUND`.' })
   @ApiConflictResponse({ description: 'Code `VJ_PACK_NAME_TAKEN`.' })
-  renamePack(@Param('id') packId: string, @Body() body: RenameVjPackDto) {
-    return this.library.renamePack(packId, body);
+  async renamePack(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id') packId: string,
+    @Body() body: RenameVjPackDto,
+  ) {
+    return this.eventLinks.packAsSeenBy(
+      await this.library.renamePack(packId, body),
+      user,
+    );
   }
 
   @Delete('packs/:id')
@@ -449,11 +509,11 @@ export class AdminVjController {
   @ApiOperation({
     summary: 'List the events a VJ pack may link to',
     description:
-      'Published events listed to the public or to members that started at most 12 hours ago and have not ended, soonest first, at most 50.',
+      'Published events listed to the public or to members that started at most 12 hours ago and have not ended, soonest first, at most 50. A caller with the vj_operator grant gets only the events a member could find in the event listings, so events moderation hid or removed and events hosted by a space are left out.',
   })
   @ApiOkResponse({ description: 'The events, soonest first.' })
-  listUpcomingEvents() {
-    return this.eventLinks.listUpcomingEvents();
+  listUpcomingEvents(@CurrentUser() user: CurrentUserData) {
+    return this.eventLinks.listUpcomingEvents(user);
   }
 
   @Get('scenes')

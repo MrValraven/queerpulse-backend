@@ -15,7 +15,7 @@ import type {
   VjSpeed,
 } from './vj.contract';
 
-/** The admin who created a pack, clip, scene or set list. */
+/** The admin or VJ operator who created a pack, clip, scene or set list. */
 export interface VjCreatorDTO {
   userId: string;
   /** `${firstName} ${lastName}`.trim() from profiles. */
@@ -32,6 +32,19 @@ export interface VjPackEventSummaryDTO {
   isAvailable: boolean;
 }
 
+/**
+ * The linked event as a caller outside the platform staff tiers (a holder of
+ * the `vj_operator` grant) gets it when members can no longer see the event:
+ * cancelled, unpublished, narrowed to a private audience, hidden or removed by
+ * moderation, or hosted by a space. The id and the flag stay so the library
+ * can still say the link is broken; the title and the start are left out
+ * (`VjEventLinkService.packsAsSeenBy`).
+ */
+export type VjPackEventWithheldSummaryDTO = Pick<
+  VjPackEventSummaryDTO,
+  'id' | 'isAvailable'
+>;
+
 export interface VjPackDTO {
   id: string;
   name: string;
@@ -45,8 +58,9 @@ export interface VjPackDTO {
   createdBy: VjCreatorDTO | null;
   createdAt: string;
   updatedAt: string;
-  /** Null when event_id is null. */
-  event: VjPackEventSummaryDTO | null;
+  /** Null when event_id is null. A VJ operator gets the withheld shape for
+   *  an event members can no longer see. */
+  event: VjPackEventSummaryDTO | VjPackEventWithheldSummaryDTO | null;
 }
 
 export interface VjClipDTO {

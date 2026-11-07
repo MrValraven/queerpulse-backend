@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MediaReferencesModule } from '../media-references/media-references.module';
 import { Message } from '../messaging/entities/message.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
@@ -38,6 +39,10 @@ import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
       Message,
       PersonaStorageKey,
       StudioAudioUpload,
+      // Read-only: both controllers ask whether a caller who is not an Admin
+      // holds the `vj_operator` grant that opens the VJ upload kinds and the
+      // VJ keys they serve.
+      UserStaffRole,
     ]),
     MediaCropsModule,
     MediaReferencesModule,

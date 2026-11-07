@@ -7,6 +7,7 @@ import { VjPack } from './entities/vj-pack.entity';
 import {
   LOCK_VJ_PACKS_ROW_EXCLUSIVE_SQL,
   VJ_EVENT_CARD_COLUMNS,
+  VJ_MEMBER_WITHHELD_EVENT_IDS_SQL,
   VJ_PACK_EVENT_CARD_SQL,
   VJ_UPCOMING_EVENTS_SQL,
   VjEventLinkService,
@@ -38,8 +39,15 @@ function uuidAt(family: number, position: number): string {
 }
 
 const PACK_ID = uuidAt(1, 1);
+const OTHER_PACK_ID = uuidAt(1, 2);
 const EVENT_ID = uuidAt(4, 1);
 const OTHER_EVENT_ID = uuidAt(4, 2);
+
+/** An admin reads every listed event; a member holding the `vj_operator`
+ *  grant reads only what a plain member could find in the event listings. */
+const ADMIN_VIEWER = { role: 'admin' };
+const VJ_OPERATOR_VIEWER = { role: 'member' };
+const MODERATOR_VIEWER = { role: 'moderator' };
 
 /** Every property name of `VjEventRow`, in its declared order. */
 const VJ_EVENT_ROW_PROPERTIES: readonly (keyof VjEventRow)[] = [
@@ -192,14 +200,20 @@ describe('VjEventLinkService', () => {
   describe('setPackEvent', () => {
     it('checks a pack event link in the contract order', async () => {
       expect(
-        await refusalOf(service.setPackEvent('pack-1', { eventId: 'x' })),
+        await refusalOf(
+          service.setPackEvent('pack-1', { eventId: 'x' }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_PACK_NOT_FOUND', status: 404 });
       expect(dataSource.transaction).not.toHaveBeenCalled();
 
       expect(
-        await refusalOf(service.setPackEvent(PACK_ID, { eventId: 'x' })),
+        await refusalOf(
+          service.setPackEvent(PACK_ID, { eventId: 'x' }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_EVENT_NOT_FOUND', status: 404 });
-      expect(await refusalOf(service.setPackEvent(PACK_ID, {}))).toMatchObject({
+      expect(
+        await refusalOf(service.setPackEvent(PACK_ID, {}, ADMIN_VIEWER)),
+      ).toMatchObject({
         code: 'VJ_EVENT_NOT_FOUND',
       });
       expect(dataSource.transaction).not.toHaveBeenCalled();
@@ -207,17 +221,23 @@ describe('VjEventLinkService', () => {
       storedPack = null;
       storedEvent = null;
       expect(
-        await refusalOf(service.setPackEvent(PACK_ID, { eventId: EVENT_ID })),
+        await refusalOf(
+          service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_PACK_NOT_FOUND', status: 404 });
 
       storedPack = { id: PACK_ID, eventId: null };
       expect(
-        await refusalOf(service.setPackEvent(PACK_ID, { eventId: EVENT_ID })),
+        await refusalOf(
+          service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_EVENT_NOT_FOUND', status: 404 });
 
       storedEvent = { id: EVENT_ID, status: 'draft', visibility: 'public' };
       expect(
-        await refusalOf(service.setPackEvent(PACK_ID, { eventId: EVENT_ID })),
+        await refusalOf(
+          service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_EVENT_NOT_LINKABLE', status: 409 });
 
       storedEvent = {
@@ -226,12 +246,16 @@ describe('VjEventLinkService', () => {
         visibility: 'invite_only',
       };
       expect(
-        await refusalOf(service.setPackEvent(PACK_ID, { eventId: EVENT_ID })),
+        await refusalOf(
+          service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_EVENT_NOT_LINKABLE', status: 409 });
 
       storedEvent = { id: EVENT_ID, status: 'cancelled', visibility: 'public' };
       expect(
-        await refusalOf(service.setPackEvent(PACK_ID, { eventId: EVENT_ID })),
+        await refusalOf(
+          service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_EVENT_NOT_LINKABLE' });
 
       expect(manager.update).not.toHaveBeenCalled();
@@ -239,7 +263,11 @@ describe('VjEventLinkService', () => {
     });
 
     it('reads the pack for update and only the id, status and visibility of the event', async () => {
-      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID.toUpperCase() });
+      await service.setPackEvent(
+        PACK_ID,
+        { eventId: EVENT_ID.toUpperCase() },
+        ADMIN_VIEWER,
+      );
 
       expect(manager.findOne).toHaveBeenCalledWith(VjPack, {
         where: { id: PACK_ID },
@@ -253,9 +281,13 @@ describe('VjEventLinkService', () => {
     });
 
     it('links an event and emits the change after commit', async () => {
-      const result = await service.setPackEvent(PACK_ID, {
-        eventId: EVENT_ID,
-      });
+      const result = await service.setPackEvent(
+        PACK_ID,
+        {
+          eventId: EVENT_ID,
+        },
+        ADMIN_VIEWER,
+      );
 
       expect(manager.update).toHaveBeenCalledWith(
         VjPack,
@@ -284,7 +316,7 @@ describe('VjEventLinkService', () => {
     it('unlinks with null and emits the change with a null event id', async () => {
       storedPack = { id: PACK_ID, eventId: EVENT_ID };
 
-      await service.setPackEvent(PACK_ID, { eventId: null });
+      await service.setPackEvent(PACK_ID, { eventId: null }, ADMIN_VIEWER);
 
       expect(manager.findOne).not.toHaveBeenCalledWith(
         Event,
@@ -308,9 +340,13 @@ describe('VjEventLinkService', () => {
     it('writes and emits nothing for the same event', async () => {
       storedPack = { id: PACK_ID, eventId: EVENT_ID };
 
-      const result = await service.setPackEvent(PACK_ID, {
-        eventId: EVENT_ID,
-      });
+      const result = await service.setPackEvent(
+        PACK_ID,
+        {
+          eventId: EVENT_ID,
+        },
+        ADMIN_VIEWER,
+      );
 
       expect(manager.update).not.toHaveBeenCalled();
       expect(eventEmitter.emit).not.toHaveBeenCalled();
@@ -321,9 +357,13 @@ describe('VjEventLinkService', () => {
       storedPack = { id: PACK_ID, eventId: EVENT_ID };
       storedEvent = { id: EVENT_ID, status: 'cancelled', visibility: 'public' };
 
-      const result = await service.setPackEvent(PACK_ID, {
-        eventId: EVENT_ID.toUpperCase(),
-      });
+      const result = await service.setPackEvent(
+        PACK_ID,
+        {
+          eventId: EVENT_ID.toUpperCase(),
+        },
+        ADMIN_VIEWER,
+      );
 
       expect(result).toBe(packDto);
       expect(manager.findOne).not.toHaveBeenCalledWith(
@@ -335,7 +375,7 @@ describe('VjEventLinkService', () => {
     });
 
     it('takes the pack table lock before the pack row', async () => {
-      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID });
+      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER);
 
       expect(manager.query).toHaveBeenCalledTimes(1);
       expect(manager.query).toHaveBeenCalledWith(
@@ -351,7 +391,7 @@ describe('VjEventLinkService', () => {
     });
 
     it('writes and emits nothing for null on an unlinked pack', async () => {
-      await service.setPackEvent(PACK_ID, { eventId: null });
+      await service.setPackEvent(PACK_ID, { eventId: null }, ADMIN_VIEWER);
 
       expect(manager.update).not.toHaveBeenCalled();
       expect(eventEmitter.emit).not.toHaveBeenCalled();
@@ -360,7 +400,7 @@ describe('VjEventLinkService', () => {
     it('moves the link from one event to another', async () => {
       storedPack = { id: PACK_ID, eventId: OTHER_EVENT_ID };
 
-      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID });
+      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER);
 
       expect(manager.update).toHaveBeenCalledWith(
         VjPack,
@@ -378,7 +418,7 @@ describe('VjEventLinkService', () => {
         visibility: 'members',
       };
 
-      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID });
+      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER);
 
       expect(manager.update).toHaveBeenCalledTimes(1);
       expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
@@ -390,7 +430,9 @@ describe('VjEventLinkService', () => {
       );
 
       expect(
-        await refusalOf(service.setPackEvent(PACK_ID, { eventId: EVENT_ID })),
+        await refusalOf(
+          service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER),
+        ),
       ).toMatchObject({ code: 'VJ_EVENT_NOT_FOUND' });
       expect(eventEmitter.emit).not.toHaveBeenCalled();
     });
@@ -398,14 +440,18 @@ describe('VjEventLinkService', () => {
 
   describe('getPackEvent', () => {
     it('answers VJ_PACK_NOT_FOUND for a malformed or unknown pack', async () => {
-      expect(await refusalOf(service.getPackEvent('nope'))).toMatchObject({
+      expect(
+        await refusalOf(service.getPackEvent('nope', ADMIN_VIEWER)),
+      ).toMatchObject({
         code: 'VJ_PACK_NOT_FOUND',
         status: 404,
       });
       expect(manager.query).not.toHaveBeenCalled();
 
       manager.query.mockResolvedValueOnce([]);
-      expect(await refusalOf(service.getPackEvent(PACK_ID))).toMatchObject({
+      expect(
+        await refusalOf(service.getPackEvent(PACK_ID, ADMIN_VIEWER)),
+      ).toMatchObject({
         code: 'VJ_PACK_NOT_FOUND',
       });
       expect(manager.query).toHaveBeenCalledWith(VJ_PACK_EVENT_CARD_SQL, [
@@ -416,7 +462,9 @@ describe('VjEventLinkService', () => {
     it('answers a null card and reason for a pack with no link', async () => {
       manager.query.mockResolvedValueOnce([rawCardRow(null)]);
 
-      expect(await service.getPackEvent(PACK_ID.toUpperCase())).toEqual({
+      expect(
+        await service.getPackEvent(PACK_ID.toUpperCase(), ADMIN_VIEWER),
+      ).toEqual({
         packId: PACK_ID,
         card: null,
         unavailableReason: null,
@@ -425,7 +473,7 @@ describe('VjEventLinkService', () => {
 
     it('answers the card, cancelled or not listed', async () => {
       manager.query.mockResolvedValueOnce([rawCardRow(rawEvent())]);
-      expect(await service.getPackEvent(PACK_ID)).toEqual({
+      expect(await service.getPackEvent(PACK_ID, ADMIN_VIEWER)).toEqual({
         packId: PACK_ID,
         card: {
           eventId: EVENT_ID,
@@ -444,7 +492,7 @@ describe('VjEventLinkService', () => {
       manager.query.mockResolvedValueOnce([
         rawCardRow(rawEvent({ status: 'cancelled', visibility: 'public' })),
       ]);
-      expect(await service.getPackEvent(PACK_ID)).toEqual({
+      expect(await service.getPackEvent(PACK_ID, ADMIN_VIEWER)).toEqual({
         packId: PACK_ID,
         card: null,
         unavailableReason: 'cancelled',
@@ -453,7 +501,7 @@ describe('VjEventLinkService', () => {
       manager.query.mockResolvedValueOnce([
         rawCardRow(rawEvent({ status: 'draft' })),
       ]);
-      expect(await service.getPackEvent(PACK_ID)).toEqual({
+      expect(await service.getPackEvent(PACK_ID, ADMIN_VIEWER)).toEqual({
         packId: PACK_ID,
         card: null,
         unavailableReason: 'not_listed',
@@ -462,7 +510,7 @@ describe('VjEventLinkService', () => {
       manager.query.mockResolvedValueOnce([
         rawCardRow(rawEvent({ visibility: 'network' })),
       ]);
-      expect(await service.getPackEvent(PACK_ID)).toEqual({
+      expect(await service.getPackEvent(PACK_ID, ADMIN_VIEWER)).toEqual({
         packId: PACK_ID,
         card: null,
         unavailableReason: 'not_listed',
@@ -475,7 +523,7 @@ describe('VjEventLinkService', () => {
         rawCardRow(rawEvent({ end_at: null, is_online: true })),
       ]);
 
-      const result = await service.getPackEvent(PACK_ID);
+      const result = await service.getPackEvent(PACK_ID, ADMIN_VIEWER);
 
       expect(result.card).toMatchObject({
         endAt: null,
@@ -500,7 +548,7 @@ describe('VjEventLinkService', () => {
         }),
       ]);
 
-      const result = await service.listUpcomingEvents();
+      const result = await service.listUpcomingEvents(ADMIN_VIEWER);
 
       expect(manager.query).toHaveBeenCalledWith(VJ_UPCOMING_EVENTS_SQL);
       expect(VJ_UPCOMING_EVENTS_SQL).toContain(
@@ -532,6 +580,238 @@ describe('VjEventLinkService', () => {
     });
   });
 
+  describe('a caller outside the platform staff tiers (vj_operator)', () => {
+    /** Answers the card read, the upcoming read and the withheld read by
+     *  SQL, the withheld read naming `withheldEventIds`. */
+    function answerQueries(options: {
+      cardRow?: Record<string, unknown>;
+      upcomingRows?: Record<string, unknown>[];
+      withheldEventIds?: string[];
+    }): void {
+      manager.query.mockImplementation(
+        (sql: string, parameters?: unknown[]) => {
+          if (sql === VJ_PACK_EVENT_CARD_SQL) {
+            return Promise.resolve(options.cardRow ? [options.cardRow] : []);
+          }
+          if (sql === VJ_UPCOMING_EVENTS_SQL) {
+            return Promise.resolve(options.upcomingRows ?? []);
+          }
+          if (sql === VJ_MEMBER_WITHHELD_EVENT_IDS_SQL) {
+            const [askedIds] = (parameters ?? []) as [string[]];
+            return Promise.resolve(
+              (options.withheldEventIds ?? [])
+                .filter((eventId) => askedIds.includes(eventId))
+                .map((eventId) => ({ id: eventId })),
+            );
+          }
+          return Promise.resolve(undefined);
+        },
+      );
+    }
+
+    const withheldReads = (): unknown[][] =>
+      (manager.query.mock.calls as unknown[][]).filter(
+        ([sql]) => sql === VJ_MEMBER_WITHHELD_EVENT_IDS_SQL,
+      );
+
+    it('leaves the events members cannot find out of the upcoming list', async () => {
+      answerQueries({
+        upcomingRows: [
+          rawEvent(),
+          rawEvent({ id: OTHER_EVENT_ID, title: 'Hidden by moderation' }),
+        ],
+        withheldEventIds: [OTHER_EVENT_ID],
+      });
+
+      const operatorList = await service.listUpcomingEvents(VJ_OPERATOR_VIEWER);
+
+      expect(operatorList.items.map((item) => item.id)).toEqual([EVENT_ID]);
+      expect(manager.query).toHaveBeenCalledWith(
+        VJ_MEMBER_WITHHELD_EVENT_IDS_SQL,
+        [[EVENT_ID, OTHER_EVENT_ID]],
+      );
+
+      manager.query.mockClear();
+      for (const viewer of [ADMIN_VIEWER, MODERATOR_VIEWER]) {
+        const staffList = await service.listUpcomingEvents(viewer);
+        expect(staffList.items.map((item) => item.id)).toEqual([
+          EVENT_ID,
+          OTHER_EVENT_ID,
+        ]);
+      }
+      expect(withheldReads()).toEqual([]);
+    });
+
+    it('answers not_listed for a linked event members cannot find', async () => {
+      answerQueries({
+        cardRow: rawCardRow(rawEvent()),
+        withheldEventIds: [EVENT_ID],
+      });
+
+      expect(await service.getPackEvent(PACK_ID, VJ_OPERATOR_VIEWER)).toEqual({
+        packId: PACK_ID,
+        card: null,
+        unavailableReason: 'not_listed',
+      });
+      expect(
+        (await service.getPackEvent(PACK_ID, ADMIN_VIEWER)).card,
+      ).toMatchObject({ eventId: EVENT_ID, title: EVENT_TITLE });
+
+      answerQueries({ cardRow: rawCardRow(rawEvent()), withheldEventIds: [] });
+      expect(
+        (await service.getPackEvent(PACK_ID, VJ_OPERATOR_VIEWER)).card,
+      ).toMatchObject({ eventId: EVENT_ID, title: EVENT_TITLE });
+    });
+
+    it('refuses to link an event members cannot find with VJ_EVENT_NOT_LINKABLE', async () => {
+      answerQueries({ withheldEventIds: [EVENT_ID] });
+
+      expect(
+        await refusalOf(
+          service.setPackEvent(
+            PACK_ID,
+            { eventId: EVENT_ID },
+            VJ_OPERATOR_VIEWER,
+          ),
+        ),
+      ).toMatchObject({ code: 'VJ_EVENT_NOT_LINKABLE', status: 409 });
+      expect(manager.update).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+
+      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER);
+      expect(manager.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('withholds the title and start of a linked event members cannot see', async () => {
+      answerQueries({ withheldEventIds: [OTHER_EVENT_ID] });
+      const basePack = {
+        id: PACK_ID,
+        name: 'Peak hour',
+        position: 0,
+        clipCount: 0,
+        totalByteSize: 0,
+        coverThumbnailUrl: null,
+        createdBy: null,
+        createdAt: EVENT_START.toISOString(),
+        updatedAt: EVENT_START.toISOString(),
+      };
+      const listedPack: VjPackDTO = {
+        ...basePack,
+        event: {
+          id: EVENT_ID,
+          title: EVENT_TITLE,
+          startAt: EVENT_START.toISOString(),
+          isAvailable: true,
+        },
+      };
+      const moderatedPack: VjPackDTO = {
+        ...basePack,
+        id: OTHER_PACK_ID,
+        event: {
+          id: OTHER_EVENT_ID,
+          title: 'Hidden by moderation',
+          startAt: EVENT_START.toISOString(),
+          isAvailable: true,
+        },
+      };
+      const privatePack: VjPackDTO = {
+        ...basePack,
+        id: uuidAt(1, 3),
+        event: {
+          id: uuidAt(4, 3),
+          title: 'Now invite only',
+          startAt: EVENT_START.toISOString(),
+          isAvailable: false,
+        },
+      };
+      const unlinkedPack: VjPackDTO = {
+        ...basePack,
+        id: uuidAt(1, 4),
+        event: null,
+      };
+      const packs = [listedPack, moderatedPack, privatePack, unlinkedPack];
+
+      const operatorPacks = await service.packsAsSeenBy(
+        packs,
+        VJ_OPERATOR_VIEWER,
+      );
+
+      expect(operatorPacks[0]).toEqual(listedPack);
+      expect(operatorPacks[1]?.event).toEqual({
+        id: OTHER_EVENT_ID,
+        isAvailable: false,
+      });
+      expect(operatorPacks[2]?.event).toEqual({
+        id: uuidAt(4, 3),
+        isAvailable: false,
+      });
+      expect(operatorPacks[3]).toEqual(unlinkedPack);
+      // One read, only for the events a status and visibility would list.
+      expect(withheldReads()).toEqual([
+        [VJ_MEMBER_WITHHELD_EVENT_IDS_SQL, [[EVENT_ID, OTHER_EVENT_ID]]],
+      ]);
+      expect(JSON.stringify(operatorPacks)).not.toContain('Now invite only');
+      expect(JSON.stringify(operatorPacks)).not.toContain(
+        'Hidden by moderation',
+      );
+
+      manager.query.mockClear();
+      expect(await service.packsAsSeenBy(packs, ADMIN_VIEWER)).toEqual(packs);
+      expect(await service.packsAsSeenBy(packs, MODERATOR_VIEWER)).toEqual(
+        packs,
+      );
+      const packList = { items: packs };
+      expect(await service.packListAsSeenBy(packList, ADMIN_VIEWER)).toBe(
+        packList,
+      );
+      expect(withheldReads()).toEqual([]);
+
+      expect(
+        await service.packsAsSeenBy([unlinkedPack], VJ_OPERATOR_VIEWER),
+      ).toEqual([unlinkedPack]);
+      expect(withheldReads()).toEqual([]);
+    });
+
+    it('narrows the pack of a pack and clips answer', async () => {
+      answerQueries({ withheldEventIds: [EVENT_ID] });
+      const pack = {
+        id: PACK_ID,
+        event: {
+          id: EVENT_ID,
+          title: EVENT_TITLE,
+          startAt: EVENT_START.toISOString(),
+          isAvailable: true,
+        },
+      } as VjPackDTO;
+
+      const packClips = await service.packClipsAsSeenBy(
+        { pack, items: [] },
+        VJ_OPERATOR_VIEWER,
+      );
+
+      expect(packClips.pack.event).toEqual({
+        id: EVENT_ID,
+        isAvailable: false,
+      });
+      expect(packClips.items).toEqual([]);
+    });
+
+    it('reads only the event id when it checks what members can find', () => {
+      expect(selectedEventColumns(VJ_MEMBER_WITHHELD_EVENT_IDS_SQL)).toEqual([
+        'id',
+      ]);
+      expect(VJ_MEMBER_WITHHELD_EVENT_IDS_SQL).toContain(
+        '"content_moderation"',
+      );
+      expect(VJ_MEMBER_WITHHELD_EVENT_IDS_SQL).toContain(
+        '"host_community"."parent_id" IS NOT NULL',
+      );
+      expect(VJ_MEMBER_WITHHELD_EVENT_IDS_SQL).not.toMatch(
+        /rsvp|cohost|persona|attendee|host_id|address/i,
+      );
+    });
+  });
+
   describe('privacy', () => {
     it('selects no host, attendee or address column', async () => {
       expect(VJ_EVENT_CARD_COLUMNS).toHaveLength(
@@ -557,7 +837,7 @@ describe('VjEventLinkService', () => {
         expect(sql).not.toMatch(/rsvp|cohost|persona|attendee/i);
       }
 
-      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID });
+      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER);
       const eventRead = manager.findOne.mock.calls.find(
         ([entity]) => entity === Event,
       ) as [unknown, { select: Record<string, boolean> }] | undefined;
@@ -576,14 +856,14 @@ describe('VjEventLinkService', () => {
           .mockImplementation(() => undefined),
       );
       manager.query.mockResolvedValueOnce([rawCardRow(rawEvent())]);
-      await service.getPackEvent(PACK_ID);
+      await service.getPackEvent(PACK_ID, ADMIN_VIEWER);
       manager.query.mockResolvedValueOnce([rawEvent()]);
-      await service.listUpcomingEvents();
-      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID });
+      await service.listUpcomingEvents(ADMIN_VIEWER);
+      await service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER);
       storedEvent = { id: EVENT_ID, status: 'draft', visibility: 'public' };
       storedPack = { id: PACK_ID, eventId: null };
       const refusal = await refusalOf(
-        service.setPackEvent(PACK_ID, { eventId: EVENT_ID }),
+        service.setPackEvent(PACK_ID, { eventId: EVENT_ID }, ADMIN_VIEWER),
       );
 
       for (const spy of logSpies) {

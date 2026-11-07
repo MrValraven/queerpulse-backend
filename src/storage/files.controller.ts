@@ -23,6 +23,8 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { isAdminOrHoldsStaffRole } from '../auth/staff-grant-access';
 // A ban is a permanent suspension (`AccountEnforcementService` sets
 // `status = Suspended`, `suspendedUntil = null` for both `suspend` and `ban`),
 // so gating on `Suspended` covers both — there is no separate `Banned` status.
@@ -118,6 +120,10 @@ export class FilesController {
     // T17: a persona-scoped key names no owner; its registry row says which
     // persona holds it and whose upload it was.
     private readonly personaImageKeys: PersonaImageKeysService,
+    // Read-only: whether a caller who is not an Admin holds the `vj_operator`
+    // grant that VJ keys are served to. Registered in `StorageModule`.
+    @InjectRepository(UserStaffRole)
+    private readonly staffRoles: Repository<UserStaffRole>,
   ) {}
 
   // Per-process memo of keys that have already passed the magic-byte check
@@ -681,11 +687,17 @@ export class FilesController {
         kindSpec === UPLOAD_KIND_SPECS.vj_preview
       ) {
         // VJ keys (clips, thumbnails and animated previews) name nobody and
-        // are served to admins only. This branch sits inside the chain so a
-        // VJ key never reaches the uploader-only fallback below, which would
-        // 404 every admin. A 404 keeps the route from revealing which keys
-        // exist.
-        if ((user.role as UserRole) !== UserRole.Admin) {
+        // are served to an Admin and to a holder of the `vj_operator` grant,
+        // the callers `admin/vj` admits. This branch sits inside the chain so
+        // a VJ key never reaches the uploader-only fallback below, which
+        // would 404 every one of them. A 404 keeps the route from revealing
+        // which keys exist.
+        const hasVjAccess = await isAdminOrHoldsStaffRole(
+          this.staffRoles,
+          user,
+          ['vj_operator'],
+        );
+        if (!hasVjAccess) {
           throw new NotFoundException();
         }
       } else if (storageKeyOwnerId(storageKey) !== user.userId) {

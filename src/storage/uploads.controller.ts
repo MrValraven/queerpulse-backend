@@ -9,11 +9,14 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { isAdminOrHoldsStaffRole } from '../auth/staff-grant-access';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
@@ -23,6 +26,7 @@ import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService, PresignedUpload } from './storage.service';
 import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { vjError } from '../vj/vj.constants';
 import {
@@ -35,6 +39,14 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+
+/** A VJ presign request, read off `PresignRequestDto` once its kind is VJ. */
+interface VjPresignRequest {
+  kind: 'vj_clip' | 'vj_thumbnail' | 'vj_preview';
+  contentType: string;
+  byteSize: number;
+  hasSubprofileId: boolean;
+}
 
 // Presigning mints a short-lived write credential to object storage; rate-limit
 // per user (see UserPresignThrottlerGuard) so a single session can't fan out an
@@ -54,6 +66,10 @@ export class UploadsController {
     private readonly mediaCropService: MediaCropService,
     private readonly personaImageKeys: PersonaImageKeysService,
     private readonly studioAudioUploads: StudioAudioUploadsService,
+    // Read-only: whether a caller who is not an Admin holds the `vj_operator`
+    // grant that opens the VJ upload kinds. Registered in `StorageModule`.
+    @InjectRepository(UserStaffRole)
+    private readonly staffRoles: Repository<UserStaffRole>,
   ) {}
 
   // pending-ok: avatar upload supports editing your own draft profile.
@@ -126,7 +142,7 @@ export class UploadsController {
   })
   @ApiForbiddenResponse({
     description:
-      'A sticker or VJ upload by a caller who is not an admin (VJ_UPLOAD_NOT_ADMIN for vj_clip, vj_thumbnail and vj_preview).',
+      'A sticker upload by a caller who is not an admin, or a VJ upload (vj_clip, vj_thumbnail and vj_preview) by a caller with no VJ access: neither the Admin role nor the vj_operator staff grant (code VJ_UPLOAD_NOT_ADMIN).',
   })
   presign(
     @CurrentUser() user: CurrentUserData,
@@ -140,25 +156,25 @@ export class UploadsController {
     if (dto.kind === 'sticker' && (user.role as UserRole) !== UserRole.Admin) {
       throw new ForbiddenException('Only an admin may upload a sticker');
     }
-    // VJ media is platform artwork under keys that name nobody, admin only.
+    // VJ media is platform artwork under keys that name nobody, open to an
+    // Admin and to a holder of the `vj_operator` grant (the rule
+    // `RolesOrStaffGuard` applies to `admin/vj`). An Admin is answered on the
+    // role alone; anyone else waits on one grant lookup.
     if (
       dto.kind === 'vj_clip' ||
       dto.kind === 'vj_thumbnail' ||
       dto.kind === 'vj_preview'
     ) {
-      if ((user.role as UserRole) !== UserRole.Admin) {
-        throw vjError('VJ_UPLOAD_NOT_ADMIN');
-      }
-      if (dto.subprofileId !== undefined) {
-        throw new BadRequestException(
-          'subprofileId is accepted for studio_audio uploads only',
-        );
-      }
-      return this.storage.presignVjUpload({
+      const vjRequest: VjPresignRequest = {
         kind: dto.kind,
         contentType: dto.contentType,
         byteSize: dto.byteSize,
-      });
+        hasSubprofileId: dto.subprofileId !== undefined,
+      };
+      if ((user.role as UserRole) !== UserRole.Admin) {
+        return this.presignVjUploadForGrantHolder(user, vjRequest);
+      }
+      return this.presignVjUpload(vjRequest);
     }
     // Studio v1: a track's audio is presigned for a persona under a key that
     // names nobody. `StudioAudioUploadsService` checks the Studio grant, the
@@ -186,6 +202,37 @@ export class UploadsController {
       userId: user.userId,
       contentType: dto.contentType,
       byteSize: dto.byteSize,
+    });
+  }
+
+  /** A VJ presign for a caller who is not an Admin: refused with
+   *  `VJ_UPLOAD_NOT_ADMIN` (no VJ access) unless they hold `vj_operator`. */
+  private async presignVjUploadForGrantHolder(
+    user: CurrentUserData,
+    vjRequest: VjPresignRequest,
+  ): Promise<PresignedUpload> {
+    const isVjOperator = await isAdminOrHoldsStaffRole(this.staffRoles, user, [
+      'vj_operator',
+    ]);
+    if (!isVjOperator) {
+      throw vjError('VJ_UPLOAD_NOT_ADMIN');
+    }
+    return this.presignVjUpload(vjRequest);
+  }
+
+  /** The VJ presign once access is settled: VJ keys carry no persona. */
+  private presignVjUpload(
+    vjRequest: VjPresignRequest,
+  ): Promise<PresignedUpload> {
+    if (vjRequest.hasSubprofileId) {
+      throw new BadRequestException(
+        'subprofileId is accepted for studio_audio uploads only',
+      );
+    }
+    return this.storage.presignVjUpload({
+      kind: vjRequest.kind,
+      contentType: vjRequest.contentType,
+      byteSize: vjRequest.byteSize,
     });
   }
 

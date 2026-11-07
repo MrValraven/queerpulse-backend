@@ -154,20 +154,35 @@ describe('AdminVjController access', () => {
     expect(reflector.get(ROLES_KEY, AdminVjController)).toEqual([
       UserRole.Admin,
     ]);
-    expect(reflector.get(STAFF_ROLES_KEY, AdminVjController)).toEqual([]);
+    expect(reflector.get(STAFF_ROLES_KEY, AdminVjController)).toEqual([
+      'vj_operator',
+    ]);
     expect(reflector.get(FEATURE_KEY, AdminVjController)).toBeUndefined();
   });
 
   it.each([
-    [UserRole.Admin, false, true],
-    [UserRole.Moderator, false, false],
-    // A plain member holding a staff grant.
-    [UserRole.Member, true, false],
+    [UserRole.Admin, 'none', true],
+    [UserRole.Moderator, 'none', false],
+    // A plain member holding the VJ grant, and a moderator holding it.
+    [UserRole.Member, 'vj_operator', true],
+    [UserRole.Moderator, 'vj_operator', true],
+    // A plain member holding an unrelated grant, and one holding none.
+    [UserRole.Member, 'music_manager_producer', false],
+    [UserRole.Member, 'none', false],
   ])(
     'RolesOrStaffGuard lets role %s (grant held: %s) through: %s',
-    async (role, hasGrant, isAllowed) => {
+    async (role, heldGrant, isAllowed) => {
+      const exists = jest.fn(
+        (options: { where: { userId: string; role: string }[] }) =>
+          Promise.resolve(
+            options.where.some(
+              (condition) =>
+                condition.userId === ADMIN_ID && condition.role === heldGrant,
+            ),
+          ),
+      );
       const guard = new RolesOrStaffGuard(new Reflector(), {
-        exists: jest.fn().mockResolvedValue(hasGrant),
+        exists,
       } as unknown as Repository<UserStaffRole>);
       const context = {
         getHandler: () => handlerOf('createScene'),
@@ -321,6 +336,9 @@ const EVENT_LINK_METHOD_NAMES = [
   'getPackEvent',
   'setPackEvent',
   'listUpcomingEvents',
+  'packAsSeenBy',
+  'packListAsSeenBy',
+  'packClipsAsSeenBy',
 ] as const;
 
 const SCENE_METHOD_NAMES = [
@@ -383,7 +401,7 @@ describe('AdminVjController delegation', () => {
     expect(setlists.createSetlist).toHaveBeenCalledWith(caller, setlistBody);
   });
 
-  it('delegates the pack and clip routes to the library service', async () => {
+  it('delegates the pack and clip routes to the library service and passes every linked pack through the event narrowing', async () => {
     const packIdsBody = { packIds: [PACK_ID] };
     const clipIdsBody = { clipIds: [CLIP_ID] };
     const clipAddBody = { clipId: CLIP_ID };
@@ -400,24 +418,28 @@ describe('AdminVjController delegation', () => {
     const previewBody = { previewStorageKey: 'vj-previews/a.webp' };
     const mediaQuery = { clipIds: CLIP_ID };
 
-    await expect(controller.listPacks()).resolves.toBe(answer);
-    await expect(controller.reorderPacks(packIdsBody)).resolves.toBe(answer);
-    await expect(controller.getPackClips(PACK_ID)).resolves.toBe(answer);
+    await expect(controller.listPacks(caller)).resolves.toBe(answer);
+    await expect(controller.reorderPacks(caller, packIdsBody)).resolves.toBe(
+      answer,
+    );
+    await expect(controller.getPackClips(caller, PACK_ID)).resolves.toBe(
+      answer,
+    );
     await expect(controller.getPackMedia(PACK_ID, mediaQuery)).resolves.toBe(
       answer,
     );
-    await expect(controller.addPackClip(PACK_ID, clipAddBody)).resolves.toBe(
-      answer,
-    );
     await expect(
-      controller.reorderPackClips(PACK_ID, clipIdsBody),
+      controller.addPackClip(caller, PACK_ID, clipAddBody),
     ).resolves.toBe(answer);
-    await expect(controller.removePackClip(PACK_ID, CLIP_ID)).resolves.toBe(
-      answer,
-    );
-    await expect(controller.renamePack(PACK_ID, renameBody)).resolves.toBe(
-      answer,
-    );
+    await expect(
+      controller.reorderPackClips(caller, PACK_ID, clipIdsBody),
+    ).resolves.toBe(answer);
+    await expect(
+      controller.removePackClip(caller, PACK_ID, CLIP_ID),
+    ).resolves.toBe(answer);
+    await expect(
+      controller.renamePack(caller, PACK_ID, renameBody),
+    ).resolves.toBe(answer);
     await expect(controller.deletePack(PACK_ID)).resolves.toBe(answer);
     await expect(controller.listClips()).resolves.toBe(answer);
     await expect(controller.getClipsMedia(mediaQuery)).resolves.toBe(answer);
@@ -443,20 +465,34 @@ describe('AdminVjController delegation', () => {
     expect(library.setClipPreview).toHaveBeenCalledWith(CLIP_ID, previewBody);
     expect(library.updateClip).toHaveBeenCalledWith(CLIP_ID, updateBody);
     expect(library.deleteClip).toHaveBeenCalledWith(CLIP_ID);
+    // Every answer that can carry a linked event goes through the narrowing
+    // with the caller, which decides how much of the event it may read.
+    expect(eventLinks.packListAsSeenBy).toHaveBeenCalledTimes(2);
+    expect(eventLinks.packListAsSeenBy).toHaveBeenCalledWith(answer, caller);
+    expect(eventLinks.packClipsAsSeenBy).toHaveBeenCalledTimes(4);
+    expect(eventLinks.packClipsAsSeenBy).toHaveBeenCalledWith(answer, caller);
+    expect(eventLinks.packAsSeenBy).toHaveBeenCalledTimes(1);
+    expect(eventLinks.packAsSeenBy).toHaveBeenCalledWith(answer, caller);
   });
 
   it('delegates the event routes to the event link service', async () => {
     const linkBody = { eventId: EVENT_ID };
 
-    await expect(controller.getPackEvent(PACK_ID)).resolves.toBe(answer);
-    await expect(controller.setPackEvent(PACK_ID, linkBody)).resolves.toBe(
+    await expect(controller.getPackEvent(caller, PACK_ID)).resolves.toBe(
       answer,
     );
-    await expect(controller.listUpcomingEvents()).resolves.toBe(answer);
+    await expect(
+      controller.setPackEvent(caller, PACK_ID, linkBody),
+    ).resolves.toBe(answer);
+    await expect(controller.listUpcomingEvents(caller)).resolves.toBe(answer);
 
-    expect(eventLinks.getPackEvent).toHaveBeenCalledWith(PACK_ID);
-    expect(eventLinks.setPackEvent).toHaveBeenCalledWith(PACK_ID, linkBody);
-    expect(eventLinks.listUpcomingEvents).toHaveBeenCalledWith();
+    expect(eventLinks.getPackEvent).toHaveBeenCalledWith(PACK_ID, caller);
+    expect(eventLinks.setPackEvent).toHaveBeenCalledWith(
+      PACK_ID,
+      linkBody,
+      caller,
+    );
+    expect(eventLinks.listUpcomingEvents).toHaveBeenCalledWith(caller);
     expect(library.getPackClips).not.toHaveBeenCalled();
   });
 

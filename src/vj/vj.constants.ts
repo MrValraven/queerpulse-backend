@@ -149,7 +149,8 @@ export const VJ_REFUSALS: Record<
   },
   VJ_UPLOAD_NOT_ADMIN: {
     status: HttpStatus.FORBIDDEN,
-    message: 'Only an admin may upload VJ clips.',
+    message:
+      'This account has no VJ access: VJ uploads need the Admin role or the VJ operator grant.',
   },
   VJ_UPLOAD_TYPE_UNSUPPORTED: {
     status: HttpStatus.BAD_REQUEST,
@@ -359,9 +360,11 @@ export function vjError(
   return new HttpException(body, refusal.status);
 }
 
-/** The `exception` frame message for a caller who is no longer an active
- *  Admin (`domainCode: 'vj_not_admin'`). */
-export const VJ_NOT_ADMIN_MESSAGE = 'VJ is open to admins only.';
+/** The `exception` frame message for a caller with no VJ access: neither an
+ *  active Admin nor an active holder of the `vj_operator` staff grant
+ *  (`domainCode: 'vj_not_admin'`, a wire code that keeps its name). */
+export const VJ_NOT_ADMIN_MESSAGE =
+  'This account has no VJ access: VJ needs the Admin role or the VJ operator grant.';
 
 /** The `exception` frame message sent to a screen socket another socket with
  *  the same `screenId` replaced (`domainCode: 'vj_screen_replaced'`). */

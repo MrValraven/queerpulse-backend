@@ -7,8 +7,8 @@ import {
 } from './staff-roles.registry';
 
 describe('staff roles registry: music_manager_producer', () => {
-  it('registers music_manager_producer last with a public staff badge', () => {
-    expect(STAFF_ROLE_IDS.at(-1)).toBe('music_manager_producer');
+  it('registers music_manager_producer with a public staff badge', () => {
+    expect(STAFF_ROLE_IDS).toContain('music_manager_producer');
     expect(STAFF_ROLES.music_manager_producer.hasPublicStaffBadge).toBe(true);
     expect(BADGED_STAFF_ROLE_IDS).toContain('music_manager_producer');
   });
@@ -21,18 +21,19 @@ describe('staff roles registry: music_manager_producer', () => {
     );
   });
 
-  it('keeps the four unbadged grants unbadged', () => {
+  it('keeps the five unbadged grants unbadged', () => {
     const unbadgedRoleIds = [
       'magazine_writer',
       'partnerships',
       'product_manager',
       'cultural_producer',
+      'vj_operator',
     ] as const;
     expect(
       unbadgedRoleIds.map(
         (staffRoleId) => STAFF_ROLES[staffRoleId].hasPublicStaffBadge,
       ),
-    ).toEqual([false, false, false, false]);
+    ).toEqual([false, false, false, false, false]);
   });
 
   it('states the house scope and the three refusals in its grants', () => {
@@ -64,5 +65,25 @@ describe('staff roles registry: music_manager_producer', () => {
   it('accepts the new id through isStaffRoleId and isBadgedStaffRoleId', () => {
     expect(isStaffRoleId('music_manager_producer')).toBe(true);
     expect(isBadgedStaffRoleId('music_manager_producer')).toBe(true);
+  });
+});
+
+describe('staff roles registry: vj_operator', () => {
+  it('registers vj_operator last and without a public staff badge', () => {
+    expect(STAFF_ROLE_IDS.at(-1)).toBe('vj_operator');
+    expect(STAFF_ROLES.vj_operator.hasPublicStaffBadge).toBe(false);
+    expect(BADGED_STAFF_ROLE_IDS).not.toContain('vj_operator');
+    expect(isStaffRoleId('vj_operator')).toBe(true);
+    expect(isBadgedStaffRoleId('vj_operator')).toBe(false);
+  });
+
+  it('opens the VJ library, the screen and the remote, and states what stays closed', () => {
+    const joinedGrants = STAFF_ROLES.vj_operator.grants.join('\n');
+    expect(joinedGrants).toContain('admin/vj');
+    expect(joinedGrants).toContain('`/vj` socket');
+    expect(joinedGrants).toContain('vj_clip, vj_thumbnail and vj_preview');
+    expect(joinedGrants).toContain('NOT the title or start of a linked event');
+    expect(joinedGrants).toContain('NOT the socket during a platform lockdown');
+    expect(joinedGrants).toContain('NOT any other admin surface');
   });
 });
