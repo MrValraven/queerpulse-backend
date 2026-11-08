@@ -352,6 +352,7 @@ export class NotificationsListener {
         source: 'event',
         eventId: e.eventId,
         eventSlug: e.eventSlug,
+        eventTitle: e.eventTitle,
       },
       e.rsvperId,
     );

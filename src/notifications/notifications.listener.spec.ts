@@ -1,5 +1,6 @@
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
+import { EventVisibility } from '../events/entities/event.entity';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -138,6 +139,29 @@ describe('NotificationsListener', () => {
       expect.objectContaining({ eventId: 'e1', eventSlug: 'e1-slug' }),
     );
     expect(notifications.create.mock.calls[0]).toHaveLength(3);
+  });
+
+  it('names the event on the host RSVP notification', async () => {
+    await listener.onEventRsvped({
+      eventId: 'e1',
+      eventSlug: 'e1-slug',
+      eventTitle: 'Queer book club',
+      eventVisibility: EventVisibility.Public,
+      hostId: 'host1',
+      rsvperId: 'u2',
+    });
+    expect(notifications.create).toHaveBeenCalledWith(
+      'host1',
+      NotificationType.EventRsvp,
+      {
+        actorId: 'u2',
+        source: 'event',
+        eventId: 'e1',
+        eventSlug: 'e1-slug',
+        eventTitle: 'Queer book club',
+      },
+      'u2',
+    );
   });
 
   it('notifies a promoted member with no actor', async () => {

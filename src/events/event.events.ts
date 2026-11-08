@@ -34,7 +34,7 @@ export interface EventRsvpedEvent {
   // Carried so the profiles `ActivityListener` can (a) title the activity row
   // with the event name and (b) gate on visibility — only a `public` event's
   // RSVP is recorded as public activity. Additive: the notifications listener
-  // ignores both.
+  // reads `eventTitle` for the host's bell row and ignores the visibility.
   eventTitle: string;
   eventVisibility: EventVisibility;
 }

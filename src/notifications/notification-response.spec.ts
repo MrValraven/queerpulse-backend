@@ -122,6 +122,25 @@ describe('toClientPayload (PRD-404 event reminder)', () => {
   });
 });
 
+describe('toClientPayload (event RSVP)', () => {
+  it('forwards the event title and slug, and keeps the ids server-side', () => {
+    const projected = toClientPayload(
+      notificationRow(NotificationType.EventRsvp, {
+        actorId: 'u2',
+        source: 'event',
+        eventId: 'e1',
+        eventSlug: 'queer-book-club',
+        eventTitle: 'Queer book club',
+      }),
+    );
+    expect(projected).toEqual({
+      source: 'event',
+      eventSlug: 'queer-book-club',
+      eventTitle: 'Queer book club',
+    });
+  });
+});
+
 describe('toClientPayload (ENG-409 lifecycle rows)', () => {
   it('forwards the role and community name on a role change, and drops the raw role pair and actor id', () => {
     const projected = toClientPayload(

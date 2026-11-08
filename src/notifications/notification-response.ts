@@ -353,6 +353,9 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // the client offers a closed set of labels while the server accepts any
     // short label. The invite deep link uses
     // `inviteId` (the lineup row id) from COMMON_PAYLOAD_KEYS.
+    // The host's own event title, so the bell names which event got the RSVP.
+    // `actorId` stays off the wire; the actor resolves separately.
+    [NotificationType.EventRsvp]: ['eventTitle'],
     // Member-sent event invites: the event title for the copy. `actorId` stays
     // off the wire; the actor resolves separately.
     [NotificationType.EventInviteRequest]: ['eventTitle'],
