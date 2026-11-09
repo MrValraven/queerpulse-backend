@@ -78,6 +78,8 @@ describe('vjError', () => {
     ['VJ_SETLIST_REORDER_MISMATCH', 400],
     ['VJ_SETLIST_ITEMS_INVALID', 400],
     ['VJ_SETLIST_FULL', 409],
+    ['VJ_CONNECTION_NOT_FOUND', 404],
+    ['VJ_CONNECTION_NOT_YOURS', 403],
   ] as const)(
     'answers %s with status %i and the code in the body',
     (code, status) => {
@@ -91,12 +93,14 @@ describe('vjError', () => {
     },
   );
 
-  it('lists the 47 server codes in contract order', () => {
-    expect(VJ_REFUSAL_CODES).toHaveLength(47);
+  it('lists the 49 server codes in contract order', () => {
+    expect(VJ_REFUSAL_CODES).toHaveLength(49);
     expect(VJ_REFUSAL_CODES[0]).toBe('VJ_PACK_NOT_FOUND');
     expect(VJ_REFUSAL_CODES[25]).toBe('VJ_UPLOAD_MISSING');
     expect(VJ_REFUSAL_CODES[26]).toBe('VJ_CLIP_FAVORITE_INVALID');
     expect(VJ_REFUSAL_CODES[46]).toBe('VJ_SETLIST_FULL');
+    expect(VJ_REFUSAL_CODES[47]).toBe('VJ_CONNECTION_NOT_FOUND');
+    expect(VJ_REFUSAL_CODES[48]).toBe('VJ_CONNECTION_NOT_YOURS');
     expect(Object.keys(VJ_REFUSALS)).toEqual([...VJ_REFUSAL_CODES]);
   });
 
@@ -275,11 +279,11 @@ describe('vjAckFailure', () => {
   });
 
   it('holds one distinct fixed sentence per socket code', () => {
-    expect(Object.keys(VJ_SOCKET_ERROR_MESSAGES)).toHaveLength(72);
+    expect(Object.keys(VJ_SOCKET_ERROR_MESSAGES)).toHaveLength(75);
     expect(Object.keys(VJ_SOCKET_ERROR_MESSAGES).sort()).toEqual(
       [...VJ_SOCKET_ERROR_CODES].sort(),
     );
-    expect(new Set(Object.values(VJ_SOCKET_ERROR_MESSAGES)).size).toBe(72);
+    expect(new Set(Object.values(VJ_SOCKET_ERROR_MESSAGES)).size).toBe(75);
     for (const message of Object.values(VJ_SOCKET_ERROR_MESSAGES)) {
       expect(message).not.toMatch(LONG_DASH_PATTERN);
     }

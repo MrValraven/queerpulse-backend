@@ -9,6 +9,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User } from '../users/entities/user.entity';
 import { AdminVjController } from './admin-vj.controller';
+import { AdminVjLiveController } from './admin-vj-live.controller';
 import { VjClip } from './entities/vj-clip.entity';
 import { VjPackClip } from './entities/vj-pack-clip.entity';
 import { VjPack } from './entities/vj-pack.entity';
@@ -66,7 +67,7 @@ import { VjStageService } from './vj-stage.service';
     // on each call, as `ChatGateway` does, so no defaults.
     JwtModule.register({}),
   ],
-  controllers: [AdminVjController],
+  controllers: [AdminVjController, AdminVjLiveController],
   providers: [
     VjLibraryService,
     VjStageService,

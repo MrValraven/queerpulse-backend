@@ -154,8 +154,13 @@ export const VJ_LOOP_MODES = ['loop', 'pingPong'] as const;
 export type VjLoopMode = (typeof VJ_LOOP_MODES)[number];
 
 /** The renderer a screen draws with. */
-export const VJ_RENDERERS = ['webgl2', 'dom'] as const;
+export const VJ_RENDERERS = ['webgl2', 'dom', 'simple'] as const;
 export type VjRenderer = (typeof VJ_RENDERERS)[number];
+
+/** The render modes the remote picks for every screen: the effects engine or
+ *  the simple renderer (clips with an opacity crossfade). */
+export const VJ_RENDER_MODES = ['effects', 'simple'] as const;
+export type VjRenderMode = (typeof VJ_RENDER_MODES)[number];
 
 /** Beats in one bar of the tempo grid. */
 export const VJ_BEATS_PER_BAR = 4;
@@ -1866,6 +1871,9 @@ export const VJ_SOCKET_ERROR_CODES = [
   'vj_event_card_kind_invalid',
   'vj_event_card_no_event',
   'vj_server_error',
+  'vj_stopped',
+  'vj_render_mode_invalid',
+  'vj_no_screens_connected',
 ] as const;
 export type VjSocketErrorCode = (typeof VJ_SOCKET_ERROR_CODES)[number];
 
@@ -2110,6 +2118,12 @@ export interface VjScreenIdentifyPayload {
   screenId: string | null;
 }
 
+/** `screens:setRenderMode`: an unstamped remote frame. The ack is
+ *  `{ ok: true, reachedCount }`, the screens connected at that moment. */
+export interface VjSetRenderModePayload {
+  mode: VjRenderMode;
+}
+
 /** `clock:sync` carries nothing. */
 export type VjClockSyncPayload = Record<string, never>;
 
@@ -2143,6 +2157,12 @@ export interface VjScreenRoleFrame {
 /** `screens:update`: every screen of the stage, sorted by `number`. */
 export interface VjScreensUpdateFrame {
   screens: VjScreenStatus[];
+}
+
+/** `screen:renderMode` to every connected screen: draw with this mode. The
+ *  stage stores nothing; a screen that attaches later starts on effects. */
+export interface VjScreenRenderModeFrame {
+  mode: VjRenderMode;
 }
 
 /** `screen:identify` to one screen: draw this number for `durationMs`. */
@@ -2179,6 +2199,7 @@ export const VJ_CLIENT_FRAME_NAMES = [
   'stage:setLogo',
   'stage:setEventCard',
   'screen:identify',
+  'screens:setRenderMode',
   'screen:advance',
   'screen:status',
 ] as const;
@@ -2191,6 +2212,7 @@ export const VJ_SERVER_FRAME_NAMES = [
   'screens:update',
   'library:changed',
   'screen:identify',
+  'screen:renderMode',
   'exception',
 ] as const;
 export type VjServerFrameName = (typeof VJ_SERVER_FRAME_NAMES)[number];
@@ -2224,6 +2246,7 @@ export type VjRemoteCommandName = (typeof VJ_REMOTE_COMMAND_NAMES)[number];
 export const VJ_EXCEPTION_DOMAIN_CODES = [
   'vj_not_admin',
   'vj_screen_replaced',
+  'vj_stopped',
 ] as const;
 export type VjExceptionDomainCode = (typeof VJ_EXCEPTION_DOMAIN_CODES)[number];
 

@@ -3,6 +3,7 @@ import {
   QUIZSHOW_TEMPLATE_SEEDS_1837900000000 as seeds,
   type QuizshowTemplateSeed,
 } from '../migrations/data/quizshow-templates-1837900000000.seed';
+import { QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000 as wheelSeeds } from '../migrations/data/quizshow-wheel-templates-1840100000000.seed';
 import {
   completenessProblems,
   structuralProblems,
@@ -178,5 +179,93 @@ describe('Frozen quizshow template seeds', () => {
     for (const text of allStrings) {
       expect(/Cesariny/.test(text) && /Paris/.test(text)).toBe(false);
     }
+  });
+});
+
+const WHEEL_SETTINGS_KEYS = [
+  'isJokerAllowed',
+  'isSpeedBonusOn',
+  'sliceCount',
+  'timeLimitSeconds',
+  'voteSeconds',
+  'wheelBonus',
+  'wheelPick',
+  'writeSeconds',
+];
+
+describe('Frozen quizshow wheel template seeds', () => {
+  it('holds the five wheel packs with fixed ids that do not clash with the first seeds', () => {
+    expect(wheelSeeds.map((seed) => seed.id)).toEqual([
+      'a7e3b1c0-5eed-4000-8000-000000000007',
+      'a7e3b1c0-5eed-4000-8000-000000000008',
+      'a7e3b1c0-5eed-4000-8000-000000000009',
+      'a7e3b1c0-5eed-4000-8000-00000000000a',
+      'a7e3b1c0-5eed-4000-8000-00000000000b',
+    ]);
+    const firstSeedIds = new Set(seeds.map((seed) => seed.id));
+    for (const seed of wheelSeeds) {
+      expect(firstSeedIds.has(seed.id)).toBe(false);
+    }
+  });
+
+  it('opens every pack with its one wheel row over six slices', () => {
+    expect(
+      wheelSeeds.map((seed) => seed.quiz.rounds[0]?.settings.wheelPick),
+    ).toEqual(['round', 'question', 'round', 'question', 'round']);
+    for (const seed of wheelSeeds) {
+      const [wheelRow, ...sliceRows] = seed.quiz.rounds;
+      expect(wheelRow?.kind).toBe('wheel');
+      expect(wheelRow?.questions).toEqual([]);
+      expect(sliceRows).toHaveLength(6);
+      expect(sliceRows.every((round) => round.kind !== 'wheel')).toBe(true);
+    }
+  });
+
+  it('gives every round row all eight settings keys', () => {
+    for (const seed of wheelSeeds) {
+      for (const round of seed.quiz.rounds) {
+        expect(Object.keys(round.settings).sort()).toEqual(WHEEL_SETTINGS_KEYS);
+      }
+    }
+  });
+
+  it('labels every note by its round and question position, the wheel row unnumbered', () => {
+    for (const seed of wheelSeeds) {
+      const expectedLabels = seed.quiz.rounds.flatMap((round, roundIndex) =>
+        round.questions.map(
+          (_question, questionIndex) =>
+            `Round ${roundIndex}, question ${questionIndex + 1}: `,
+        ),
+      );
+      const labels = seed.staffNotes
+        .split('\n')
+        .map((line) => NOTE_LABEL_PATTERN.exec(line)?.[0] ?? null);
+      expect(labels).toEqual(expectedLabels);
+    }
+  });
+
+  it('passes the structural and the completeness checks and holds no adults round and no image', () => {
+    for (const seed of wheelSeeds) {
+      const quiz = seed.quiz as unknown as QuizShape;
+      expect(structuralProblems(quiz)).toEqual([]);
+      expect(completenessProblems(quiz)).toEqual([]);
+      for (const round of seed.quiz.rounds) {
+        expect(round.contentLabel).not.toBe('adults');
+        for (const question of round.questions) {
+          expect(question.mediaRef).toBeNull();
+        }
+      }
+    }
+  });
+
+  it('fits the card and notes limits and holds no long dash', () => {
+    for (const seed of wheelSeeds) {
+      expect(seed.cardTitle.en.length).toBeLessThanOrEqual(120);
+      expect(seed.cardTitle.pt.length).toBeLessThanOrEqual(120);
+      expect(seed.cardDescription.en.length).toBeLessThanOrEqual(300);
+      expect(seed.cardDescription.pt.length).toBeLessThanOrEqual(300);
+      expect(seed.staffNotes.length).toBeLessThanOrEqual(20000);
+    }
+    expect(JSON.stringify(wheelSeeds)).not.toMatch(/[–—]/);
   });
 });

@@ -7,7 +7,9 @@ import { AddQuizshowGameReportSubject1837000000000 } from '../migrations/1837000
 import { AddQuizshowGames1837000100000 } from '../migrations/1837000100000-AddQuizshowGames';
 import { AddQuizshowTemplates1837900000000 } from '../migrations/1837900000000-AddQuizshowTemplates';
 import { AddQuizshowWheel1840000000000 } from '../migrations/1840000000000-AddQuizshowWheel';
+import { AddQuizshowWheelTemplates1840100000000 } from '../migrations/1840100000000-AddQuizshowWheelTemplates';
 import { QUIZSHOW_TEMPLATE_SEEDS_1837900000000 } from '../migrations/data/quizshow-templates-1837900000000.seed';
+import { QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000 } from '../migrations/data/quizshow-wheel-templates-1840100000000.seed';
 
 /**
  * Pulse Live migrations on real Postgres, in ledger order: the two
@@ -15,7 +17,8 @@ import { QUIZSHOW_TEMPLATE_SEEDS_1837900000000 } from '../migrations/data/quizsh
  * forward migrations that add games without an event, then the
  * `1837900000000` templates migration with its five seeded drafts, then the
  * `1840000000000` wheel migration that appends `wheel` to the round kind
- * enum. Skipped unless
+ * enum, then the `1840100000000` wheel templates migration with its five
+ * seeded drafts (up and down inside the templates block). Skipped unless
  * `QUIZSHOW_MIGRATIONS_DATABASE_URL` names a database whose name ends in
  * `_test` (it drops and rebuilds the schema). Run it with, for example:
  *
@@ -1019,6 +1022,115 @@ describeWithDatabase('Pulse Live migrations on real Postgres', () => {
           [HOST_QUIZ_ID],
         );
       expect(hostQuizzes).toEqual([{ source_template_id: null }]);
+    });
+
+    // Runs up and down inside this block, before the templates migration's own
+    // down, so the counts above and below only ever see the five original seeds.
+    describe('the wheel templates migration', () => {
+      const wheelTemplatesMigration =
+        new AddQuizshowWheelTemplates1840100000000();
+      const WHEEL_TEMPLATE_IDS =
+        QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000.map((seed) => seed.id);
+      const SETTINGS_KEYS = [
+        'isJokerAllowed',
+        'isSpeedBonusOn',
+        'sliceCount',
+        'timeLimitSeconds',
+        'voteSeconds',
+        'wheelBonus',
+        'wheelPick',
+        'writeSeconds',
+      ];
+
+      beforeAll(async () => {
+        await wheelTemplatesMigration.up(queryRunner);
+      });
+
+      it('seeds the five wheel packs as drafts with a wheel row first', async () => {
+        const templates: { id: string; is_draft: boolean }[] =
+          await dataSource.query(
+            `SELECT "id", "published_at" IS NULL AS "is_draft" FROM "quizshow_templates" WHERE "id" = ANY($1::uuid[]) ORDER BY "id"`,
+            [WHEEL_TEMPLATE_IDS],
+          );
+        expect(templates).toEqual(
+          [...WHEEL_TEMPLATE_IDS]
+            .sort()
+            .map((templateId) => ({ id: templateId, is_draft: true })),
+        );
+
+        const contentCounts: {
+          round_count: number;
+          question_count: number;
+        }[] = await dataSource.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM "quizshow_rounds" AS "round"
+                JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+               WHERE "quiz"."template_id" = ANY($1::uuid[])) AS "round_count",
+             (SELECT COUNT(*)::int FROM "quizshow_questions" AS "question"
+                JOIN "quizshow_rounds" AS "round" ON "round"."id" = "question"."round_id"
+                JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+               WHERE "quiz"."template_id" = ANY($1::uuid[])) AS "question_count"`,
+          [WHEEL_TEMPLATE_IDS],
+        );
+        expect(contentCounts).toEqual([
+          { round_count: 35, question_count: 149 },
+        ]);
+
+        const firstRounds: {
+          template_id: string;
+          kind: string;
+          wheel_pick: string;
+        }[] = await dataSource.query(
+          `SELECT "quiz"."template_id", "round"."kind", "round"."settings"->>'wheelPick' AS "wheel_pick"
+             FROM "quizshow_rounds" AS "round"
+             JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+            WHERE "quiz"."template_id" = ANY($1::uuid[]) AND "round"."position" = 0
+            ORDER BY "quiz"."template_id"`,
+          [WHEEL_TEMPLATE_IDS],
+        );
+        expect(firstRounds).toEqual(
+          QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000.map((seed) => ({
+            template_id: seed.id,
+            kind: 'wheel',
+            wheel_pick: seed.quiz.rounds[0]?.settings.wheelPick,
+          })).sort((first, second) =>
+            first.template_id.localeCompare(second.template_id),
+          ),
+        );
+
+        const roundSettingsKeys: { keys: string[] }[] = await dataSource.query(
+          `SELECT ARRAY(SELECT jsonb_object_keys("round"."settings")) AS "keys"
+             FROM "quizshow_rounds" AS "round"
+             JOIN "quizshow_quizzes" AS "quiz" ON "quiz"."id" = "round"."quiz_id"
+            WHERE "quiz"."template_id" = ANY($1::uuid[])`,
+          [WHEEL_TEMPLATE_IDS],
+        );
+        expect(roundSettingsKeys).toHaveLength(35);
+        for (const row of roundSettingsKeys) {
+          expect([...row.keys].sort()).toEqual(SETTINGS_KEYS);
+        }
+      });
+
+      it('removes exactly the five wheel templates on down', async () => {
+        const templateCountBefore = await countOf('quizshow_templates');
+        await wheelTemplatesMigration.down(queryRunner);
+        expect(await countOf('quizshow_templates')).toBe(
+          templateCountBefore - 5,
+        );
+
+        const remainingWheelRows: { count: number }[] = await dataSource.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM "quizshow_templates" WHERE "id" = ANY($1::uuid[]))
+           + (SELECT COUNT(*)::int FROM "quizshow_quizzes" WHERE "template_id" = ANY($1::uuid[])) AS "count"`,
+          [WHEEL_TEMPLATE_IDS],
+        );
+        expect(remainingWheelRows).toEqual([{ count: 0 }]);
+        const originalTemplates: { count: number }[] = await dataSource.query(
+          `SELECT COUNT(*)::int AS "count" FROM "quizshow_templates" WHERE "id" = ANY($1::uuid[])`,
+          [SEED_TEMPLATE_IDS],
+        );
+        expect(originalTemplates).toEqual([{ count: 5 }]);
+      });
     });
 
     it('refuses down while a staff-made template remains, then removes exactly the five seeds and restores the pack key', async () => {

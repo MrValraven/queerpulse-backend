@@ -10,6 +10,8 @@ import {
   VJ_LIBRARY_CHANGED,
   VJ_LIMITS,
   VJ_REMOTE_COMMAND_NAMES,
+  VJ_RENDER_MODES,
+  VJ_RENDERERS,
   VJ_SERVER_FRAME_NAMES,
   VJ_SOCKET_ERROR_CODES,
   VJ_SPEEDS,
@@ -973,6 +975,7 @@ describe('vj contract', () => {
       'stage:setLogo',
       'stage:setEventCard',
       'screen:identify',
+      'screens:setRenderMode',
       'screen:advance',
       'screen:status',
     ]);
@@ -982,6 +985,7 @@ describe('vj contract', () => {
       'screens:update',
       'library:changed',
       'screen:identify',
+      'screen:renderMode',
       'exception',
     ]);
     expect(VJ_REMOTE_COMMAND_NAMES).toEqual([
@@ -1009,6 +1013,7 @@ describe('vj contract', () => {
     expect(VJ_EXCEPTION_DOMAIN_CODES).toEqual([
       'vj_not_admin',
       'vj_screen_replaced',
+      'vj_stopped',
     ]);
     expect(VJ_LIBRARY_CHANGE_KINDS).toEqual([
       'pack_created',
@@ -1033,17 +1038,31 @@ describe('vj contract', () => {
       'setlist_deleted',
       'setlists_reordered',
     ]);
-    expect(VJ_SOCKET_ERROR_CODES).toHaveLength(72);
-    expect(new Set(VJ_SOCKET_ERROR_CODES).size).toBe(72);
+    expect(VJ_SOCKET_ERROR_CODES).toHaveLength(75);
+    expect(new Set(VJ_SOCKET_ERROR_CODES).size).toBe(75);
     expect(VJ_SOCKET_ERROR_CODES[0]).toBe('vj_not_admin');
     expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 1]).toBe(
-      'vj_server_error',
+      'vj_no_screens_connected',
+    );
+    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 2]).toBe(
+      'vj_render_mode_invalid',
+    );
+    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 3]).toBe(
+      'vj_stopped',
     );
     const bpmIndex = VJ_SOCKET_ERROR_CODES.indexOf('vj_bpm_out_of_range');
     expect(VJ_SOCKET_ERROR_CODES[bpmIndex + 1]).toBe('vj_client_outdated');
-    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 2]).toBe(
+    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 4]).toBe(
+      'vj_server_error',
+    );
+    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 5]).toBe(
       'vj_event_card_no_event',
     );
     expect(VJ_LIBRARY_CHANGED).toBe('vj.library.changed');
+  });
+
+  it('lists the simple renderer and the render modes', () => {
+    expect(VJ_RENDERERS).toEqual(['webgl2', 'dom', 'simple']);
+    expect(VJ_RENDER_MODES).toEqual(['effects', 'simple']);
   });
 });

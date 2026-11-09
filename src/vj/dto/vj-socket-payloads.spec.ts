@@ -25,6 +25,7 @@ import {
   VjSetMixPayloadDto,
   VjSetOverlayPayloadDto,
   VjSetPackPayloadDto,
+  VjSetRenderModePayloadDto,
   VjSetScreenOverridePayloadDto,
   VjSetShufflePayloadDto,
   VjSetStrobePayloadDto,
@@ -167,6 +168,7 @@ const FRAME_PAYLOADS: Record<
     { ...STAMP, isVisible: true, kind: 'qr' },
   ],
   'screen:identify': [VjScreenIdentifyPayloadDto, { screenId: SCREEN_ID }],
+  'screens:setRenderMode': [VjSetRenderModePayloadDto, { mode: 'simple' }],
   'screen:advance': [
     VjScreenAdvancePayloadDto,
     { expectedClipSequence: 3, clipId: CLIP_ID },
@@ -297,6 +299,17 @@ describe('VJ socket payload DTOs', () => {
     await expect(
       piped(VjScreenIdentifyPayloadDto, { ...STAMP, screenId: null }),
     ).rejects.toBeInstanceOf(WsException);
+  });
+
+  it('keeps screens:setRenderMode unstamped', async () => {
+    await expect(
+      piped(VjSetRenderModePayloadDto, { ...STAMP, mode: 'simple' }),
+    ).rejects.toBeInstanceOf(WsException);
+  });
+
+  it('lets any mode value through so the gateway answers its code', async () => {
+    const instance = await piped(VjSetRenderModePayloadDto, { mode: 7 });
+    expect({ ...instance }).toEqual({ mode: 7 });
   });
 
   it('accepts an empty clock:sync payload and refuses any field on it', async () => {

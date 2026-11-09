@@ -21,6 +21,7 @@ import { VJ_KEY_HANDLERS } from '../storage/shared-upload-handlers';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminVjController } from './admin-vj.controller';
+import { AdminVjLiveController } from './admin-vj-live.controller';
 import { VjClip } from './entities/vj-clip.entity';
 import { VjPackClip } from './entities/vj-pack-clip.entity';
 import { VjPack } from './entities/vj-pack.entity';
@@ -553,7 +554,7 @@ describe('VjModule', () => {
       (importedModule.providers ?? []).map((provider) => provider.provide),
     );
 
-    expect(controllers).toEqual([AdminVjController]);
+    expect(controllers).toEqual([AdminVjController, AdminVjLiveController]);
     expect(providers).toEqual([
       VjLibraryService,
       VjStageService,

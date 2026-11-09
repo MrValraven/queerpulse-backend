@@ -58,6 +58,15 @@ function screenEntry(overrides: Partial<VjScreenEntry> = {}): VjScreenEntry {
 }
 
 describe('vj screen status', () => {
+  it('keeps a health report from the simple renderer', () => {
+    const parsed = parseVjScreenStatus(
+      validPayload({ health: { ...validHealth(), renderer: 'simple' } }),
+      true,
+      NOW,
+    );
+    expect(parsed?.health?.renderer).toBe('simple');
+  });
+
   it('stores health, next clip and mic when valid and null when not', () => {
     const parsed = parseVjScreenStatus(validPayload(), true, NOW);
     expect(parsed).toEqual({

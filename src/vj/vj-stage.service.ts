@@ -9,6 +9,7 @@ import {
   type VjCommandSuccess,
   type VjLibraryChange,
   type VjRemoteCommandName,
+  type VjRenderer,
   type VjScreenStatus,
   type VjSocketErrorCode,
   type VjStageCause,
@@ -130,6 +131,30 @@ interface VjStage {
   pendingApplyAt: number | null;
   timers: VjStageTimers;
   lastMicAdoptedAt: number | null;
+  /** Screen sockets that sent a stored `screen:status` since they attached,
+   *  so the live list can tell a reported fullscreen flag from the default. */
+  statusReportedSocketIds: Set<string>;
+}
+
+/** One connected screen as the live connections list reads it. */
+export interface VjLiveScreenRead {
+  socketId: string;
+  number: number;
+  isLead: boolean;
+  /** Epoch ms of the attach. */
+  connectedAt: number;
+  /** Null until the screen sends a stored status report. */
+  isFullscreen: boolean | null;
+  /** Null until the screen reports valid health. */
+  renderer: VjRenderer | null;
+}
+
+/** One stage in memory as the live connections list reads it: its connected
+ *  screens by number, and every socket the stage holds (screens and remotes). */
+export interface VjLiveStageRead {
+  adminUserId: string;
+  screens: VjLiveScreenRead[];
+  attachedSocketIds: string[];
 }
 
 /** What the client id and stale checks answer. */
@@ -496,6 +521,7 @@ export class VjStageService implements OnModuleDestroy {
       return { leadChange: null, hasScreenListChanged: false };
     }
     const hasDetachedSocket = stage.attachedSocketIds.delete(socketId);
+    stage.statusReportedSocketIds.delete(socketId);
     if (hasDetachedSocket && stage.attachedSocketIds.size === 0) {
       stage.idleSince = now;
     }
@@ -765,6 +791,7 @@ export class VjStageService implements OnModuleDestroy {
     entry.nextClipId = status.nextClipId;
     entry.mic = status.mic;
     entry.lastSeenAt = now;
+    stage.statusReportedSocketIds.add(socketId);
     return { isStored: true, frame: this.adoptMicTempo(stage, entry, now) };
   }
 
@@ -818,6 +845,29 @@ export class VjStageService implements OnModuleDestroy {
     if (screenId !== null && targets.length === 0) {
       return { failure: vjAckFailure('vj_screen_not_attached'), targets: [] };
     }
+    return { failure: null, targets };
+  }
+
+  /** The screen sockets `screens:setRenderMode` reaches: every connected screen, in number order. */
+  renderModeTargets(
+    adminUserId: string,
+  ):
+    | { failure: VjAckFailure; targets: [] }
+    | { failure: null; targets: { socketId: string; number: number }[] } {
+    const stage = this.stages.get(adminUserId);
+    if (stage === undefined) {
+      return { failure: vjAckFailure('vj_not_attached'), targets: [] };
+    }
+    const targets: { socketId: string; number: number }[] = [];
+    for (const entry of stage.screens.values()) {
+      if (entry.socketId !== null) {
+        targets.push({ socketId: entry.socketId, number: entry.number });
+      }
+    }
+    if (targets.length === 0) {
+      return { failure: vjAckFailure('vj_no_screens_connected'), targets: [] };
+    }
+    targets.sort((first, second) => first.number - second.number);
     return { failure: null, targets };
   }
 
@@ -882,6 +932,64 @@ export class VjStageService implements OnModuleDestroy {
     }
   }
 
+  /** Drops one owner's stage at once, attached or idle, clearing its timers
+   *  the way `sweep` does. The gateway disconnects the stage's sockets first.
+   *  Answers whether a stage was in memory. */
+  dropStage(adminUserId: string): boolean {
+    const stage = this.stages.get(adminUserId);
+    if (stage === undefined) {
+      return false;
+    }
+    stage.timers.clear();
+    this.stages.delete(adminUserId);
+    return true;
+  }
+
+  /** The stages in memory for the live connections list: one owner's stage
+   *  when `adminUserId` is given, else every stage. Idle stages are listed
+   *  with no screens and no attached sockets. Screens come by number, each
+   *  connected one only. */
+  liveStages(adminUserId: string | null): VjLiveStageRead[] {
+    const reads: VjLiveStageRead[] = [];
+    for (const stage of this.stages.values()) {
+      if (adminUserId !== null && stage.adminUserId !== adminUserId) {
+        continue;
+      }
+      const leadSocketId = leadSocketIdOfStage(stage);
+      const screens: VjLiveScreenRead[] = [];
+      for (const entry of stage.screens.values()) {
+        if (entry.socketId === null || entry.connectedAt === null) {
+          continue;
+        }
+        screens.push({
+          socketId: entry.socketId,
+          number: entry.number,
+          isLead: entry.socketId === leadSocketId,
+          connectedAt: entry.connectedAt,
+          isFullscreen: stage.statusReportedSocketIds.has(entry.socketId)
+            ? entry.isFullscreen
+            : null,
+          renderer: entry.health?.renderer ?? null,
+        });
+      }
+      screens.sort((first, second) => first.number - second.number);
+      reads.push({
+        adminUserId: stage.adminUserId,
+        screens,
+        attachedSocketIds: [...stage.attachedSocketIds],
+      });
+    }
+    return reads;
+  }
+
+  /** How many stages in scope hold no attached socket: one owner's when
+   *  `adminUserId` is given, else every stage. */
+  idleStageCount(adminUserId: string | null): number {
+    return this.liveStages(adminUserId).filter(
+      (stage) => stage.attachedSocketIds.length === 0,
+    ).length;
+  }
+
   /** Clears every stage's timers. */
   onModuleDestroy(): void {
     for (const stage of this.stages.values()) {
@@ -908,6 +1016,7 @@ export class VjStageService implements OnModuleDestroy {
         this.handleTimerFire(stage, kind);
       }),
       lastMicAdoptedAt: null,
+      statusReportedSocketIds: new Set(),
     };
     this.stages.set(adminUserId, stage);
     return stage;
@@ -972,6 +1081,7 @@ export class VjStageService implements OnModuleDestroy {
         : null;
     if (replacedSocketId !== null) {
       stage.attachedSocketIds.delete(replacedSocketId);
+      stage.statusReportedSocketIds.delete(replacedSocketId);
     }
     Object.assign(existing, {
       socketId,

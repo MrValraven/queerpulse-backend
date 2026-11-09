@@ -56,6 +56,8 @@ export const VJ_REFUSAL_CODES = [
   'VJ_SETLIST_REORDER_MISMATCH',
   'VJ_SETLIST_ITEMS_INVALID',
   'VJ_SETLIST_FULL',
+  'VJ_CONNECTION_NOT_FOUND',
+  'VJ_CONNECTION_NOT_YOURS',
 ] as const;
 export type VjRefusalCode = (typeof VJ_REFUSAL_CODES)[number];
 
@@ -257,6 +259,14 @@ export const VJ_REFUSALS: Record<
     status: HttpStatus.CONFLICT,
     message: `A set list holds at most ${VJ_LIMITS.setlistItemsMax} scenes.`,
   },
+  VJ_CONNECTION_NOT_FOUND: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'No live VJ screen or remote has this connection id.',
+  },
+  VJ_CONNECTION_NOT_YOURS: {
+    status: HttpStatus.FORBIDDEN,
+    message: "This VJ connection belongs to another operator's show.",
+  },
 };
 
 /** A body field a refusal may carry beside `statusCode`, `message` and `code`. */
@@ -322,6 +332,8 @@ export const VJ_REFUSAL_EXTRAS: Record<
   VJ_SETLIST_REORDER_MISMATCH: [],
   VJ_SETLIST_ITEMS_INVALID: [],
   VJ_SETLIST_FULL: ['setlistId'],
+  VJ_CONNECTION_NOT_FOUND: [],
+  VJ_CONNECTION_NOT_YOURS: [],
 };
 
 /** What a caller may hand `vjError`: the body extras, each copied only when
@@ -369,6 +381,11 @@ export const VJ_NOT_ADMIN_MESSAGE =
 /** The `exception` frame message sent to a screen socket another socket with
  *  the same `screenId` replaced (`domainCode: 'vj_screen_replaced'`). */
 export const VJ_SCREEN_REPLACED_MESSAGE = 'Another tab opened this screen.';
+
+/** The `exception` frame message sent to a screen or remote socket stopped
+ *  from the live connections panel of the VJ library
+ *  (`domainCode: 'vj_stopped'`). */
+export const VJ_STOPPED_MESSAGE = 'Stopped from the VJ library';
 
 /** The fixed English sentence of every socket refusal, for logs and the
  *  ack's `message`. No sentence interpolates a payload value. */
@@ -464,6 +481,9 @@ export const VJ_SOCKET_ERROR_MESSAGES: Record<VjSocketErrorCode, string> = {
   vj_event_card_kind_invalid: 'The event card kind must be qr or nextEvent.',
   vj_event_card_no_event: 'The active pack links no event.',
   vj_server_error: 'A server read failed while handling this frame.',
+  vj_stopped: VJ_STOPPED_MESSAGE,
+  vj_render_mode_invalid: 'The render mode must be effects or simple.',
+  vj_no_screens_connected: 'No screen is connected to this stage.',
 };
 
 /** The one way a VJ socket frame is refused: `{ ok: false, code, message,

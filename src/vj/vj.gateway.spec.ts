@@ -2152,6 +2152,101 @@ describe('VjGateway', () => {
       expect(codeOf(sixth)).toBe('vj_rate_limited');
     });
 
+    it('relays screens:setRenderMode to every connected screen on the next tick', async () => {
+      const first = await attachedScreen(harness, 'socket-first');
+      const second = await attachedScreen(
+        harness,
+        'socket-second',
+        OTHER_SCREEN_ID,
+      );
+      const remote = await attachedRemote(harness, 'socket-remote');
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+
+      const ack = await harness.gateway.handleSetRenderMode(asClient(remote), {
+        mode: 'simple',
+      });
+
+      expect(ack).toEqual({ ok: true, reachedCount: 2, serverNow: START });
+      // Nothing leaves before the ack.
+      expect(roomEmitsOf(harness, 'screen:renderMode')).toEqual([]);
+      await flushImmediate();
+      expect(roomEmitsOf(harness, 'screen:renderMode')).toEqual([
+        {
+          room: first.id,
+          event: 'screen:renderMode',
+          payload: { mode: 'simple' },
+        },
+        {
+          room: second.id,
+          event: 'screen:renderMode',
+          payload: { mode: 'simple' },
+        },
+      ]);
+      expect(harness.stages.getState(ADMIN_USER_ID)?.revision).toBe(0);
+    });
+
+    it('answers vj_wrong_role to setRenderMode from a screen', async () => {
+      const screen = await attachedScreen(harness, 'socket-screen');
+
+      const ack = await harness.gateway.handleSetRenderMode(asClient(screen), {
+        mode: 'simple',
+      });
+
+      expect(codeOf(ack)).toBe('vj_wrong_role');
+    });
+
+    it('answers vj_render_mode_invalid for a mode outside the list', async () => {
+      await attachedScreen(harness, 'socket-screen');
+      const remote = await attachedRemote(harness, 'socket-remote');
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+
+      for (const mode of ['webgl2', null, 7]) {
+        const ack = await harness.gateway.handleSetRenderMode(
+          asClient(remote),
+          { mode },
+        );
+        expect(codeOf(ack)).toBe('vj_render_mode_invalid');
+      }
+
+      await flushImmediate();
+      expect(roomEmitsOf(harness, 'screen:renderMode')).toEqual([]);
+    });
+
+    it('answers vj_no_screens_connected with no screen connected', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+
+      const ack = await harness.gateway.handleSetRenderMode(asClient(remote), {
+        mode: 'effects',
+      });
+
+      expect(codeOf(ack)).toBe('vj_no_screens_connected');
+      await flushImmediate();
+      expect(roomEmitsOf(harness, 'screen:renderMode')).toEqual([]);
+    });
+
+    it('refuses the sixth setRenderMode in a burst with vj_rate_limited', async () => {
+      await attachedScreen(harness, 'socket-screen');
+      const remote = await attachedRemote(harness, 'socket-remote');
+
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const ack = await harness.gateway.handleSetRenderMode(
+          asClient(remote),
+          { mode: 'simple' },
+        );
+        expect(ack.ok).toBe(true);
+      }
+
+      const sixth = await harness.gateway.handleSetRenderMode(
+        asClient(remote),
+        { mode: 'simple' },
+      );
+      expect(codeOf(sixth)).toBe('vj_rate_limited');
+    });
+
     const SENT_AT = START + 1234;
 
     /** Each frame with an ack: the setup, then `markSent` right before the

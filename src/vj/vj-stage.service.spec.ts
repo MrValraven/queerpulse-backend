@@ -1332,6 +1332,31 @@ describe('VjStageService', () => {
         'vj_not_attached',
       );
     });
+
+    it('answers render mode targets for every connected screen', () => {
+      attachScreen(service, 'socket-a', randomUUID(), 0);
+      attachScreen(service, 'socket-b', randomUUID(), 1);
+      attachScreen(service, 'socket-c', randomUUID(), 2);
+      service.detachSocket(ADMIN_USER_ID, 'socket-c', 3);
+
+      expect(service.renderModeTargets(ADMIN_USER_ID)).toEqual({
+        failure: null,
+        targets: [
+          { socketId: 'socket-a', number: 1 },
+          { socketId: 'socket-b', number: 2 },
+        ],
+      });
+
+      service.detachSocket(ADMIN_USER_ID, 'socket-a', 4);
+      service.detachSocket(ADMIN_USER_ID, 'socket-b', 5);
+
+      expect(service.renderModeTargets(ADMIN_USER_ID).failure?.code).toBe(
+        'vj_no_screens_connected',
+      );
+      expect(service.renderModeTargets(randomUUID()).failure?.code).toBe(
+        'vj_not_attached',
+      );
+    });
   });
 
   describe('library', () => {

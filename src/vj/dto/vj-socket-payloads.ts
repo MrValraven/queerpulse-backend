@@ -199,6 +199,13 @@ export class VjScreenIdentifyPayloadDto {
   screenId?: unknown;
 }
 
+/** `screens:setRenderMode`: an unstamped remote frame. Any `mode` value passes
+ *  the pipe; the gateway answers `vj_render_mode_invalid` for a bad one. */
+export class VjSetRenderModePayloadDto {
+  @Allow()
+  mode?: unknown;
+}
+
 /** `stage:resetLook`. `isImmediate` comes from `VjRemoteCommandPayloadDto`. */
 export class VjResetLookPayloadDto extends VjRemoteCommandPayloadDto {}
 

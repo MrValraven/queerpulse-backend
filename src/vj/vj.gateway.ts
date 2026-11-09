@@ -105,6 +105,7 @@ import {
   VjSetMixPayloadDto,
   VjSetOverlayPayloadDto,
   VjSetPackPayloadDto,
+  VjSetRenderModePayloadDto,
   VjSetScreenOverridePayloadDto,
   VjSetShufflePayloadDto,
   VjSetStrobePayloadDto,
@@ -115,6 +116,7 @@ import {
 import { vjAttachApplyAt } from './stage/vj-quantize';
 import {
   EMPTY_VJ_LOOKUP_RESULTS,
+  isOneOf,
   isUuidString,
   type VjLookupResults,
 } from './stage/vj-rule-kit';
@@ -122,11 +124,14 @@ import {
   vjAckFailure,
   VJ_NOT_ADMIN_MESSAGE,
   VJ_SCREEN_REPLACED_MESSAGE,
+  VJ_STOPPED_MESSAGE,
+  type VjRefusalCode,
 } from './vj.constants';
 import {
   VJ_CONTRACT_VERSION,
   VJ_LIBRARY_CHANGED,
   VJ_LIMITS,
+  VJ_RENDER_MODES,
   type VjAck,
   type VjAckFailure,
   type VjAttachRole,
@@ -136,13 +141,24 @@ import {
   type VjLibraryChange,
   type VjReauthAck,
   type VjRemoteCommandName,
+  type VjRenderMode,
   type VjScreenIdentifyFrame,
+  type VjScreenRenderModeFrame,
   type VjSocketErrorCode,
   type VjStageFrame,
   type VjStageState,
   type VjWsTransportCode,
 } from './vj.contract';
+import { readVjCreatorProfiles } from './vj-library-reads';
+import {
+  toVjLiveDTO,
+  type VjLiveDTO,
+  type VjLiveRemoteSnapshot,
+  type VjLiveStageSnapshot,
+  type VjLiveStoppedDTO,
+} from './vj-live-response';
 import { resolveVjLookups } from './vj-lookup-resolver';
+import { toVjCreator } from './vj-response';
 import { VjStageReadsService } from './vj-stage-reads.service';
 import {
   VjStageService,
@@ -168,6 +184,8 @@ export const VJ_MIX_RATE_LIMIT = { capacity: 60, refillPerSecond: 25 };
 export const VJ_EFFECTS_RATE_LIMIT = { capacity: 60, refillPerSecond: 25 };
 /** `screen:identify` per socket: 5, then one every 2 seconds. */
 const IDENTIFY_RATE_LIMIT = { capacity: 5, refillPerSecond: 0.5 };
+/** `screens:setRenderMode` per socket: 5, then one every 2 seconds. */
+const RENDER_MODE_RATE_LIMIT = { capacity: 5, refillPerSecond: 0.5 };
 /** `clock:sync` per socket: 10, then one per second. */
 const CLOCK_SYNC_RATE_LIMIT = { capacity: 10, refillPerSecond: 1 };
 
@@ -209,6 +227,7 @@ const UNLOGGED_REFUSALS: ReadonlySet<VjSocketErrorCode> =
     'vj_clip_excluded',
     'vj_clip_not_favorite',
     'vj_stale_setlist',
+    'vj_no_screens_connected',
   ]);
 
 /** Library change kinds whose stage effect needs the item count of each
@@ -274,6 +293,8 @@ interface VjSocketData {
    *  `screen:advance` runs after the one before it settles, so a command
    *  with an existence read cannot be overtaken by a later one. Never rejects. */
   commandChain?: Promise<void>;
+  /** Epoch ms a remote attach landed; the live connections list shows it. */
+  attachedAt?: number;
 }
 
 type VjSocket = Socket<
@@ -290,6 +311,25 @@ type VjAccess = 'none' | 'admin' | 'grant';
 /** The verdict of the checks every frame runs before its own rules. */
 type VjFrameGate =
   { userId: string; failure: null } | { userId: null; failure: VjAckFailure };
+
+/** Whose stages a live connections read or stop reaches: every stage for an
+ *  Admin, the caller's own stage for a caller let in by the `vj_operator`
+ *  grant alone. */
+export interface VjLiveScope {
+  callerUserId: string;
+  isAdmin: boolean;
+}
+
+/** A single stop: the counts, or the refusal code the route answers. */
+export type VjLiveStopOutcome =
+  | { refusal: null; stopped: VjLiveStoppedDTO }
+  | {
+      refusal: Extract<
+        VjRefusalCode,
+        'VJ_CONNECTION_NOT_FOUND' | 'VJ_CONNECTION_NOT_YOURS'
+      >;
+      stopped: null;
+    };
 
 /**
  * Same origin allowlist as the chat and Pulse Live handshakes: CORS never
@@ -384,6 +424,9 @@ export class VjGateway
   private readonly identifyLimiter = new TokenBucketLimiter(
     IDENTIFY_RATE_LIMIT,
   );
+  private readonly renderModeLimiter = new TokenBucketLimiter(
+    RENDER_MODE_RATE_LIMIT,
+  );
   private readonly clockSyncLimiter = new TokenBucketLimiter(
     CLOCK_SYNC_RATE_LIMIT,
   );
@@ -450,6 +493,7 @@ export class VjGateway
     this.mixLimiter.clear(client.id);
     this.effectsLimiter.clear(client.id);
     this.identifyLimiter.clear(client.id);
+    this.renderModeLimiter.clear(client.id);
     this.clockSyncLimiter.clear(client.id);
     const { userId, role } = client.data;
     if (userId === undefined || role === undefined) return;
@@ -620,6 +664,47 @@ export class VjGateway
     return withServerNow<{ ok: true; identifiedCount: number }>({
       ok: true,
       identifiedCount: targets.length,
+    });
+  }
+
+  /** `screens:setRenderMode` from a remote: every connected screen gets
+   *  `screen:renderMode`. Outside the command queue (note 17); the stage
+   *  stores nothing, so a screen that attaches later starts on its own default. */
+  @SubscribeMessage('screens:setRenderMode')
+  async handleSetRenderMode(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetRenderModePayloadDto,
+  ): Promise<VjAck<{ reachedCount: number }>> {
+    const frame = 'screens:setRenderMode';
+    const gate = await this.frameGate(
+      client,
+      frame,
+      this.renderModeLimiter,
+      'remote',
+    );
+    if (gate.failure !== null) return withServerNow(gate.failure);
+    const { mode } = payload;
+    if (!isOneOf<VjRenderMode>(VJ_RENDER_MODES, mode)) {
+      return withServerNow(
+        this.refusal(frame, client, vjAckFailure('vj_render_mode_invalid')),
+      );
+    }
+    const reached = this.stages.renderModeTargets(gate.userId);
+    if (reached.failure !== null) {
+      return withServerNow(this.refusal(frame, client, reached.failure));
+    }
+    const { targets } = reached;
+    this.emitOnNextTick(gate.userId, () => {
+      for (const target of targets) {
+        const renderModeFrame: VjScreenRenderModeFrame = { mode };
+        this.namespace
+          ?.to(target.socketId)
+          .emit('screen:renderMode', renderModeFrame);
+      }
+    });
+    return withServerNow<{ ok: true; reachedCount: number }>({
+      ok: true,
+      reachedCount: targets.length,
     });
   }
 
@@ -1252,8 +1337,10 @@ export class VjGateway
   ): Promise<VjUnstampedAck<VjAttachSuccess>> {
     // A socket that left while the gate awaited must not join the stage.
     if (!client.connected) return vjAckFailure('vj_not_attached');
-    const attached = this.stages.attachRemote(userId, client.id, Date.now());
+    const attachedAt = Date.now();
+    const attached = this.stages.attachRemote(userId, client.id, attachedAt);
     client.data.isAttached = true;
+    client.data.attachedAt = attachedAt;
     await client.join([
       vjStageRoomName(userId),
       vjRemotesRoomName(userId),
@@ -1485,6 +1572,7 @@ export class VjGateway
       this.mixLimiter,
       this.effectsLimiter,
       this.identifyLimiter,
+      this.renderModeLimiter,
       this.clockSyncLimiter,
     ];
   }
@@ -1612,5 +1700,215 @@ export class VjGateway
     }
     armTimer(Math.min(millisecondsLeft, MAX_SET_TIMEOUT_DELAY_MS));
     return true;
+  }
+
+  /**
+   * The live connections in scope for `GET admin/vj/live`: every stage in
+   * memory with an attached screen or remote, read from the stage service
+   * and the live sockets, with the owner names in one profiles read (none
+   * when no stage is listed) and the count of idle stages. The snapshots and
+   * the idle count are read together before the profiles read awaits, so
+   * both describe one moment.
+   */
+  async listLiveConnections(scope: VjLiveScope): Promise<VjLiveDTO> {
+    const ownerScope = scope.isAdmin ? null : scope.callerUserId;
+    const snapshots = this.liveStageSnapshots(ownerScope);
+    const idleStageCount = this.stages.idleStageCount(ownerScope);
+    const listedOwnerIds = snapshots
+      .filter((stage) => stage.screens.length + stage.remotes.length > 0)
+      .map((stage) => stage.ownerUserId);
+    const profiles = await readVjCreatorProfiles(
+      this.users.manager,
+      listedOwnerIds,
+    );
+    const displayNames = new Map<string, string>();
+    for (const ownerUserId of listedOwnerIds) {
+      displayNames.set(
+        ownerUserId,
+        toVjCreator(ownerUserId, profiles)?.displayName ?? '',
+      );
+    }
+    return toVjLiveDTO(
+      snapshots,
+      displayNames,
+      scope.callerUserId,
+      idleStageCount,
+    );
+  }
+
+  /**
+   * Stops one live `/vj` socket: `exception BAD_REQUEST vj_stopped`, then the
+   * drop, as a replaced screen gets. The normal disconnect path then detaches
+   * it (lead promotion, `screens:update` to the remotes). A socket id with no
+   * live admitted socket answers `VJ_CONNECTION_NOT_FOUND`; a caller let in
+   * by the grant alone who names another owner's socket answers
+   * `VJ_CONNECTION_NOT_YOURS`.
+   */
+  stopLiveConnection(
+    scope: VjLiveScope,
+    connectionId: string,
+  ): VjLiveStopOutcome {
+    const socket = this.liveSocketOf(connectionId);
+    const ownerUserId = socket?.data.userId;
+    if (socket === null || ownerUserId === undefined) {
+      return { refusal: 'VJ_CONNECTION_NOT_FOUND', stopped: null };
+    }
+    if (!scope.isAdmin && ownerUserId !== scope.callerUserId) {
+      return { refusal: 'VJ_CONNECTION_NOT_YOURS', stopped: null };
+    }
+    const stopped = this.stopSockets([socket]);
+    this.logger.log(
+      `VJ connection stopped: user ${ownerUserId} socket ${socket.id} by ${scope.callerUserId}`,
+    );
+    return { refusal: null, stopped };
+  }
+
+  /**
+   * Stops everything in scope: every `/vj` socket in it, attached or not,
+   * gets `vj_stopped` and is dropped, then every stage in scope (attached or
+   * idle) is dropped with its timers, and its trailing `screens:update`
+   * timer is cleared. A socket left out because its handshake is still
+   * running gets the same stop once its admission lands on an owner in
+   * scope (see `stopWhenAdmitted`); the answer does not wait for those
+   * handshakes and leaves them out of the counts.
+   */
+  stopEverything(scope: VjLiveScope): VjLiveStoppedDTO {
+    const ownerScope = scope.isAdmin ? null : scope.callerUserId;
+    const namespaceSockets = [...(this.namespace?.sockets.values() ?? [])].map(
+      (socket) => socket as VjSocket,
+    );
+    const sockets = namespaceSockets.filter(
+      (socket) => ownerScope === null || socket.data.userId === ownerScope,
+    );
+    const admittingSockets = namespaceSockets.filter(
+      (socket) =>
+        !sockets.includes(socket) &&
+        socket.data.userId === undefined &&
+        socket.data.admission !== undefined,
+    );
+    const stopped = this.stopSockets(sockets);
+    for (const socket of admittingSockets) {
+      this.stopWhenAdmitted(socket, ownerScope, scope.callerUserId);
+    }
+    const ownerUserIds = this.stages
+      .liveStages(ownerScope)
+      .map((stage) => stage.adminUserId);
+    for (const ownerUserId of ownerUserIds) {
+      this.stages.dropStage(ownerUserId);
+      this.clearScreensUpdateTimer(ownerUserId);
+    }
+    if (ownerScope !== null) this.clearScreensUpdateTimer(ownerScope);
+    this.logger.log(
+      `VJ stopped everything: ${stopped.stoppedScreenCount} screens, ${stopped.stoppedRemoteCount} remotes, ${ownerUserIds.length} stages by ${scope.callerUserId}`,
+    );
+    return stopped;
+  }
+
+  /**
+   * The late half of a stop everything for a socket whose handshake was still
+   * running: once its admission lands on an owner in scope (any owner when
+   * `ownerScope` is null) and the socket is still connected, it gets the same
+   * `vj_stopped` drop. When it had attached meanwhile and so brought the
+   * owner's stage back, that stage is dropped again once no socket is left
+   * attached to it. Fire and forget: the caller does not await it.
+   */
+  private stopWhenAdmitted(
+    socket: VjSocket,
+    ownerScope: string | null,
+    callerUserId: string,
+  ): void {
+    const admission = socket.data.admission;
+    if (admission === undefined) return;
+    admission
+      .then((admittedUserId) => {
+        if (admittedUserId === null) return;
+        if (ownerScope !== null && admittedUserId !== ownerScope) return;
+        if (!socket.connected) return;
+        const hasAttached = socket.data.isAttached === true;
+        this.stopSockets([socket]);
+        const stage = this.stages.liveStages(admittedUserId)[0];
+        const isStageEmptied =
+          hasAttached &&
+          stage !== undefined &&
+          stage.attachedSocketIds.length === 0;
+        if (isStageEmptied) {
+          this.stages.dropStage(admittedUserId);
+          this.clearScreensUpdateTimer(admittedUserId);
+        }
+        this.logger.log(
+          `VJ stopped a socket admitted after stop everything: user ${admittedUserId} socket ${socket.id} by ${callerUserId}`,
+        );
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          `VJ late stop failed: socket ${socket.id} (${error instanceof Error ? error.message : 'unknown error'})`,
+        );
+      });
+  }
+
+  /** The stages in scope with the screens and remotes that have a live socket;
+   *  a remote's time is the moment its attach landed. */
+  private liveStageSnapshots(ownerScope: string | null): VjLiveStageSnapshot[] {
+    return this.stages.liveStages(ownerScope).map((stage) => {
+      const screenSocketIds = new Set(
+        stage.screens.map((screen) => screen.socketId),
+      );
+      const screens = stage.screens
+        .filter((screen) => this.liveSocketOf(screen.socketId) !== null)
+        .map((screen) => ({
+          connectionId: screen.socketId,
+          number: screen.number,
+          isLead: screen.isLead,
+          connectedAt: screen.connectedAt,
+          isFullscreen: screen.isFullscreen,
+          renderer: screen.renderer,
+        }));
+      const remotes: VjLiveRemoteSnapshot[] = [];
+      for (const socketId of stage.attachedSocketIds) {
+        if (screenSocketIds.has(socketId)) continue;
+        const socket = this.liveSocketOf(socketId);
+        if (socket === null || socket.data.role !== 'remote') continue;
+        remotes.push({
+          connectionId: socketId,
+          connectedAt: socket.data.attachedAt ?? socket.handshake.issued,
+        });
+      }
+      return { ownerUserId: stage.adminUserId, screens, remotes };
+    });
+  }
+
+  /** The live socket with this id, or null. */
+  private liveSocketOf(socketId: string): VjSocket | null {
+    const socket = this.namespace?.sockets.get(socketId);
+    return socket === undefined ? null : (socket as VjSocket);
+  }
+
+  /** Sends each socket `exception BAD_REQUEST vj_stopped` and drops it, the
+   *  way `dropReplacedScreen` does, and counts the screens and remotes among
+   *  them by the role each claimed. */
+  private stopSockets(sockets: readonly VjSocket[]): VjLiveStoppedDTO {
+    const frame = buildChatWsErrorFrame(
+      'BAD_REQUEST',
+      VJ_STOPPED_MESSAGE,
+      undefined,
+      'vj_stopped',
+    );
+    let stoppedScreenCount = 0;
+    let stoppedRemoteCount = 0;
+    for (const socket of sockets) {
+      if (socket.data.role === 'screen') stoppedScreenCount += 1;
+      if (socket.data.role === 'remote') stoppedRemoteCount += 1;
+      socket.emit('exception', frame);
+      socket.disconnect(true);
+    }
+    return { stoppedScreenCount, stoppedRemoteCount };
+  }
+
+  /** Clears one owner's pending trailing `screens:update`. */
+  private clearScreensUpdateTimer(ownerUserId: string): void {
+    const timer = this.screensUpdateTimers.get(ownerUserId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.screensUpdateTimers.delete(ownerUserId);
   }
 }
