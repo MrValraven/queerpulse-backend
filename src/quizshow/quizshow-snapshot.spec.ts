@@ -1,5 +1,6 @@
 import {
   QUIZSHOW_JOIN_CODE_PATTERN,
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
   type QuizshowOption,
   type QuizshowQuestion,
   type QuizshowQuiz,
@@ -12,7 +13,6 @@ import {
   extraTimeMs,
   generateJoinCode,
   isLastQuestionOfRound,
-  isLastRound,
   openLimitMs,
   type QuizshowRandom,
   questionCount,
@@ -58,6 +58,7 @@ const SETTINGS: QuizshowRoundSettings = {
   isJokerAllowed: true,
   writeSeconds: 60,
   voteSeconds: 30,
+  ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
 };
 
 function text(value: string): { en: string; pt: string } {
@@ -334,6 +335,53 @@ describe('quizshow snapshot', () => {
     ).toBe(60);
   });
 
+  it('gives a wheel row a plain round card with no joker', () => {
+    const wheelRow = round('wheel', [], 'w1');
+    wheelRow.contentLabel = 'spicy';
+    wheelRow.settings = {
+      ...SETTINGS,
+      isJokerAllowed: true,
+      isSpeedBonusOn: false,
+    };
+    const snapshot = buildSessionSnapshot(
+      {
+        ...buildQuiz(),
+        rounds: [round('quiz', [MULTIPLE_CHOICE], 'r1'), wheelRow],
+      },
+      seededRandom(3),
+    );
+    expect(toRoundCard(at(snapshot.rounds, 1), 1)).toEqual({
+      roundIndex: 1,
+      kind: 'wheel',
+      title: text('w1'),
+      contentLabel: 'none',
+      questionCount: 0,
+      isJokerAllowed: false,
+      isSpeedBonusOn: false,
+    });
+  });
+
+  it('freezes a wheel row with its settings and no questions', () => {
+    const wheelRow = round('wheel', [], 'w1');
+    wheelRow.settings = { ...SETTINGS, wheelPick: 'question' };
+    const snapshot = buildSessionSnapshot(
+      {
+        ...buildQuiz(),
+        rounds: [
+          round('quiz', [MULTIPLE_CHOICE], 'r1'),
+          wheelRow,
+          round('quiz', [TRUE_FALSE], 'r2'),
+          round('quiz', [TYPE_ANSWER], 'r3'),
+        ],
+      },
+      seededRandom(3),
+    );
+    expect(snapshot.rounds).toHaveLength(4);
+    expect(at(snapshot.rounds, 1).questions).toEqual([]);
+    expect(at(snapshot.rounds, 1).settings.wheelPick).toBe('question');
+    expect(questionCount(snapshot)).toBe(3);
+  });
+
   it("uses the question's limit, then the round's", () => {
     expect(openLimitMs({ settings: SETTINGS }, { timeLimitSeconds: 15 })).toBe(
       15000,
@@ -359,13 +407,11 @@ describe('quizshow snapshot', () => {
     }
   });
 
-  it('counts questions and knows the last of a round and of the quiz', () => {
+  it('counts questions and knows the last question of a round', () => {
     const snapshot = buildSessionSnapshot(buildQuiz(), seededRandom(3));
     expect(questionCount(snapshot)).toBe(7);
     expect(isLastQuestionOfRound(snapshot, 0, 3)).toBe(false);
     expect(isLastQuestionOfRound(snapshot, 0, 4)).toBe(true);
-    expect(isLastRound(snapshot, 1)).toBe(false);
-    expect(isLastRound(snapshot, 2)).toBe(true);
     expect(snapshotQuestionAt(snapshot, 1, 0)?.id).toBe('q-ld');
     expect(snapshotQuestionAt(snapshot, 1, 1)).toBeNull();
     expect(snapshotQuestionAt(snapshot, 9, 0)).toBeNull();

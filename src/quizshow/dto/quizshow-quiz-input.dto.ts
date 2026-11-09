@@ -29,7 +29,11 @@ import {
   QUIZSHOW_LIMITS,
   QUIZSHOW_QUESTION_TYPES,
   QUIZSHOW_ROUND_KINDS,
+  QUIZSHOW_WHEEL_BONUS_VALUES,
+  QUIZSHOW_WHEEL_PICKS,
   QuizshowQuestionType,
+  QuizshowWheelBonus,
+  QuizshowWheelPick,
 } from '../quizshow.contract';
 
 /** Array ceilings sit above the structural limits so `too_many_rounds` and its
@@ -125,6 +129,22 @@ export class QuizshowRoundSettingsDto {
   @Min(QUIZSHOW_LIMITS.voteSecondsMin)
   @Max(QUIZSHOW_LIMITS.voteSecondsMax)
   voteSeconds!: number;
+
+  /** The three wheel fields are optional on input so a studio page cached from
+   *  before the wheel still saves; the mapping fills the defaults. */
+  @IsOptional()
+  @IsIn(QUIZSHOW_WHEEL_BONUS_VALUES)
+  wheelBonus?: QuizshowWheelBonus;
+
+  @IsOptional()
+  @IsIn(QUIZSHOW_WHEEL_PICKS)
+  wheelPick?: QuizshowWheelPick;
+
+  @IsOptional()
+  @IsInt()
+  @Min(QUIZSHOW_LIMITS.wheelSlicesMin)
+  @Max(QUIZSHOW_LIMITS.wheelSlicesMax)
+  sliceCount?: number | null;
 }
 
 export class QuizshowAnswerInputDto {

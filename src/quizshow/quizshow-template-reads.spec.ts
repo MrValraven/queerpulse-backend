@@ -1,4 +1,6 @@
 import {
+  TEMPLATE_CARDS_SQL,
+  TEMPLATE_ROWS_SQL,
   missingCardFields,
   templateAuditName,
   withCopySuffix,
@@ -28,6 +30,20 @@ function card(
 }
 
 describe('quizshow template reads', () => {
+  it.each([
+    ['TEMPLATE_ROWS_SQL', TEMPLATE_ROWS_SQL],
+    ['TEMPLATE_CARDS_SQL', TEMPLATE_CARDS_SQL],
+  ])(
+    '%s counts rounds without wheel steps, with a cast that runs before the enum has the label',
+    (_name, sql) => {
+      const roundCountSubquery = sql.slice(0, sql.indexOf('AS "round_count"'));
+      expect(roundCountSubquery).toContain(
+        `AND "round"."kind"::text <> 'wheel'`,
+      );
+      expect(sql.match(/<> 'wheel'/g)).toHaveLength(1);
+    },
+  );
+
   it('names the missing card fields for the languages the quiz uses', () => {
     expect(missingCardFields(card(), 'both')).toEqual([]);
     expect(

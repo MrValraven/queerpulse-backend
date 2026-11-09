@@ -15,16 +15,23 @@ import {
   QuizshowPlayMode,
   QuizshowSessionStatus,
 } from '../quizshow.contract';
+import type { QuizshowWheelProgress } from '../quizshow-wheel';
 import { QuizshowQuizRecord } from './quizshow-quiz.entity';
 
 /**
  * The stored form of the live cursor. The status lives in its own column and
- * `phaseId` is `String(phaseCounter)`.
+ * `phaseId` is `String(phaseCounter)`. The round number, the up-next card and
+ * the spin flag are derived from `wheelProgress` on load, so they are not
+ * stored.
  */
 export type QuizshowStoredCursor = Omit<
   QuizshowCursor,
-  'status' | 'phaseId'
-> & { phaseCounter: number };
+  'status' | 'phaseId' | 'roundNumber' | 'upNext' | 'canSpinForNextRound'
+> & {
+  phaseCounter: number;
+  /** Absent on rows written before the wheel. */
+  wheelProgress?: QuizshowWheelProgress;
+};
 
 /**
  * One live game of a quiz. The join code, the event and the quiz are each held

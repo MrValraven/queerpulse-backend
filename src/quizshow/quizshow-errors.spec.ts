@@ -29,6 +29,9 @@ const cursorFixture: QuizshowCursor = {
   pausedRemainingMs: null,
   pausedExtraTimeRemainingMs: null,
   isRestartRecovery: false,
+  roundNumber: 1,
+  upNext: null,
+  canSpinForNextRound: false,
 };
 
 const REST_ROWS: Array<[QuizshowErrorCode, number]> = [
@@ -168,5 +171,22 @@ describe('quizshow errors', () => {
       if (code === 'quizshow_fake_too_close') continue;
       expect(QUIZSHOW_ERRORS[code].message.endsWith('.')).toBe(true);
     }
+  });
+
+  it.each([
+    ['quizshow_wheel_not_spun', 'The wheel has not been spun yet.'],
+    ['quizshow_wheel_spinning', 'The wheel is still spinning.'],
+    [
+      'quizshow_wheel_spin_too_few_rounds',
+      'Spinning for the next round needs at least 2 unplayed rounds outside a wheel.',
+    ],
+    ['quizshow_wheel_already_next', 'A wheel step comes next on its own.'],
+    [
+      'quizshow_joker_wheel_next',
+      'A wheel picks the next round, so the joker waits for its round card.',
+    ],
+  ] as const)('names the cause of %s as a socket code', (code, message) => {
+    expect(QUIZSHOW_ERRORS[code]).toEqual({ status: null, message });
+    expect('cursor' in quizshowAckFailure(code)).toBe(false);
   });
 });

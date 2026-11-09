@@ -10,6 +10,7 @@ import { QuizshowSessionRecord } from './quizshow-session.entity';
 import { QuizshowTeamRecord } from './quizshow-team.entity';
 import { QuizshowTemplateRecord } from './quizshow-template.entity';
 import { QuizshowVoteRecord } from './quizshow-vote.entity';
+import { QUIZSHOW_ROUND_KINDS } from '../quizshow.contract';
 
 const ENTITY_CLASSES = [
   QuizshowQuizRecord,
@@ -110,6 +111,15 @@ describe('quizshow entities', () => {
         'quizshow_team_color_key',
       ].sort(),
     );
+  });
+
+  it('follows the contract round kinds, wheel included', () => {
+    const kindColumn = getMetadataArgsStorage().columns.find(
+      (column) =>
+        column.target === QuizshowRoundRecord && column.propertyName === 'kind',
+    );
+    expect(kindColumn?.options.enum).toEqual(QUIZSHOW_ROUND_KINDS);
+    expect(kindColumn?.options.enum).toContain('wheel');
   });
 
   it('lets a quiz belong to an event, an owner or a template', () => {

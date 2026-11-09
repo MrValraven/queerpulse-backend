@@ -31,7 +31,6 @@ import {
 import { IsQuizshowClassValid } from './quizshow-quiz-input.dto';
 
 const PHASE_ID_PATTERN = /^\d{1,12}$/;
-const ROUND_INDEX_MAX = 9;
 
 export function trimString({ value }: { value: unknown }): unknown {
   return typeof value === 'string' ? value.trim() : value;
@@ -195,7 +194,7 @@ export class QuizshowVoteSubmitPayload {
 export class QuizshowJokerPayload {
   @IsInt()
   @Min(0)
-  @Max(ROUND_INDEX_MAX)
+  @Max(QUIZSHOW_LIMITS.roundRowsMax - 1)
   roundIndex!: number;
 }
 

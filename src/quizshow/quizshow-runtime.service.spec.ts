@@ -1,16 +1,18 @@
 import { Logger } from '@nestjs/common';
 import type { Namespace, Socket } from 'socket.io';
-import type {
-  QuizshowAnswerPayload,
-  QuizshowHostVoteOptions,
-  QuizshowLobby,
-  QuizshowHostLobby,
-  QuizshowMyReveal,
-  QuizshowMyScores,
-  QuizshowPhaseChangeFrame,
-  QuizshowRoundKind,
-  QuizshowSessionEnd,
-  QuizshowVoteOptions,
+import {
+  QUIZSHOW_LIMITS,
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowAnswerPayload,
+  type QuizshowHostVoteOptions,
+  type QuizshowLobby,
+  type QuizshowHostLobby,
+  type QuizshowMyReveal,
+  type QuizshowMyScores,
+  type QuizshowPhaseChangeFrame,
+  type QuizshowRoundKind,
+  type QuizshowSessionEnd,
+  type QuizshowVoteOptions,
 } from './quizshow.contract';
 import {
   hostAddTime,
@@ -19,6 +21,7 @@ import {
   hostPause,
   hostRemovePlayer,
   hostReveal,
+  hostSpin,
   hostStart,
   timerElapsed,
 } from './quizshow-engine-phases';
@@ -30,6 +33,7 @@ import type {
   QuizshowPersistOperation,
 } from './quizshow-engine-types';
 import {
+  buildSessionState,
   quizshowPlayerRoomName,
   quizshowRoomName,
   type QuizshowRoleRoom,
@@ -151,6 +155,7 @@ function snapshotRound(
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions,
   };
@@ -498,6 +503,25 @@ function voteFor(harness: Harness, voterId: string, authorId: string) {
   );
 }
 
+/** Join one player, start a wheel night and spin once through the runtime. */
+async function spinFirstWheel(harness: Harness): Promise<void> {
+  await joinPlayer(harness, 'user-alex', 'Alex');
+  await startGame(harness);
+  expect(harness.state.cursor.phase).toBe('wheel');
+  clearRecords(harness);
+  const batchCountAfterStart =
+    harness.persistence.enqueueBatch.mock.calls.length;
+  const outcome = await harness.runtime.execute(SESSION_ID, (state, now) =>
+    hostSpin(state, state.cursor.phaseId, now, harness.random),
+  );
+  if (outcome === null || !outcome.ok || outcome.success.isNoop) {
+    throw new Error('host:spin did not spin');
+  }
+  expect(
+    harness.persistence.enqueueBatch.mock.calls.length - batchCountAfterStart,
+  ).toBe(1);
+}
+
 describe('QuizshowRuntimeService', () => {
   beforeEach(() => {
     jest.useFakeTimers({ now: START });
@@ -559,6 +583,71 @@ describe('QuizshowRuntimeService', () => {
     expect(
       indexOfEmit(harness.records, 'scores:mine', playerRoom(alexId)),
     ).toBeGreaterThan(scoresPhaseIndex);
+  });
+
+  it('sends every role the same spin on phase:change', async () => {
+    const harness = createHarness([
+      snapshotRound('wheel-1', 'wheel', []),
+      quizRound('round-1', ['question-1']),
+      quizRound('round-2', ['question-2']),
+    ]);
+    const batchCountBefore = harness.persistence.enqueueBatch.mock.calls.length;
+
+    await spinFirstWheel(harness);
+
+    const wheelsByRole = ROLE_ROOMS.map((role) => {
+      const phaseChanges = emitsOf(
+        harness.records,
+        'phase:change',
+        roleRoom(role),
+      );
+      const lastPhaseChange = phaseChanges[phaseChanges.length - 1];
+      if (lastPhaseChange === undefined) {
+        throw new Error(`No phase:change to ${role}`);
+      }
+      return (lastPhaseChange.payload as QuizshowPhaseChangeFrame).wheel;
+    });
+    const [screenWheel, playersWheel, hostsWheel] = wheelsByRole;
+    expect(screenWheel).not.toBeNull();
+    expect(screenWheel?.spin?.landedSliceIndex).toBe(0);
+    expect(playersWheel).toEqual(screenWheel);
+    expect(hostsWheel).toEqual(screenWheel);
+    const batches =
+      harness.persistence.enqueueBatch.mock.calls.slice(batchCountBefore);
+    const spinBatch = batches[batches.length - 1];
+    const spinOperationTypes = (spinBatch?.[1] ?? []).map(
+      (operation) => operation.type,
+    );
+    expect(
+      spinOperationTypes.filter((type) => type === 'checkpoint'),
+    ).toHaveLength(1);
+  });
+
+  it('rebuilds the landed spin for a late screen', async () => {
+    const harness = createHarness([
+      snapshotRound('wheel-1', 'wheel', []),
+      quizRound('round-1', ['question-1']),
+      quizRound('round-2', ['question-2']),
+    ]);
+
+    await spinFirstWheel(harness);
+    await jest.advanceTimersByTimeAsync(QUIZSHOW_LIMITS.wheelSpinMs);
+
+    const phaseChanges = emitsOf(
+      harness.records,
+      'phase:change',
+      roleRoom('screen'),
+    );
+    const lastPhaseChange = phaseChanges[phaseChanges.length - 1];
+    if (lastPhaseChange === undefined) throw new Error('No phase:change');
+    const frameSpin = (lastPhaseChange.payload as QuizshowPhaseChangeFrame)
+      .wheel?.spin;
+    expect(frameSpin).toBeDefined();
+    expect(frameSpin).not.toBeNull();
+    const lateScreenState = buildSessionState(harness.state, {
+      role: 'screen',
+    });
+    expect(lateScreenState.wheel?.spin).toEqual(frameSpin);
   });
 
   it('sends the host view to hosts and the public view elsewhere', async () => {

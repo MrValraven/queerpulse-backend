@@ -1,8 +1,9 @@
 /**
  * Pulse Live (`quizshow`) engine phases: the phase machine of one live
  * session. Host commands, timers, early closes, scoring at reveal, scores,
- * leaderboard and podium, the end of the night and abandonment. Pure: every
- * time comes in as a `now` argument and randomness through `QuizshowRandom`.
+ * leaderboard and podium, the wheel (spins, picks, slice bonuses and the
+ * early finish), the end of the night and abandonment. Pure: every time comes
+ * in as a `now` argument and randomness through `QuizshowRandom`.
  */
 import { textHasBlockedTerm } from '../common/blocked-terms';
 import type { QuizshowStoredPodiumEntry } from './entities/quizshow-result.entity';
@@ -13,6 +14,8 @@ import {
   type QuizshowPodiumEntry,
   type QuizshowScoresScope,
   type QuizshowSessionStatus,
+  type QuizshowUpNext,
+  type QuizshowWheelBonusView,
 } from './quizshow.contract';
 import {
   activePlayers,
@@ -27,6 +30,10 @@ import {
   succeed,
 } from './quizshow-engine-state';
 import { dropEmptyLobbyTeams } from './quizshow-engine-players';
+import {
+  applyWheelBonus,
+  type QuizshowWheelBonusResult,
+} from './quizshow-engine-wheel';
 import type {
   QuizshowCommandOutcome,
   QuizshowEngineEffect,
@@ -37,7 +44,6 @@ import type {
   QuizshowPersistOperation,
   QuizshowQuestionLogEntry,
 } from './quizshow-engine-types';
-import { isPartyRoundKind } from './quizshow-quiz-validation';
 import {
   closestNumberOutcomes,
   competitionRanks,
@@ -50,7 +56,6 @@ import {
   CRYPTO_RANDOM,
   extraTimeMs,
   isLastQuestionOfRound,
-  isLastRound,
   openLimitMs,
   shuffleAvoidingOrder,
   snapshotQuestionAt,
@@ -61,6 +66,23 @@ import {
   type QuizshowSnapshotQuestion,
   type QuizshowSnapshotRound,
 } from './quizshow-snapshot';
+import {
+  createWheelState,
+  drawnWheelSliceRoundIndexes,
+  drawWheelSpin,
+  isQuizRoundKind,
+  isWheelExhausted,
+  isWheelRoundKind,
+  isWheelSpinLanded,
+  nextQuizshowStep,
+  unplannedWheelSliceRoundIndexes,
+  wheelAngleModulo,
+  wheelRoundIndexOfRange,
+  wheelSliceRoundIndexes,
+  wheelSpinEndAngle,
+  withWheelSettingsDefaults,
+  type QuizshowWheelState,
+} from './quizshow-wheel';
 
 /** Host commands that move the cursor and share the no-op rule. */
 export const QUIZSHOW_MOVING_COMMANDS = [
@@ -70,6 +92,8 @@ export const QUIZSHOW_MOVING_COMMANDS = [
   'skip',
   'show_answers',
   'end',
+  'spin',
+  'finish_wheel',
 ] as const;
 
 export type QuizshowHostOutcome = QuizshowCommandOutcome<{ isNoop: boolean }>;
@@ -176,7 +200,7 @@ function isQuizRoundInPlay(state: QuizshowLiveState): boolean {
   const roundIndex = state.cursor.roundIndex ?? state.current?.roundIndex;
   if (roundIndex === undefined) return false;
   const round = state.snapshot.rounds[roundIndex];
-  return round !== undefined && !isPartyRoundKind(round.kind);
+  return round !== undefined && isQuizRoundKind(round.kind);
 }
 
 function findLogEntry(
@@ -286,15 +310,15 @@ function openQuestion(
     eligibleCount: eligiblePlayers.length,
     wasSkipped: false,
   });
-  const isParty = isPartyRoundKind(round.kind);
-  const limitMs = isParty ? writeLimitMs(round) : QUIZSHOW_LIMITS.readPhaseMs;
+  const isQuiz = isQuizRoundKind(round.kind);
+  const limitMs = isQuiz ? QUIZSHOW_LIMITS.readPhaseMs : writeLimitMs(round);
   advanceCursor(state, {
-    phase: isParty ? 'write' : 'read',
+    phase: isQuiz ? 'read' : 'write',
     roundIndex,
     questionIndex,
     now,
     durationMs: limitMs,
-    extraTimeMs: isParty ? extraTimeMs(limitMs) : null,
+    extraTimeMs: isQuiz ? null : extraTimeMs(limitMs),
   });
   return [
     { kind: 'phase_changed' },
@@ -357,14 +381,18 @@ function recordScoresFrame(
   state.scoresAtLastFrame = totalsByEntrant(state);
 }
 
-/** `scores` keeps the question's indices; `leaderboard` keeps the round that ended. */
+/**
+ * `scores` keeps the question's indices; `leaderboard` names the round that
+ * ended, which a closing wheel passes in as its own row.
+ */
 function showScores(
   state: QuizshowLiveState,
   phase: 'scores' | 'leaderboard',
   scope: QuizshowScoresScope,
   now: number,
+  roundIndex: number | null = state.cursor.roundIndex,
 ): QuizshowEngineEffect[] {
-  const { roundIndex, questionIndex } = state.cursor;
+  const { questionIndex } = state.cursor;
   advanceCursor(state, {
     phase,
     roundIndex,
@@ -458,7 +486,229 @@ function refreshPodiumIfShown(
   return [{ kind: 'podium_shown' }];
 }
 
-/** After a question's last phase: next question, the round's leaderboard, or the podium. */
+/** The open wheel; the `wheel` phase with none open breaks an engine invariant. */
+function openedWheelOf(state: QuizshowLiveState): QuizshowWheelState {
+  const wheel = state.wheelProgress.wheel;
+  if (wheel === null) {
+    throw new Error(
+      `Pulse Live session ${state.sessionId} is in the wheel phase with no wheel open.`,
+    );
+  }
+  return wheel;
+}
+
+/** What `host:next` opens from the lobby or a leaderboard. */
+function openStep(
+  state: QuizshowLiveState,
+  step: QuizshowUpNext,
+  now: number,
+): QuizshowEngineEffect[] {
+  switch (step.kind) {
+    case 'round':
+      state.wheelProgress.playedRoundIndexes.push(step.roundIndex);
+      return openRoundIntro(state, step.roundIndex, now);
+    case 'wheel':
+      return openWheel(state, step.wheelRoundIndex, now);
+    case 'podium':
+      return showPodium(state, now);
+  }
+}
+
+/** Opens a planned wheel, or returns to it after a slice with its played slice off it. */
+function openWheel(
+  state: QuizshowLiveState,
+  wheelRoundIndex: number,
+  now: number,
+): QuizshowEngineEffect[] {
+  const rounds = state.snapshot.rounds;
+  const progress = state.wheelProgress;
+  const openWheelState = progress.wheel;
+  if (
+    openWheelState !== null &&
+    openWheelState.wheelRoundIndex === wheelRoundIndex
+  ) {
+    // Back from a pick, the wheel starts again from rest.
+    openWheelState.spin = null;
+    openWheelState.restAngle = 0;
+  } else {
+    progress.wheel = createWheelState(
+      rounds,
+      wheelRoundIndex,
+      wheelSliceRoundIndexes(rounds, wheelRoundIndex),
+    );
+    if (!progress.openedWheelRoundIndexes.includes(wheelRoundIndex)) {
+      progress.openedWheelRoundIndexes.push(wheelRoundIndex);
+    }
+  }
+  advanceCursor(state, {
+    phase: 'wheel',
+    roundIndex: wheelRoundIndex,
+    questionIndex: null,
+    now,
+    durationMs: null,
+    extraTimeMs: null,
+  });
+  return [{ kind: 'phase_changed' }, checkpoint()];
+}
+
+/** One spin decided here: every surface animates to the same stop. Each spin is a new `wheel` phase. */
+function spinWheel(
+  state: QuizshowLiveState,
+  wheel: QuizshowWheelState,
+  now: number,
+  random: QuizshowRandom,
+): QuizshowEngineEffect[] {
+  const drawnCount = drawnWheelSliceRoundIndexes(
+    state.snapshot.rounds,
+    wheel,
+    state.wheelProgress,
+  ).length;
+  wheel.spin = drawWheelSpin({
+    drawnCount,
+    startAngle: wheel.restAngle,
+    now,
+    random,
+  });
+  wheel.restAngle = wheelAngleModulo(
+    wheelSpinEndAngle(wheel.spin, drawnCount),
+    360,
+  );
+  advanceCursor(state, {
+    phase: 'wheel',
+    roundIndex: wheel.wheelRoundIndex,
+    questionIndex: null,
+    now,
+    durationMs: null,
+    extraTimeMs: null,
+  });
+  return [{ kind: 'phase_changed' }, checkpoint()];
+}
+
+/** `host:next` on a landed spin: starts the landed round, or opens the next question of the landed category. */
+function startWheelPick(
+  state: QuizshowLiveState,
+  now: number,
+): QuizshowEngineEffect[] {
+  const wheel = openedWheelOf(state);
+  const spin = wheel.spin;
+  const landedRoundIndex =
+    spin === null
+      ? undefined
+      : drawnWheelSliceRoundIndexes(
+          state.snapshot.rounds,
+          wheel,
+          state.wheelProgress,
+        )[spin.landedSliceIndex];
+  if (landedRoundIndex === undefined) {
+    throw new Error(
+      `Pulse Live session ${state.sessionId} started a wheel pick with no landed slice.`,
+    );
+  }
+  if (wheel.pick === 'round') {
+    if (wheel.wheelRoundIndex === null) {
+      // An unplanned wheel picks once and is gone.
+      state.wheelProgress.wheel = null;
+    } else {
+      wheel.pickedCount += 1;
+      wheel.playingRoundIndex = landedRoundIndex;
+      wheel.baselineByEntrant = Object.fromEntries(
+        entrantTotals(state).map((entrant) => [
+          entrant.entrantId,
+          entrant.score,
+        ]),
+      );
+      wheel.spin = null;
+      wheel.restAngle = 0;
+    }
+    return openStep(
+      state,
+      { kind: 'round', roundIndex: landedRoundIndex },
+      now,
+    );
+  }
+  const slicePosition = wheel.sliceRoundIndexes.indexOf(landedRoundIndex);
+  const questionIndex = wheel.askedCounts[slicePosition] ?? 0;
+  wheel.askedCounts[slicePosition] = questionIndex + 1;
+  wheel.pickedCount += 1;
+  wheel.playingRoundIndex = landedRoundIndex;
+  wheel.spin = null;
+  wheel.restAngle = 0;
+  return openQuestion(state, landedRoundIndex, questionIndex, now);
+}
+
+/** A planned wheel's row joins the closed rows, so its unplayed slices are skipped for good. */
+function closeOpenWheel(state: QuizshowLiveState): void {
+  const progress = state.wheelProgress;
+  const wheelRoundIndex = progress.wheel?.wheelRoundIndex ?? null;
+  if (
+    wheelRoundIndex !== null &&
+    !progress.closedWheelRoundIndexes.includes(wheelRoundIndex)
+  ) {
+    progress.closedWheelRoundIndexes.push(wheelRoundIndex);
+  }
+  progress.wheel = null;
+}
+
+/**
+ * The row a closing leaderboard names: the wheel row when the cursor already
+ * sits on one, or after a pick-a-question wheel question; else the round
+ * that ended, a pick-a-round slice included.
+ */
+function leaderboardRoundIndexOf(state: QuizshowLiveState): number | null {
+  const { roundIndex } = state.cursor;
+  if (roundIndex === null) return null;
+  const rounds = state.snapshot.rounds;
+  const row = rounds[roundIndex];
+  if (row !== undefined && isWheelRoundKind(row.kind)) return roundIndex;
+  const wheelRoundIndex = wheelRoundIndexOfRange(rounds, roundIndex);
+  const wheelRow =
+    wheelRoundIndex === null ? undefined : rounds[wheelRoundIndex];
+  if (
+    wheelRoundIndex !== null &&
+    wheelRow !== undefined &&
+    withWheelSettingsDefaults(wheelRow.settings).wheelPick === 'question'
+  ) {
+    return wheelRoundIndex;
+  }
+  return roundIndex;
+}
+
+/** A round, or a pick-a-question wheel, ended: its leaderboard, or the podium when nothing remains and no bonus waits to be announced. */
+function afterRoundEnds(
+  state: QuizshowLiveState,
+  award: QuizshowWheelBonusView | null,
+  now: number,
+): QuizshowEngineEffect[] {
+  const nextStep = nextQuizshowStep(state.snapshot.rounds, state.wheelProgress);
+  if (nextStep.kind === 'podium' && award === null) {
+    return showPodium(state, now);
+  }
+  return showScores(
+    state,
+    'leaderboard',
+    'round',
+    now,
+    leaderboardRoundIndexOf(state),
+  );
+}
+
+/** Stamps the award with the phase that announces it; call after the transition moved the cursor. */
+function attachWheelBonusAward(
+  state: QuizshowLiveState,
+  result: QuizshowWheelBonusResult | null,
+): void {
+  if (result === null) return;
+  state.wheelProgress.wheelBonusAward = {
+    ...result.view,
+    phaseId: state.cursor.phaseId,
+  };
+}
+
+/**
+ * After a question's last phase: back to the wheel after a pick-a-question
+ * wheel question, the round's next question, or the end of the round (a
+ * pick-a-round slice pays its bonus first).
+ */
 function afterQuestion(
   state: QuizshowLiveState,
   now: number,
@@ -471,13 +721,56 @@ function afterQuestion(
       `Pulse Live session ${state.sessionId} moved on with no question in play.`,
     );
   }
+  const rounds = state.snapshot.rounds;
+  const wheel = state.wheelProgress.wheel;
+
+  // Rule 1: a pick-a-question wheel question returns to the wheel.
+  if (wheel?.pick === 'question' && wheel.playingRoundIndex === roundIndex) {
+    const wheelRoundIndex = wheel.wheelRoundIndex;
+    if (wheelRoundIndex === null) {
+      throw new Error(
+        `Pulse Live session ${state.sessionId} plays a wheel question from an unplanned wheel.`,
+      );
+    }
+    // The bonus reads the question in play, so it runs before anything moves.
+    const bonus = applyWheelBonus(state, roundIndex);
+    wheel.playingRoundIndex = null;
+    const effects: QuizshowEngineEffect[] = [...(bonus?.effects ?? [])];
+    if (isWheelExhausted(rounds, wheel, state.wheelProgress)) {
+      closeOpenWheel(state);
+      effects.push(...afterRoundEnds(state, bonus?.view ?? null, now));
+    } else {
+      if (bonus !== null) {
+        // The wheel shows no scores frame, so the next question's scores would count the bonus as its own points.
+        state.scoresAtLastFrame = totalsByEntrant(state);
+      }
+      effects.push(...openWheel(state, wheelRoundIndex, now));
+    }
+    attachWheelBonusAward(state, bonus);
+    return effects;
+  }
+
+  // Rule 2: the round's next question.
   if (!isLastQuestionOfRound(state.snapshot, roundIndex, questionIndex)) {
     return openQuestion(state, roundIndex, questionIndex + 1, now);
   }
-  if (!isLastRound(state.snapshot, roundIndex)) {
-    return showScores(state, 'leaderboard', 'round', now);
+
+  // Rule 3: the round's last question; a pick-a-round slice pays its bonus first.
+  let bonus: QuizshowWheelBonusResult | null = null;
+  if (wheel?.pick === 'round' && wheel.playingRoundIndex === roundIndex) {
+    bonus = applyWheelBonus(state, roundIndex);
+    wheel.playingRoundIndex = null;
+    wheel.baselineByEntrant = null;
+    if (isWheelExhausted(rounds, wheel, state.wheelProgress)) {
+      closeOpenWheel(state);
+    }
   }
-  return showPodium(state, now);
+  const effects: QuizshowEngineEffect[] = [
+    ...(bonus?.effects ?? []),
+    ...afterRoundEnds(state, bonus?.view ?? null, now),
+  ];
+  attachWheelBonusAward(state, bonus);
+  return effects;
 }
 
 function finishSession(
@@ -710,8 +1003,8 @@ function revealQuestion(
   const context = currentPlayContext(state);
   const { play, round } = context;
   if (!play.isScored) {
-    if (isPartyRoundKind(round.kind)) scorePartyQuestion(state, context);
-    else scoreQuizQuestion(state, context);
+    if (isQuizRoundKind(round.kind)) scoreQuizQuestion(state, context);
+    else scorePartyQuestion(state, context);
     applyTeamPoints(state, play);
     play.isScored = true;
   }
@@ -969,7 +1262,13 @@ export function hostStart(
     effects.push(...droppedTeamEffects, { kind: 'lobby_changed' });
   }
   state.status = 'running';
-  effects.push(...openRoundIntro(state, 0, now));
+  effects.push(
+    ...openStep(
+      state,
+      nextQuizshowStep(state.snapshot.rounds, state.wheelProgress),
+      now,
+    ),
+  );
   return hostActed(state, now, effects, false);
 }
 
@@ -1000,9 +1299,13 @@ function nextEffects(
     case 'scores':
       return afterQuestion(state, now);
     case 'leaderboard':
-      return roundIndex === null
-        ? null
-        : openRoundIntro(state, roundIndex + 1, now);
+      return openStep(
+        state,
+        nextQuizshowStep(state.snapshot.rounds, state.wheelProgress),
+        now,
+      );
+    case 'wheel':
+      return startWheelPick(state, now);
     case 'podium':
       return finishSession(state, now);
     default:
@@ -1024,9 +1327,109 @@ export function hostNext(
   if (state.status !== 'running') {
     return refuse('quizshow_command_not_allowed', state, true);
   }
+  if (state.cursor.phase === 'wheel') {
+    const spin = openedWheelOf(state).spin;
+    if (spin === null) return refuse('quizshow_wheel_not_spun', state, false);
+    if (
+      !isWheelSpinLanded(spin, now, QUIZSHOW_LIMITS.wheelLandingToleranceMs)
+    ) {
+      return refuse('quizshow_wheel_spinning', state, false);
+    }
+  }
   const effects = nextEffects(state, now, random);
   if (effects === null)
     return refuse('quizshow_command_not_allowed', state, true);
+  return hostActed(state, now, effects, false);
+}
+
+/**
+ * Spins the open wheel (the first spin and a spin again alike), or from a
+ * leaderboard opens an unplanned wheel over the next unplayed rounds and spins
+ * it in the same command.
+ */
+export function hostSpin(
+  state: QuizshowLiveState,
+  phaseId: string,
+  now: number,
+  random: QuizshowRandom = CRYPTO_RANDOM,
+): QuizshowHostOutcome {
+  noteHostCommand(state, now);
+  const movingCheck = checkMovingCommand(state, phaseId);
+  if (movingCheck === 'stale')
+    return refuse('quizshow_stale_phase', state, true);
+  if (movingCheck === 'noop') return hostActed(state, now, [], true);
+  if (state.status !== 'running') {
+    return refuse('quizshow_command_not_allowed', state, true);
+  }
+  const { phase } = state.cursor;
+  if (phase === 'wheel') {
+    const wheel = openedWheelOf(state);
+    if (
+      wheel.spin !== null &&
+      !isWheelSpinLanded(
+        wheel.spin,
+        now,
+        QUIZSHOW_LIMITS.wheelLandingToleranceMs,
+      )
+    ) {
+      return refuse('quizshow_wheel_spinning', state, false);
+    }
+    return hostActed(state, now, spinWheel(state, wheel, now, random), false);
+  }
+  if (phase === 'leaderboard') {
+    const rounds = state.snapshot.rounds;
+    const progress = state.wheelProgress;
+    const nextStep = nextQuizshowStep(rounds, progress);
+    if (nextStep.kind === 'wheel' || progress.wheel !== null) {
+      return refuse('quizshow_wheel_already_next', state, false);
+    }
+    const candidateRoundIndexes = unplannedWheelSliceRoundIndexes(
+      rounds,
+      progress,
+    );
+    if (
+      nextStep.kind === 'podium' ||
+      candidateRoundIndexes.length < QUIZSHOW_LIMITS.wheelSlicesMin
+    ) {
+      return refuse('quizshow_wheel_spin_too_few_rounds', state, false);
+    }
+    const wheel = createWheelState(rounds, null, candidateRoundIndexes);
+    progress.wheel = wheel;
+    return hostActed(state, now, spinWheel(state, wheel, now, random), false);
+  }
+  return refuse('quizshow_command_not_allowed', state, true);
+}
+
+/**
+ * Ends the open wheel early, even with a spin in the air: its unplayed slices
+ * are skipped for good. A pick-a-question wheel that played a question ends
+ * like a round; every other wheel moves straight to the next step.
+ */
+export function hostFinishWheel(
+  state: QuizshowLiveState,
+  phaseId: string,
+  now: number,
+): QuizshowHostOutcome {
+  noteHostCommand(state, now);
+  const movingCheck = checkMovingCommand(state, phaseId);
+  if (movingCheck === 'stale')
+    return refuse('quizshow_stale_phase', state, true);
+  if (movingCheck === 'noop') return hostActed(state, now, [], true);
+  if (state.status !== 'running' || state.cursor.phase !== 'wheel') {
+    return refuse('quizshow_command_not_allowed', state, true);
+  }
+  const wheel = openedWheelOf(state);
+  const isQuestionWheelWithPick =
+    wheel.pick === 'question' && wheel.pickedCount >= 1;
+  closeOpenWheel(state);
+  // The cursor still sits on the wheel row, so its leaderboard names that row.
+  const effects = isQuestionWheelWithPick
+    ? afterRoundEnds(state, null, now)
+    : openStep(
+        state,
+        nextQuizshowStep(state.snapshot.rounds, state.wheelProgress),
+        now,
+      );
   return hostActed(state, now, effects, false);
 }
 

@@ -1,4 +1,8 @@
-import type { QuizshowPlayMode } from './quizshow.contract';
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowPlayMode,
+} from './quizshow.contract';
+import { emptyWheelProgress } from './quizshow-wheel';
 import {
   activePlayers,
   advanceCursor,
@@ -26,10 +30,13 @@ import type {
 
 const STARTED_AT = 1_000;
 
-function snapshotRound(roundId: string): QuizshowSnapshotRound {
+function snapshotRound(
+  roundId: string,
+  kind: QuizshowSnapshotRound['kind'] = 'quiz',
+): QuizshowSnapshotRound {
   return {
     id: roundId,
-    kind: 'quiz',
+    kind,
     title: { en: 'Round', pt: 'Ronda' },
     contentLabel: 'none',
     settings: {
@@ -38,6 +45,7 @@ function snapshotRound(roundId: string): QuizshowSnapshotRound {
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions: [
       {
@@ -64,7 +72,10 @@ const SNAPSHOT: QuizshowSessionSnapshot = {
   rounds: [snapshotRound('round-one'), snapshotRound('round-two')],
 };
 
-function lobbyState(playMode: QuizshowPlayMode = 'solo'): QuizshowLiveState {
+function lobbyState(
+  playMode: QuizshowPlayMode = 'solo',
+  snapshot: QuizshowSessionSnapshot = SNAPSHOT,
+): QuizshowLiveState {
   return createLobbyState({
     sessionId: 'session-1',
     eventId: 'event-1',
@@ -79,7 +90,7 @@ function lobbyState(playMode: QuizshowPlayMode = 'solo'): QuizshowLiveState {
     playMode,
     maxTeamSize: null,
     isReviewOn: true,
-    snapshot: SNAPSHOT,
+    snapshot,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
     startedAt: STARTED_AT,
@@ -188,7 +199,60 @@ describe('Pulse Live engine state', () => {
       pausedRemainingMs: null,
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
+      roundNumber: 0,
+      upNext: { kind: 'round', roundIndex: 0 },
+      canSpinForNextRound: false,
     });
+  });
+
+  it('opens the lobby with empty wheel progress and the first step next', () => {
+    const state = lobbyState();
+
+    expect(state.wheelProgress).toEqual(emptyWheelProgress());
+    expect(state.cursor.roundNumber).toBe(0);
+    expect(state.cursor.roundCount).toBe(2);
+    expect(state.cursor.upNext).toEqual({ kind: 'round', roundIndex: 0 });
+    expect(state.cursor.canSpinForNextRound).toBe(false);
+  });
+
+  it('names a wheel next when the quiz opens on one', () => {
+    const state = lobbyState('solo', {
+      ...SNAPSHOT,
+      rounds: [
+        snapshotRound('wheel-one', 'wheel'),
+        snapshotRound('round-one'),
+        snapshotRound('round-two'),
+      ],
+    });
+
+    expect(state.cursor.upNext).toEqual({ kind: 'wheel', wheelRoundIndex: 0 });
+    expect(state.cursor.roundCount).toBe(2);
+  });
+
+  it('recomputes the cursor fields on every advance', () => {
+    const state = lobbyState();
+    state.wheelProgress.playedRoundIndexes.push(0);
+
+    advanceCursor(state, {
+      phase: 'leaderboard',
+      roundIndex: 0,
+      questionIndex: null,
+      now: 2_000,
+      durationMs: null,
+      extraTimeMs: null,
+    });
+    expect(state.cursor.roundNumber).toBe(1);
+    expect(state.cursor.upNext).toEqual({ kind: 'round', roundIndex: 1 });
+
+    advanceCursor(state, {
+      phase: 'round_intro',
+      roundIndex: 1,
+      questionIndex: null,
+      now: 3_000,
+      durationMs: null,
+      extraTimeMs: null,
+    });
+    expect(state.cursor.upNext).toBeNull();
   });
 
   it('counts phases and records the transition it came from', () => {

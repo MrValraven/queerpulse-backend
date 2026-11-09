@@ -42,6 +42,7 @@ import {
   type QuizshowSnapshotQuestion,
   type QuizshowSnapshotRound,
 } from './quizshow-snapshot';
+import { isWheelRoundKind } from './quizshow-wheel';
 
 export interface QuizshowNewTeamInput {
   name: string;
@@ -449,14 +450,17 @@ export function setAvatarShown(
   );
 }
 
-/** The lobby for round 0, the intro of the round, or the leaderboard just before it. */
+/** The round a lobby or leaderboard names next, or the round whose intro is open. A wheel phase is never a moment. */
 function isJokerMoment(state: QuizshowLiveState, roundIndex: number): boolean {
-  const { phase, roundIndex: cursorRoundIndex } = state.cursor;
-  if (phase === 'lobby') return roundIndex === 0;
-  if (phase === 'round_intro') return cursorRoundIndex === roundIndex;
-  if (phase === 'leaderboard') {
-    return cursorRoundIndex !== null && roundIndex === cursorRoundIndex + 1;
+  const { phase, roundIndex: cursorRoundIndex, upNext } = state.cursor;
+  if (phase === 'lobby' || phase === 'leaderboard') {
+    return (
+      upNext !== null &&
+      upNext.kind === 'round' &&
+      upNext.roundIndex === roundIndex
+    );
   }
+  if (phase === 'round_intro') return cursorRoundIndex === roundIndex;
   return false;
 }
 
@@ -492,11 +496,19 @@ export function playJoker(
     return succeed({ me: toMe(state, playerId) }, []);
   }
   const round = state.snapshot.rounds[roundIndex];
+  if (round === undefined || isWheelRoundKind(round.kind)) {
+    return refuse('quizshow_joker_not_allowed', state, false);
+  }
+  // A wheel picks the next round, so the joker waits for that round's card.
+  const { phase, upNext } = state.cursor;
   if (
-    round === undefined ||
-    !round.settings.isJokerAllowed ||
-    !isJokerMoment(state, roundIndex)
+    (phase === 'lobby' || phase === 'leaderboard') &&
+    upNext !== null &&
+    upNext.kind === 'wheel'
   ) {
+    return refuse('quizshow_joker_wheel_next', state, false);
+  }
+  if (!round.settings.isJokerAllowed || !isJokerMoment(state, roundIndex)) {
     return refuse('quizshow_joker_not_allowed', state, false);
   }
   if (state.playMode === 'solo') {

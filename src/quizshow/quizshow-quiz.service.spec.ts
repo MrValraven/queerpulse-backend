@@ -8,11 +8,12 @@ import { toQuizShape } from './quizshow-quiz-mapping';
 import { QuizshowQuizService } from './quizshow-quiz.service';
 import type { QuizshowQuizInputDto } from './dto/quizshow-quiz-input.dto';
 import type { QuizshowImportDto } from './dto/quizshow-import.dto';
-import type {
-  QuizshowQuestionInput,
-  QuizshowQuiz,
-  QuizshowQuizShape,
-  QuizshowRoundInput,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowQuestionInput,
+  type QuizshowQuiz,
+  type QuizshowQuizShape,
+  type QuizshowRoundInput,
 } from './quizshow.contract';
 
 const USER_ID = 'user-1';
@@ -62,6 +63,7 @@ function round(
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions,
     ...overrides,

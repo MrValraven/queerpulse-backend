@@ -11,6 +11,7 @@ import type {
   QuizshowTeamColorKey,
 } from './quizshow.contract';
 import { quizshowAckFailure } from './quizshow-errors';
+import { emptyWheelProgress, progressCursorFields } from './quizshow-wheel';
 import type {
   QuizshowCommandOutcome,
   QuizshowEngineEffect,
@@ -38,6 +39,7 @@ export type QuizshowLobbyStateInput = Omit<
   | 'hasScoredQuestion'
   | 'lastHostCommandAt'
   | 'isScreenMuted'
+  | 'wheelProgress'
 > & { startedAt: number };
 
 export interface QuizshowCursorAdvance {
@@ -62,6 +64,7 @@ export function createLobbyState(
   input: QuizshowLobbyStateInput,
 ): QuizshowLiveState {
   const { startedAt, attachedOrganiserUserIds, ...sessionFields } = input;
+  const wheelProgress = emptyWheelProgress();
   return {
     ...sessionFields,
     status: 'lobby',
@@ -71,14 +74,15 @@ export function createLobbyState(
       phase: 'lobby',
       roundIndex: null,
       questionIndex: null,
-      roundCount: input.snapshot.rounds.length,
       phaseStartedAt: null,
       deadline: null,
       extraTimeDeadline: null,
       pausedRemainingMs: null,
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
+      ...progressCursorFields(input.snapshot.rounds, wheelProgress, 'lobby'),
     },
+    wheelProgress,
     phaseCounter: 0,
     pausedAt: null,
     lastHostCommandAt: startedAt,
@@ -96,7 +100,12 @@ export function createLobbyState(
   };
 }
 
-/** Moves to the next phase: a new phase id, the transition it came from, fresh deadlines, no paused remainder and the session status copied in. */
+/**
+ * Moves to the next phase: a new phase id, the transition it came from, fresh
+ * deadlines, no paused remainder, the session status copied in and the four
+ * progress fields recomputed. Callers change `wheelProgress` first and call
+ * this last, so the fields see the new progress.
+ */
 export function advanceCursor(
   state: QuizshowLiveState,
   next: QuizshowCursorAdvance,
@@ -118,6 +127,11 @@ export function advanceCursor(
     pausedRemainingMs: null,
     pausedExtraTimeRemainingMs: null,
     isRestartRecovery: false,
+    ...progressCursorFields(
+      state.snapshot.rounds,
+      state.wheelProgress,
+      next.phase,
+    ),
   };
   state.cursor.status = state.status;
 }

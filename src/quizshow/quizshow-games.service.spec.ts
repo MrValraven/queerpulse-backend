@@ -17,13 +17,14 @@ import type {
   QuizshowGameInputDto,
 } from './dto/quizshow-game.dto';
 import type { QuizshowImportDto } from './dto/quizshow-import.dto';
-import type {
-  QuizshowGameResponse,
-  QuizshowImportSource,
-  QuizshowQuestionInput,
-  QuizshowQuiz,
-  QuizshowRoundInput,
-  QuizshowQuizShape,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowGameResponse,
+  type QuizshowImportSource,
+  type QuizshowQuestionInput,
+  type QuizshowQuiz,
+  type QuizshowRoundInput,
+  type QuizshowQuizShape,
 } from './quizshow.contract';
 
 const USER_ID = 'user-1';
@@ -71,6 +72,7 @@ function round(
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions,
     ...overrides,
@@ -279,6 +281,15 @@ async function caughtError(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe('QuizshowGamesService', () => {
+  it('counts rounds without wheel steps, with a cast that runs before the enum has the label', () => {
+    const roundCountSubquery = GAME_LIST_SQL.slice(
+      0,
+      GAME_LIST_SQL.indexOf('AS "round_count"'),
+    );
+    expect(roundCountSubquery).toContain(`AND "round"."kind"::text <> 'wheel'`);
+    expect(GAME_LIST_SQL.match(/<> 'wheel'/g)).toHaveLength(1);
+  });
+
   it("lists only the caller's games, newest first, with counts, the live session and kept results", async () => {
     const { service, dataSource } = build();
     dataSource.query.mockResolvedValueOnce([

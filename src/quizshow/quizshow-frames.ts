@@ -40,6 +40,8 @@ import {
   type QuizshowSessionState,
   type QuizshowStateBase,
   type QuizshowVoteOptions,
+  type QuizshowWheelBonusView,
+  type QuizshowWheelView,
 } from './quizshow.contract';
 import {
   activePlayers,
@@ -71,6 +73,7 @@ import {
   type QuizshowSnapshotQuestion,
   type QuizshowSnapshotRound,
 } from './quizshow-snapshot';
+import { wheelBonusViewForCursor, wheelViewForCursor } from './quizshow-wheel';
 
 export type QuizshowRoleRoom = 'screen' | 'players' | 'hosts';
 
@@ -119,6 +122,7 @@ const REVEAL_PHASES: ReadonlySet<QuizshowPhase> = new Set<QuizshowPhase>([
 /** Phases with no round card. */
 const ROUNDLESS_PHASES: ReadonlySet<QuizshowPhase> = new Set<QuizshowPhase>([
   'lobby',
+  'wheel',
   'podium',
   'ended',
 ]);
@@ -194,6 +198,19 @@ function currentRoundCard(state: QuizshowLiveState): QuizshowRoundCard | null {
   if (ROUNDLESS_PHASES.has(phase) || roundIndex === null) return null;
   const round = state.snapshot.rounds[roundIndex];
   return round === undefined ? null : toRoundCard(round, roundIndex);
+}
+
+/** The wheel view is the same for every role: it holds no answer and no secret. */
+function wheelOf(state: QuizshowLiveState): QuizshowWheelView | null {
+  return wheelViewForCursor(
+    state.snapshot.rounds,
+    state.wheelProgress,
+    state.cursor,
+  );
+}
+
+function wheelBonusOf(state: QuizshowLiveState): QuizshowWheelBonusView | null {
+  return wheelBonusViewForCursor(state.wheelProgress, state.cursor);
 }
 
 function isPlayerActive(
@@ -300,6 +317,8 @@ export function buildPhaseChange(
     round: currentRoundCard(state),
     question:
       audience === 'host' ? hostQuestionView(state) : publicQuestionView(state),
+    wheel: wheelOf(state),
+    wheelBonus: wheelBonusOf(state),
   };
 }
 
@@ -902,6 +921,8 @@ function stateBase(state: QuizshowLiveState): QuizshowStateBase {
     scores: buildScores(state),
     podium: sessionPodium(state),
     nextEvent: state.cursor.phase === 'ended' ? state.nextEvent : null,
+    wheel: wheelOf(state),
+    wheelBonus: wheelBonusOf(state),
   };
 }
 

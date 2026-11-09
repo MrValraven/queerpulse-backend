@@ -6,10 +6,18 @@ import {
   QUIZSHOW_LIMITS,
   QUIZSHOW_LOBBY_OPENS_PER_HOUR_MAX,
   QUIZSHOW_OPEN_SESSION_STATUSES,
+  QUIZSHOW_PARTY_ROUND_KINDS,
+  QUIZSHOW_PHASES,
+  QUIZSHOW_PLAYABLE_ROUND_KINDS,
+  QUIZSHOW_QUIZ_PROBLEM_CODES,
+  QUIZSHOW_ROUND_KINDS,
   QUIZSHOW_TEAM_COLOR_KEYS,
   QUIZSHOW_TEMPLATE_CARD_FIELDS,
   QUIZSHOW_TEMPLATE_STATUSES,
   QUIZSHOW_TIMED_PHASES,
+  QUIZSHOW_WHEEL_BONUS_VALUES,
+  QUIZSHOW_WHEEL_PICKS,
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
 } from './quizshow.contract';
 
 describe('Pulse Live contract vocabulary', () => {
@@ -114,5 +122,75 @@ describe('Pulse Live contract vocabulary', () => {
   it('caps games at 50 per member and lobby opens at 10 an hour', () => {
     expect(QUIZSHOW_GAMES_PER_MEMBER_MAX).toBe(50);
     expect(QUIZSHOW_LOBBY_OPENS_PER_HOUR_MAX).toBe(10);
+  });
+
+  it('adds the wheel kind last and keeps it out of the playable and party kinds', () => {
+    expect(QUIZSHOW_ROUND_KINDS).toEqual([
+      'quiz',
+      'lie_detector',
+      'caption_this',
+      'drag_name',
+      'wheel',
+    ]);
+    expect(QUIZSHOW_PLAYABLE_ROUND_KINDS).toEqual([
+      'quiz',
+      'lie_detector',
+      'caption_this',
+      'drag_name',
+    ]);
+    expect(QUIZSHOW_PARTY_ROUND_KINDS).not.toContain('wheel');
+  });
+
+  it('puts the untimed wheel phase after the leaderboard', () => {
+    expect(QUIZSHOW_PHASES.indexOf('wheel')).toBe(
+      QUIZSHOW_PHASES.indexOf('leaderboard') + 1,
+    );
+    expect(QUIZSHOW_TIMED_PHASES).not.toContain('wheel');
+  });
+
+  it('carries the wheel vocabulary, defaults and limits', () => {
+    expect(QUIZSHOW_WHEEL_PICKS).toEqual(['round', 'question']);
+    expect(QUIZSHOW_WHEEL_BONUS_VALUES).toEqual([0, 250, 500, 1000]);
+    expect(QUIZSHOW_WHEEL_SETTINGS_DEFAULTS).toEqual({
+      wheelBonus: 0,
+      wheelPick: 'round',
+      sliceCount: null,
+    });
+    expect(QUIZSHOW_LIMITS).toEqual(
+      expect.objectContaining({
+        roundsMax: 10,
+        roundRowsMax: 13,
+        wheelStepsMax: 3,
+        wheelSlicesMin: 2,
+        wheelSlicesMax: 8,
+        wheelSpinMs: 5500,
+        wheelSpinReducedMotionMs: 1200,
+        wheelTurnsMin: 5,
+        wheelTurnsMax: 6,
+        wheelJitterSeedMax: 1000,
+        wheelJitterSpread: 0.7,
+        wheelPointerAngle: 270,
+        wheelLandingToleranceMs: 250,
+      }),
+    );
+  });
+
+  it('appends the wheel problem codes and socket codes', () => {
+    expect(QUIZSHOW_QUIZ_PROBLEM_CODES.slice(-2)).toEqual([
+      'too_many_wheels',
+      'wheel_too_few_slices',
+    ]);
+    expect(QUIZSHOW_ERROR_CODES).toEqual(
+      expect.arrayContaining([
+        'quizshow_wheel_not_spun',
+        'quizshow_wheel_spinning',
+        'quizshow_wheel_spin_too_few_rounds',
+        'quizshow_wheel_already_next',
+        'quizshow_joker_wheel_next',
+      ]),
+    );
+    expect(
+      QUIZSHOW_ERROR_CODES.indexOf('quizshow_wheel_not_spun'),
+    ).toBeLessThan(QUIZSHOW_ERROR_CODES.indexOf('ACCOUNT_RESTRICTED'));
   });
 });

@@ -22,10 +22,11 @@ import type { QuizshowPlayerRecord } from './entities/quizshow-player.entity';
 import type { QuizshowQuizRecord } from './entities/quizshow-quiz.entity';
 import type { QuizshowSessionRecord } from './entities/quizshow-session.entity';
 import { QuizshowAccessService } from './quizshow-access.service';
-import type {
-  QuizshowAck,
-  QuizshowAttachRole,
-  QuizshowMe,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowAck,
+  type QuizshowAttachRole,
+  type QuizshowMe,
 } from './quizshow.contract';
 import { createLobbyState } from './quizshow-engine-state';
 import type {
@@ -40,6 +41,7 @@ import { QuizshowRuntimeService } from './quizshow-runtime.service';
 import type {
   QuizshowRandom,
   QuizshowSnapshotQuestion,
+  QuizshowSnapshotRound,
 } from './quizshow-snapshot';
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
@@ -154,6 +156,47 @@ interface HarnessOptions {
   /** `'game'` builds a session of a game owned by OWNER_USER_ID with no event. */
   kind?: 'event' | 'game';
   isAdultsOnly?: boolean;
+  /** Plays [wheel, quiz of one question, quiz of one question] instead of the single two-question quiz. */
+  hasWheelFirst?: boolean;
+}
+
+const ROUND_SETTINGS = {
+  timeLimitSeconds: 20,
+  isSpeedBonusOn: true,
+  isJokerAllowed: true,
+  writeSeconds: 60,
+  voteSeconds: 30,
+  ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+};
+
+function singleQuestionRound(
+  roundId: string,
+  questionId: string,
+): QuizshowSnapshotRound {
+  return {
+    id: roundId,
+    kind: 'quiz',
+    title: { en: 'Round', pt: 'Ronda' },
+    contentLabel: 'none',
+    settings: ROUND_SETTINGS,
+    questions: [trueFalseQuestion(questionId)],
+  };
+}
+
+/** A wheel row first, then two quiz rounds of one question each. */
+function wheelFirstRounds(): QuizshowSnapshotRound[] {
+  return [
+    {
+      id: 'wheel-1',
+      kind: 'wheel',
+      title: { en: 'Wheel', pt: 'Roda' },
+      contentLabel: 'none',
+      settings: ROUND_SETTINGS,
+      questions: [],
+    },
+    singleQuestionRound('round-2', '55555555-5555-4555-8555-555555555555'),
+    singleQuestionRound('round-3', '66666666-6666-4666-8666-666666666666'),
+  ];
 }
 
 function lobbyState(options: HarnessOptions = {}): QuizshowLiveState {
@@ -189,25 +232,21 @@ function lobbyState(options: HarnessOptions = {}): QuizshowLiveState {
       title: 'Pride night quiz',
       languages: 'both',
       screenLanguage: 'en',
-      rounds: [
-        {
-          id: 'round-1',
-          kind: 'quiz',
-          title: { en: 'Round', pt: 'Ronda' },
-          contentLabel: 'none',
-          settings: {
-            timeLimitSeconds: 20,
-            isSpeedBonusOn: true,
-            isJokerAllowed: true,
-            writeSeconds: 60,
-            voteSeconds: 30,
-          },
-          questions: [
-            typedQuestion(QUESTION_ID),
-            trueFalseQuestion('33333333-3333-4333-8333-333333333333'),
+      rounds: options.hasWheelFirst
+        ? wheelFirstRounds()
+        : [
+            {
+              id: 'round-1',
+              kind: 'quiz',
+              title: { en: 'Round', pt: 'Ronda' },
+              contentLabel: 'none',
+              settings: ROUND_SETTINGS,
+              questions: [
+                typedQuestion(QUESTION_ID),
+                trueFalseQuestion('33333333-3333-4333-8333-333333333333'),
+              ],
+            },
           ],
-        },
-      ],
     },
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
@@ -491,6 +530,14 @@ function hostNext(harness: Harness, client: FakeClient, phaseId: string) {
   return harness.gateway.handleHostNext(asClient(client), {
     phaseId,
   });
+}
+
+function hostSpin(harness: Harness, client: FakeClient, phaseId: string) {
+  return harness.gateway.handleHostSpin(asClient(client), { phaseId });
+}
+
+function finishWheel(harness: Harness, client: FakeClient, phaseId: string) {
+  return harness.gateway.handleHostFinishWheel(asClient(client), { phaseId });
 }
 
 function setScreenMuted(
@@ -873,6 +920,76 @@ describe('QuizshowGateway', () => {
       'quizshow_wrong_role',
     );
     expect(harness.state.cursor.phase).toBe('lobby');
+  });
+
+  it('refuses host:spin and host:finishWheel from a player socket', async () => {
+    const { client: player } = await joinedPlayer(
+      harness,
+      'socket-player',
+      PLAYER_USER_ID,
+    );
+    expect(codeOf(await hostSpin(harness, player, '0'))).toBe(
+      'quizshow_wrong_role',
+    );
+    expect(codeOf(await finishWheel(harness, player, '0'))).toBe(
+      'quizshow_wrong_role',
+    );
+    expect(harness.state.cursor.phase).toBe('lobby');
+  });
+
+  it('answers a spin outside the wheel with the reason and the cursor', async () => {
+    const hostRemote = await attachedHost(harness, 'socket-host');
+    const ack = await hostSpin(
+      harness,
+      hostRemote,
+      harness.state.cursor.phaseId,
+    );
+    expect(ack).toMatchObject({
+      ok: false,
+      code: 'quizshow_command_not_allowed',
+      cursor: { phase: 'lobby', upNext: expect.anything() as unknown },
+    });
+    expect(harness.state.cursor.phase).toBe('lobby');
+  });
+
+  describe('a session that opens on a wheel', () => {
+    beforeEach(() => {
+      harness = createHarness({ hasWheelFirst: true });
+    });
+
+    async function startedWheel(): Promise<FakeClient> {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      expect(
+        await harness.gateway.handleHostStart(asClient(hostRemote), {
+          phaseId: '0',
+        }),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(harness.state.cursor.phase).toBe('wheel');
+      return hostRemote;
+    }
+
+    it('spins the wheel for the host', async () => {
+      const hostRemote = await startedWheel();
+      const ack = await hostSpin(
+        harness,
+        hostRemote,
+        harness.state.cursor.phaseId,
+      );
+      expect(ack).toEqual({ ok: true, isNoop: false });
+      expect(harness.state.wheelProgress.wheel?.spin).not.toBeNull();
+      expect(harness.state.cursor.phase).toBe('wheel');
+    });
+
+    it('finishes the wheel for the host', async () => {
+      const hostRemote = await startedWheel();
+      const ack = await finishWheel(
+        harness,
+        hostRemote,
+        harness.state.cursor.phaseId,
+      );
+      expect(ack).toEqual({ ok: true, isNoop: false });
+      expect(harness.state.cursor.phase).toBe('podium');
+    });
   });
 
   it('emits session state after the attach ack', async () => {

@@ -6,9 +6,13 @@ import {
   QuizshowGameInputDto,
   QuizshowOpenGameSessionDto,
 } from './quizshow-game.dto';
+import { QUIZSHOW_WHEEL_SETTINGS_DEFAULTS } from '../quizshow.contract';
 import { QuizshowImportDto } from './quizshow-import.dto';
 import { QuizshowOpenSessionDto } from './quizshow-open-session.dto';
-import { QuizshowQuizInputDto } from './quizshow-quiz-input.dto';
+import {
+  QuizshowQuizInputDto,
+  QuizshowRoundSettingsDto,
+} from './quizshow-quiz-input.dto';
 import { QuizshowStaffActionDto } from './quizshow-staff-action.dto';
 import {
   QuizshowTemplateInputDto,
@@ -16,6 +20,7 @@ import {
 } from './quizshow-template.dto';
 import {
   QuizshowAnswerSubmitPayload,
+  QuizshowJokerPayload,
   QuizshowLobbyJoinPayload,
   QuizshowPhaseCommandPayload,
   QuizshowSetScreenMutedPayload,
@@ -26,7 +31,12 @@ type PlainObject = Record<string, unknown>;
 async function validateBody<Dto extends object>(
   dtoClass: new () => Dto,
   body: PlainObject,
-): Promise<{ instance: Dto; errorCount: number }> {
+): Promise<{
+  instance: Dto;
+  errorCount: number;
+  errorProperties: string[];
+  constraintNames: string[];
+}> {
   const instance = plainToInstance(dtoClass, body, {
     ...VALIDATION_PIPE_OPTIONS.transformOptions,
   });
@@ -34,7 +44,14 @@ async function validateBody<Dto extends object>(
     whitelist: VALIDATION_PIPE_OPTIONS.whitelist,
     forbidNonWhitelisted: VALIDATION_PIPE_OPTIONS.forbidNonWhitelisted,
   });
-  return { instance, errorCount: errors.length };
+  return {
+    instance,
+    errorCount: errors.length,
+    errorProperties: errors.map((error) => error.property),
+    constraintNames: errors.flatMap((error) =>
+      Object.keys(error.constraints ?? {}),
+    ),
+  };
 }
 
 const blankText = { en: '', pt: '' };
@@ -67,6 +84,7 @@ function buildRound(overrides: PlainObject = {}): PlainObject {
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions: [buildQuestion()],
     ...overrides,
@@ -600,5 +618,89 @@ describe('quizshow request bodies', () => {
       hasAcceptedAdultContent: 'yes',
     });
     expect(nonBoolean.errorCount).toBeGreaterThan(0);
+  });
+
+  const baseRoundSettings = {
+    timeLimitSeconds: 20,
+    isSpeedBonusOn: true,
+    isJokerAllowed: true,
+    writeSeconds: 60,
+    voteSeconds: 30,
+  };
+
+  it('accepts round settings without the wheel fields', async () => {
+    const settingsOnly = await validateBody(
+      QuizshowRoundSettingsDto,
+      baseRoundSettings,
+    );
+    expect(settingsOnly.errorCount).toBe(0);
+    const insideAQuiz = await validateBody(
+      QuizshowQuizInputDto,
+      buildQuiz({ rounds: [buildRound({ settings: baseRoundSettings })] }),
+    );
+    expect(insideAQuiz.errorCount).toBe(0);
+  });
+
+  it('accepts every wheel bonus, both picks, an Auto and a fixed slice count', async () => {
+    for (const wheelBonus of [0, 250, 500, 1000]) {
+      const result = await validateBody(QuizshowRoundSettingsDto, {
+        ...baseRoundSettings,
+        wheelBonus,
+      });
+      expect(result.errorCount).toBe(0);
+    }
+    for (const wheelPick of ['round', 'question']) {
+      const result = await validateBody(QuizshowRoundSettingsDto, {
+        ...baseRoundSettings,
+        wheelPick,
+      });
+      expect(result.errorCount).toBe(0);
+    }
+    for (const sliceCount of [null, 2, 8]) {
+      const result = await validateBody(QuizshowRoundSettingsDto, {
+        ...baseRoundSettings,
+        sliceCount,
+      });
+      expect(result.errorCount).toBe(0);
+    }
+  });
+
+  it('refuses an unknown bonus, pick or slice count', async () => {
+    const refusedFields: Array<[string, unknown]> = [
+      ['wheelBonus', 300],
+      ['wheelPick', 'player'],
+      ['sliceCount', 1],
+      ['sliceCount', 9],
+      ['sliceCount', 2.5],
+    ];
+    for (const [property, value] of refusedFields) {
+      const result = await validateBody(QuizshowRoundSettingsDto, {
+        ...baseRoundSettings,
+        [property]: value,
+      });
+      expect(result.errorProperties).toEqual([property]);
+    }
+  });
+
+  it('accepts a wheel round kind', async () => {
+    const { errorCount } = await validateBody(
+      QuizshowQuizInputDto,
+      buildQuiz({
+        rounds: [buildRound({ kind: 'wheel', questions: [] })],
+      }),
+    );
+    expect(errorCount).toBe(0);
+  });
+
+  it('takes a joker on any of the 13 round rows', async () => {
+    const lastRow = await validateBody(QuizshowJokerPayload, {
+      roundIndex: 12,
+    });
+    expect(lastRow.errorCount).toBe(0);
+    const pastTheRows = await validateBody(QuizshowJokerPayload, {
+      roundIndex: 13,
+    });
+    expect(pastTheRows.errorProperties).toEqual(['roundIndex']);
+    expect(pastTheRows.constraintNames).toEqual(['max']);
   });
 });

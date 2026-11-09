@@ -24,6 +24,7 @@ const TEMPLATE_QUIZ_COUNTS = `
     (
       SELECT COUNT(*)::int FROM "quizshow_rounds" "round"
       WHERE "round"."quiz_id" = "quiz"."id"
+        AND "round"."kind"::text <> 'wheel'
     ) AS "round_count",
     (
       SELECT COUNT(*)::int

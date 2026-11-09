@@ -257,6 +257,28 @@ export const QUIZSHOW_ERRORS: Readonly<
     status: null,
     message: 'This game holds 18+ content and needs a confirmation to join.',
   },
+  quizshow_wheel_not_spun: {
+    status: null,
+    message: 'The wheel has not been spun yet.',
+  },
+  quizshow_wheel_spinning: {
+    status: null,
+    message: 'The wheel is still spinning.',
+  },
+  quizshow_wheel_spin_too_few_rounds: {
+    status: null,
+    message:
+      'Spinning for the next round needs at least 2 unplayed rounds outside a wheel.',
+  },
+  quizshow_wheel_already_next: {
+    status: null,
+    message: 'A wheel step comes next on its own.',
+  },
+  quizshow_joker_wheel_next: {
+    status: null,
+    message:
+      'A wheel picks the next round, so the joker waits for its round card.',
+  },
   // existing, reused as is
   ACCOUNT_RESTRICTED: {
     status: HttpStatus.FORBIDDEN,

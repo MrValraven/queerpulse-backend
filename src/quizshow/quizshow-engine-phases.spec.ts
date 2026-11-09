@@ -1,9 +1,10 @@
-import type {
-  QuizshowAckFailure,
-  QuizshowAnswerPayload,
-  QuizshowPlayMode,
-  QuizshowRoundKind,
-  QuizshowText,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowAckFailure,
+  type QuizshowAnswerPayload,
+  type QuizshowPlayMode,
+  type QuizshowRoundKind,
+  type QuizshowText,
 } from './quizshow.contract';
 import {
   abandonIfIdle,
@@ -102,6 +103,7 @@ function snapshotRound(
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions,
   };

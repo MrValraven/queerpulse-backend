@@ -9,8 +9,19 @@ export const QUIZSHOW_ROUND_KINDS = [
   'lie_detector',
   'caption_this',
   'drag_name',
+  'wheel', // a wheel step: no questions; its slices are the rounds right after it
 ] as const;
 export type QuizshowRoundKind = (typeof QUIZSHOW_ROUND_KINDS)[number];
+
+/** Every kind that holds questions: the round kind picker and every kind-keyed copy map. */
+export const QUIZSHOW_PLAYABLE_ROUND_KINDS = [
+  'quiz',
+  'lie_detector',
+  'caption_this',
+  'drag_name',
+] as const;
+export type QuizshowPlayableRoundKind =
+  (typeof QUIZSHOW_PLAYABLE_ROUND_KINDS)[number];
 /** Rounds whose questions are all `prompt` and whose answers players write. */
 export const QUIZSHOW_PARTY_ROUND_KINDS = [
   'lie_detector',
@@ -71,6 +82,7 @@ export const QUIZSHOW_PHASES = [
   'reveal', // correct answer / authors, points
   'scores', // quiz rounds only: top of the leaderboard after a question
   'leaderboard', // between rounds
+  'wheel', // the wheel picks what plays next; untimed, host-paced
   'podium', // 3rd, 2nd, 1st
   'ended', // thank-you screen; status is finished or abandoned
 ] as const;
@@ -171,6 +183,11 @@ export const QUIZSHOW_ERROR_CODES = [
   'quizshow_answer_not_found',
   'quizshow_rate_limited',
   'quizshow_adult_consent_required',
+  'quizshow_wheel_not_spun',
+  'quizshow_wheel_spinning',
+  'quizshow_wheel_spin_too_few_rounds',
+  'quizshow_wheel_already_next',
+  'quizshow_joker_wheel_next',
   // existing, reused as is
   'ACCOUNT_RESTRICTED',
 ] as const;
@@ -195,6 +212,8 @@ export const QUIZSHOW_QUIZ_PROBLEM_CODES = [
   'answer_missing',
   'truth_missing',
   'media_missing',
+  'too_many_wheels',
+  'wheel_too_few_slices',
 ] as const;
 export type QuizshowQuizProblemCode =
   (typeof QUIZSHOW_QUIZ_PROBLEM_CODES)[number];
@@ -263,6 +282,18 @@ export const QUIZSHOW_LIMITS = {
   templateCardTitleMax: 120,
   templateCardDescriptionMax: 300,
   templateStaffNotesMax: 20000,
+  roundRowsMax: 13, // roundsMax + wheelStepsMax: every row of a quiz, wheels included
+  wheelStepsMax: 3,
+  wheelSlicesMin: 2,
+  wheelSlicesMax: 8,
+  wheelSpinMs: 5500,
+  wheelSpinReducedMotionMs: 1200,
+  wheelTurnsMin: 5,
+  wheelTurnsMax: 6,
+  wheelJitterSeedMax: 1000,
+  wheelJitterSpread: 0.7, // share of one slice the landing may drift from its middle
+  wheelPointerAngle: 270, // degrees clockwise from 12 o'clock: the pointer at 9 o'clock
+  wheelLandingToleranceMs: 250,
 } as const;
 
 /** Every bilingual field. A language the quiz does not use may hold ''. */
@@ -271,15 +302,91 @@ export interface QuizshowText {
   pt: string;
 }
 
+export const QUIZSHOW_WHEEL_PICKS = ['round', 'question'] as const;
+export type QuizshowWheelPick = (typeof QUIZSHOW_WHEEL_PICKS)[number];
+
+export const QUIZSHOW_WHEEL_BONUS_VALUES = [0, 250, 500, 1000] as const;
+export type QuizshowWheelBonus = (typeof QUIZSHOW_WHEEL_BONUS_VALUES)[number];
+
 export interface QuizshowRoundSettings {
   timeLimitSeconds: number; // quiz rounds; default 20
   isSpeedBonusOn: boolean; // quiz rounds; default true ("Faster answers score more")
-  isJokerAllowed: boolean; // every kind; default true
+  isJokerAllowed: boolean; // every playable kind; default true; ignored on wheel rows
   writeSeconds: number; // party rounds; default 60
   voteSeconds: number; // party rounds; default 30
+  /** A round inside a wheel's range: the flat bonus of its slice. 0 on every other row after a save. */
+  wheelBonus: QuizshowWheelBonus; // default 0
+  /** Wheel rows: what one spin picks. 'round' on every other row after a save. */
+  wheelPick: QuizshowWheelPick; // default 'round'
+  /** Wheel rows: 2..8 slices, null = Auto. null on every other row after a save. */
+  sliceCount: number | null; // default null
 }
-// All five are always present on every round. A round ignores the ones its
-// kind does not use; they are stored as sent.
+// All eight are present on every round a GET, PUT, import or snapshot returns.
+
+export const QUIZSHOW_WHEEL_SETTINGS_DEFAULTS: Readonly<
+  Pick<QuizshowRoundSettings, 'wheelBonus' | 'wheelPick' | 'sliceCount'>
+> = { wheelBonus: 0, wheelPick: 'round', sliceCount: null };
+
+/** What `host:next` opens from the lobby or a leaderboard. */
+export type QuizshowUpNext =
+  | { kind: 'round'; roundIndex: number }
+  | { kind: 'wheel'; wheelRoundIndex: number }
+  | { kind: 'podium' };
+
+/** One slice: a round of the wheel's range (pick a round) or a category (pick a question). */
+export interface QuizshowWheelSlice {
+  roundIndex: number; // the slice round's row index
+  title: QuizshowText; // the round title
+  kind: QuizshowPlayableRoundKind;
+  contentLabel: QuizshowContentLabel;
+  wheelBonus: QuizshowWheelBonus; // always 0 on an unplanned spin
+  /** Pick a round: the round's questions. Pick a question: questions still in the pile. */
+  questionCount: number;
+  /** Pick a round: the round has started. Pick a question: the pile is empty. */
+  isPlayed: boolean;
+}
+
+/** One spin, decided by the server. Every surface animates to the same stop. */
+export interface QuizshowWheelSpin {
+  /** Index into the drawn slices: `slices` with `isPlayed` false, in running order. */
+  landedSliceIndex: number;
+  startedAt: number; // server epoch ms
+  durationMs: number; // QUIZSHOW_LIMITS.wheelSpinMs (5500)
+  turns: number; // 5 or 6 full turns
+  jitterSeed: number; // integer 0..1000
+  /** Wheel rotation in degrees when the spin starts. */
+  startAngle: number;
+}
+
+export interface QuizshowWheelView {
+  /** The wheel step's row; null for an unplanned spin from a leaderboard. */
+  wheelRoundIndex: number | null;
+  pick: QuizshowWheelPick; // always 'round' on an unplanned spin
+  /** Every slice of the range in running order, played ones included. */
+  slices: QuizshowWheelSlice[];
+  spinNumber: number; // N of "spin N of M"
+  spinTotal: number; // M of "spin N of M"
+  /** null before the first spin, and once the landed pick has started. */
+  spin: QuizshowWheelSpin | null;
+  /** Pick a question, during the question it picked: that category's row. null in `wheel`. */
+  playingRoundIndex: number | null;
+}
+
+export interface QuizshowWheelBonusWinner {
+  entrantId: string; // playerId (solo) or teamId (teams)
+  kind: 'player' | 'team';
+  name: string;
+  colorKey: QuizshowTeamColorKey | null;
+}
+
+/** "+500 to Ana for Music", shown on the screen that follows the award. */
+export interface QuizshowWheelBonusView {
+  points: QuizshowWheelBonus; // 250, 500 or 1000
+  pick: QuizshowWheelPick;
+  sliceRoundIndex: number;
+  sliceTitle: QuizshowText;
+  winners: QuizshowWheelBonusWinner[]; // entrant order of `entrantTotals`; 1+ entries
+}
 
 export interface QuizshowOption {
   id: string;
@@ -637,8 +744,11 @@ export interface QuizshowCursor {
   phaseId: string;
   status: QuizshowSessionStatus;
   phase: QuizshowPhase;
-  roundIndex: number | null; // 0-based; null in lobby, podium, ended
+  /** 0-based row index; null in lobby, podium, ended. In `wheel`: the wheel step's row,
+   *  or null for an unplanned spin. In `leaderboard` after a pick-a-question wheel: the wheel step's row. */
+  roundIndex: number | null;
   questionIndex: number | null; // 0-based within the round; null outside question phases
+  /** M of "Round N of M". Was `snapshot.rounds.length`. */
   roundCount: number;
   phaseStartedAt: number | null; // server epoch ms
   /** Standard deadline, server epoch ms. null on untimed phases and while paused. */
@@ -651,6 +761,12 @@ export interface QuizshowCursor {
   /** Paused by a server restart. `host:resume` replays the question from its
    *  first phase (`read` or `write`), discarding that question's answers and votes. */
   isRestartRecovery: boolean;
+  /** N of "Round N of M": rounds started so far, the current one included; 0 before the first. */
+  roundNumber: number;
+  /** Set in `lobby` and `leaderboard`; null in every other phase. */
+  upNext: QuizshowUpNext | null;
+  /** True only in `leaderboard` when the remote may offer "Spin for the next round". */
+  canSpinForNextRound: boolean;
 }
 
 export type QuizshowAnswerPayload =
@@ -717,6 +833,8 @@ export interface QuizshowPhaseChangeFrame {
   cursor: QuizshowCursor;
   round: QuizshowRoundCard | null;
   question: QuizshowQuestionView | QuizshowHostQuestionView | null; // null outside question phases
+  wheel: QuizshowWheelView | null;
+  wheelBonus: QuizshowWheelBonusView | null;
 }
 
 export interface QuizshowLobbyPlayer {
@@ -934,6 +1052,8 @@ export interface QuizshowStateBase {
   scores: QuizshowScores | null; // during scores, leaderboard, podium
   podium: QuizshowPodiumEntry[] | null;
   nextEvent: QuizshowNextEvent | null; // set in `ended`
+  wheel: QuizshowWheelView | null;
+  wheelBonus: QuizshowWheelBonusView | null;
 }
 
 export interface QuizshowScreenState extends QuizshowStateBase {

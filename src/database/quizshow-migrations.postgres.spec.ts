@@ -6,13 +6,16 @@ import { AddQuizshow1836000100000 } from '../migrations/1836000100000-AddQuizsho
 import { AddQuizshowGameReportSubject1837000000000 } from '../migrations/1837000000000-AddQuizshowGameReportSubject';
 import { AddQuizshowGames1837000100000 } from '../migrations/1837000100000-AddQuizshowGames';
 import { AddQuizshowTemplates1837900000000 } from '../migrations/1837900000000-AddQuizshowTemplates';
+import { AddQuizshowWheel1840000000000 } from '../migrations/1840000000000-AddQuizshowWheel';
 import { QUIZSHOW_TEMPLATE_SEEDS_1837900000000 } from '../migrations/data/quizshow-templates-1837900000000.seed';
 
 /**
  * Pulse Live migrations on real Postgres, in ledger order: the two
  * `1836000*` migrations as they ran in production, then the two `1837000*`
  * forward migrations that add games without an event, then the
- * `1837900000000` templates migration with its five seeded drafts. Skipped unless
+ * `1837900000000` templates migration with its five seeded drafts, then the
+ * `1840000000000` wheel migration that appends `wheel` to the round kind
+ * enum. Skipped unless
  * `QUIZSHOW_MIGRATIONS_DATABASE_URL` names a database whose name ends in
  * `_test` (it drops and rebuilds the schema). Run it with, for example:
  *
@@ -550,6 +553,26 @@ describeWithDatabase('Pulse Live migrations on real Postgres', () => {
       ]);
       expect(await countOf('quizshow_players')).toBe(1);
     });
+  });
+
+  it('appends wheel to the round kind enum outside the migration transaction', async () => {
+    const wheelMigration = new AddQuizshowWheel1840000000000();
+    expect(wheelMigration.transaction).toBe(false);
+    expect(await labelsOf('quizshow_round_kind')).toEqual([
+      'quiz',
+      'lie_detector',
+      'caption_this',
+      'drag_name',
+    ]);
+    await wheelMigration.up(queryRunner);
+    expect(await labelsOf('quizshow_round_kind')).toEqual([
+      'quiz',
+      'lie_detector',
+      'caption_this',
+      'drag_name',
+      'wheel',
+    ]);
+    await expect(wheelMigration.down()).rejects.toThrow(/Irreversible/);
   });
 
   describe('the templates migration', () => {

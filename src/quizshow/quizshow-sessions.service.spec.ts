@@ -18,7 +18,11 @@ import {
   normaliseJoinCode,
   QuizshowSessionsService,
 } from './quizshow-sessions.service';
-import type { QuizshowJoinHost } from './quizshow.contract';
+import { emptyWheelProgress } from './quizshow-wheel';
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowJoinHost,
+} from './quizshow.contract';
 import type { QuizshowOpenGameSessionDto } from './dto/quizshow-game.dto';
 import type { QuizshowJoinDto } from './dto/quizshow-join.dto';
 import type { QuizshowOpenSessionDto } from './dto/quizshow-open-session.dto';
@@ -107,6 +111,7 @@ function completeQuiz(): unknown {
           isJokerAllowed: true,
           writeSeconds: 60,
           voteSeconds: 30,
+          ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
         },
         questions: [
           {
@@ -439,11 +444,57 @@ describe('QuizshowSessionsService', () => {
     expect(row.status).toBe('lobby');
     expect(row.cursor.phase).toBe('lobby');
     expect(row.cursor.phaseCounter).toBe(0);
+    expect(row.cursor.roundCount).toBe(1);
+    expect(row.cursor.wheelProgress).toEqual(emptyWheelProgress());
     expect(row.questionLog).toEqual([]);
     expect(row.startedByUserId).toBe(ORGANISER_ID);
     expect(row.attachedOrganiserUserIds).toEqual([]);
     expect(row.lastHostCommandAt).toBe(row.startedAt);
     expect(row.quizSnapshot.rounds.length).toBeGreaterThan(0);
+  });
+
+  it('stores a lobby cursor whose round count skips the wheels', async () => {
+    const { service, manager, state } = build();
+    const baseQuiz = completeQuiz() as { rounds: Record<string, any>[] };
+    const quizRound = baseQuiz.rounds[0] as Record<string, any>;
+    const wheelRound = {
+      kind: 'wheel',
+      title: { en: 'Spin', pt: 'Gira' },
+      contentLabel: 'none',
+      settings: {
+        ...quizRound.settings,
+        wheelBonus: 250,
+        wheelPick: 'round',
+        sliceCount: null,
+      },
+      questions: [],
+    };
+    state.quiz = {
+      ...baseQuiz,
+      rounds: [
+        structuredClone(quizRound),
+        wheelRound,
+        structuredClone(quizRound),
+        structuredClone(quizRound),
+      ],
+    };
+    await service.openSession(SLUG, ORGANISER_ID, openInput());
+    const row = manager.insert.mock.calls[0]?.[1] as Record<string, any>;
+    expect(row.cursor.roundCount).toBe(3);
+    expect(row.cursor.wheelProgress).toEqual(emptyWheelProgress());
+    expect(row.quizSnapshot.rounds[1].settings).toEqual(
+      expect.objectContaining({
+        timeLimitSeconds: 20,
+        isSpeedBonusOn: true,
+        isJokerAllowed: true,
+        writeSeconds: 60,
+        voteSeconds: 30,
+        wheelBonus: 250,
+        wheelPick: 'round',
+        sliceCount: null,
+      }),
+    );
+    expect(Object.keys(row.quizSnapshot.rounds[1].settings)).toHaveLength(8);
   });
 
   it('retries a join code that collides with an open session', async () => {

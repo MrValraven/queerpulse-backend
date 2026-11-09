@@ -13,7 +13,7 @@ import {
   type QuizshowRound,
   type QuizshowRoundCard,
 } from './quizshow.contract';
-import { isPartyRoundKind } from './quizshow-quiz-validation';
+import { isQuizRoundKind, isWheelRoundKind } from './quizshow-wheel';
 
 /** Injected randomness so engine and snapshot specs stay deterministic. */
 export interface QuizshowRandom {
@@ -133,13 +133,6 @@ export function isLastQuestionOfRound(
   return round !== undefined && questionIndex === round.questions.length - 1;
 }
 
-export function isLastRound(
-  snapshot: QuizshowSessionSnapshot,
-  roundIndex: number,
-): boolean {
-  return roundIndex === snapshot.rounds.length - 1;
-}
-
 export function openLimitMs(
   round: Pick<QuizshowSnapshotRound, 'settings'>,
   question: Pick<QuizshowQuestion, 'timeLimitSeconds'>,
@@ -167,6 +160,18 @@ export function toRoundCard(
   round: QuizshowSnapshotRound,
   roundIndex: number,
 ): QuizshowRoundCard {
+  if (isWheelRoundKind(round.kind)) {
+    // A wheel is a plain card: no questions, no joker, nothing to label.
+    return {
+      roundIndex,
+      kind: 'wheel',
+      title: round.title,
+      contentLabel: 'none',
+      questionCount: 0,
+      isJokerAllowed: false,
+      isSpeedBonusOn: round.settings.isSpeedBonusOn,
+    };
+  }
   return {
     roundIndex,
     kind: round.kind,
@@ -185,9 +190,9 @@ export function toQuestionView(
   roundIndex: number,
   questionIndex: number,
 ): QuizshowQuestionView {
-  const timeLimitSeconds = isPartyRoundKind(round.kind)
-    ? round.settings.writeSeconds
-    : (question.timeLimitSeconds ?? round.settings.timeLimitSeconds);
+  const timeLimitSeconds = isQuizRoundKind(round.kind)
+    ? (question.timeLimitSeconds ?? round.settings.timeLimitSeconds)
+    : round.settings.writeSeconds;
   return {
     questionId: question.id,
     roundIndex,

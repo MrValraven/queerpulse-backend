@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import type { DataSource, EntityManager } from 'typeorm';
+import { QUIZSHOW_WHEEL_SETTINGS_DEFAULTS } from './quizshow.contract';
 import { createLobbyState } from './quizshow-engine-state';
 import type {
   QuizshowLivePlayer,
@@ -11,12 +12,19 @@ import {
   buildQuizshowRecap,
   QUIZSHOW_RESTART_REPLAY_PHASES,
   QuizshowPersistenceService,
+  toStoredCursor,
 } from './quizshow-persistence.service';
+import { streakBonusFor } from './quizshow-scoring';
 import type {
   QuizshowRandom,
   QuizshowSessionSnapshot,
   QuizshowSnapshotRound,
 } from './quizshow-snapshot';
+import {
+  emptyWheelProgress,
+  type QuizshowWheelProgress,
+  type QuizshowWheelState,
+} from './quizshow-wheel';
 
 const STARTED_AT = 1_000;
 const SESSION_ID = 'session-1';
@@ -79,6 +87,7 @@ const ROUND_SETTINGS = {
   isJokerAllowed: true,
   writeSeconds: 60,
   voteSeconds: 30,
+  ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
 };
 
 const QUIZ_ROUND: QuizshowSnapshotRound = {
@@ -200,7 +209,99 @@ function logEntry(
   };
 }
 
-function lobbyState(): QuizshowLiveState {
+const WHEEL_ROUND: QuizshowSnapshotRound = {
+  id: 'round-wheel',
+  kind: 'wheel',
+  title: { en: 'Wheel', pt: 'Roda' },
+  contentLabel: 'none',
+  settings: { ...ROUND_SETTINGS, wheelPick: 'question', sliceCount: null },
+  questions: [],
+};
+
+/** Caption This, then a pick-a-question wheel whose slices are the quiz and Lie Detector rounds. */
+const WHEEL_SNAPSHOT: QuizshowSessionSnapshot = {
+  ...SNAPSHOT,
+  rounds: [CAPTION_ROUND, WHEEL_ROUND, QUIZ_ROUND, LIE_ROUND],
+};
+
+/** The five settings fields a round stored before the wheel holds. */
+const SETTINGS_BEFORE_WHEEL = {
+  timeLimitSeconds: 20,
+  isSpeedBonusOn: true,
+  isJokerAllowed: true,
+  writeSeconds: 60,
+  voteSeconds: 30,
+} as unknown as QuizshowSnapshotRound['settings'];
+
+const SNAPSHOT_BEFORE_WHEEL: QuizshowSessionSnapshot = {
+  ...SNAPSHOT,
+  rounds: [
+    QUIZ_ROUND,
+    LIE_ROUND,
+    CAPTION_ROUND,
+    { ...CAPTION_ROUND, id: 'round-caption-encore' },
+  ].map((round) => ({ ...round, settings: SETTINGS_BEFORE_WHEEL })),
+};
+
+function wheelSpin() {
+  return {
+    landedSliceIndex: 1,
+    startedAt: 50_000,
+    durationMs: 5_500,
+    turns: 5,
+    jitterSeed: 420,
+    startAngle: 0,
+  };
+}
+
+/** The wheel of `WHEEL_SNAPSHOT` open in `wheel` with a spin in the air. */
+function spunWheel(): QuizshowWheelState {
+  return {
+    wheelRoundIndex: 1,
+    pick: 'question',
+    sliceRoundIndexes: [2, 3],
+    askedCounts: [0, 0],
+    pickedCount: 0,
+    spinTotal: 3,
+    spin: wheelSpin(),
+    restAngle: 0,
+    playingRoundIndex: null,
+    baselineByEntrant: null,
+  };
+}
+
+function spunWheelProgress(): QuizshowWheelProgress {
+  return {
+    playedRoundIndexes: [0],
+    openedWheelRoundIndexes: [1],
+    closedWheelRoundIndexes: [],
+    wheel: spunWheel(),
+    wheelBonusAward: null,
+  };
+}
+
+/** A stored cursor in `wheel` on the wheel row of `WHEEL_SNAPSHOT`. */
+function storedWheelCursor(overrides: Record<string, unknown>) {
+  return {
+    phase: 'wheel',
+    roundIndex: 1,
+    questionIndex: null,
+    roundCount: 99,
+    phaseStartedAt: 45_000,
+    deadline: null,
+    extraTimeDeadline: null,
+    pausedRemainingMs: null,
+    pausedExtraTimeRemainingMs: null,
+    isRestartRecovery: false,
+    phaseCounter: 10,
+    wheelProgress: spunWheelProgress(),
+    ...overrides,
+  };
+}
+
+function lobbyState(
+  snapshot: QuizshowSessionSnapshot = SNAPSHOT,
+): QuizshowLiveState {
   return createLobbyState({
     sessionId: SESSION_ID,
     eventId: 'event-1',
@@ -215,7 +316,7 @@ function lobbyState(): QuizshowLiveState {
     playMode: 'solo',
     maxTeamSize: null,
     isReviewOn: true,
-    snapshot: SNAPSHOT,
+    snapshot,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
     startedAt: STARTED_AT,
@@ -276,6 +377,7 @@ function sessionRow(overrides: Record<string, unknown>) {
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
       phaseCounter: 0,
+      wheelProgress: emptyWheelProgress(),
     },
     question_log: [],
     quiz_snapshot: SNAPSHOT,
@@ -561,19 +663,28 @@ describe('QuizshowPersistenceService', () => {
     expect(state.openedByUserId).toBe('cohost-user');
     expect(state.snapshot).toBe(SNAPSHOT);
     expect(state.phaseCounter).toBe(7);
+    // The stored cursor predates the wheel: the load recomputes the round
+    // count and the other derived fields from the in-order progress.
     expect(state.cursor).toEqual({
       phaseId: '7',
       status: 'running',
       phase: 'scores',
       roundIndex: 0,
       questionIndex: 0,
-      roundCount: 2,
+      roundCount: 3,
       phaseStartedAt: 31_000,
       deadline: null,
       extraTimeDeadline: null,
       pausedRemainingMs: null,
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
+      roundNumber: 1,
+      upNext: null,
+      canSpinForNextRound: false,
+    });
+    expect(state.wheelProgress).toEqual({
+      ...emptyWheelProgress(),
+      playedRoundIndexes: [0],
     });
     expect(state.lastHostCommandAt).toBe(40_000);
     expect(state.attachedOrganiserUserIds).toEqual(new Set(['cohost-user']));
@@ -950,6 +1061,7 @@ describe('QuizshowPersistenceService', () => {
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
       phaseCounter: 0,
+      wheelProgress: emptyWheelProgress(),
     });
     expect(JSON.parse(String(questionLogJson))).toEqual([]);
     expect(pausedAt).toBeNull();
@@ -2281,5 +2393,402 @@ describe('QuizshowPersistenceService', () => {
     expect(gameQuery?.sql).toContain(
       'SELECT "quiz"."id" AS "id" FROM "quizshow_quizzes" "quiz" WHERE "quiz"."owner_user_id" = $1',
     );
+  });
+
+  it('stores the wheel progress with the cursor and leaves the derived fields out', async () => {
+    const { service, recordedQueries } = buildService();
+    const state = lobbyState(WHEEL_SNAPSHOT);
+    const openWheel = spunWheel();
+    state.wheelProgress = { ...spunWheelProgress(), wheel: openWheel };
+    state.cursor = {
+      ...state.cursor,
+      status: 'running',
+      phase: 'wheel',
+      roundIndex: 1,
+      phaseStartedAt: 45_000,
+    };
+    state.status = 'running';
+    state.phaseCounter = 10;
+
+    const storedCursor = toStoredCursor(state);
+
+    expect(storedCursor).toEqual({
+      phase: 'wheel',
+      roundIndex: 1,
+      questionIndex: null,
+      roundCount: state.cursor.roundCount,
+      phaseStartedAt: 45_000,
+      deadline: null,
+      extraTimeDeadline: null,
+      pausedRemainingMs: null,
+      pausedExtraTimeRemainingMs: null,
+      isRestartRecovery: false,
+      phaseCounter: 10,
+      wheelProgress: spunWheelProgress(),
+    });
+    expect(storedCursor.wheelProgress).not.toBe(state.wheelProgress);
+    expect(storedCursor).not.toHaveProperty('roundNumber');
+    expect(storedCursor).not.toHaveProperty('upNext');
+    expect(storedCursor).not.toHaveProperty('canSpinForNextRound');
+    expect(storedCursor).not.toHaveProperty('status');
+    expect(storedCursor).not.toHaveProperty('phaseId');
+
+    service.enqueue(state, { type: 'checkpoint' });
+    openWheel.pickedCount = 5;
+    openWheel.spin = null;
+    state.wheelProgress.playedRoundIndexes.push(2);
+    await service.flush(SESSION_ID);
+
+    const checkpoint = recordedQueries.find((query) =>
+      query.sql.includes('UPDATE "quizshow_sessions"'),
+    );
+    const [, , cursorJson] = checkpoint?.params ?? [];
+    const queuedCursor = JSON.parse(String(cursorJson)) as Record<
+      string,
+      unknown
+    >;
+    expect(queuedCursor.wheelProgress).toEqual(spunWheelProgress());
+    expect(queuedCursor).not.toHaveProperty('roundNumber');
+    expect(queuedCursor).not.toHaveProperty('upNext');
+    expect(queuedCursor).not.toHaveProperty('canSpinForNextRound');
+  });
+
+  it('reloads an open wheel with its spin and recomputes the cursor fields', async () => {
+    const { service } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            status: 'paused',
+            paused_at: new Date(48_000),
+            quiz_snapshot: WHEEL_SNAPSHOT,
+            cursor: storedWheelCursor({}),
+          }),
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state).not.toBeNull();
+    if (state === null) return;
+    expect(state.wheelProgress).toEqual(spunWheelProgress());
+    expect(state.status).toBe('paused');
+    expect(state.pausedAt).toBe(48_000);
+    // Caption This counts 1 and the pick-a-question wheel counts 1; the
+    // stored 99 is ignored. Caption This and the opened wheel make round 2.
+    expect(state.cursor).toEqual(
+      expect.objectContaining({
+        phaseId: '10',
+        status: 'paused',
+        phase: 'wheel',
+        roundIndex: 1,
+        questionIndex: null,
+        isRestartRecovery: false,
+        roundCount: 2,
+        roundNumber: 2,
+        upNext: null,
+        canSpinForNextRound: false,
+        deadline: null,
+        pausedRemainingMs: null,
+      }),
+    );
+    expect(state.current).toBeNull();
+  });
+
+  it('a running row in wheel reloads as stored with its spin and no replay flag', async () => {
+    // Boot recovery pauses the row before any load; a row still running in
+    // `wheel` keeps its status, because `wheel` is no replay phase.
+    const { service, recordedQueries } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            status: 'running',
+            quiz_snapshot: WHEEL_SNAPSHOT,
+            cursor: storedWheelCursor({}),
+          }),
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.status).toBe('running');
+    expect(state?.cursor.status).toBe('running');
+    expect(state?.cursor.isRestartRecovery).toBe(false);
+    expect(state?.pausedAt).toBeNull();
+    expect(state?.wheelProgress.wheel?.spin).toEqual(wheelSpin());
+    await service.flush(SESSION_ID);
+    expect(
+      recordedQueries.some((query) =>
+        query.sql.includes('UPDATE "quizshow_sessions"'),
+      ),
+    ).toBe(false);
+  });
+
+  it('a session opened before the wheel reloads as in-order play', async () => {
+    const cursorBeforeWheel = {
+      phase: 'leaderboard',
+      roundIndex: 2,
+      questionIndex: null,
+      roundCount: 4,
+      phaseStartedAt: 60_000,
+      deadline: null,
+      extraTimeDeadline: null,
+      pausedRemainingMs: null,
+      pausedExtraTimeRemainingMs: null,
+      isRestartRecovery: false,
+      phaseCounter: 18,
+    };
+    const leaderboardLoad = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            status: 'paused',
+            paused_at: new Date(61_000),
+            quiz_snapshot: SNAPSHOT_BEFORE_WHEEL,
+            cursor: cursorBeforeWheel,
+          }),
+        ],
+      }),
+    );
+    const lobbyLoad = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            status: 'lobby',
+            quiz_snapshot: SNAPSHOT_BEFORE_WHEEL,
+            cursor: {
+              ...cursorBeforeWheel,
+              phase: 'lobby',
+              roundIndex: null,
+              phaseStartedAt: null,
+              phaseCounter: 0,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const leaderboardState = await leaderboardLoad.service.loadLiveState(
+      SESSION_ID,
+      RANDOM,
+    );
+    const lobbyStateLoaded = await lobbyLoad.service.loadLiveState(
+      SESSION_ID,
+      RANDOM,
+    );
+
+    expect(leaderboardState?.wheelProgress).toEqual({
+      playedRoundIndexes: [0, 1, 2],
+      openedWheelRoundIndexes: [],
+      closedWheelRoundIndexes: [],
+      wheel: null,
+      wheelBonusAward: null,
+    });
+    expect(leaderboardState?.cursor).toEqual(
+      expect.objectContaining({
+        phase: 'leaderboard',
+        roundIndex: 2,
+        roundCount: 4,
+        roundNumber: 3,
+        upNext: { kind: 'round', roundIndex: 3 },
+        // One unplayed round is too few for an unplanned spin.
+        canSpinForNextRound: false,
+        isRestartRecovery: false,
+      }),
+    );
+    expect(lobbyStateLoaded?.wheelProgress).toEqual(emptyWheelProgress());
+    expect(lobbyStateLoaded?.cursor).toEqual(
+      expect.objectContaining({
+        phase: 'lobby',
+        roundIndex: null,
+        roundCount: 4,
+        roundNumber: 0,
+        upNext: { kind: 'round', roundIndex: 0 },
+        canSpinForNextRound: false,
+      }),
+    );
+  });
+
+  it('writes the wheel bonus as absolute scores in one transaction', async () => {
+    const playersOnly = buildService();
+    const playersState = lobbyState();
+    playersOnly.service.enqueueBatch(playersState, [
+      {
+        type: 'save_wheel_bonus',
+        players: [{ playerId: 'p1', score: 1500 }],
+        teams: [],
+      },
+      { type: 'checkpoint' },
+    ]);
+    await playersOnly.service.flush(SESSION_ID);
+
+    expect(playersOnly.dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(playersOnly.recordedQueries).toHaveLength(2);
+    expect(
+      playersOnly.recordedQueries.every(
+        (query) => query.transactionNumber === 1,
+      ),
+    ).toBe(true);
+    const [bonusUpdate, checkpoint] = playersOnly.recordedQueries;
+    expect(bonusUpdate?.sql).toContain('UPDATE "quizshow_players" "player"');
+    expect(bonusUpdate?.sql).toContain(
+      'FROM unnest($2::uuid[], $3::int[]) AS "bonus"("id", "score")',
+    );
+    expect(bonusUpdate?.sql).toContain('SET "score" = "bonus"."score"');
+    expect(bonusUpdate?.params).toEqual([SESSION_ID, ['p1'], [1500]]);
+    expect(checkpoint?.sql).toContain('UPDATE "quizshow_sessions"');
+    expect(
+      playersOnly.recordedQueries.some((query) =>
+        query.sql.includes('"quizshow_teams"'),
+      ),
+    ).toBe(false);
+
+    const teamsOnly = buildService();
+    teamsOnly.service.enqueue(lobbyState(), {
+      type: 'save_wheel_bonus',
+      players: [],
+      teams: [{ teamId: 't1', score: 750 }],
+    });
+    await teamsOnly.service.flush(SESSION_ID);
+
+    expect(teamsOnly.recordedQueries).toHaveLength(1);
+    const [teamsUpdate] = teamsOnly.recordedQueries;
+    expect(teamsUpdate?.sql).toContain('UPDATE "quizshow_teams" "team"');
+    expect(teamsUpdate?.sql).toContain(
+      'FROM unnest($2::uuid[], $3::int[]) AS "bonus"("id", "score")',
+    );
+    expect(teamsUpdate?.params).toEqual([SESSION_ID, ['t1'], [750]]);
+    expect(teamsUpdate?.transactionNumber).toBe(1);
+
+    const nothingAwarded = buildService();
+    nothingAwarded.service.enqueue(lobbyState(), {
+      type: 'save_wheel_bonus',
+      players: [],
+      teams: [],
+    });
+    await nothingAwarded.service.flush(SESSION_ID);
+
+    expect(nothingAwarded.recordedQueries).toHaveLength(0);
+    expect(nothingAwarded.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('works back to the open phase of a wheel question on reload', async () => {
+    // Phase counter path: wheel (10), read (11), open (12), reveal (13).
+    const { service } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            quiz_snapshot: WHEEL_SNAPSHOT,
+            cursor: storedWheelCursor({
+              phase: 'reveal',
+              roundIndex: 2,
+              questionIndex: 0,
+              phaseStartedAt: 70_000,
+              phaseCounter: 13,
+              wheelProgress: {
+                ...spunWheelProgress(),
+                wheel: {
+                  ...spunWheel(),
+                  askedCounts: [1, 0],
+                  pickedCount: 1,
+                  spin: null,
+                  playingRoundIndex: 2,
+                },
+              },
+            }),
+            question_log: [
+              logEntry({ questionId: 'question-choice', roundIndex: 2 }),
+            ],
+          }),
+        ],
+        players: [playerRow({ id: 'player-ana', score: 1_100, streak: 1 })],
+        answers: [
+          answerRow({
+            id: 'answer-ana',
+            player_id: 'player-ana',
+            question_id: 'question-choice',
+            payload: { type: 'multiple_choice', optionIndex: 0 },
+            elapsed_ms: 1_200,
+            is_correct: true,
+            points_awarded: 1_100,
+          }),
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.cursor.phaseId).toBe('13');
+    expect(state?.current?.roundIndex).toBe(2);
+    expect(state?.current?.answers.get('player-ana')?.phaseId).toBe('12');
+    expect(state?.current?.answers.get('player-ana')?.streakBonus).toBe(
+      streakBonusFor(1),
+    );
+  });
+
+  it('keeps wheel out of the restart replay phases', () => {
+    expect(QUIZSHOW_RESTART_REPLAY_PHASES).not.toContain('wheel');
+  });
+
+  it('lists only logged questions in the recap of a night with a wheel', async () => {
+    const { service, recordedQueries } = buildService((sql) => {
+      if (sql.includes('WITH "finished" AS (')) return [{ id: SESSION_ID }];
+      if (sql.includes('GROUP BY "answer"."question_id"')) {
+        return [
+          {
+            question_id: 'question-choice',
+            answer_count: 2,
+            correct_count: 1,
+            average_elapsed_ms: 1_000,
+          },
+        ];
+      }
+      return [];
+    });
+    const state = lobbyState(WHEEL_SNAPSHOT);
+    state.status = 'finished';
+    state.phaseCounter = 30;
+    state.cursor = {
+      ...state.cursor,
+      phaseId: '30',
+      status: 'finished',
+      phase: 'ended',
+      phaseStartedAt: 130_000,
+    };
+    state.questionLog.push(
+      logEntry({ questionId: 'question-choice', roundIndex: 2 }),
+      logEntry({
+        questionId: 'question-lie',
+        roundIndex: 3,
+        roundKind: 'lie_detector',
+        type: 'prompt',
+      }),
+    );
+
+    service.enqueue(state, { type: 'finish', podium: [], placings: {} });
+    await service.flush(SESSION_ID);
+
+    const resultsInsert = recordedQueries.find((query) =>
+      query.sql.includes('INSERT INTO "quizshow_results"'),
+    );
+    const recap = JSON.parse(String(resultsInsert?.params[3])) as {
+      questionsPlayed: number;
+      questions: Array<{
+        roundIndex: number;
+        roundKind: string;
+        percentCorrect: number | null;
+      }>;
+    };
+    expect(recap.questionsPlayed).toBe(2);
+    expect(recap.questions).toHaveLength(2);
+    expect(recap.questions.map((question) => question.roundIndex)).toEqual([
+      2, 3,
+    ]);
+    expect(
+      recap.questions.some((question) => question.roundKind === 'wheel'),
+    ).toBe(false);
+    expect(recap.questions[0]?.percentCorrect).toBe(50);
+    expect(recap.questions[1]?.percentCorrect).toBeNull();
   });
 });

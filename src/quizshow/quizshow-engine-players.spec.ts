@@ -1,14 +1,15 @@
 import { BLOCKED_TERMS } from '../common/blocked-terms';
-import type {
-  QuizshowAckFailure,
-  QuizshowAnswerPayload,
-  QuizshowMe,
-  QuizshowMyAnswer,
-  QuizshowMyVote,
-  QuizshowPhase,
-  QuizshowPlayMode,
-  QuizshowRoundKind,
-  QuizshowRoundSettings,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowAckFailure,
+  type QuizshowAnswerPayload,
+  type QuizshowMe,
+  type QuizshowMyAnswer,
+  type QuizshowMyVote,
+  type QuizshowPhase,
+  type QuizshowPlayMode,
+  type QuizshowRoundKind,
+  type QuizshowRoundSettings,
 } from './quizshow.contract';
 import {
   createTeam,
@@ -74,6 +75,7 @@ const ROUND_SETTINGS: QuizshowRoundSettings = {
   isJokerAllowed: true,
   writeSeconds: 60,
   voteSeconds: 30,
+  ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
 };
 
 const QUESTION_BASE = {
@@ -1879,5 +1881,120 @@ describe('Pulse Live engine, players', () => {
       'quizshow_joker_not_allowed',
     );
     expect(toMe(state, lastPlayer.playerId).hasUsedJoker).toBe(false);
+  });
+
+  describe('the joker around a wheel', () => {
+    function wheelStateWithPlayer(): {
+      state: QuizshowLiveState;
+      playerId: string;
+    } {
+      const state = stateWithQuiz({
+        rounds: [
+          snapshotRound('wheel', []),
+          snapshotRound('quiz', [trueFalseQuestion('question-1')]),
+          snapshotRound('quiz', [trueFalseQuestion('question-2')]),
+        ],
+      });
+      const player = join(state, 'user-a', 2_000, seededRandom());
+      return { state, playerId: player.playerId };
+    }
+
+    function moveToLeaderboard(state: QuizshowLiveState, now: number): void {
+      state.status = 'running';
+      advanceCursor(state, {
+        phase: 'leaderboard',
+        roundIndex: 0,
+        questionIndex: null,
+        now,
+        durationMs: null,
+        extraTimeMs: null,
+      });
+    }
+
+    it('waits for the round card when a wheel comes next', () => {
+      const { state, playerId } = wheelStateWithPlayer();
+      state.cursor.upNext = { kind: 'wheel', wheelRoundIndex: 0 };
+      expect(refusalCode(playJoker(state, playerId, 1, 3_000))).toBe(
+        'quizshow_joker_wheel_next',
+      );
+
+      moveToLeaderboard(state, 10_000);
+      state.cursor.upNext = { kind: 'wheel', wheelRoundIndex: 0 };
+      expect(refusalCode(playJoker(state, playerId, 1, 10_100))).toBe(
+        'quizshow_joker_wheel_next',
+      );
+      expect(toMe(state, playerId).hasUsedJoker).toBe(false);
+    });
+
+    it('answers a wheel-next refusal without a cursor', () => {
+      const { state, playerId } = wheelStateWithPlayer();
+      state.cursor.upNext = { kind: 'wheel', wheelRoundIndex: 0 };
+      const refusal = refusalOf(playJoker(state, playerId, 1, 3_000));
+      expect(refusal.code).toBe('quizshow_joker_wheel_next');
+      expect(refusal.cursor).toBeUndefined();
+    });
+
+    it('refuses the joker on a wheel row before the wheel check', () => {
+      const { state, playerId } = wheelStateWithPlayer();
+      state.cursor.upNext = { kind: 'wheel', wheelRoundIndex: 0 };
+      expect(refusalCode(playJoker(state, playerId, 0, 3_000))).toBe(
+        'quizshow_joker_not_allowed',
+      );
+    });
+
+    it('targets the round named next on a leaderboard', () => {
+      const state = stateWithQuiz({
+        rounds: [
+          snapshotRound('quiz', [trueFalseQuestion('question-1')]),
+          snapshotRound('quiz', [trueFalseQuestion('question-2')]),
+          snapshotRound('quiz', [trueFalseQuestion('question-3')]),
+          snapshotRound('quiz', [trueFalseQuestion('question-4')]),
+        ],
+      });
+      const player = join(state, 'user-a', 2_000, seededRandom());
+      moveToLeaderboard(state, 10_000);
+      state.cursor.upNext = { kind: 'round', roundIndex: 3 };
+
+      expect(refusalCode(playJoker(state, player.playerId, 1, 10_100))).toBe(
+        'quizshow_joker_not_allowed',
+      );
+      expect(
+        successOf(playJoker(state, player.playerId, 3, 10_100)).me
+          .jokerRoundIndex,
+      ).toBe(3);
+    });
+
+    it('refuses the joker during the wheel phase', () => {
+      const { state, playerId } = wheelStateWithPlayer();
+      state.status = 'running';
+      advanceCursor(state, {
+        phase: 'wheel',
+        roundIndex: 0,
+        questionIndex: null,
+        now: 10_000,
+        durationMs: null,
+        extraTimeMs: null,
+      });
+      state.cursor.upNext = null;
+      expect(refusalCode(playJoker(state, playerId, 1, 10_100))).toBe(
+        'quizshow_joker_not_allowed',
+      );
+      expect(refusalCode(playJoker(state, playerId, 2, 10_100))).toBe(
+        'quizshow_joker_not_allowed',
+      );
+    });
+
+    it('keeps a double tap a success after the moment moved to a wheel', () => {
+      const { state, playerId } = wheelStateWithPlayer();
+      state.cursor.upNext = { kind: 'round', roundIndex: 2 };
+      expect(
+        successOf(playJoker(state, playerId, 2, 3_000)).me.jokerRoundIndex,
+      ).toBe(2);
+
+      state.cursor.upNext = { kind: 'wheel', wheelRoundIndex: 0 };
+      const repeated = playJoker(state, playerId, 2, 3_100);
+      expect(successOf(repeated).me.jokerRoundIndex).toBe(2);
+      expect(repeated.effects).toEqual([]);
+    });
   });
 });

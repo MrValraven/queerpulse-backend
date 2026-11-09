@@ -116,6 +116,7 @@ import {
 import {
   hostAddTime,
   hostEnd,
+  hostFinishWheel,
   hostHideAnswer,
   hostNext,
   hostPause,
@@ -127,6 +128,7 @@ import {
   hostSetScreenMuted,
   hostShowAnswers,
   hostSkip,
+  hostSpin,
   hostStart,
   type QuizshowHostOutcome,
 } from './quizshow-engine-phases';
@@ -851,6 +853,26 @@ export class QuizshowGateway
   ): Promise<QuizshowAck<{ isNoop: boolean }>> {
     return this.runHostCommand(client, 'host:next', (state, now) =>
       hostNext(state, payload.phaseId, now, this.runtime.random),
+    );
+  }
+
+  @SubscribeMessage('host:spin')
+  handleHostSpin(
+    @ConnectedSocket() client: QuizshowSocket,
+    @MessageBody() payload: QuizshowPhaseCommandPayload,
+  ): Promise<QuizshowAck<{ isNoop: boolean }>> {
+    return this.runHostCommand(client, 'host:spin', (state, now) =>
+      hostSpin(state, payload.phaseId, now, this.runtime.random),
+    );
+  }
+
+  @SubscribeMessage('host:finishWheel')
+  handleHostFinishWheel(
+    @ConnectedSocket() client: QuizshowSocket,
+    @MessageBody() payload: QuizshowPhaseCommandPayload,
+  ): Promise<QuizshowAck<{ isNoop: boolean }>> {
+    return this.runHostCommand(client, 'host:finishWheel', (state, now) =>
+      hostFinishWheel(state, payload.phaseId, now),
     );
   }
 

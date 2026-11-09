@@ -19,6 +19,7 @@ import type {
   QuizshowTeamColorKey,
 } from './quizshow.contract';
 import type { QuizshowSessionSnapshot } from './quizshow-snapshot';
+import type { QuizshowWheelProgress } from './quizshow-wheel';
 
 export interface QuizshowLivePlayer {
   playerId: string;
@@ -162,6 +163,8 @@ export interface QuizshowLiveState {
   attachedOrganiserUserIds: Set<string>;
   nextEvent: QuizshowNextEvent | null;
   hasScoredQuestion: boolean;
+  /** Which rounds and wheels have run, and the open wheel; plain JSON, stored in the cursor. */
+  wheelProgress: QuizshowWheelProgress;
   /** In memory only; false after a restart. */
   isScreenMuted: boolean;
 }
@@ -213,6 +216,11 @@ export type QuizshowPersistOperation =
       >;
       players: Array<Pick<QuizshowLivePlayer, 'playerId' | 'score' | 'streak'>>;
       teams: Array<Pick<QuizshowLiveTeam, 'teamId' | 'score'>>;
+    }
+  | {
+      type: 'save_wheel_bonus';
+      players: Array<Pick<QuizshowLivePlayer, 'playerId' | 'score'>>; // [] in teams
+      teams: Array<Pick<QuizshowLiveTeam, 'teamId' | 'score'>>; // [] in solo
     }
   | {
       type: 'set_answer_hidden';

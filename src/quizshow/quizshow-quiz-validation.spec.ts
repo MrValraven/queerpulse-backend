@@ -6,12 +6,13 @@ import {
   usedLanguages,
   type QuizshowValidatableQuiz,
 } from './quizshow-quiz-validation';
-import type {
-  QuizshowOption,
-  QuizshowQuestionInput,
-  QuizshowRoundInput,
-  QuizshowRoundKind,
-  QuizshowText,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowOption,
+  type QuizshowQuestionInput,
+  type QuizshowRoundInput,
+  type QuizshowRoundKind,
+  type QuizshowText,
 } from './quizshow.contract';
 
 type ShapeRound = QuizshowValidatableQuiz['rounds'][number];
@@ -27,6 +28,7 @@ const defaultSettings: QuizshowRoundInput['settings'] = {
   isJokerAllowed: true,
   writeSeconds: 60,
   voteSeconds: 30,
+  ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
 };
 
 function optionsOf(count: number): QuizshowOption[] {
@@ -102,6 +104,26 @@ function quizOf(
 
 function quizRound(questions: QuizshowQuestionInput[]): ShapeRound {
   return roundOf('quiz', questions);
+}
+
+function wheelRow(
+  settings: Partial<QuizshowRoundInput['settings']> = {},
+): ShapeRound {
+  return {
+    kind: 'wheel',
+    title: { en: '', pt: '' },
+    contentLabel: 'none',
+    settings: { ...defaultSettings, ...settings },
+    questions: [],
+  };
+}
+
+function problemOf(
+  code: string,
+  roundIndex: number | null,
+  questionIndex: number | null = null,
+) {
+  return { code, roundIndex, questionIndex, language: null };
 }
 
 describe('quiz validation', () => {
@@ -531,6 +553,179 @@ describe('quiz validation', () => {
     ]);
     expect(hasAdultsRound(plain)).toBe(false);
     expect(hasAdultsRound(withAdults)).toBe(true);
+  });
+
+  it('does not refuse a wheel row that carries the adults label', () => {
+    const labelledWheel: ShapeRound = {
+      ...wheelRow(),
+      contentLabel: 'adults',
+    };
+    const quiz = quizOf([
+      labelledWheel,
+      quizRound([multipleChoice()]),
+      quizRound([multipleChoice()]),
+    ]);
+    expect(hasAdultsRound(quiz)).toBe(false);
+  });
+
+  it('keeps the 18+ checks reading content labels', () => {
+    const quiz = quizOf([
+      wheelRow(),
+      roundOf('quiz', [multipleChoice()], { contentLabel: 'adults' }),
+      quizRound([multipleChoice()]),
+    ]);
+    expect(hasAdultsRound(quiz)).toBe(true);
+    const plain = quizOf([wheelRow(), quizRound([multipleChoice()])]);
+    expect(hasAdultsRound(plain)).toBe(false);
+  });
+
+  describe('wheel rows', () => {
+    it('counts too many rounds without the wheels', () => {
+      const tenWithWheels = [
+        wheelRow(),
+        ...Array.from({ length: 4 }, () => quizRound([multipleChoice()])),
+        wheelRow(),
+        ...Array.from({ length: 4 }, () => quizRound([multipleChoice()])),
+        wheelRow(),
+        ...Array.from({ length: 2 }, () => quizRound([multipleChoice()])),
+      ];
+      const codes = structuralProblems(quizOf(tenWithWheels)).map(
+        (found) => found.code,
+      );
+      expect(codes).not.toContain('too_many_rounds');
+      const eleven = Array.from({ length: 11 }, () =>
+        quizRound([multipleChoice()]),
+      );
+      expect(structuralProblems(quizOf(eleven))).toEqual([
+        problemOf('too_many_rounds', null),
+      ]);
+    });
+
+    it('refuses a fourth wheel', () => {
+      const quizRows = [quizRound([multipleChoice()])];
+      const fourWheels = quizOf([
+        wheelRow(),
+        wheelRow(),
+        wheelRow(),
+        wheelRow(),
+        ...quizRows,
+      ]);
+      expect(structuralProblems(fourWheels)).toEqual([
+        problemOf('too_many_wheels', null),
+      ]);
+      const threeWheels = quizOf([
+        wheelRow(),
+        wheelRow(),
+        wheelRow(),
+        ...quizRows,
+      ]);
+      expect(structuralProblems(threeWheels)).toEqual([]);
+    });
+
+    it('refuses every question on a wheel row with one problem each, and checks nothing else on them', () => {
+      const brokenChoice = multipleChoice({
+        prompt: { en: '', pt: '' },
+        options: optionsOf(1).map((option) => ({
+          ...option,
+          text: { en: '', pt: '' },
+        })),
+      });
+      const unanswered = questionOfType('type_answer', { answer: null });
+      const wheel: ShapeRound = {
+        ...wheelRow(),
+        questions: [brokenChoice, unanswered],
+      };
+      const quiz = quizOf([
+        quizRound([multipleChoice()]),
+        wheel,
+        quizRound([multipleChoice()]),
+        quizRound([multipleChoice()]),
+      ]);
+      const onWheel = structuralProblems(quiz).filter(
+        (found) => found.roundIndex === 1,
+      );
+      expect(onWheel).toEqual([
+        problemOf('question_type_not_allowed', 1, 0),
+        problemOf('question_type_not_allowed', 1, 1),
+      ]);
+      const completenessOnWheelQuestions = completenessProblems(quiz).filter(
+        (found) => found.roundIndex === 1 && found.questionIndex !== null,
+      );
+      expect(completenessOnWheelQuestions).toEqual([]);
+    });
+
+    it('still counts wheel row questions in the question limits', () => {
+      const wheel: ShapeRound = {
+        ...wheelRow(),
+        questions: Array.from({ length: 21 }, () => multipleChoice()),
+      };
+      const codes = structuralProblems(quizOf([wheel])).map(
+        (found) => found.code,
+      );
+      expect(codes).toContain('too_many_questions_in_round');
+    });
+
+    it('counts no rounds without the wheels', () => {
+      const codes = completenessProblems(quizOf([wheelRow()])).map(
+        (found) => found.code,
+      );
+      expect(codes).toContain('no_rounds');
+    });
+
+    it('skips wheel rows in round_empty', () => {
+      const quiz = quizOf([
+        wheelRow(),
+        quizRound([multipleChoice()]),
+        quizRound([multipleChoice()]),
+      ]);
+      expect(
+        completenessProblems(quiz).filter(
+          (found) => found.code === 'round_empty',
+        ),
+      ).toEqual([]);
+    });
+
+    it('needs 2 rounds after each wheel', () => {
+      const tooFew = (rounds: ShapeRound[]) =>
+        completenessProblems(quizOf(rounds)).filter(
+          (found) => found.code === 'wheel_too_few_slices',
+        );
+      const quizOne = () => quizRound([multipleChoice()]);
+      expect(tooFew([quizOne(), wheelRow()])).toEqual([
+        problemOf('wheel_too_few_slices', 1),
+      ]);
+      expect(tooFew([wheelRow(), wheelRow(), quizOne(), quizOne()])).toEqual([
+        problemOf('wheel_too_few_slices', 0),
+      ]);
+      expect(
+        tooFew([
+          wheelRow({ sliceCount: 3 }),
+          quizOne(),
+          wheelRow(),
+          quizOne(),
+          quizOne(),
+        ]),
+      ).toEqual([problemOf('wheel_too_few_slices', 0)]);
+      expect(tooFew([wheelRow(), quizOne(), quizOne()])).toEqual([]);
+    });
+
+    it('lists problems in row order, wheel problems in place', () => {
+      const quiz = quizOf([
+        roundOf('quiz', []),
+        wheelRow(),
+        roundOf('quiz', []),
+      ]);
+      expect(
+        completenessProblems(quiz).map((found) => [
+          found.code,
+          found.roundIndex,
+        ]),
+      ).toEqual([
+        ['round_empty', 0],
+        ['wheel_too_few_slices', 1],
+        ['round_empty', 2],
+      ]);
+    });
   });
 
   it('maps a language mode to the languages it uses', () => {

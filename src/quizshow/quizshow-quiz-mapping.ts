@@ -4,6 +4,10 @@ import type { QuizshowQuestionRecord } from './entities/quizshow-question.entity
 import type { QuizshowQuizRecord } from './entities/quizshow-quiz.entity';
 import type { QuizshowRoundRecord } from './entities/quizshow-round.entity';
 import type { QuizshowValidatableQuiz } from './quizshow-quiz-validation';
+import {
+  normaliseWheelRounds,
+  withWheelSettingsDefaults,
+} from './quizshow-wheel';
 import type {
   QuizshowQuestion,
   QuizshowQuiz,
@@ -42,7 +46,7 @@ export function toQuizshowQuiz(
       kind: round.kind,
       title: { en: round.titleEn, pt: round.titlePt },
       contentLabel: round.contentLabel,
-      settings: round.settings,
+      settings: withWheelSettingsDefaults(round.settings),
       questions: orderedQuestions
         .filter((question) => question.roundId === round.id)
         .map(toQuizshowQuestion),
@@ -85,7 +89,8 @@ export function buildRoundRows(
 } {
   const roundRows: Partial<QuizshowRoundRecord>[] = [];
   const questionRows: Partial<QuizshowQuestionRecord>[] = [];
-  rounds.forEach((round, roundPosition) => {
+  const normalisedRounds = normaliseWheelRounds(rounds);
+  normalisedRounds.forEach((round, roundPosition) => {
     const roundId = randomUUID();
     roundRows.push({
       id: roundId,

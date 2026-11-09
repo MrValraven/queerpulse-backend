@@ -1,15 +1,17 @@
-import type {
-  QuizshowAnswerPayload,
-  QuizshowNextEvent,
-  QuizshowOption,
-  QuizshowPhase,
-  QuizshowPlayMode,
-  QuizshowPlayerState,
-  QuizshowPodiumEntry,
-  QuizshowRoundKind,
-  QuizshowScoresScope,
-  QuizshowStateBase,
-  QuizshowText,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowAnswerPayload,
+  type QuizshowNextEvent,
+  type QuizshowOption,
+  type QuizshowPhase,
+  type QuizshowPlayMode,
+  type QuizshowPlayerState,
+  type QuizshowPodiumEntry,
+  type QuizshowRoundKind,
+  type QuizshowScoresScope,
+  type QuizshowStateBase,
+  type QuizshowText,
+  type QuizshowWheelBonusWinner,
 } from './quizshow.contract';
 import {
   activePlayers,
@@ -45,6 +47,11 @@ import {
   quizshowRoomName,
 } from './quizshow-frames';
 import { competitionRanks } from './quizshow-scoring';
+import {
+  emptyWheelProgress,
+  type QuizshowWheelBonusAward,
+  type QuizshowWheelState,
+} from './quizshow-wheel';
 import type {
   QuizshowSessionSnapshot,
   QuizshowSnapshotQuestion,
@@ -235,6 +242,7 @@ function snapshotRound(
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions,
   };
@@ -256,6 +264,94 @@ const SNAPSHOT: QuizshowSessionSnapshot = {
     snapshotRound('caption_this', 'Caption This', [CAPTION_QUESTION]),
   ],
 };
+
+const WHEEL_SNAPSHOT: QuizshowSessionSnapshot = {
+  ...SNAPSHOT,
+  rounds: [
+    snapshotRound('quiz', 'Warm up', [MULTIPLE_CHOICE_QUESTION]),
+    snapshotRound('wheel', 'Wheel of rounds', []),
+    snapshotRound('quiz', 'History', [
+      MULTIPLE_CHOICE_QUESTION,
+      TRUE_FALSE_QUESTION,
+    ]),
+    snapshotRound('quiz', 'Culture', [TYPED_QUESTION, ORDER_QUESTION]),
+  ],
+};
+const WHEEL_ROUND_INDEX = 1;
+const WHEEL_PHASE_ID = 'phase-wheel';
+const LEADERBOARD_PHASE_ID = 'phase-leaderboard';
+
+/** A wheel at row 1 with rows 2 and 3 as its slices, as the engine holds it while the wheel is open. */
+function openWheelState(pick: 'round' | 'question'): QuizshowWheelState {
+  return {
+    wheelRoundIndex: WHEEL_ROUND_INDEX,
+    pick,
+    sliceRoundIndexes: [2, 3],
+    askedCounts: [0, 0],
+    pickedCount: 0,
+    spinTotal: 2,
+    spin: null,
+    restAngle: 0,
+    playingRoundIndex: null,
+    baselineByEntrant: null,
+  };
+}
+
+function wheelNightState(
+  phase: QuizshowPhase,
+  roundIndex: number | null,
+  wheel: QuizshowWheelState | null,
+): QuizshowLiveState {
+  const state = createLobbyState({
+    sessionId: SESSION_ID,
+    eventId: 'event-pride-night',
+    eventSlug: 'pride-night',
+    eventTitle: 'Pride night',
+    kind: 'event',
+    gameId: null,
+    isAdultsOnly: false,
+    hostUserId: HOST_USER_ID,
+    openedByUserId: OPENER_USER_ID,
+    joinCode: 'ABC234',
+    playMode: 'solo',
+    maxTeamSize: null,
+    isReviewOn: true,
+    snapshot: WHEEL_SNAPSHOT,
+    attachedOrganiserUserIds: new Set<string>([HOST_USER_ID]),
+    nextEvent: null,
+    startedAt: 1_000,
+  });
+  seatPlayers(state);
+  state.cursor = {
+    ...state.cursor,
+    phaseId: WHEEL_PHASE_ID,
+    status: 'running',
+    phase,
+    roundIndex,
+    questionIndex: null,
+    roundCount: WHEEL_SNAPSHOT.rounds.length,
+  };
+  state.wheelProgress = { ...emptyWheelProgress(), wheel };
+  return state;
+}
+
+const ANA_WINNER: QuizshowWheelBonusWinner = {
+  entrantId: ANA,
+  kind: 'player',
+  name: 'Ana',
+  colorKey: null,
+};
+
+function awardOn(phaseId: string): QuizshowWheelBonusAward {
+  return {
+    phaseId,
+    points: 500,
+    pick: 'round',
+    sliceRoundIndex: 2,
+    sliceTitle: bilingual('History'),
+    winners: [ANA_WINNER],
+  };
+}
 
 function lobbyState(playMode: QuizshowPlayMode = 'solo'): QuizshowLiveState {
   return createLobbyState({
@@ -1792,6 +1888,123 @@ describe('quizshow frames', () => {
     expect(buildSessionState(endedState, { role: 'host' }).nextEvent).toEqual(
       NEXT_EVENT,
     );
+  });
+
+  describe('the wheel', () => {
+    it('sends one wheel view to every audience and no round card in wheel', () => {
+      const state = wheelNightState(
+        'wheel',
+        WHEEL_ROUND_INDEX,
+        openWheelState('round'),
+      );
+      const publicFrame = buildPhaseChange(state, 'public');
+      const hostFrame = buildPhaseChange(state, 'host');
+      expect(publicFrame.wheel).not.toBeNull();
+      expect(publicFrame.wheel).toEqual(hostFrame.wheel);
+      expect(publicFrame.round).toBeNull();
+      expect(hostFrame.round).toBeNull();
+      expect(
+        publicFrame.wheel?.slices.map((slice) => slice.roundIndex),
+      ).toEqual([2, 3]);
+    });
+
+    it("carries the wheel and the bonus on every role's session state", () => {
+      const state = wheelNightState(
+        'wheel',
+        WHEEL_ROUND_INDEX,
+        openWheelState('round'),
+      );
+      state.wheelProgress.wheelBonusAward = awardOn(WHEEL_PHASE_ID);
+      const expectedWheel = buildPhaseChange(state, 'public').wheel;
+      const expectedBonus = buildPhaseChange(state, 'public').wheelBonus;
+      expect(expectedWheel).not.toBeNull();
+      expect(expectedBonus).not.toBeNull();
+      const frames = [
+        buildSessionState(state, { role: 'screen' }),
+        playerState(state, ANA),
+        buildSessionState(state, { role: 'host' }),
+      ];
+      for (const frame of frames) {
+        expect(frame.wheel).toEqual(expectedWheel);
+        expect(frame.wheelBonus).toEqual(expectedBonus);
+        expect(frame.round).toBeNull();
+        const wheelCard = frame.rounds[WHEEL_ROUND_INDEX];
+        expect(wheelCard).toMatchObject({
+          roundIndex: WHEEL_ROUND_INDEX,
+          kind: 'wheel',
+          isJokerAllowed: false,
+        });
+      }
+    });
+
+    it('keeps the wheel view on a pick a question wheel question', () => {
+      const wheel: QuizshowWheelState = {
+        ...openWheelState('question'),
+        pickedCount: 1,
+        askedCounts: [1, 0],
+        playingRoundIndex: 2,
+      };
+      const state = wheelNightState('open', 2, wheel);
+      state.cursor = { ...state.cursor, questionIndex: 0 };
+      const frame = buildPhaseChange(state, 'public');
+      expect(frame.wheel).not.toBeNull();
+      expect(frame.wheel?.playingRoundIndex).toBe(2);
+      expect(frame.question).not.toBeNull();
+      expect(frame.round).toMatchObject({ roundIndex: 2 });
+    });
+
+    it('shows the bonus on the leaderboard after an award and drops it on the next phase', () => {
+      const state = wheelNightState('leaderboard', 2, null);
+      state.cursor = { ...state.cursor, phaseId: LEADERBOARD_PHASE_ID };
+      state.wheelProgress = {
+        ...emptyWheelProgress(),
+        wheelBonusAward: awardOn(LEADERBOARD_PHASE_ID),
+      };
+      const shown = buildPhaseChange(state, 'public');
+      expect(shown.wheel).toBeNull();
+      expect(shown.wheelBonus).toEqual({
+        points: 500,
+        pick: 'round',
+        sliceRoundIndex: 2,
+        sliceTitle: bilingual('History'),
+        winners: [ANA_WINNER],
+      });
+      expect(shown.wheelBonus).not.toHaveProperty('phaseId');
+      state.cursor = { ...state.cursor, phaseId: 'phase-after' };
+      expect(buildPhaseChange(state, 'public').wheelBonus).toBeNull();
+      expect(buildSessionState(state, { role: 'host' }).wheelBonus).toBeNull();
+    });
+
+    it('keeps the bonus when a pause re-sends the same phase id', () => {
+      const state = wheelNightState('leaderboard', 2, null);
+      state.cursor = { ...state.cursor, phaseId: LEADERBOARD_PHASE_ID };
+      state.wheelProgress = {
+        ...emptyWheelProgress(),
+        wheelBonusAward: awardOn(LEADERBOARD_PHASE_ID),
+      };
+      const beforePause = buildPhaseChange(state, 'public').wheelBonus;
+      expect(beforePause).not.toBeNull();
+      setSessionStatus(state, 'paused');
+      expect(state.cursor.phaseId).toBe(LEADERBOARD_PHASE_ID);
+      expect(buildPhaseChange(state, 'public').wheelBonus).toEqual(beforePause);
+      expect(buildSessionState(state, { role: 'host' }).wheelBonus).toEqual(
+        beforePause,
+      );
+    });
+
+    it('sends null wheel fields on a night without a wheel', () => {
+      const state = lobbyState();
+      state.cursor = { ...state.cursor, phase: 'leaderboard', roundIndex: 0 };
+      for (const audience of ['public', 'host'] as const) {
+        const frame = buildPhaseChange(state, audience);
+        expect(frame.wheel).toBeNull();
+        expect(frame.wheelBonus).toBeNull();
+      }
+      expect(buildSessionState(state, { role: 'screen' })).toMatchObject({
+        wheel: null,
+        wheelBonus: null,
+      });
+    });
   });
 
   it('names the rooms', () => {

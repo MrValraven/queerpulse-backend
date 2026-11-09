@@ -8,6 +8,8 @@ import {
   speedPoints,
   streakBonusFor,
   teamQuestionPoints,
+  pointsSinceBaseline,
+  wheelBonusWinnerIds,
 } from './quizshow-scoring';
 
 const BASE = 1000;
@@ -285,6 +287,40 @@ describe('Pulse Live scoring', () => {
     );
     expect(points.get('teamOne')).toBe(500);
     expect(points.get('teamTwo')).toBe(0);
+  });
+
+  it('gives the wheel bonus to every entrant tied on the best positive score, in input order', () => {
+    expect(
+      wheelBonusWinnerIds([
+        { entrantId: 'ana', points: 300 },
+        { entrantId: 'bea', points: 500 },
+        { entrantId: 'cris', points: 500 },
+      ]),
+    ).toEqual(['bea', 'cris']);
+    expect(
+      wheelBonusWinnerIds([
+        { entrantId: 'ana', points: 0 },
+        { entrantId: 'bea', points: 0 },
+      ]),
+    ).toEqual([]);
+    expect(wheelBonusWinnerIds([{ entrantId: 'ana', points: -500 }])).toEqual(
+      [],
+    );
+    expect(wheelBonusWinnerIds([])).toEqual([]);
+  });
+
+  it('measures the points each entrant scored since the baseline', () => {
+    expect(
+      pointsSinceBaseline({ ana: 100, bea: 0 }, [
+        { entrantId: 'ana', score: 400 },
+        { entrantId: 'bea', score: 0 },
+        { entrantId: 'cris', score: 250 },
+      ]),
+    ).toEqual([
+      { entrantId: 'ana', points: 300 },
+      { entrantId: 'bea', points: 0 },
+      { entrantId: 'cris', points: 250 },
+    ]);
   });
 
   it('ranks ties together and skips the next rank', () => {

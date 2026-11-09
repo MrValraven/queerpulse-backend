@@ -149,6 +149,43 @@ describe('ReportsService: the Pulse Live answer subject', () => {
     );
   });
 
+  it('finds the answered question past a wheel row', async () => {
+    reports.manager.query.mockResolvedValue([
+      answerRow({
+        quiz_snapshot: {
+          rounds: [
+            {
+              kind: 'wheel',
+              title: { en: '', pt: '' },
+              contentLabel: 'none',
+              settings: {},
+              questions: [],
+            },
+            {
+              kind: 'caption_this',
+              questions: [
+                {
+                  id: QUESTION_ID,
+                  prompt: { en: 'Name a drag queen', pt: 'Nome' },
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+    await fileAgainst(ANSWER_ID);
+    const created = reports.create.mock.calls[0][0] as {
+      evidence: Array<Record<string, unknown>>;
+    };
+    expect(created.evidence[0]).toEqual(
+      expect.objectContaining({
+        roundKind: 'caption_this',
+        questionPrompt: { en: 'Name a drag queen', pt: 'Nome' },
+      }),
+    );
+  });
+
   it('lowercases the answer id before the dedupe', async () => {
     await fileAgainst(ANSWER_ID.toUpperCase());
     expect(reports.manager.query).toHaveBeenCalledWith(expect.any(String), [

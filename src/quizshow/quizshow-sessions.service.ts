@@ -43,6 +43,7 @@ import {
   type QuizshowJoinResponse,
   type QuizshowResultsResponse,
 } from './quizshow.contract';
+import { emptyWheelProgress, quizshowRoundTotal } from './quizshow-wheel';
 
 const JOIN_CODE_ATTEMPTS = 5;
 const JOIN_CODE_INDEX = 'UQ_quizshow_sessions_open_join_code';
@@ -466,7 +467,10 @@ export class QuizshowSessionsService {
               phase: 'lobby',
               roundIndex: null,
               questionIndex: null,
-              roundCount: snapshot.rounds.length,
+              roundCount: quizshowRoundTotal(
+                snapshot.rounds,
+                emptyWheelProgress(),
+              ),
               phaseStartedAt: null,
               deadline: null,
               extraTimeDeadline: null,
@@ -474,6 +478,7 @@ export class QuizshowSessionsService {
               pausedExtraTimeRemainingMs: null,
               isRestartRecovery: false,
               phaseCounter: 0,
+              wheelProgress: emptyWheelProgress(),
             },
             questionLog: [],
             quizSnapshot: snapshot,

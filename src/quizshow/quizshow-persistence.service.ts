@@ -32,7 +32,6 @@ import type {
   QuizshowQuestionLogEntry,
 } from './quizshow-engine-types';
 import { isAdultsOnlySession } from './quizshow-play-rules';
-import { isPartyRoundKind } from './quizshow-quiz-validation';
 import {
   competitionRanks,
   streakBonusFor,
@@ -45,6 +44,12 @@ import {
   type QuizshowSnapshotQuestion,
   type QuizshowSnapshotRound,
 } from './quizshow-snapshot';
+import {
+  emptyWheelProgress,
+  isQuizRoundKind,
+  progressCursorFields,
+  type QuizshowWheelProgress,
+} from './quizshow-wheel';
 
 /** Phases a restart replays from the question's first phase; every other phase resumes as checkpointed. */
 export const QUIZSHOW_RESTART_REPLAY_PHASES: readonly QuizshowPhase[] = [
@@ -225,9 +230,15 @@ export function quizshowWriteFailureCode(error: unknown): string {
   return 'unknown';
 }
 
-/** The cursor as the `cursor` column stores it: no status, the phase counter for the phase id. */
+/**
+ * The cursor as the `cursor` column stores it: no status, the phase counter
+ * for the phase id and the wheel progress. Every writer of the column calls
+ * this, so the checkpoint keeps the open wheel, its spin and its baseline.
+ * The fields worked out from the progress (round number, what comes next,
+ * the unplanned spin) stay out: the load recomputes them.
+ */
 export function toStoredCursor(
-  state: Pick<QuizshowLiveState, 'cursor' | 'phaseCounter'>,
+  state: Pick<QuizshowLiveState, 'cursor' | 'phaseCounter' | 'wheelProgress'>,
 ): QuizshowStoredCursor {
   const cursor = state.cursor;
   return {
@@ -242,7 +253,30 @@ export function toStoredCursor(
     pausedExtraTimeRemainingMs: cursor.pausedExtraTimeRemainingMs,
     isRestartRecovery: cursor.isRestartRecovery,
     phaseCounter: state.phaseCounter,
+    wheelProgress: structuredClone(state.wheelProgress),
   };
+}
+
+/**
+ * The wheel progress a stored cursor holds. A session opened before the wheel
+ * stores none and has played its rounds in order, so every round up to the
+ * cursor's round has opened.
+ */
+function storedWheelProgress(
+  storedCursor: QuizshowStoredCursor,
+): QuizshowWheelProgress {
+  if (storedCursor.wheelProgress !== undefined) {
+    return storedCursor.wheelProgress;
+  }
+  const legacyProgress = emptyWheelProgress();
+  const roundIndex = storedCursor.roundIndex ?? null;
+  if (roundIndex !== null) {
+    legacyProgress.playedRoundIndexes = Array.from(
+      { length: roundIndex + 1 },
+      (_unused, playedRoundIndex) => playedRoundIndex,
+    );
+  }
+  return legacyProgress;
 }
 
 /**
@@ -272,7 +306,7 @@ export function buildQuizshowRecap(
         ? null
         : Number(aggregate.average_elapsed_ms);
     const isMeasured =
-      !isPartyRoundKind(entry.roundKind) &&
+      isQuizRoundKind(entry.roundKind) &&
       !wasSkipped &&
       entry.eligibleCount > 0;
     return {
@@ -342,7 +376,7 @@ function answeringPhaseId(
     state.cursor.phase === 'scores'
       ? state.phaseCounter - 1
       : state.phaseCounter;
-  if (!isPartyRoundKind(round.kind)) return String(revealPhaseCounter - 1);
+  if (isQuizRoundKind(round.kind)) return String(revealPhaseCounter - 1);
   const optionCount =
     answerRows.filter((row) => row.vote_option_id !== null).length +
     (round.kind === 'lie_detector' ? 1 : 0);
@@ -458,13 +492,20 @@ export class QuizshowPersistenceService {
     const snapshot = sessionRow.quiz_snapshot;
     const storedCursor = sessionRow.cursor;
     const phaseCounter = Number(storedCursor.phaseCounter ?? 0);
+    const wheelProgress = storedWheelProgress(storedCursor);
+    // The stored round count is ignored: the progress decides it, and a row
+    // from before the wheel stored the snapshot's row count.
     const cursor: QuizshowCursor = {
       phaseId: String(phaseCounter),
       status: sessionRow.status,
       phase: storedCursor.phase,
       roundIndex: storedCursor.roundIndex ?? null,
       questionIndex: storedCursor.questionIndex ?? null,
-      roundCount: storedCursor.roundCount ?? snapshot.rounds.length,
+      ...progressCursorFields(
+        snapshot.rounds,
+        wheelProgress,
+        storedCursor.phase,
+      ),
       phaseStartedAt: storedCursor.phaseStartedAt ?? null,
       deadline: storedCursor.deadline ?? null,
       extraTimeDeadline: storedCursor.extraTimeDeadline ?? null,
@@ -564,6 +605,7 @@ export class QuizshowPersistenceService {
       status: cursor.status,
       cursor,
       phaseCounter,
+      wheelProgress,
       pausedAt,
       lastHostCommandAt: toEpochMs(sessionRow.last_host_command_at),
       lastTransition: null,
@@ -946,7 +988,7 @@ export class QuizshowPersistenceService {
       isJokerActiveFor(state, playerId, roundIndex)
         ? QUIZSHOW_LIMITS.jokerMultiplier
         : 1;
-    const isQuizRound = !isPartyRoundKind(round.kind);
+    const isQuizRound = isQuizRoundKind(round.kind);
 
     const phaseId = answeringPhaseId(state, round, answerRows);
     const answers = new Map<string, QuizshowLiveAnswer>();
@@ -1306,6 +1348,40 @@ export class QuizshowPersistenceService {
                   FROM unnest($2::uuid[], $3::int[]) AS "scored"("id", "score")
                   WHERE "team"."session_id" = $1
                     AND "team"."id" = "scored"."id"`,
+            params: [
+              sessionId,
+              operation.teams.map((team) => team.teamId),
+              operation.teams.map((team) => team.score),
+            ],
+          });
+        }
+        return this.statementsWrite(true, statements);
+      }
+      case 'save_wheel_bonus': {
+        // Absolute totals after the bonus, so a retried or replayed write
+        // lands on the same scores.
+        const statements: SqlStatement[] = [];
+        if (operation.players.length > 0) {
+          statements.push({
+            sql: `UPDATE "quizshow_players" "player"
+                  SET "score" = "bonus"."score"
+                  FROM unnest($2::uuid[], $3::int[]) AS "bonus"("id", "score")
+                  WHERE "player"."session_id" = $1
+                    AND "player"."id" = "bonus"."id"`,
+            params: [
+              sessionId,
+              operation.players.map((player) => player.playerId),
+              operation.players.map((player) => player.score),
+            ],
+          });
+        }
+        if (operation.teams.length > 0) {
+          statements.push({
+            sql: `UPDATE "quizshow_teams" "team"
+                  SET "score" = "bonus"."score"
+                  FROM unnest($2::uuid[], $3::int[]) AS "bonus"("id", "score")
+                  WHERE "team"."session_id" = $1
+                    AND "team"."id" = "bonus"."id"`,
             params: [
               sessionId,
               operation.teams.map((team) => team.teamId),

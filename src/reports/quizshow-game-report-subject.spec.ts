@@ -76,6 +76,23 @@ const quizSnapshot = {
   ],
 };
 
+// The questions the fixture log shows, in play order.
+const EXPECTED_SHOWN_QUESTIONS = [
+  {
+    roundKind: 'lie_detector',
+    prompt: { en: 'Name the flag', pt: 'Nomeia a bandeira' },
+    options: [],
+  },
+  {
+    roundKind: 'quiz',
+    prompt: { en: 'Which year was Stonewall?', pt: 'Que ano?' },
+    options: [
+      { en: '1979', pt: '1979' },
+      { en: '1969', pt: '1969' },
+    ],
+  },
+];
+
 const gameRow = (overrides: Record<string, unknown> = {}) => ({
   session_id: SESSION_ID,
   quiz_id: GAME_ID,
@@ -105,21 +122,7 @@ describe('captureQuizshowGameForReport', () => {
       'reporter-1',
       CAPTURED_AT,
     );
-    expect(evidence?.shownQuestions).toEqual([
-      {
-        roundKind: 'lie_detector',
-        prompt: { en: 'Name the flag', pt: 'Nomeia a bandeira' },
-        options: [],
-      },
-      {
-        roundKind: 'quiz',
-        prompt: { en: 'Which year was Stonewall?', pt: 'Que ano?' },
-        options: [
-          { en: '1979', pt: '1979' },
-          { en: '1969', pt: '1969' },
-        ],
-      },
-    ]);
+    expect(evidence?.shownQuestions).toEqual(EXPECTED_SHOWN_QUESTIONS);
     const serialized = JSON.stringify(evidence);
     expect(serialized).not.toContain('Never shown');
     expect(serialized).not.toContain('Progress Pride');
@@ -132,6 +135,32 @@ describe('captureQuizshowGameForReport', () => {
     ]) {
       expect(serialized).not.toContain(answerKey);
     }
+  });
+
+  it('captures the shown questions of a night whose snapshot holds a wheel row', async () => {
+    const [quizRound, lieDetectorRound] = quizSnapshot.rounds;
+    const wheelRow = {
+      kind: 'wheel',
+      title: { en: '', pt: '' },
+      contentLabel: 'none',
+      settings: {},
+      questions: [],
+    };
+    const { manager } = managerAnswering([
+      gameRow({
+        quiz_snapshot: {
+          ...quizSnapshot,
+          rounds: [quizRound, wheelRow, lieDetectorRound],
+        },
+      }),
+    ]);
+    const evidence = await captureQuizshowGameForReport(
+      manager,
+      SESSION_ID,
+      'reporter-1',
+      CAPTURED_AT,
+    );
+    expect(evidence?.shownQuestions).toEqual(EXPECTED_SHOWN_QUESTIONS);
   });
 
   it('names the game, its title and its owner', async () => {

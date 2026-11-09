@@ -21,12 +21,13 @@ import {
   QUIZSHOW_TEMPLATE_AUDIT_ACTIONS,
   QuizshowTemplatesService,
 } from './quizshow-templates.service';
-import type {
-  QuizshowQuestionInput,
-  QuizshowQuiz,
-  QuizshowQuizShape,
-  QuizshowRoundInput,
-  QuizshowTemplateCardText,
+import {
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowQuestionInput,
+  type QuizshowQuiz,
+  type QuizshowQuizShape,
+  type QuizshowRoundInput,
+  type QuizshowTemplateCardText,
 } from './quizshow.contract';
 
 const TEMPLATE_ID = 'a7e3b1c0-5eed-4000-8000-000000000001';
@@ -80,6 +81,7 @@ function round(
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
     },
     questions,
     ...overrides,
