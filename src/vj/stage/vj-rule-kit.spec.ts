@@ -14,6 +14,7 @@ import {
   readVjImmediateFlag,
   refuseRule,
   roundToTenth,
+  VJ_SETLIST_CLOCK_KEEP,
   vjPackClipKey,
   vjSetlistItemKey,
   withVjLiveSource,
@@ -221,15 +222,25 @@ describe('vj rule kit', () => {
         isImmediate: false,
         isLookSwitch: false,
         overlayHideAfterMs: undefined,
+        setlistClock: { kind: 'keep' },
+        scheduledAt: null,
       },
     });
+    expect(VJ_SETLIST_CLOCK_KEEP).toEqual({ kind: 'keep' });
     const lookups = [{ kind: 'pack' as const, packId: PACK_ID }];
+    const setlistClock = {
+      kind: 'start' as const,
+      durationMs: 8000,
+      remainingMs: 8000,
+    };
     expect(
       acceptRule(state, {
         lookups,
         isImmediate: true,
         isLookSwitch: true,
         overlayHideAfterMs: null,
+        setlistClock,
+        scheduledAt: NOW + 8000,
       }).accepted,
     ).toEqual({
       nextState: state,
@@ -237,6 +248,8 @@ describe('vj rule kit', () => {
       isImmediate: true,
       isLookSwitch: true,
       overlayHideAfterMs: null,
+      setlistClock,
+      scheduledAt: NOW + 8000,
     });
   });
 
@@ -247,12 +260,32 @@ describe('vj rule kit', () => {
     expect(vjPackClipKey(PACK_ID, CLIP_ID)).not.toBe(
       vjPackClipKey(PACK_ID, SECOND_CLIP_ID),
     );
-    expect(vjSetlistItemKey(SETLIST_ID.toUpperCase(), 0)).toBe(
-      vjSetlistItemKey(SETLIST_ID, 0),
+    const atZero = { kind: 'index' as const, index: 0, wrapsToFirst: false };
+    expect(vjSetlistItemKey(SETLIST_ID.toUpperCase(), atZero)).toBe(
+      vjSetlistItemKey(SETLIST_ID, atZero),
     );
-    expect(vjSetlistItemKey(SETLIST_ID, null)).not.toBe(
-      vjSetlistItemKey(SETLIST_ID, 0),
+    expect(vjSetlistItemKey(SETLIST_ID, { kind: 'count' })).toBe(
+      `${SETLIST_ID}:count`,
     );
+    expect(vjSetlistItemKey(SETLIST_ID, atZero)).toBe(`${SETLIST_ID}:0`);
+    expect(
+      vjSetlistItemKey(SETLIST_ID, {
+        kind: 'index',
+        index: 3,
+        wrapsToFirst: true,
+      }),
+    ).toBe(`${SETLIST_ID}:3:first`);
+    expect(vjSetlistItemKey(SETLIST_ID, { kind: 'last' })).toBe(
+      `${SETLIST_ID}:last`,
+    );
+    expect(
+      new Set([
+        vjSetlistItemKey(SETLIST_ID, { kind: 'count' }),
+        vjSetlistItemKey(SETLIST_ID, atZero),
+        vjSetlistItemKey(SETLIST_ID, { ...atZero, wrapsToFirst: true }),
+        vjSetlistItemKey(SETLIST_ID, { kind: 'last' }),
+      ]).size,
+    ).toBe(4);
   });
 
   it('starts with empty lookup results', () => {

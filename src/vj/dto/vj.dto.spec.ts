@@ -8,7 +8,6 @@ import {
   CreateVjSceneDto,
   CreateVjSetlistDto,
   RenameVjPackDto,
-  RenameVjSetlistDto,
   ReorderVjPackClipsDto,
   ReorderVjPacksDto,
   ReorderVjScenesDto,
@@ -18,6 +17,7 @@ import {
   SetVjSetlistItemsDto,
   UpdateVjClipDto,
   UpdateVjSceneDto,
+  UpdateVjSetlistDto,
   VjClipsMediaQuery,
   VjPackMediaQuery,
 } from './vj.dto';
@@ -103,9 +103,32 @@ describe('VJ DTOs', () => {
       [UpdateVjSceneDto, { name: null, packId: 7, look: [] }],
       [ReorderVjScenesDto, { sceneIds: 'a,b' }],
       [CreateVjSetlistDto, { name: [], sceneIds: [1, 2] }],
-      [RenameVjSetlistDto, { name: 5 }],
+      [
+        CreateVjSetlistDto,
+        {
+          name: 'Friday set',
+          items: [{ kind: 'clip', clipId: 5 }],
+          isLooping: 'yes',
+          stepDuration: { kind: 'bars', value: 3 },
+        },
+      ],
+      [UpdateVjSetlistDto, { name: 5 }],
+      [
+        UpdateVjSetlistDto,
+        { isLooping: 1, stepDuration: { kind: 'seconds', value: 1 } },
+      ],
       [ReorderVjSetlistsDto, { setlistIds: { first: 'a' } }],
-      [SetVjSetlistItemsDto, { sceneIds: 'a' }],
+      [SetVjSetlistItemsDto, { items: 'a' }],
+      [
+        SetVjSetlistItemsDto,
+        {
+          items: [
+            { id: 'nope', kind: 'scene', sceneId: 7, look: {} },
+            { kind: 'clip', clipId: 'x', duration: { kind: 'beats' } },
+          ],
+        },
+      ],
+      [SetVjSetlistItemsDto, { sceneIds: ['a'] }],
       [VjClipsMediaQuery, { clipIds: ['a', 'b'] }],
     ];
     for (const [dtoClass, plain] of cases) {
@@ -123,7 +146,7 @@ describe('VJ DTOs', () => {
       UpdateVjSceneDto,
       ReorderVjScenesDto,
       CreateVjSetlistDto,
-      RenameVjSetlistDto,
+      UpdateVjSetlistDto,
       ReorderVjSetlistsDto,
       SetVjSetlistItemsDto,
       VjClipsMediaQuery,
@@ -142,11 +165,17 @@ describe('VJ DTOs', () => {
     expect(scene.errors).toHaveLength(1);
     expect(scene.errors[0]?.property).toBe('position');
     const items = await validated(SetVjSetlistItemsDto, {
-      sceneIds: [],
+      items: [],
       setlistId: 'x',
     });
     expect(items.errors).toHaveLength(1);
     expect(items.errors[0]?.property).toBe('setlistId');
+    const update = await validated(UpdateVjSetlistDto, {
+      name: 'Friday set',
+      position: 2,
+    });
+    expect(update.errors).toHaveLength(1);
+    expect(update.errors[0]?.property).toBe('position');
   });
 
   it('still refuses an undeclared property', async () => {

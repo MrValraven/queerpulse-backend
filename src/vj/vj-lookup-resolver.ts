@@ -3,16 +3,20 @@ import {
   vjSetlistItemKey,
   type VjCommandLookup,
   type VjLookupResults,
-  type VjSetlistItemRead,
 } from './stage/vj-rule-kit';
 import type { VjStageReadsService } from './vj-stage-reads.service';
-import type { VjSceneLook } from './vj.contract';
+import type {
+  VjSceneLook,
+  VjSetlistRead,
+  VjSetlistReadPosition,
+} from './vj.contract';
 
 /**
  * Turns a command's lookups (contract 7.7) into the answers its apply step
  * reads. Each distinct lookup is read once and every read runs in parallel;
  * every `clip` lookup merges into one `existingClipIds` read and the
- * `clipsInPack` lookups of one pack into one `clipIdsInPack` read. A rejected
+ * `clipsInPack` lookups of one pack into one `clipIdsInPack` read; each
+ * distinct set list and position is one `readSetlist` read. A rejected
  * read rejects the whole resolve, and the gateway answers `vj_server_error`.
  * Logs nothing.
  */
@@ -24,7 +28,7 @@ interface VjLookupAnswers {
   clipIdsInPack: Set<string>;
   packClips: Map<string, { isFavorite: boolean } | null>;
   scenes: Map<string, VjSceneLook | null>;
-  setlistItems: Map<string, VjSetlistItemRead | null>;
+  setlistItems: Map<string, VjSetlistRead | null>;
 }
 
 /** The lookups grouped so each distinct read appears once. */
@@ -34,7 +38,10 @@ interface VjGroupedLookups {
   clipIdsByPack: Map<string, Set<string>>;
   packClips: Map<string, { packId: string; clipId: string }>;
   sceneIds: Set<string>;
-  setlistItems: Map<string, { setlistId: string; index: number | null }>;
+  setlistItems: Map<
+    string,
+    { setlistId: string; position: VjSetlistReadPosition }
+  >;
 }
 
 /** Groups the lookups by the read that answers them, ids lowercased. */
@@ -75,8 +82,11 @@ function groupVjLookups(lookups: readonly VjCommandLookup[]): VjGroupedLookups {
         break;
       case 'setlistItem':
         grouped.setlistItems.set(
-          vjSetlistItemKey(lookup.setlistId, lookup.index),
-          { setlistId: lookup.setlistId.toLowerCase(), index: lookup.index },
+          vjSetlistItemKey(lookup.setlistId, lookup.position),
+          {
+            setlistId: lookup.setlistId.toLowerCase(),
+            position: lookup.position,
+          },
         );
         break;
     }
@@ -130,11 +140,8 @@ function startVjLookupReads(
   }
   for (const [key, request] of grouped.setlistItems) {
     pending.push(
-      reads.readSetlistItem(request.setlistId, request.index).then((answer) => {
-        answers.setlistItems.set(
-          key,
-          answer === null ? null : { ...request, ...answer },
-        );
+      reads.readSetlist(request.setlistId, request.position).then((read) => {
+        answers.setlistItems.set(key, read);
       }),
     );
   }

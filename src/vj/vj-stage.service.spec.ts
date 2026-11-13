@@ -1,11 +1,19 @@
+import { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
   createVjStageState,
+  VJ_LIMITS,
   vjSceneLookOf,
+  vjSetlistSelectReadPosition,
   type VjAckFailure,
   type VjLibraryChange,
   type VjRemoteCommandName,
+  type VjSceneLook,
   type VjScreenClipStatus,
+  type VjSetlistFollowRead,
+  type VjSetlistRead,
+  type VjSetlistReadPosition,
+  type VjSetlistStepRead,
   type VjStageFrame,
   type VjStageState,
 } from './vj.contract';
@@ -54,8 +62,12 @@ function createReads() {
       .fn<Promise<{ isFavorite: boolean } | null>, [string, string]>()
       .mockResolvedValue({ isFavorite: false }),
     readSceneLook: jest.fn().mockResolvedValue(null),
-    readSetlistItem: jest.fn().mockResolvedValue(null),
-    setlistItemCount: jest.fn().mockResolvedValue(null),
+    readSetlist: jest
+      .fn<Promise<VjSetlistRead | null>, [string, VjSetlistReadPosition]>()
+      .mockResolvedValue(null),
+    readSetlistFollow: jest
+      .fn<Promise<VjSetlistFollowRead | null>, [string]>()
+      .mockResolvedValue(null),
   };
 }
 
@@ -253,6 +265,206 @@ function clipStatus(
     failure: null,
     ...overrides,
   };
+}
+
+/** Seconds each test sequence step plays, and the same in ms. */
+const STEP_SECONDS = 2;
+const STEP_MS = STEP_SECONDS * 1000;
+/** How early the step timer fires before a step ends. */
+const EARLY_MS = VJ_LIMITS.quantizedAdvanceEarlyMs;
+
+/** A look whose dip to white flashes, so its step needs the flash consent. */
+const FLASHING_LOOK: VjSceneLook = (() => {
+  const look = vjSceneLookOf(createVjStageState(randomUUID(), 0));
+  return { ...look, transition: { ...look.transition, mode: 'dipWhite' } };
+})();
+
+/** A sequence as the test database holds it; a test may change its item ids
+ *  between reads. A flashing step is a scene step, every other a clip step. */
+interface TestSetlist {
+  setlistId: string;
+  itemIds: string[];
+  clipIdByItemId: Map<string, string>;
+  flashingItemIds: Set<string>;
+  sceneId: string;
+  isLooping: boolean;
+}
+
+function testSetlist(
+  stepCount: number,
+  options: { isLooping?: boolean; flashingIndexes?: number[] } = {},
+): TestSetlist {
+  const itemIds = Array.from({ length: stepCount }, () => randomUUID());
+  const flashingItemIds = new Set(
+    (options.flashingIndexes ?? []).map((index) => itemAt(itemIds, index)),
+  );
+  return {
+    setlistId: randomUUID(),
+    itemIds,
+    clipIdByItemId: new Map(
+      itemIds
+        .filter((itemId) => !flashingItemIds.has(itemId))
+        .map((itemId) => [itemId, randomUUID()]),
+    ),
+    flashingItemIds,
+    sceneId: randomUUID(),
+    isLooping: options.isLooping ?? false,
+  };
+}
+
+/** The clip a clip step of the sequence plays, by its original index. */
+function clipOfStep(setlist: TestSetlist, index: number): string {
+  const clipId = setlist.clipIdByItemId.get(itemAt(setlist.itemIds, index));
+  if (clipId === undefined) {
+    throw new Error(`expected a clip step at index ${index}`);
+  }
+  return clipId;
+}
+
+/** The step index a read position lands on, as VJ_STAGE_SETLIST_READ_SQL
+ *  picks it; null for none. */
+function positionIndexOf(
+  setlist: TestSetlist,
+  position: VjSetlistReadPosition,
+): number | null {
+  const count = setlist.itemIds.length;
+  if (position.kind === 'count') {
+    return null;
+  }
+  if (position.kind === 'last') {
+    return count > 0 ? count - 1 : null;
+  }
+  if (position.index < count) {
+    return position.index;
+  }
+  return position.wrapsToFirst && count > 0 ? 0 : null;
+}
+
+/** The read the stage reads service answers for the sequence at a position. */
+function setlistReadAt(
+  setlist: TestSetlist,
+  position: VjSetlistReadPosition,
+): VjSetlistRead {
+  const index = positionIndexOf(setlist, position);
+  const duration = { kind: 'seconds' as const, value: STEP_SECONDS };
+  let step: VjSetlistStepRead | null = null;
+  if (index !== null) {
+    const itemId = itemAt(setlist.itemIds, index);
+    step = setlist.flashingItemIds.has(itemId)
+      ? {
+          kind: 'scene',
+          itemId,
+          index,
+          sceneId: setlist.sceneId,
+          look: FLASHING_LOOK,
+          duration,
+        }
+      : {
+          kind: 'clip',
+          itemId,
+          index,
+          clipId: clipOfStep(setlist, index),
+          duration,
+        };
+  }
+  return {
+    setlistId: setlist.setlistId,
+    isLooping: setlist.isLooping,
+    stepDuration: duration,
+    itemIds: [...setlist.itemIds],
+    step,
+  };
+}
+
+/** The lookup answers of one read of the sequence at a position. */
+function setlistAnswers(
+  setlist: TestSetlist,
+  position: VjSetlistReadPosition,
+): VjLookupResults {
+  return lookupResults({
+    setlistItems: new Map([
+      [
+        vjSetlistItemKey(setlist.setlistId, position),
+        setlistReadAt(setlist, position),
+      ],
+    ]),
+  });
+}
+
+/** Points the reads mock at the sequence, read afresh on every call. */
+function serveSetlist(
+  reads: ReturnType<typeof createReads>,
+  setlist: TestSetlist,
+): void {
+  reads.readSetlist.mockImplementation((setlistId, position) =>
+    Promise.resolve(
+      setlistId.toLowerCase() === setlist.setlistId
+        ? setlistReadAt(setlist, position)
+        : null,
+    ),
+  );
+}
+
+/** The follow read of the sequence as it is now. */
+function followReadOf(setlist: TestSetlist): VjSetlistFollowRead {
+  return { itemIds: [...setlist.itemIds], isLooping: setlist.isLooping };
+}
+
+/** Plays the sequence from a step through `stage:setlistSelect`. */
+function playSetlist(
+  remote: VjTestRemote,
+  setlist: TestSetlist,
+  index = 0,
+  fields: Record<string, unknown> = {},
+): VjStageFrame {
+  return frameOf(
+    remote.send(
+      'stage:setlistSelect',
+      { setlistId: setlist.setlistId, index, isPlaying: true, ...fields },
+      Date.now(),
+      setlistAnswers(setlist, vjSetlistSelectReadPosition(index, true)),
+    ),
+  );
+}
+
+/** Shows one step of the sequence by hand through `stage:setlistSelect`. */
+function showSetlistStep(
+  remote: VjTestRemote,
+  setlist: TestSetlist,
+  index: number,
+  now = START_AT,
+): VjStageFrame {
+  return frameOf(
+    remote.send(
+      'stage:setlistSelect',
+      { setlistId: setlist.setlistId, index },
+      now,
+      setlistAnswers(setlist, vjSetlistSelectReadPosition(index, false)),
+    ),
+  );
+}
+
+/** The broadcast frames the step timer landed. */
+function setlistFramesOf(
+  broadcasts: readonly RecordedBroadcast[],
+): VjStageFrame[] {
+  return broadcasts
+    .map((broadcast) => broadcast.frame)
+    .filter((frame) => frame.cause === 'setlist');
+}
+
+/** A set list change of the given kind naming the sequence. */
+function setlistChange(
+  kind: VjLibraryChange['kind'],
+  setlist: TestSetlist,
+  parts: Partial<VjLibraryChange> = {},
+): VjLibraryChange {
+  return libraryChange({
+    kind,
+    setlistId: setlist.setlistId,
+    setlistIds: [setlist.setlistId],
+    ...parts,
+  });
 }
 
 describe('VjStageService', () => {
@@ -883,25 +1095,13 @@ describe('VjStageService', () => {
     it('answers vj_stale_setlist when the set list moved between prepare and apply', () => {
       const first = createRemote(service);
       const second = createRemote(service);
-      const setlistId = randomUUID();
-      const look = vjSceneLookOf(createVjStageState(randomUUID(), 0));
-      const itemRead = (index: number | null) => ({
-        setlistId,
-        index,
-        itemCount: 3,
-        sceneId: index === null ? null : randomUUID(),
-        look: index === null ? null : look,
-      });
+      const setlist = testSetlist(3);
       appliedOf(
         first.send(
           'stage:setlistSelect',
-          { setlistId, index: null },
+          { setlistId: setlist.setlistId, index: null },
           START_AT,
-          lookupResults({
-            setlistItems: new Map([
-              [vjSetlistItemKey(setlistId, null), itemRead(null)],
-            ]),
-          }),
+          setlistAnswers(setlist, { kind: 'count' }),
         ),
       );
       const stepPayload = first.nextPayload({});
@@ -911,12 +1111,19 @@ describe('VjStageService', () => {
         stepPayload,
         START_AT,
       );
+      const firstStep: VjSetlistReadPosition = {
+        kind: 'index',
+        index: 0,
+        wrapsToFirst: false,
+      };
       expect(prepared.lookups).toEqual([
-        { kind: 'setlistItem', setlistId, index: 0 },
+        {
+          kind: 'setlistItem',
+          setlistId: setlist.setlistId,
+          position: firstStep,
+        },
       ]);
-      const firstItem = lookupResults({
-        setlistItems: new Map([[vjSetlistItemKey(setlistId, 0), itemRead(0)]]),
-      });
+      const firstItem = setlistAnswers(setlist, firstStep);
       appliedOf(second.send('stage:setlistNext', {}, START_AT, firstItem));
       expect(stateOf(service).setlistIndex).toBe(0);
 
@@ -932,6 +1139,46 @@ describe('VjStageService', () => {
       expect(stale.code).toBe('vj_stale_setlist');
       expect(stale.state?.setlistIndex).toBe(0);
       expect(stateOf(service).setlistIndex).toBe(0);
+    });
+
+    it('records the sequence of a command whose write failed and answers its code', () => {
+      const remote = createRemote(service);
+      const payload = remote.nextPayload({ isLooping: true });
+      expect(
+        failureOf(
+          service.refuseRemoteWrite(
+            ADMIN_USER_ID,
+            payload,
+            'vj_setlist_not_found',
+          ),
+        ).code,
+      ).toBe('vj_setlist_not_found');
+      expect(
+        failureOf(
+          service.refuseRemoteWrite(ADMIN_USER_ID, payload, 'vj_server_error'),
+        ).code,
+      ).toBe('vj_stale_command');
+      expect(
+        failureOf(
+          service.refuseRemoteWrite(randomUUID(), payload, 'vj_server_error'),
+        ).code,
+      ).toBe('vj_not_attached');
+    });
+
+    it('lands Loop on the active sequence with the clock kept', () => {
+      const remote = createRemote(service);
+      const setlist = testSetlist(2);
+      const shown = showSetlistStep(remote, setlist, 1);
+      expect(shown.state.setlistPlayback.isLooping).toBe(false);
+      const looped = frameOf(
+        remote.send('stage:setlistSetLooping', { isLooping: true }, START_AT),
+      );
+      expect(looped.cause).toBe('command');
+      expect(looped.state.setlistIndex).toBe(1);
+      expect(looped.state.setlistPlayback).toMatchObject({
+        isLooping: true,
+        status: 'manual',
+      });
     });
   });
 
@@ -1063,6 +1310,723 @@ describe('VjStageService', () => {
         isVisible: false,
         targetAt: START_AT + 5000,
         label: '',
+      });
+    });
+
+    describe('sequence step timer', () => {
+      let remote: VjTestRemote;
+
+      beforeEach(() => {
+        remote = createRemote(service);
+      });
+
+      it('advances a playing sequence at each step end and finishes after the last step', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        const played = playSetlist(remote, setlist);
+        expect(played.state.setlistIndex).toBe(0);
+        expect(played.state.liveClipId).toBe(clipOfStep(setlist, 0));
+        expect(played.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          itemId: itemAt(setlist.itemIds, 0),
+          stepStartedAt: START_AT,
+          stepEndsAt: START_AT + STEP_MS,
+          stepDurationMs: STEP_MS,
+        });
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS - 1);
+        expect(reads.readSetlist).not.toHaveBeenCalled();
+        await jest.advanceTimersByTimeAsync(1);
+        expect(reads.readSetlist).toHaveBeenLastCalledWith(setlist.setlistId, {
+          kind: 'index',
+          index: 1,
+          wrapsToFirst: false,
+        });
+        const second = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(second.sourceClientId).toBeNull();
+        expect(second.applyAt).toBe(START_AT + STEP_MS);
+        expect(second.state.setlistIndex).toBe(1);
+        expect(second.state.liveClipId).toBe(clipOfStep(setlist, 1));
+        expect(second.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          itemId: itemAt(setlist.itemIds, 1),
+          stepStartedAt: START_AT + STEP_MS,
+          stepEndsAt: START_AT + 2 * STEP_MS,
+        });
+
+        await jest.advanceTimersByTimeAsync(STEP_MS);
+        const third = itemAt(setlistFramesOf(broadcasts), 1);
+        expect(third.state.setlistIndex).toBe(2);
+        expect(third.state.setlistPlayback.stepEndsAt).toBe(
+          START_AT + 3 * STEP_MS,
+        );
+
+        await jest.advanceTimersByTimeAsync(STEP_MS);
+        const finished = itemAt(setlistFramesOf(broadcasts), 2);
+        expect(finished.applyAt).toBe(START_AT + 3 * STEP_MS);
+        expect(finished.state.setlistIndex).toBe(2);
+        expect(finished.state.liveClipId).toBe(clipOfStep(setlist, 2));
+        expect(finished.state.setlistPlayback).toMatchObject({
+          status: 'finished',
+          stepStartedAt: null,
+          stepEndsAt: null,
+        });
+        expect(jest.getTimerCount()).toBe(0);
+        await jest.advanceTimersByTimeAsync(10 * STEP_MS);
+        expect(setlistFramesOf(broadcasts)).toHaveLength(3);
+      });
+
+      it('wraps a looping sequence from its last step to step 1', async () => {
+        const setlist = testSetlist(2, { isLooping: true });
+        serveSetlist(reads, setlist);
+        const played = playSetlist(remote, setlist, 1);
+        expect(played.state.setlistPlayback.isLooping).toBe(true);
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(reads.readSetlist).toHaveBeenLastCalledWith(setlist.setlistId, {
+          kind: 'index',
+          index: 2,
+          wrapsToFirst: true,
+        });
+        const wrapped = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(wrapped.state.setlistIndex).toBe(0);
+        expect(wrapped.state.liveClipId).toBe(clipOfStep(setlist, 0));
+        expect(wrapped.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          stepEndsAt: START_AT + 2 * STEP_MS,
+        });
+      });
+
+      it('lands needsFlashConsent on a flashing step no one confirmed for the run', async () => {
+        const setlist = testSetlist(2, { flashingIndexes: [1] });
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist);
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        const held = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(held.state.liveClipId).toBe(clipOfStep(setlist, 0));
+        expect(held.state.transition.mode).not.toBe('dipWhite');
+        expect(held.state.setlistPlayback).toMatchObject({
+          status: 'needsFlashConsent',
+          stepStartedAt: null,
+          stepEndsAt: null,
+        });
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
+      it('recalls a flashing step when the run confirmed the flash warning', async () => {
+        const setlist = testSetlist(2, { flashingIndexes: [1] });
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist, 0, { isFlashConfirmed: true });
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        const recalled = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(recalled.state.setlistIndex).toBe(1);
+        expect(recalled.state.transition.mode).toBe('dipWhite');
+        expect(recalled.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          isFlashConfirmed: true,
+          stepEndsAt: START_AT + 2 * STEP_MS,
+        });
+      });
+
+      it('retries a failed step read after setlistTimerRetryMs and holds the step meanwhile', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        reads.readSetlist.mockRejectedValueOnce(new Error('read failed'));
+        playSetlist(remote, setlist);
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(1);
+        expect(setlistFramesOf(broadcasts)).toHaveLength(0);
+        expect(stateOf(service).setlistIndex).toBe(0);
+
+        await jest.advanceTimersByTimeAsync(VJ_LIMITS.setlistTimerRetryMs - 1);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(1);
+        await jest.advanceTimersByTimeAsync(1);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(2);
+        const retriedAt =
+          START_AT + STEP_MS - EARLY_MS + VJ_LIMITS.setlistTimerRetryMs;
+        const advanced = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(advanced.applyAt).toBeNull();
+        expect(advanced.state.setlistIndex).toBe(1);
+        expect(advanced.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          stepStartedAt: retriedAt,
+          stepEndsAt: retriedAt + STEP_MS,
+        });
+      });
+
+      it('drops a failed step read when the run was paused meanwhile', async () => {
+        const setlist = testSetlist(3);
+        let rejectRead: (error: Error) => void = () => undefined;
+        reads.readSetlist.mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectRead = reject;
+            }),
+        );
+        playSetlist(remote, setlist);
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(1);
+        appliedOf(
+          remote.send(
+            'stage:setlistSetPlaying',
+            { isPlaying: false },
+            Date.now(),
+          ),
+        );
+        rejectRead(new Error('read failed'));
+        await jest.advanceTimersByTimeAsync(0);
+        expect(jest.getTimerCount()).toBe(0);
+        await jest.advanceTimersByTimeAsync(10 * VJ_LIMITS.setlistTimerRetryMs);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(1);
+        expect(stateOf(service).setlistPlayback.status).toBe('paused');
+      });
+
+      it('reads again at once when a library follow moved the index while the read was out', async () => {
+        const setlist = testSetlist(3);
+        const removedItemId = itemAt(setlist.itemIds, 0);
+        const lastClipId = clipOfStep(setlist, 2);
+        serveSetlist(reads, setlist);
+        let releaseRead: (read: VjSetlistRead | null) => void = () => undefined;
+        reads.readSetlist.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseRead = resolve;
+            }),
+        );
+        playSetlist(remote, setlist, 1);
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(1);
+
+        setlist.itemIds = setlist.itemIds.filter(
+          (itemId) => itemId !== removedItemId,
+        );
+        const followed = service.applyLibraryChange(
+          setlistChange('setlist_items_changed', setlist),
+          Date.now(),
+          new Map([[setlist.setlistId, followReadOf(setlist)]]),
+        );
+        expect(itemAt(followed, 0).frame.state.setlistIndex).toBe(0);
+        expect(itemAt(followed, 0).frame.state.setlistPlayback.stepEndsAt).toBe(
+          START_AT + STEP_MS,
+        );
+
+        releaseRead(
+          setlistReadAt(setlist, {
+            kind: 'index',
+            index: 2,
+            wrapsToFirst: false,
+          }),
+        );
+        await jest.advanceTimersByTimeAsync(0);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(2);
+        expect(reads.readSetlist).toHaveBeenLastCalledWith(setlist.setlistId, {
+          kind: 'index',
+          index: 1,
+          wrapsToFirst: false,
+        });
+        const advanced = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(advanced.applyAt).toBe(START_AT + STEP_MS);
+        expect(advanced.state.setlistIndex).toBe(1);
+        expect(advanced.state.liveClipId).toBe(lastClipId);
+        expect(advanced.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          stepEndsAt: START_AT + 2 * STEP_MS,
+        });
+      });
+
+      it('lands the follow of an item edit whose follow has not landed, then plays the step after the one on screen', async () => {
+        const setlist = testSetlist(4);
+        const secondId = itemAt(setlist.itemIds, 1);
+        const thirdId = itemAt(setlist.itemIds, 2);
+        const fourthId = itemAt(setlist.itemIds, 3);
+        const lastClipId = clipOfStep(setlist, 3);
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist, 2);
+        // The save of [B, C, D] committed; its library follow is still out.
+        setlist.itemIds = [secondId, thirdId, fourthId];
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(reads.readSetlist).toHaveBeenCalledTimes(2);
+        expect(reads.readSetlist).toHaveBeenNthCalledWith(
+          1,
+          setlist.setlistId,
+          { kind: 'index', index: 3, wrapsToFirst: false },
+        );
+        expect(reads.readSetlist).toHaveBeenLastCalledWith(setlist.setlistId, {
+          kind: 'index',
+          index: 2,
+          wrapsToFirst: false,
+        });
+        const libraryFrames = broadcasts
+          .map((broadcast) => broadcast.frame)
+          .filter((frame) => frame.cause === 'library');
+        expect(libraryFrames).toHaveLength(1);
+        expect(itemAt(libraryFrames, 0).state.setlistIndex).toBe(1);
+        expect(itemAt(libraryFrames, 0).state.setlistPlayback).toMatchObject({
+          itemId: thirdId,
+          status: 'playing',
+          stepEndsAt: START_AT + STEP_MS,
+        });
+        const advancedFrames = setlistFramesOf(broadcasts);
+        expect(advancedFrames).toHaveLength(1);
+        const advanced = itemAt(advancedFrames, 0);
+        expect(advanced.applyAt).toBe(START_AT + STEP_MS);
+        expect(advanced.state.setlistIndex).toBe(2);
+        expect(advanced.state.liveClipId).toBe(lastClipId);
+        expect(advanced.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          itemId: fourthId,
+        });
+        expect(service.getSetlistItemIds(ADMIN_USER_ID)).toEqual([
+          secondId,
+          thirdId,
+          fourthId,
+        ]);
+
+        // The follow the gateway lands later finds nothing to move.
+        expect(
+          service.applyLibraryChange(
+            setlistChange('setlist_items_changed', setlist),
+            Date.now(),
+            new Map([[setlist.setlistId, followReadOf(setlist)]]),
+          ),
+        ).toEqual([]);
+      });
+
+      it('plays the next step at once when a clip delete empties the frame of the playing step', async () => {
+        const setlist = testSetlist(3);
+        const firstId = itemAt(setlist.itemIds, 0);
+        const thirdId = itemAt(setlist.itemIds, 2);
+        const deletedClipId = clipOfStep(setlist, 1);
+        const lastClipId = clipOfStep(setlist, 2);
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist, 1);
+        jest.advanceTimersByTime(1000);
+
+        setlist.itemIds = [firstId, thirdId];
+        const deleted = itemAt(
+          service.applyLibraryChange(
+            setlistChange('clip_deleted', setlist, {
+              setlistId: null,
+              clipId: deletedClipId,
+            }),
+            Date.now(),
+            new Map([[setlist.setlistId, followReadOf(setlist)]]),
+          ),
+          0,
+        ).frame;
+        expect(deleted.cause).toBe('library');
+        expect(deleted.state.liveClipId).toBeNull();
+        expect(deleted.state.setlistIndex).toBe(0);
+        expect(deleted.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          itemId: null,
+          stepStartedAt: START_AT + 1000 - STEP_MS,
+          stepEndsAt: START_AT + 1000,
+          stepDurationMs: STEP_MS,
+        });
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(reads.readSetlist).toHaveBeenLastCalledWith(setlist.setlistId, {
+          kind: 'index',
+          index: 1,
+          wrapsToFirst: false,
+        });
+        const advanced = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(advanced.state.setlistIndex).toBe(1);
+        expect(advanced.state.liveClipId).toBe(lastClipId);
+        expect(advanced.state.setlistPlayback.itemId).toBe(thirdId);
+      });
+
+      it('logs the owner id only and retries when the landing after the read throws', async () => {
+        const errorSpy = jest
+          .spyOn(Logger.prototype, 'error')
+          .mockImplementation(() => undefined);
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        reads.readSetlist.mockResolvedValueOnce({
+          ...setlistReadAt(setlist, {
+            kind: 'index',
+            index: 1,
+            wrapsToFirst: false,
+          }),
+          itemIds: null,
+        } as unknown as VjSetlistRead);
+        playSetlist(remote, setlist);
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(setlistFramesOf(broadcasts)).toHaveLength(0);
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        const logged = String(errorSpy.mock.calls[0]?.[0]);
+        expect(logged).toContain(ADMIN_USER_ID);
+        expect(logged).not.toContain(setlist.setlistId);
+
+        await jest.advanceTimersByTimeAsync(VJ_LIMITS.setlistTimerRetryMs);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(2);
+        expect(itemAt(setlistFramesOf(broadcasts), 0).state.setlistIndex).toBe(
+          1,
+        );
+        errorSpy.mockRestore();
+      });
+
+      it('keeps the run going when the broadcast of a landed step throws', async () => {
+        const errorSpy = jest
+          .spyOn(Logger.prototype, 'error')
+          .mockImplementation(() => undefined);
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist);
+        service.bindBroadcaster({
+          broadcastState: () => {
+            throw new Error('emit failed');
+          },
+        });
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(stateOf(service).setlistIndex).toBe(1);
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        await jest.advanceTimersByTimeAsync(STEP_MS);
+        expect(stateOf(service).setlistIndex).toBe(2);
+        errorSpy.mockRestore();
+      });
+
+      it('reads again at once when Loop changed while the read was out', async () => {
+        const setlist = testSetlist(2);
+        serveSetlist(reads, setlist);
+        let releaseRead: (read: VjSetlistRead | null) => void = () => undefined;
+        reads.readSetlist.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseRead = resolve;
+            }),
+        );
+        playSetlist(remote, setlist, 1);
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(reads.readSetlist).toHaveBeenLastCalledWith(setlist.setlistId, {
+          kind: 'index',
+          index: 2,
+          wrapsToFirst: false,
+        });
+
+        setlist.isLooping = true;
+        appliedOf(
+          remote.send(
+            'stage:setlistSetLooping',
+            { isLooping: true },
+            Date.now(),
+          ),
+        );
+        releaseRead(
+          setlistReadAt(setlist, {
+            kind: 'index',
+            index: 2,
+            wrapsToFirst: false,
+          }),
+        );
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(reads.readSetlist).toHaveBeenCalledTimes(2);
+        expect(reads.readSetlist).toHaveBeenLastCalledWith(setlist.setlistId, {
+          kind: 'index',
+          index: 2,
+          wrapsToFirst: true,
+        });
+        const wrapped = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(wrapped.state.setlistIndex).toBe(0);
+        expect(wrapped.state.setlistPlayback.status).toBe('playing');
+      });
+
+      it('reads again at once when a step edit moved nothing while the read was out', async () => {
+        const setlist = testSetlist(2);
+        serveSetlist(reads, setlist);
+        let releaseRead: (read: VjSetlistRead | null) => void = () => undefined;
+        reads.readSetlist.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseRead = resolve;
+            }),
+        );
+        playSetlist(remote, setlist, 1);
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        const endRead: VjSetlistRead = {
+          ...setlistReadAt(setlist, {
+            kind: 'index',
+            index: 2,
+            wrapsToFirst: false,
+          }),
+          step: null,
+        };
+
+        const appendedId = randomUUID();
+        const appendedClipId = randomUUID();
+        setlist.itemIds = [...setlist.itemIds, appendedId];
+        setlist.clipIdByItemId.set(appendedId, appendedClipId);
+        expect(
+          service.applyLibraryChange(
+            setlistChange('setlist_items_changed', setlist),
+            Date.now(),
+            new Map([[setlist.setlistId, followReadOf(setlist)]]),
+          ),
+        ).toEqual([]);
+        releaseRead(endRead);
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(reads.readSetlist).toHaveBeenCalledTimes(2);
+        const advanced = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(advanced.state.setlistIndex).toBe(2);
+        expect(advanced.state.liveClipId).toBe(appendedClipId);
+        expect(advanced.state.setlistPlayback.status).toBe('playing');
+      });
+
+      it('lands nothing from a read when a Next landed meanwhile, then runs from the new step', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        let releaseRead: (read: VjSetlistRead | null) => void = () => undefined;
+        reads.readSetlist.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseRead = resolve;
+            }),
+        );
+        playSetlist(remote, setlist);
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        const nextStep: VjSetlistReadPosition = {
+          kind: 'index',
+          index: 1,
+          wrapsToFirst: false,
+        };
+        const stepped = frameOf(
+          remote.send(
+            'stage:setlistNext',
+            {},
+            Date.now(),
+            setlistAnswers(setlist, nextStep),
+          ),
+        );
+        expect(stepped.state.setlistIndex).toBe(1);
+
+        releaseRead(setlistReadAt(setlist, nextStep));
+        await jest.advanceTimersByTimeAsync(0);
+        expect(setlistFramesOf(broadcasts)).toHaveLength(0);
+        expect(stateOf(service).setlistIndex).toBe(1);
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(2);
+        expect(itemAt(setlistFramesOf(broadcasts), 0).state.setlistIndex).toBe(
+          2,
+        );
+      });
+
+      it('stops the step timer on Pause and resumes it with the time left', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist);
+        jest.advanceTimersByTime(500);
+        const paused = frameOf(
+          remote.send(
+            'stage:setlistSetPlaying',
+            { isPlaying: false },
+            Date.now(),
+          ),
+        );
+        expect(paused.state.setlistPlayback).toMatchObject({
+          status: 'paused',
+          stepStartedAt: null,
+          stepEndsAt: null,
+          pausedRemainingMs: STEP_MS - 500,
+        });
+        expect(jest.getTimerCount()).toBe(0);
+        await jest.advanceTimersByTimeAsync(10 * STEP_MS);
+        expect(reads.readSetlist).not.toHaveBeenCalled();
+
+        const resumedAt = Date.now();
+        const resumed = frameOf(
+          remote.send(
+            'stage:setlistSetPlaying',
+            { isPlaying: true },
+            resumedAt,
+          ),
+        );
+        expect(resumed.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          stepStartedAt: resumedAt - 500,
+          stepEndsAt: resumedAt + STEP_MS - 500,
+          stepDurationMs: STEP_MS,
+          pausedRemainingMs: null,
+        });
+        await jest.advanceTimersByTimeAsync(STEP_MS - 500 - EARLY_MS);
+        expect(itemAt(setlistFramesOf(broadcasts), 0).state.setlistIndex).toBe(
+          1,
+        );
+      });
+
+      it('stops the step timer when a clip tap takes the sequence over', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist);
+        const tappedClipId = randomUUID();
+        const takenOver = frameOf(tapClip(remote, tappedClipId, Date.now()));
+        expect(takenOver.state.liveClipId).toBe(tappedClipId);
+        expect(takenOver.state.setlistPlayback).toMatchObject({
+          status: 'takenOver',
+          stepStartedAt: null,
+          stepEndsAt: null,
+        });
+        expect(jest.getTimerCount()).toBe(0);
+        await jest.advanceTimersByTimeAsync(10 * STEP_MS);
+        expect(reads.readSetlist).not.toHaveBeenCalled();
+        expect(stateOf(service).liveClipId).toBe(tappedClipId);
+      });
+
+      it('lands a sequence command and a library follow at once; only the timer waits for the step end', async () => {
+        const setlist = testSetlist(3, { isLooping: true });
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist);
+        jest.advanceTimersByTime(500);
+        const stepped = frameOf(
+          remote.send(
+            'stage:setlistNext',
+            {},
+            Date.now(),
+            setlistAnswers(setlist, {
+              kind: 'index',
+              index: 1,
+              wrapsToFirst: true,
+            }),
+          ),
+        );
+        expect(stepped.applyAt).toBeNull();
+        expect(stepped.state.setlistPlayback).toMatchObject({
+          stepStartedAt: START_AT + 500,
+          stepEndsAt: START_AT + 500 + STEP_MS,
+        });
+
+        setlist.isLooping = false;
+        const followed = itemAt(
+          service.applyLibraryChange(
+            setlistChange('setlist_updated', setlist),
+            Date.now(),
+            new Map([[setlist.setlistId, followReadOf(setlist)]]),
+          ),
+          0,
+        ).frame;
+        expect(followed.applyAt).toBeNull();
+        expect(followed.state.setlistPlayback).toMatchObject({
+          isLooping: false,
+          stepEndsAt: START_AT + 500 + STEP_MS,
+        });
+
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
+        const advanced = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(advanced.applyAt).toBe(START_AT + 500 + STEP_MS);
+        expect(advanced.state.setlistIndex).toBe(2);
+      });
+
+      it('advances once at restore when the restored step end has passed', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        const restoreState = {
+          activeSetlistId: setlist.setlistId,
+          setlistIndex: 0,
+          setlistPlayback: {
+            status: 'playing',
+            itemId: itemAt(setlist.itemIds, 0),
+            isFlashConfirmed: true,
+            stepStartedAt: START_AT - 5 * STEP_MS,
+            stepEndsAt: START_AT - 4 * STEP_MS,
+            stepDurationMs: STEP_MS,
+            pausedRemainingMs: null,
+            isLooping: false,
+          },
+        };
+        const restorePosition: VjSetlistReadPosition = {
+          kind: 'index',
+          index: 0,
+          wrapsToFirst: false,
+        };
+        expect(service.restoreLookupsOf(restoreState, START_AT)).toEqual(
+          expect.arrayContaining([
+            {
+              kind: 'setlistItem',
+              setlistId: setlist.setlistId,
+              position: restorePosition,
+            },
+          ]),
+        );
+        const restored = attachedOf(
+          attachScreen(service, 'socket-a', randomUUID(), START_AT, {
+            restoreState,
+            restoreReads: setlistAnswers(setlist, restorePosition),
+          }),
+        );
+        expect(restored.isRestored).toBe(true);
+        expect(restored.state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          isFlashConfirmed: false,
+          stepEndsAt: START_AT - 4 * STEP_MS,
+        });
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(reads.readSetlist).toHaveBeenCalledTimes(1);
+        const frames = setlistFramesOf(broadcasts);
+        expect(frames).toHaveLength(1);
+        expect(itemAt(frames, 0).applyAt).toBeNull();
+        expect(itemAt(frames, 0).state.setlistIndex).toBe(1);
+        expect(itemAt(frames, 0).state.setlistPlayback).toMatchObject({
+          status: 'playing',
+          stepStartedAt: START_AT,
+          stepEndsAt: START_AT + STEP_MS,
+        });
+        await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS - 1);
+        expect(setlistFramesOf(broadcasts)).toHaveLength(1);
+      });
+
+      it('keeps a restored step end that has not passed', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        const restorePosition: VjSetlistReadPosition = {
+          kind: 'index',
+          index: 1,
+          wrapsToFirst: false,
+        };
+        attachedOf(
+          attachScreen(service, 'socket-a', randomUUID(), START_AT, {
+            restoreState: {
+              activeSetlistId: setlist.setlistId,
+              setlistIndex: 1,
+              setlistPlayback: {
+                status: 'playing',
+                stepStartedAt: START_AT - 1000,
+                stepEndsAt: START_AT + STEP_MS - 1000,
+                stepDurationMs: STEP_MS,
+                isLooping: false,
+              },
+            },
+            restoreReads: setlistAnswers(setlist, restorePosition),
+          }),
+        );
+        await jest.advanceTimersByTimeAsync(STEP_MS - 1000 - EARLY_MS - 1);
+        expect(reads.readSetlist).not.toHaveBeenCalled();
+        await jest.advanceTimersByTimeAsync(1);
+        const advanced = itemAt(setlistFramesOf(broadcasts), 0);
+        expect(advanced.applyAt).toBe(START_AT + STEP_MS - 1000);
+        expect(advanced.state.setlistIndex).toBe(2);
+      });
+
+      it('clears the step timer with the stage', async () => {
+        const setlist = testSetlist(3);
+        serveSetlist(reads, setlist);
+        playSetlist(remote, setlist);
+        expect(jest.getTimerCount()).toBe(1);
+        expect(service.dropStage(ADMIN_USER_ID)).toBe(true);
+        expect(jest.getTimerCount()).toBe(0);
+        await jest.advanceTimersByTimeAsync(10 * STEP_MS);
+        expect(reads.readSetlist).not.toHaveBeenCalled();
       });
     });
 
@@ -1364,61 +2328,336 @@ describe('VjStageService', () => {
       service.attachRemote(ADMIN_USER_ID, 'remote-socket', 0);
     });
 
-    it('clears the active set list on its delete and the index past a shrunk count', () => {
+    it('follows a removed step to the one before it and clears the active set list on its delete', () => {
       const remote = createRemote(service);
-      const setlistId = randomUUID();
-      appliedOf(
-        remote.send(
-          'stage:setlistSelect',
-          { setlistId, index: 2 },
-          START_AT,
-          lookupResults({
-            setlistItems: new Map([
-              [
-                vjSetlistItemKey(setlistId, 2),
-                {
-                  setlistId,
-                  index: 2,
-                  itemCount: 3,
-                  sceneId: randomUUID(),
-                  look: vjSceneLookOf(createVjStageState(randomUUID(), 0)),
-                },
-              ],
-            ]),
-          }),
-        ),
-      );
+      const setlist = testSetlist(3);
+      showSetlistStep(remote, setlist, 2);
       expect(
-        service.activeSetlistIdsAmong([setlistId.toUpperCase(), randomUUID()]),
-      ).toEqual([setlistId]);
+        service.activeSetlistIdsAmong([
+          setlist.setlistId.toUpperCase(),
+          randomUUID(),
+        ]),
+      ).toEqual([setlist.setlistId]);
 
+      setlist.itemIds = setlist.itemIds.slice(0, 2);
       const shrunk = service.applyLibraryChange(
-        libraryChange({
-          kind: 'setlist_items_changed',
-          setlistId,
-          setlistIds: [setlistId],
-        }),
+        setlistChange('setlist_items_changed', setlist),
         START_AT + 1,
-        new Map([[setlistId, 2]]),
+        new Map([[setlist.setlistId, followReadOf(setlist)]]),
       );
       expect(shrunk).toHaveLength(1);
       expect(itemAt(shrunk, 0).frame.cause).toBe('library');
       expect(itemAt(shrunk, 0).frame.state).toMatchObject({
-        activeSetlistId: setlistId,
-        setlistIndex: null,
+        activeSetlistId: setlist.setlistId,
+        setlistIndex: 1,
       });
+      expect(itemAt(shrunk, 0).frame.state.setlistPlayback.itemId).toBeNull();
 
       const deleted = service.applyLibraryChange(
-        libraryChange({
-          kind: 'setlist_deleted',
-          setlistId,
-          setlistIds: [setlistId],
-        }),
+        setlistChange('setlist_deleted', setlist),
         START_AT + 2,
         new Map(),
       );
       expect(itemAt(deleted, 0).frame.state.activeSetlistId).toBeNull();
-      expect(service.activeSetlistIdsAmong([setlistId])).toEqual([]);
+      expect(service.activeSetlistIdsAmong([setlist.setlistId])).toEqual([]);
+    });
+
+    it('follows with the item ids the last follow read gave', () => {
+      const remote = createRemote(service);
+      const setlist = testSetlist(4);
+      const firstId = itemAt(setlist.itemIds, 0);
+      const secondId = itemAt(setlist.itemIds, 1);
+      const thirdId = itemAt(setlist.itemIds, 2);
+      const fourthId = itemAt(setlist.itemIds, 3);
+      showSetlistStep(remote, setlist, 2);
+
+      const insertedId = randomUUID();
+      setlist.itemIds = [firstId, insertedId, secondId, thirdId, fourthId];
+      const inserted = itemAt(
+        service.applyLibraryChange(
+          setlistChange('setlist_items_changed', setlist),
+          START_AT + 1,
+          new Map([[setlist.setlistId, followReadOf(setlist)]]),
+        ),
+        0,
+      ).frame.state;
+      expect(inserted.setlistIndex).toBe(3);
+      expect(inserted.setlistPlayback.itemId).toBe(thirdId);
+
+      // The step on screen and the one before it go; the nearest kept step
+      // before it in the list the stage last read is the inserted one.
+      setlist.itemIds = [firstId, insertedId, fourthId];
+      const removed = itemAt(
+        service.applyLibraryChange(
+          setlistChange('setlist_items_changed', setlist),
+          START_AT + 2,
+          new Map([[setlist.setlistId, followReadOf(setlist)]]),
+        ),
+        0,
+      ).frame.state;
+      expect(removed.setlistIndex).toBe(1);
+      expect(removed.setlistPlayback.itemId).toBeNull();
+    });
+
+    it('follows a clip delete that removed a step of the active sequence', () => {
+      const remote = createRemote(service);
+      const setlist = testSetlist(3);
+      const deletedClipId = clipOfStep(setlist, 1);
+      const shownClipId = clipOfStep(setlist, 2);
+      showSetlistStep(remote, setlist, 2);
+
+      setlist.itemIds = [
+        itemAt(setlist.itemIds, 0),
+        itemAt(setlist.itemIds, 2),
+      ];
+      const followed = itemAt(
+        service.applyLibraryChange(
+          setlistChange('clip_deleted', setlist, { clipId: deletedClipId }),
+          START_AT + 1,
+          new Map([[setlist.setlistId, followReadOf(setlist)]]),
+        ),
+        0,
+      ).frame.state;
+      expect(followed.liveClipId).toBe(shownClipId);
+      expect(followed.setlistIndex).toBe(1);
+      expect(followed.setlistPlayback.itemId).toBe(itemAt(setlist.itemIds, 1));
+    });
+
+    it('clears the selection when the follow read of a clip delete finds no set list', () => {
+      const remote = createRemote(service);
+      const setlist = testSetlist(2);
+      showSetlistStep(remote, setlist, 1);
+      const cleared = itemAt(
+        service.applyLibraryChange(
+          setlistChange('clip_deleted', setlist, {
+            clipId: clipOfStep(setlist, 0),
+          }),
+          START_AT + 1,
+          new Map([[setlist.setlistId, null]]),
+        ),
+        0,
+      ).frame.state;
+      expect(cleared.activeSetlistId).toBeNull();
+      expect(cleared.setlistIndex).toBeNull();
+      expect(cleared.setlistPlayback.status).toBe('manual');
+    });
+
+    it('replaces the item ids when another set list is selected and forgets them on Stop', () => {
+      const remote = createRemote(service);
+      const first = testSetlist(3);
+      const second = testSetlist(4);
+      showSetlistStep(remote, first, 0);
+      expect(service.getSetlistItemIds(ADMIN_USER_ID)).toEqual(first.itemIds);
+
+      showSetlistStep(remote, second, 2);
+      expect(service.getSetlistItemIds(ADMIN_USER_ID)).toEqual(second.itemIds);
+      // The step on screen and the one before it go: the follow anchors on
+      // the second list's ids and lands on its first step.
+      second.itemIds = [itemAt(second.itemIds, 0), itemAt(second.itemIds, 3)];
+      const followed = itemAt(
+        service.applyLibraryChange(
+          setlistChange('setlist_items_changed', second),
+          START_AT + 1,
+          new Map([[second.setlistId, followReadOf(second)]]),
+        ),
+        0,
+      ).frame.state;
+      expect(followed.setlistIndex).toBe(0);
+      expect(service.getSetlistItemIds(ADMIN_USER_ID)).toEqual(second.itemIds);
+
+      appliedOf(
+        remote.send(
+          'stage:setlistSelect',
+          { setlistId: null, index: null },
+          START_AT,
+        ),
+      );
+      expect(service.getSetlistItemIds(ADMIN_USER_ID)).toBeNull();
+    });
+
+    it('refreshes the item ids on a landing that changes nothing', () => {
+      const remote = createRemote(service);
+      const setlist = testSetlist(2);
+      const arm = { setlistId: setlist.setlistId, index: null };
+      appliedOf(
+        remote.send(
+          'stage:setlistSelect',
+          arm,
+          START_AT,
+          setlistAnswers(setlist, { kind: 'count' }),
+        ),
+      );
+      setlist.itemIds = [...setlist.itemIds, randomUUID()];
+      const again = appliedOf(
+        remote.send(
+          'stage:setlistSelect',
+          arm,
+          START_AT,
+          setlistAnswers(setlist, { kind: 'count' }),
+        ),
+      );
+      expect(again.success.isNoop).toBe(true);
+      expect(service.getSetlistItemIds(ADMIN_USER_ID)).toEqual(setlist.itemIds);
+    });
+
+    it('feeds the item ids of a restore to a later follow', () => {
+      const setlist = testSetlist(4);
+      const restorePosition: VjSetlistReadPosition = {
+        kind: 'index',
+        index: 2,
+        wrapsToFirst: false,
+      };
+      const restored = attachedOf(
+        attachScreen(service, 'socket-a', randomUUID(), START_AT, {
+          restoreState: {
+            activeSetlistId: setlist.setlistId,
+            setlistIndex: 2,
+            setlistPlayback: { status: 'manual' },
+          },
+          restoreReads: setlistAnswers(setlist, restorePosition),
+        }),
+      );
+      expect(restored.state.setlistPlayback.itemId).toBe(
+        itemAt(setlist.itemIds, 2),
+      );
+      expect(service.getSetlistItemIds(ADMIN_USER_ID)).toEqual(setlist.itemIds);
+
+      // The step on screen and the one before it go: the restored ids find
+      // step 1 as the nearest kept step before it.
+      setlist.itemIds = [
+        itemAt(setlist.itemIds, 0),
+        itemAt(setlist.itemIds, 3),
+      ];
+      const followed = itemAt(
+        service.applyLibraryChange(
+          setlistChange('setlist_items_changed', setlist),
+          START_AT + 1,
+          new Map([[setlist.setlistId, followReadOf(setlist)]]),
+        ),
+        0,
+      ).frame.state;
+      expect(followed.setlistIndex).toBe(0);
+    });
+
+    it('answers vj_stale_setlist and lands nothing when a library follow landed while a command read the active set list', async () => {
+      const remote = createRemote(service);
+      const setlist = testSetlist(4);
+      const secondId = itemAt(setlist.itemIds, 1);
+      const thirdId = itemAt(setlist.itemIds, 2);
+      const fourthId = itemAt(setlist.itemIds, 3);
+      const lastClipId = clipOfStep(setlist, 3);
+      showSetlistStep(remote, setlist, 2);
+      let releaseRead: (read: VjSetlistRead | null) => void = () => undefined;
+      reads.readSetlist.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseRead = resolve;
+          }),
+      );
+      const payload = remote.nextPayload({});
+      const pending = service.runRemoteCommand(
+        ADMIN_USER_ID,
+        'stage:setlistNext',
+        payload,
+        () => START_AT,
+      );
+      const olderRead = setlistReadAt(setlist, {
+        kind: 'index',
+        index: 3,
+        wrapsToFirst: false,
+      });
+
+      setlist.itemIds = [secondId, thirdId, fourthId];
+      const followed = service.applyLibraryChange(
+        setlistChange('setlist_items_changed', setlist),
+        START_AT,
+        new Map([[setlist.setlistId, followReadOf(setlist)]]),
+      );
+      expect(itemAt(followed, 0).frame.state.setlistIndex).toBe(1);
+      releaseRead(olderRead);
+      const stale = failureOf(await pending);
+
+      expect(stale.code).toBe('vj_stale_setlist');
+      expect(stale.state?.setlistIndex).toBe(1);
+      expect(stateOf(service).setlistIndex).toBe(1);
+      expect(stateOf(service).setlistPlayback.itemId).toBe(thirdId);
+      expect(service.getSetlistItemIds(ADMIN_USER_ID)).toEqual([
+        secondId,
+        thirdId,
+        fourthId,
+      ]);
+      expect(
+        failureOf(
+          service.applyRemoteCommand(
+            ADMIN_USER_ID,
+            'stage:setlistNext',
+            payload,
+            EMPTY_VJ_LOOKUP_RESULTS,
+            START_AT,
+          ),
+        ).code,
+      ).toBe('vj_stale_command');
+
+      const retried = frameOf(
+        remote.send(
+          'stage:setlistNext',
+          {},
+          START_AT,
+          setlistAnswers(setlist, {
+            kind: 'index',
+            index: 2,
+            wrapsToFirst: false,
+          }),
+        ),
+      );
+      expect(retried.state.setlistIndex).toBe(2);
+      expect(retried.state.liveClipId).toBe(lastClipId);
+    });
+
+    it('lands a command whose read started after the last library follow', async () => {
+      const remote = createRemote(service);
+      const setlist = testSetlist(4);
+      showSetlistStep(remote, setlist, 2);
+      setlist.itemIds = setlist.itemIds.slice(1);
+      service.applyLibraryChange(
+        setlistChange('setlist_items_changed', setlist),
+        START_AT,
+        new Map([[setlist.setlistId, followReadOf(setlist)]]),
+      );
+      serveSetlist(reads, setlist);
+
+      const stepped = appliedOf(
+        await service.runRemoteCommand(
+          ADMIN_USER_ID,
+          'stage:setlistNext',
+          remote.nextPayload({}),
+          () => START_AT,
+        ),
+      );
+      expect(stepped.frame?.state.setlistIndex).toBe(2);
+    });
+
+    it('lands a set list update on every stage with that set list active', () => {
+      const otherAdminUserId = randomUUID();
+      service.attachRemote(otherAdminUserId, 'other-remote-socket', 0);
+      const setlist = testSetlist(2);
+      showSetlistStep(createRemote(service), setlist, 0);
+      showSetlistStep(createRemote(service, otherAdminUserId), setlist, 1);
+
+      setlist.isLooping = true;
+      const frames = service.applyLibraryChange(
+        setlistChange('setlist_updated', setlist),
+        START_AT + 1,
+        new Map([[setlist.setlistId, followReadOf(setlist)]]),
+      );
+      expect(frames.map((entry) => entry.adminUserId).sort()).toEqual(
+        [ADMIN_USER_ID, otherAdminUserId].sort(),
+      );
+      for (const { frame } of frames) {
+        expect(frame.cause).toBe('library');
+        expect(frame.state.setlistPlayback.isLooping).toBe(true);
+      }
+      expect(stateOf(service, otherAdminUserId).setlistIndex).toBe(1);
     });
 
     it('clears the mix, overrides, history and exclusions of a deleted clip', () => {

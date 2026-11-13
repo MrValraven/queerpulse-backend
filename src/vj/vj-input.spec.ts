@@ -11,8 +11,11 @@ import {
   normalizeIdPermutation,
   normalizePackName,
   normalizeSceneName,
+  normalizeSetlistItems,
+  normalizeSetlistLooping,
   normalizeSetlistName,
   normalizeSetlistSceneIds,
+  normalizeStepDuration,
   parseMediaClipIds,
   parseRequiredClipIds,
   readEventIdBody,
@@ -31,6 +34,9 @@ const PACK_ID = '77777777-7777-4777-8777-777777777777';
 const SCENE_ID = '88888888-8888-4888-8888-888888888888';
 const OTHER_SCENE_ID = '99999999-9999-4999-8999-999999999999';
 const SETLIST_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const CLIP_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const ITEM_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const OTHER_ITEM_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
 /** Runs a function and answers the `code` and extra body fields it refused with. */
 function refusalOf(run: () => unknown): Record<string, unknown> {
@@ -526,6 +532,220 @@ describe('normalizeSetlistSceneIds', () => {
     expect(
       refusalOf(() => normalizeSetlistSceneIds(mixed, SETLIST_ID)).code,
     ).toBe('VJ_SETLIST_ITEMS_INVALID');
+  });
+});
+
+describe('normalizeStepDuration', () => {
+  it('copies a valid seconds or beats length', () => {
+    expect(normalizeStepDuration({ kind: 'seconds', value: 2 })).toEqual({
+      kind: 'seconds',
+      value: 2,
+    });
+    expect(normalizeStepDuration({ kind: 'seconds', value: 600 })).toEqual({
+      kind: 'seconds',
+      value: 600,
+    });
+    for (const beats of [4, 8, 16, 32, 64]) {
+      expect(normalizeStepDuration({ kind: 'beats', value: beats })).toEqual({
+        kind: 'beats',
+        value: beats,
+      });
+    }
+  });
+
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['a number', 8],
+    ['an array', [{ kind: 'seconds', value: 8 }]],
+    ['1 second', { kind: 'seconds', value: 1 }],
+    ['601 seconds', { kind: 'seconds', value: 601 }],
+    ['a fraction of seconds', { kind: 'seconds', value: 2.5 }],
+    ['seconds as text', { kind: 'seconds', value: '8' }],
+    ['2 beats', { kind: 'beats', value: 2 }],
+    ['128 beats', { kind: 'beats', value: 128 }],
+    ['an unknown kind', { kind: 'bars', value: 4 }],
+    ['an extra key', { kind: 'seconds', value: 8, isOn: true }],
+    ['a missing value', { kind: 'seconds' }],
+  ])('answers the step duration code for %s', (_label, value) => {
+    expect(refusalOf(() => normalizeStepDuration(value)).code).toBe(
+      'VJ_SETLIST_STEP_DURATION_INVALID',
+    );
+  });
+});
+
+describe('normalizeSetlistLooping', () => {
+  it('reads true and false', () => {
+    expect(normalizeSetlistLooping(true)).toBe(true);
+    expect(normalizeSetlistLooping(false)).toBe(false);
+  });
+
+  it.each([undefined, null, 'true', 1, 0, {}])(
+    'answers the loop code for %p',
+    (value) => {
+      expect(refusalOf(() => normalizeSetlistLooping(value)).code).toBe(
+        'VJ_SETLIST_LOOP_INVALID',
+      );
+    },
+  );
+});
+
+describe('normalizeSetlistItems', () => {
+  it('reads scene and clip steps with lowercased ids and null defaults', () => {
+    expect(normalizeSetlistItems([], SETLIST_ID)).toEqual([]);
+    expect(
+      normalizeSetlistItems(
+        [
+          { id: ITEM_ID.toUpperCase(), kind: 'scene', sceneId: SCENE_ID },
+          {
+            kind: 'clip',
+            clipId: CLIP_ID.toUpperCase(),
+            sceneId: null,
+            duration: { kind: 'beats', value: 16 },
+          },
+          { kind: 'scene', sceneId: SCENE_ID, clipId: null, duration: null },
+        ],
+        SETLIST_ID,
+      ),
+    ).toEqual([
+      {
+        id: ITEM_ID,
+        kind: 'scene',
+        sceneId: SCENE_ID,
+        clipId: null,
+        duration: null,
+      },
+      {
+        id: null,
+        kind: 'clip',
+        sceneId: null,
+        clipId: CLIP_ID,
+        duration: { kind: 'beats', value: 16 },
+      },
+      {
+        id: null,
+        kind: 'scene',
+        sceneId: SCENE_ID,
+        clipId: null,
+        duration: null,
+      },
+    ]);
+  });
+
+  it.each([undefined, null, 'items', { items: [] }, 5])(
+    'answers the items code for the non-array %p',
+    (value) => {
+      expect(refusalOf(() => normalizeSetlistItems(value, null)).code).toBe(
+        'VJ_SETLIST_ITEMS_INVALID',
+      );
+    },
+  );
+
+  it('answers the old sceneIds body with the items code', () => {
+    const oldBody = { sceneIds: [SCENE_ID] };
+    expect(
+      refusalOf(() =>
+        normalizeSetlistItems(
+          (oldBody as { items?: unknown }).items,
+          SETLIST_ID,
+        ),
+      ).code,
+    ).toBe('VJ_SETLIST_ITEMS_INVALID');
+  });
+
+  it('caps the list at 100 steps before reading any entry', () => {
+    const step = { kind: 'scene', sceneId: SCENE_ID };
+    const hundred = Array.from({ length: 100 }, () => step);
+    expect(normalizeSetlistItems(hundred, SETLIST_ID)).toHaveLength(100);
+    const tooMany = [...hundred, 'not a step'];
+    const refusal = refusalOf(() => normalizeSetlistItems(tooMany, SETLIST_ID));
+    expect(refusal.code).toBe('VJ_SETLIST_FULL');
+    expect(refusal.setlistId).toBe(SETLIST_ID);
+    const createRefusal = refusalOf(() => normalizeSetlistItems(tooMany, null));
+    expect(createRefusal.code).toBe('VJ_SETLIST_FULL');
+    expect(createRefusal).not.toHaveProperty('setlistId');
+  });
+
+  it.each([
+    ['null', null],
+    ['an array', [SCENE_ID]],
+    ['a uuid string', SCENE_ID],
+    ['an unknown key', { kind: 'scene', sceneId: SCENE_ID, look: {} }],
+    ['a missing kind', { sceneId: SCENE_ID }],
+    ['an unknown kind', { kind: 'generator', sceneId: SCENE_ID }],
+    ['a scene step without a scene', { kind: 'scene' }],
+    ['a scene step with a bad scene id', { kind: 'scene', sceneId: 'nope' }],
+    [
+      'a scene step that carries a clip',
+      { kind: 'scene', sceneId: SCENE_ID, clipId: CLIP_ID },
+    ],
+    ['a clip step with a scene id only', { kind: 'clip', sceneId: SCENE_ID }],
+    ['a clip step with a bad clip id', { kind: 'clip', clipId: 7 }],
+    [
+      'a clip step that carries a scene',
+      { kind: 'clip', clipId: CLIP_ID, sceneId: SCENE_ID },
+    ],
+    ['a malformed id', { id: 'nope', kind: 'scene', sceneId: SCENE_ID }],
+    ['a null id', { id: null, kind: 'scene', sceneId: SCENE_ID }],
+  ])('answers the step code for %s', (_label, entry) => {
+    expect(
+      refusalOf(() => normalizeSetlistItems([entry], SETLIST_ID)).code,
+    ).toBe('VJ_SETLIST_STEP_INVALID');
+  });
+
+  it('answers the step code for an id repeated in the body, ignoring case', () => {
+    expect(
+      refusalOf(() =>
+        normalizeSetlistItems(
+          [
+            { id: ITEM_ID, kind: 'scene', sceneId: SCENE_ID },
+            { id: OTHER_ITEM_ID, kind: 'scene', sceneId: SCENE_ID },
+            { id: ITEM_ID.toUpperCase(), kind: 'clip', clipId: CLIP_ID },
+          ],
+          SETLIST_ID,
+        ),
+      ).code,
+    ).toBe('VJ_SETLIST_STEP_INVALID');
+  });
+
+  it('answers the step duration code for a bad step length', () => {
+    for (const duration of [
+      { kind: 'seconds', value: 1 },
+      { kind: 'beats', value: 3 },
+      8,
+      'eight',
+    ]) {
+      expect(
+        refusalOf(() =>
+          normalizeSetlistItems(
+            [{ kind: 'scene', sceneId: SCENE_ID, duration }],
+            SETLIST_ID,
+          ),
+        ).code,
+      ).toBe('VJ_SETLIST_STEP_DURATION_INVALID');
+    }
+  });
+
+  it('checks the step shape before its duration, and entries in list order', () => {
+    expect(
+      refusalOf(() =>
+        normalizeSetlistItems(
+          [{ id: 'nope', kind: 'scene', sceneId: SCENE_ID, duration: 1 }],
+          SETLIST_ID,
+        ),
+      ).code,
+    ).toBe('VJ_SETLIST_STEP_INVALID');
+    expect(
+      refusalOf(() =>
+        normalizeSetlistItems(
+          [
+            { kind: 'scene', sceneId: SCENE_ID, duration: 1 },
+            { kind: 'scene', sceneId: 'nope' },
+          ],
+          SETLIST_ID,
+        ),
+      ).code,
+    ).toBe('VJ_SETLIST_STEP_DURATION_INVALID');
   });
 });
 

@@ -75,7 +75,7 @@ const EXPECTED_ROUTES = [
   ['createSetlist', RequestMethod.POST, 'setlists'],
   ['reorderSetlists', RequestMethod.PATCH, 'setlists/reorder'],
   ['setSetlistItems', RequestMethod.PUT, 'setlists/:id/items'],
-  ['renameSetlist', RequestMethod.PATCH, 'setlists/:id'],
+  ['updateSetlist', RequestMethod.PATCH, 'setlists/:id'],
   ['deleteSetlist', RequestMethod.DELETE, 'setlists/:id'],
 ] as const;
 
@@ -224,7 +224,7 @@ describe('AdminVjController routes', () => {
     ['reorderScenes', 'updateScene'],
     ['reorderScenes', 'deleteScene'],
     ['reorderSetlists', 'setSetlistItems'],
-    ['reorderSetlists', 'renameSetlist'],
+    ['reorderSetlists', 'updateSetlist'],
     ['reorderSetlists', 'deleteSetlist'],
   ] as [HandlerName, HandlerName][])(
     'declares the literal route %s before the parameter route %s',
@@ -256,7 +256,7 @@ describe('AdminVjController routes', () => {
       'updateScene',
       'deleteScene',
       'setSetlistItems',
-      'renameSetlist',
+      'updateSetlist',
       'deleteSetlist',
     ] as HandlerName[]) {
       expect(
@@ -355,7 +355,7 @@ const SETLIST_METHOD_NAMES = [
   'createSetlist',
   'reorderSetlists',
   'setSetlistItems',
-  'renameSetlist',
+  'updateSetlist',
   'deleteSetlist',
 ] as const;
 
@@ -516,8 +516,21 @@ describe('AdminVjController delegation', () => {
 
   it('delegates the set list routes to the set list service', async () => {
     const reorderBody = { setlistIds: [SETLIST_ID] };
-    const itemsBody = { sceneIds: [SCENE_ID, SCENE_ID] };
-    const renameBody = { name: 'Warm up' };
+    const itemsBody = {
+      items: [
+        { kind: 'scene', sceneId: SCENE_ID },
+        {
+          kind: 'scene',
+          sceneId: SCENE_ID,
+          duration: { kind: 'beats', value: 8 },
+        },
+      ],
+    };
+    const updateBody = {
+      name: 'Warm up',
+      isLooping: true,
+      stepDuration: { kind: 'seconds', value: 12 },
+    };
 
     await expect(controller.listSetlists()).resolves.toBe(answer);
     await expect(controller.reorderSetlists(reorderBody)).resolves.toBe(answer);
@@ -525,7 +538,7 @@ describe('AdminVjController delegation', () => {
       controller.setSetlistItems(SETLIST_ID, itemsBody),
     ).resolves.toBe(answer);
     await expect(
-      controller.renameSetlist(SETLIST_ID, renameBody),
+      controller.updateSetlist(SETLIST_ID, updateBody),
     ).resolves.toBe(answer);
     await expect(controller.deleteSetlist(SETLIST_ID)).resolves.toBe(answer);
 
@@ -535,7 +548,7 @@ describe('AdminVjController delegation', () => {
       SETLIST_ID,
       itemsBody,
     );
-    expect(setlists.renameSetlist).toHaveBeenCalledWith(SETLIST_ID, renameBody);
+    expect(setlists.updateSetlist).toHaveBeenCalledWith(SETLIST_ID, updateBody);
     expect(setlists.deleteSetlist).toHaveBeenCalledWith(SETLIST_ID);
   });
 });

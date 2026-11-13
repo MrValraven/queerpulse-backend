@@ -9,10 +9,12 @@ import { VjClip } from './entities/vj-clip.entity';
 import {
   readVjClipDto,
   readVjClipPackIds,
+  readVjClipSetlistItemCounts,
   readVjCreatorProfiles,
   readVjPackDto,
   readVjPackSummaries,
   toVjClipDtos,
+  VJ_CLIP_SETLIST_ITEM_COUNTS_SQL,
   VJ_PACK_SUMMARY_V2_SQL,
 } from './vj-library-reads';
 
@@ -254,13 +256,18 @@ describe('vj-library-reads', () => {
     expect(manager.query).not.toHaveBeenCalled();
   });
 
-  it('reads creators and pack ids in one query each', async () => {
+  it('reads creators, pack ids and set list item counts in one query each', async () => {
     const manager = buildManager();
-    manager.query.mockResolvedValueOnce([
-      { clip_id: CLIP_ID, pack_id: PACK_ID },
-      { clip_id: CLIP_ID, pack_id: OTHER_PACK_ID },
-      { clip_id: OTHER_CLIP_ID, pack_id: OTHER_PACK_ID },
-    ]);
+    manager.query
+      .mockResolvedValueOnce([
+        { clip_id: CLIP_ID, pack_id: PACK_ID },
+        { clip_id: CLIP_ID, pack_id: OTHER_PACK_ID },
+        { clip_id: OTHER_CLIP_ID, pack_id: OTHER_PACK_ID },
+      ])
+      .mockResolvedValueOnce([
+        { clip_id: CLIP_ID, item_count: 3 },
+        { clip_id: OTHER_CLIP_ID, item_count: '1' },
+      ]);
     const clips = [
       buildClip(),
       buildClip({
@@ -272,12 +279,17 @@ describe('vj-library-reads', () => {
     ];
     const dtos = await toVjClipDtos(asManager(manager), clips);
 
-    expect(manager.query).toHaveBeenCalledTimes(1);
+    expect(manager.query).toHaveBeenCalledTimes(2);
     const [, queryParameters] = manager.query.mock.calls[0] as [
       string,
       unknown[],
     ];
     expect(queryParameters).toEqual([[CLIP_ID, OTHER_CLIP_ID, uuidAt(2, 3)]]);
+    expect(manager.query.mock.calls[1]).toEqual([
+      VJ_CLIP_SETLIST_ITEM_COUNTS_SQL,
+      [[CLIP_ID, OTHER_CLIP_ID, uuidAt(2, 3)]],
+    ]);
+    expect(dtos.map((dto) => dto.setlistItemCount)).toEqual([3, 1, 0]);
     expect(manager.find).toHaveBeenCalledTimes(1);
     const [, profileOptions] = manager.find.mock.calls[0] as [
       unknown,
@@ -313,6 +325,9 @@ describe('vj-library-reads', () => {
       new Map(),
     );
     await expect(
+      readVjClipSetlistItemCounts(asManager(manager), []),
+    ).resolves.toEqual(new Map());
+    await expect(
       readVjCreatorProfiles(asManager(manager), [null, null]),
     ).resolves.toEqual(new Map());
     expect(manager.query).not.toHaveBeenCalled();
@@ -330,7 +345,27 @@ describe('vj-library-reads', () => {
       id: CLIP_ID,
       packIds: [PACK_ID],
       packCount: 1,
+      setlistItemCount: 0,
     });
     expect(JSON.stringify(clip)).not.toContain(`"${CLIP_KEY}"`);
+  });
+
+  it("counts each clip's set list items with the contract 4.1 read", async () => {
+    expect(VJ_CLIP_SETLIST_ITEM_COUNTS_SQL).toBe(
+      'SELECT "item"."clip_id", COUNT(*)::int AS "item_count" FROM "vj_setlist_items" "item" WHERE "item"."clip_id" = ANY($1::uuid[]) GROUP BY "item"."clip_id"',
+    );
+    const manager = buildManager();
+    manager.query.mockResolvedValueOnce([
+      { clip_id: OTHER_CLIP_ID, item_count: '4' },
+    ]);
+    const counts = await readVjClipSetlistItemCounts(asManager(manager), [
+      CLIP_ID,
+      OTHER_CLIP_ID,
+    ]);
+    expect(counts).toEqual(new Map([[OTHER_CLIP_ID, 4]]));
+    expect(manager.query).toHaveBeenCalledWith(
+      VJ_CLIP_SETLIST_ITEM_COUNTS_SQL,
+      [[CLIP_ID, OTHER_CLIP_ID]],
+    );
   });
 });

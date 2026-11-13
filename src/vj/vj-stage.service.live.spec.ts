@@ -24,8 +24,8 @@ function createService() {
       ),
     readPackClipForAdvance: jest.fn().mockResolvedValue({ isFavorite: false }),
     readSceneLook: jest.fn().mockResolvedValue(null),
-    readSetlistItem: jest.fn().mockResolvedValue(null),
-    setlistItemCount: jest.fn().mockResolvedValue(null),
+    readSetlist: jest.fn().mockResolvedValue(null),
+    readSetlistFollow: jest.fn().mockResolvedValue(null),
   };
   const service = new VjStageService(reads as unknown as VjStageReadsService);
   const broadcasts: { adminUserId: string; frame: VjStageFrame }[] = [];

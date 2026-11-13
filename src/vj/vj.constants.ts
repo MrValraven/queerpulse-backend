@@ -7,7 +7,8 @@ import {
 } from './vj.contract';
 
 /** Every reason code a VJ REST or upload refusal can carry: the v1 contract
- *  section 4 table, then the v2 contract section 5 table, each in table order. */
+ *  section 4 table, then the v2 contract section 5 table, each in table order,
+ *  with the sequences contract 4.3 codes after `VJ_SETLIST_FULL`. */
 export const VJ_REFUSAL_CODES = [
   'VJ_PACK_NOT_FOUND',
   'VJ_PACK_NAME_REQUIRED',
@@ -56,6 +57,11 @@ export const VJ_REFUSAL_CODES = [
   'VJ_SETLIST_REORDER_MISMATCH',
   'VJ_SETLIST_ITEMS_INVALID',
   'VJ_SETLIST_FULL',
+  'VJ_SETLIST_STEP_INVALID',
+  'VJ_SETLIST_STEP_DURATION_INVALID',
+  'VJ_SETLIST_ITEM_NOT_FOUND',
+  'VJ_SETLIST_LOOP_INVALID',
+  'VJ_SETLIST_PATCH_EMPTY',
   'VJ_CONNECTION_NOT_FOUND',
   'VJ_CONNECTION_NOT_YOURS',
 ] as const;
@@ -253,11 +259,33 @@ export const VJ_REFUSALS: Record<
   },
   VJ_SETLIST_ITEMS_INVALID: {
     status: HttpStatus.BAD_REQUEST,
-    message: 'sceneIds must be an array of scene ids.',
+    message: 'items must be an array of steps.',
   },
   VJ_SETLIST_FULL: {
     status: HttpStatus.CONFLICT,
-    message: `A set list holds at most ${VJ_LIMITS.setlistItemsMax} scenes.`,
+    message: `A set list holds at most ${VJ_LIMITS.setlistItemsMax} steps.`,
+  },
+  VJ_SETLIST_STEP_INVALID: {
+    status: HttpStatus.BAD_REQUEST,
+    message:
+      'Each step needs a kind of scene or clip, the matching uuid, and only the fields id, kind, sceneId, clipId and duration.',
+  },
+  VJ_SETLIST_STEP_DURATION_INVALID: {
+    status: HttpStatus.BAD_REQUEST,
+    message:
+      'A step length must be 2 to 600 seconds, or 4, 8, 16, 32 or 64 beats.',
+  },
+  VJ_SETLIST_ITEM_NOT_FOUND: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'A step id names no item of this set list.',
+  },
+  VJ_SETLIST_LOOP_INVALID: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'isLooping must be true or false.',
+  },
+  VJ_SETLIST_PATCH_EMPTY: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'The update names no field to change.',
   },
   VJ_CONNECTION_NOT_FOUND: {
     status: HttpStatus.NOT_FOUND,
@@ -277,6 +305,7 @@ export type VjRefusalExtra =
   | 'maxBytes'
   | 'setlistId'
   | 'sceneId'
+  | 'clipId'
   | 'lookField';
 
 /** The extra body fields each code carries. `vjError` copies only these from
@@ -293,7 +322,7 @@ export const VJ_REFUSAL_EXTRAS: Record<
   VJ_PACK_REORDER_MISMATCH: [],
   VJ_PACK_FULL: ['packId'],
   VJ_PACK_CLIPS_REORDER_MISMATCH: [],
-  VJ_CLIP_NOT_FOUND: [],
+  VJ_CLIP_NOT_FOUND: ['clipId'],
   VJ_CLIP_ALREADY_IN_PACK: ['packId'],
   VJ_CLIP_NOT_IN_PACK: ['packId'],
   VJ_CLIP_TITLE_REQUIRED: [],
@@ -332,14 +361,19 @@ export const VJ_REFUSAL_EXTRAS: Record<
   VJ_SETLIST_REORDER_MISMATCH: [],
   VJ_SETLIST_ITEMS_INVALID: [],
   VJ_SETLIST_FULL: ['setlistId'],
+  VJ_SETLIST_STEP_INVALID: [],
+  VJ_SETLIST_STEP_DURATION_INVALID: [],
+  VJ_SETLIST_ITEM_NOT_FOUND: [],
+  VJ_SETLIST_LOOP_INVALID: [],
+  VJ_SETLIST_PATCH_EMPTY: [],
   VJ_CONNECTION_NOT_FOUND: [],
   VJ_CONNECTION_NOT_YOURS: [],
 };
 
 /** What a caller may hand `vjError`: the body extras, each copied only when
- *  the code lists it. `sceneId` goes only on a set list item refusal (a scene
- *  route's own `:id` is never echoed), and `lookField` is a dot path of schema
- *  names with no value in it. */
+ *  the code lists it. `sceneId` and `clipId` go only on a set list item
+ *  refusal (a scene or clip route's own `:id` is never echoed), and
+ *  `lookField` is a dot path of schema names with no value in it. */
 export interface VjErrorOptions {
   field?: 'storageKey' | 'thumbnailStorageKey' | 'previewStorageKey';
   packId?: string;
@@ -347,6 +381,7 @@ export interface VjErrorOptions {
   maxBytes?: number;
   setlistId?: string;
   sceneId?: string;
+  clipId?: string;
   lookField?: string;
 }
 
@@ -463,11 +498,11 @@ export const VJ_SOCKET_ERROR_MESSAGES: Record<VjSocketErrorCode, string> = {
   vj_scene_not_found: 'No VJ scene has this id.',
   vj_setlist_not_found: 'No VJ set list has this id.',
   vj_setlist_none: 'No set list is active on this stage.',
-  vj_setlist_empty: 'The set list holds no scenes.',
+  vj_setlist_empty: 'The set list holds no steps.',
   vj_setlist_index_invalid:
     'The set list index is outside the list or names no set list.',
-  vj_setlist_start: 'The set list is already at its first scene.',
-  vj_setlist_end: 'The set list holds no scene after this one.',
+  vj_setlist_start: 'The set list is already at its first step.',
+  vj_setlist_end: 'The set list holds no step after this one.',
   vj_stale_setlist: 'The set list position moved while this command was read.',
   vj_countdown_target_conflict:
     'A countdown takes either targetAt or durationMs.',
@@ -484,6 +519,8 @@ export const VJ_SOCKET_ERROR_MESSAGES: Record<VjSocketErrorCode, string> = {
   vj_stopped: VJ_STOPPED_MESSAGE,
   vj_render_mode_invalid: 'The render mode must be effects or simple.',
   vj_no_screens_connected: 'No screen is connected to this stage.',
+  vj_setlist_flash_unconfirmed:
+    'The next step flashes and no one confirmed the flash warning for this run.',
 };
 
 /** The one way a VJ socket frame is refused: `{ ok: false, code, message,

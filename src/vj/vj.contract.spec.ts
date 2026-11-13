@@ -1,4 +1,5 @@
 import {
+  DEFAULT_VJ_STEP_DURATION,
   VJ_CLIENT_FRAME_NAMES,
   VJ_CONTRACT_VERSION,
   VJ_EFFECT_CATALOG,
@@ -13,32 +14,71 @@ import {
   VJ_RENDER_MODES,
   VJ_RENDERERS,
   VJ_SERVER_FRAME_NAMES,
+  VJ_SETLIST_ITEM_KINDS,
+  VJ_SETLIST_PLAYBACK_STATUSES,
   VJ_SOCKET_ERROR_CODES,
   VJ_SPEEDS,
   VJ_STAGE_CAUSES,
+  VJ_STEP_BEAT_COUNTS,
+  VJ_STEP_DURATION_KINDS,
   VJ_TRANSITION_CATALOG,
   VJ_TRANSITION_IDS,
   canonicalVjStageState,
+  createVjSetlistPlayback,
   createVjStageState,
   isSameVjStageContent,
+  isVjStepDuration,
+  restoredVjSetlistPlayback,
   roundVjAmount,
+  stampVjSetlistClock,
   upgradeVjStageFieldsV1,
+  upgradeVjStageFieldsV2,
   vjBeatPositionAt,
   vjBlackoutFadeMs,
   vjClockOffsetMs,
   vjEffectSettingOf,
+  vjIsLiveSourceChange,
   vjIsQuantizedChange,
   vjLastDownbeatAt,
   vjNextBoundaryAt,
   vjQuantizedApplyAt,
+  vjResolvedStepDuration,
+  vjSceneLookFlashes,
   vjSceneLookOf,
+  vjSetlistAdvanceApplyAt,
+  vjSetlistClearedState,
+  vjSetlistFollowState,
+  vjSetlistIndexPosition,
+  vjSetlistLoopingState,
+  vjSetlistSelectReadPosition,
+  vjSetlistSelectTransition,
+  vjSetlistSetPlayingReadPosition,
+  vjSetlistSetPlayingTransition,
+  vjSetlistStepFlashes,
+  vjSetlistStepReadPosition,
+  vjSetlistStepTransition,
+  vjSetlistTakeoverState,
+  vjSetlistTimerReadPosition,
+  vjSetlistTimerTargetAt,
+  vjSetlistTimerTransition,
   vjShuffleIntervalMs,
+  vjStepDurationMs,
   vjStrobeFlashesPerSecond,
   vjTransitionLengthMs,
   type VjClockSample,
   type VjEffectId,
+  type VjSceneLook,
+  type VjSetlistPlayback,
+  type VjSetlistRead,
+  type VjSetlistReadPosition,
+  type VjSetlistRefusalCode,
+  type VjSetlistRestoreInput,
+  type VjSetlistStepRead,
+  type VjSetlistTransition,
+  type VjSetlistTransitionResult,
   type VjShuffle,
   type VjStageState,
+  type VjStepDuration,
   type VjTempo,
   type VjTransition,
 } from './vj.contract';
@@ -157,6 +197,16 @@ describe('vj contract', () => {
       screenOverrides: {},
       activeSetlistId: null,
       setlistIndex: null,
+      setlistPlayback: {
+        status: 'manual',
+        itemId: null,
+        isFlashConfirmed: false,
+        stepStartedAt: null,
+        stepEndsAt: null,
+        stepDurationMs: null,
+        pausedRemainingMs: null,
+        isLooping: false,
+      },
       updatedAt: 1000,
     });
   });
@@ -219,6 +269,10 @@ describe('vj contract', () => {
       setlistNameMax: 60,
       setlistsMax: 50,
       setlistItemsMax: 100,
+      setlistStepSecondsMin: 2,
+      setlistStepSecondsMax: 600,
+      setlistStepSecondsDefault: 8,
+      setlistTimerRetryMs: 1000,
       downbeatSkewMsMax: 60000,
       quantizeMinLeadMs: 150,
       quantizedAdvanceEarlyMs: 300,
@@ -242,6 +296,7 @@ describe('vj contract', () => {
       'mic_tempo',
       'overlay_timeout',
       'countdown_end',
+      'setlist',
     ]);
   });
 
@@ -971,6 +1026,8 @@ describe('vj contract', () => {
       'stage:setlistSelect',
       'stage:setlistNext',
       'stage:setlistPrevious',
+      'stage:setlistSetPlaying',
+      'stage:setlistSetLooping',
       'stage:setCountdown',
       'stage:setLogo',
       'stage:setEventCard',
@@ -1006,6 +1063,8 @@ describe('vj contract', () => {
       'stage:setlistSelect',
       'stage:setlistNext',
       'stage:setlistPrevious',
+      'stage:setlistSetPlaying',
+      'stage:setlistSetLooping',
       'stage:setCountdown',
       'stage:setLogo',
       'stage:setEventCard',
@@ -1033,29 +1092,32 @@ describe('vj contract', () => {
       'scene_deleted',
       'scenes_reordered',
       'setlist_created',
-      'setlist_renamed',
+      'setlist_updated',
       'setlist_items_changed',
       'setlist_deleted',
       'setlists_reordered',
     ]);
-    expect(VJ_SOCKET_ERROR_CODES).toHaveLength(75);
-    expect(new Set(VJ_SOCKET_ERROR_CODES).size).toBe(75);
+    expect(VJ_SOCKET_ERROR_CODES).toHaveLength(76);
+    expect(new Set(VJ_SOCKET_ERROR_CODES).size).toBe(76);
     expect(VJ_SOCKET_ERROR_CODES[0]).toBe('vj_not_admin');
     expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 1]).toBe(
-      'vj_no_screens_connected',
+      'vj_setlist_flash_unconfirmed',
     );
     expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 2]).toBe(
-      'vj_render_mode_invalid',
+      'vj_no_screens_connected',
     );
     expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 3]).toBe(
+      'vj_render_mode_invalid',
+    );
+    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 4]).toBe(
       'vj_stopped',
     );
     const bpmIndex = VJ_SOCKET_ERROR_CODES.indexOf('vj_bpm_out_of_range');
     expect(VJ_SOCKET_ERROR_CODES[bpmIndex + 1]).toBe('vj_client_outdated');
-    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 4]).toBe(
+    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 5]).toBe(
       'vj_server_error',
     );
-    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 5]).toBe(
+    expect(VJ_SOCKET_ERROR_CODES[VJ_SOCKET_ERROR_CODES.length - 6]).toBe(
       'vj_event_card_no_event',
     );
     expect(VJ_LIBRARY_CHANGED).toBe('vj.library.changed');
@@ -1064,5 +1126,2099 @@ describe('vj contract', () => {
   it('lists the simple renderer and the render modes', () => {
     expect(VJ_RENDERERS).toEqual(['webgl2', 'dom', 'simple']);
     expect(VJ_RENDER_MODES).toEqual(['effects', 'simple']);
+  });
+});
+
+const SETLIST_ID = '11111111-1111-4111-8111-111111111111';
+const OTHER_SETLIST_ID = '22222222-2222-4222-8222-222222222222';
+const SCENE_ID = '33333333-3333-4333-8333-333333333333';
+const ITEM_A = 'a0000000-0000-4000-8000-00000000000a';
+const ITEM_B = 'b0000000-0000-4000-8000-00000000000b';
+const ITEM_C = 'c0000000-0000-4000-8000-00000000000c';
+const ITEM_D = 'd0000000-0000-4000-8000-00000000000d';
+const ITEM_X = 'e0000000-0000-4000-8000-00000000000e';
+const ITEM_IDS = [ITEM_A, ITEM_B, ITEM_C, ITEM_D];
+const EIGHT_SECONDS: VjStepDuration = { kind: 'seconds', value: 8 };
+
+type VjSceneStepRead = Extract<VjSetlistStepRead, { kind: 'scene' }>;
+type VjClipStepRead = Extract<VjSetlistStepRead, { kind: 'clip' }>;
+
+function buildLook(isFlashing = false): VjSceneLook {
+  const look = vjSceneLookOf(buildState());
+  if (!isFlashing) {
+    return look;
+  }
+  return {
+    ...look,
+    transition: { mode: 'dipWhite', length: { unit: 'ms', value: 800 } },
+  };
+}
+
+function buildSceneStep(
+  index: number,
+  overrides: Partial<VjSceneStepRead> = {},
+): VjSceneStepRead {
+  return {
+    kind: 'scene',
+    itemId: ITEM_IDS[index] ?? ITEM_A,
+    index,
+    sceneId: SCENE_ID,
+    look: buildLook(),
+    duration: EIGHT_SECONDS,
+    ...overrides,
+  };
+}
+
+function buildClipStep(
+  index: number,
+  overrides: Partial<VjClipStepRead> = {},
+): VjClipStepRead {
+  return {
+    kind: 'clip',
+    itemId: ITEM_IDS[index] ?? ITEM_A,
+    index,
+    clipId: CLIP_ID,
+    duration: EIGHT_SECONDS,
+    ...overrides,
+  };
+}
+
+function buildRead(
+  step: VjSetlistStepRead | null,
+  overrides: Partial<VjSetlistRead> = {},
+): VjSetlistRead {
+  return {
+    setlistId: SETLIST_ID,
+    isLooping: false,
+    stepDuration: EIGHT_SECONDS,
+    itemIds: [...ITEM_IDS],
+    step,
+    ...overrides,
+  };
+}
+
+function buildPlayback(
+  overrides: Partial<VjSetlistPlayback> = {},
+): VjSetlistPlayback {
+  return { ...createVjSetlistPlayback(false), ...overrides };
+}
+
+/** A stage with the set list active and the given status running at index 1. */
+function buildSequenceState(
+  status: VjSetlistPlayback['status'],
+  playbackOverrides: Partial<VjSetlistPlayback> = {},
+  stateOverrides: Partial<VjStageState> = {},
+): VjStageState {
+  return buildState({
+    activeSetlistId: SETLIST_ID,
+    setlistIndex: 1,
+    setlistPlayback: buildPlayback({
+      status,
+      itemId: ITEM_B,
+      ...playbackOverrides,
+    }),
+    ...stateOverrides,
+  });
+}
+
+function buildPlayingState(
+  stateOverrides: Partial<VjStageState> = {},
+  playbackOverrides: Partial<VjSetlistPlayback> = {},
+): VjStageState {
+  return buildSequenceState(
+    'playing',
+    {
+      stepStartedAt: NOW,
+      stepEndsAt: NOW + 8000,
+      stepDurationMs: 8000,
+      ...playbackOverrides,
+    },
+    stateOverrides,
+  );
+}
+
+function acceptedOf(result: VjSetlistTransitionResult): VjSetlistTransition {
+  if (result.transition === null) {
+    throw new Error(`expected a transition, got ${String(result.code)}`);
+  }
+  return result.transition;
+}
+
+function refusal(code: VjSetlistRefusalCode): VjSetlistTransitionResult {
+  return { code, transition: null };
+}
+
+describe('vj sequences: constants and helpers', () => {
+  it('lists the kinds, statuses and beat counts', () => {
+    expect(VJ_SETLIST_ITEM_KINDS).toEqual(['scene', 'clip']);
+    expect(VJ_STEP_DURATION_KINDS).toEqual(['seconds', 'beats']);
+    expect(VJ_STEP_BEAT_COUNTS).toEqual([4, 8, 16, 32, 64]);
+    expect(VJ_SETLIST_PLAYBACK_STATUSES).toEqual([
+      'manual',
+      'playing',
+      'paused',
+      'takenOver',
+      'finished',
+      'needsFlashConsent',
+    ]);
+  });
+
+  it('freezes the default step length at 8 seconds', () => {
+    expect(DEFAULT_VJ_STEP_DURATION).toEqual({ kind: 'seconds', value: 8 });
+    expect(Object.isFrozen(DEFAULT_VJ_STEP_DURATION)).toBe(true);
+  });
+
+  it('builds the default playback with the saved Loop', () => {
+    expect(createVjSetlistPlayback(true)).toEqual({
+      status: 'manual',
+      itemId: null,
+      isFlashConfirmed: false,
+      stepStartedAt: null,
+      stepEndsAt: null,
+      stepDurationMs: null,
+      pausedRemainingMs: null,
+      isLooping: true,
+    });
+    expect(createVjSetlistPlayback(false).isLooping).toBe(false);
+  });
+
+  it('computes step lengths from seconds and from beats at the current tempo', () => {
+    const tempo = buildTempo({ bpm: 120 });
+    expect(vjStepDurationMs({ kind: 'seconds', value: 8 }, tempo)).toBe(8000);
+    expect(vjStepDurationMs({ kind: 'seconds', value: 600 }, tempo)).toBe(
+      600_000,
+    );
+    expect(vjStepDurationMs({ kind: 'beats', value: 16 }, tempo)).toBe(8000);
+    expect(
+      vjStepDurationMs({ kind: 'beats', value: 16 }, buildTempo({ bpm: 124 })),
+    ).toBe(7742);
+    expect(
+      vjStepDurationMs({ kind: 'beats', value: 4 }, buildTempo({ bpm: 124 })),
+    ).toBe(1935);
+  });
+
+  it('accepts only in-range step lengths with exactly kind and value', () => {
+    for (const valid of [
+      { kind: 'seconds', value: 2 },
+      { kind: 'seconds', value: 600 },
+      { kind: 'seconds', value: 8 },
+      { kind: 'beats', value: 4 },
+      { kind: 'beats', value: 64 },
+    ]) {
+      expect(isVjStepDuration(valid)).toBe(true);
+    }
+    for (const invalid of [
+      { kind: 'seconds', value: 1 },
+      { kind: 'seconds', value: 601 },
+      { kind: 'seconds', value: 2.5 },
+      { kind: 'seconds', value: '8' },
+      { kind: 'beats', value: 2 },
+      { kind: 'beats', value: 128 },
+      { kind: 'beats', value: 8.0001 },
+      { kind: 'minutes', value: 8 },
+      { kind: 'seconds' },
+      { value: 8 },
+      { kind: 'seconds', value: 8, extra: true },
+      [],
+      null,
+      undefined,
+      8,
+      'seconds',
+    ]) {
+      expect(isVjStepDuration(invalid)).toBe(false);
+    }
+  });
+
+  it('resolves a step length to its own, else the sequence default', () => {
+    const own: VjStepDuration = { kind: 'beats', value: 16 };
+    expect(vjResolvedStepDuration(own, EIGHT_SECONDS)).toBe(own);
+    expect(vjResolvedStepDuration(null, EIGHT_SECONDS)).toBe(EIGHT_SECONDS);
+  });
+
+  it('normalises an index read position past the step cap', () => {
+    expect(vjSetlistIndexPosition(0, false)).toEqual({
+      kind: 'index',
+      index: 0,
+      wrapsToFirst: false,
+    });
+    expect(vjSetlistIndexPosition(99, true)).toEqual({
+      kind: 'index',
+      index: 99,
+      wrapsToFirst: true,
+    });
+    expect(vjSetlistIndexPosition(100, true)).toEqual({
+      kind: 'index',
+      index: 0,
+      wrapsToFirst: false,
+    });
+    expect(vjSetlistIndexPosition(100, false)).toEqual({ kind: 'count' });
+    expect(vjSetlistIndexPosition(250, false)).toEqual({ kind: 'count' });
+  });
+
+  it('flags a look that flashes by its transition or by an effect it turns on', () => {
+    expect(vjSceneLookFlashes(buildLook(false))).toBe(false);
+    expect(vjSceneLookFlashes(buildLook(true))).toBe(true);
+    const flashEffectId = VJ_EFFECT_IDS.find(
+      (effectId) => VJ_EFFECT_CATALOG[effectId].isFlashCapable,
+    );
+    expect(flashEffectId).toBeDefined();
+    const effectId = flashEffectId as VjEffectId;
+    const entry = VJ_EFFECT_CATALOG[effectId];
+    const baseLook = buildLook(false);
+    const withEffect = (isOn: boolean): VjSceneLook => ({
+      ...baseLook,
+      effects: {
+        ...baseLook.effects,
+        settings: {
+          [effectId]: {
+            isOn,
+            amount: entry.defaultAmount,
+            variant: entry.defaultVariant,
+          },
+        },
+      },
+    });
+    expect(vjSceneLookFlashes(withEffect(true))).toBe(true);
+    expect(vjSceneLookFlashes(withEffect(false))).toBe(false);
+  });
+
+  it('never flashes for a clip step and follows the look for a scene step', () => {
+    expect(vjSetlistStepFlashes(buildClipStep(0))).toBe(false);
+    expect(vjSetlistStepFlashes(buildSceneStep(0))).toBe(false);
+    expect(
+      vjSetlistStepFlashes(buildSceneStep(0, { look: buildLook(true) })),
+    ).toBe(true);
+  });
+
+  it('names a live source change by source, variant, clipSequence or pack', () => {
+    const previous = buildState();
+    expect(vjIsLiveSourceChange(previous, buildState())).toBe(false);
+    expect(
+      vjIsLiveSourceChange(previous, buildState({ liveClipId: CLIP_ID })),
+    ).toBe(true);
+    expect(
+      vjIsLiveSourceChange(
+        previous,
+        buildState({ liveGeneratorId: 'prideFlagWave' }),
+      ),
+    ).toBe(true);
+    expect(
+      vjIsLiveSourceChange(
+        previous,
+        buildState({ liveGeneratorVariant: 'trans' }),
+      ),
+    ).toBe(true);
+    expect(
+      vjIsLiveSourceChange(previous, buildState({ clipSequence: 1 })),
+    ).toBe(true);
+    expect(
+      vjIsLiveSourceChange(previous, buildState({ activePackId: PACK_ID })),
+    ).toBe(true);
+    expect(
+      vjIsLiveSourceChange(
+        previous,
+        buildState({
+          mix: { clipId: CLIP_ID, amount: 1, blendMode: 'normal' },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the playback in the canonical form with a lowercased item id', () => {
+    const upper = buildSequenceState('manual', {
+      itemId: ITEM_B.toUpperCase(),
+    });
+    const lower = buildSequenceState('manual', { itemId: ITEM_B });
+    expect(canonicalVjStageState(upper).setlistPlayback.itemId).toBe(ITEM_B);
+    expect(isSameVjStageContent(upper, lower)).toBe(true);
+    expect(Object.keys(canonicalVjStageState(lower).setlistPlayback)).toEqual([
+      'status',
+      'itemId',
+      'isFlashConfirmed',
+      'stepStartedAt',
+      'stepEndsAt',
+      'stepDurationMs',
+      'pausedRemainingMs',
+      'isLooping',
+    ]);
+    const paused = buildSequenceState('paused', { pausedRemainingMs: 10 });
+    expect(isSameVjStageContent(paused, lower)).toBe(false);
+  });
+
+  it('fills setlistPlayback in a second upgrade pass', () => {
+    const v2Record = JSON.parse(JSON.stringify(buildState())) as Record<
+      string,
+      unknown
+    >;
+    delete v2Record.setlistPlayback;
+    const filled = upgradeVjStageFieldsV2(v2Record);
+    expect(filled.setlistPlayback).toEqual(createVjSetlistPlayback(false));
+    expect(filled).not.toBe(v2Record);
+    expect(v2Record).not.toHaveProperty('setlistPlayback');
+
+    const withPlayback = JSON.parse(
+      JSON.stringify(buildSequenceState('paused', { pausedRemainingMs: 5 })),
+    ) as Record<string, unknown>;
+    expect(upgradeVjStageFieldsV2(withPlayback)).toBe(withPlayback);
+
+    const upgradedV1 = upgradeVjStageFieldsV2(
+      upgradeVjStageFieldsV1(buildV1State(), NOW),
+    );
+    expect(upgradedV1.setlistPlayback).toEqual(createVjSetlistPlayback(false));
+  });
+});
+
+describe('vj sequences: setlistSelect', () => {
+  it('reads no step to arm, step 0 to play from null, else the index', () => {
+    expect(vjSetlistSelectReadPosition(null, false)).toEqual({ kind: 'count' });
+    expect(vjSetlistSelectReadPosition(null, true)).toEqual({
+      kind: 'index',
+      index: 0,
+      wrapsToFirst: false,
+    });
+    expect(vjSetlistSelectReadPosition(3, false)).toEqual({
+      kind: 'index',
+      index: 3,
+      wrapsToFirst: false,
+    });
+    expect(vjSetlistSelectReadPosition(3, true)).toEqual({
+      kind: 'index',
+      index: 3,
+      wrapsToFirst: false,
+    });
+    expect(vjSetlistSelectReadPosition(100, true)).toEqual({ kind: 'count' });
+  });
+
+  it('clears the active set list for a null id', () => {
+    const state = buildPlayingState();
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(state, {
+        setlistId: null,
+        index: null,
+        isPlaying: false,
+        isFlashConfirmed: false,
+        read: null,
+      }),
+    );
+    expect(transition.nextState).toEqual(vjSetlistClearedState(state));
+    expect(transition.nextState.activeSetlistId).toBeNull();
+    expect(transition.nextState.setlistIndex).toBeNull();
+    expect(transition.nextState.setlistPlayback).toEqual(
+      createVjSetlistPlayback(false),
+    );
+    expect(transition.show).toBeNull();
+    expect(transition.clock).toEqual({ kind: 'clear' });
+  });
+
+  it('refuses a set list no read found', () => {
+    expect(
+      vjSetlistSelectTransition(buildState(), {
+        setlistId: SETLIST_ID,
+        index: 0,
+        isPlaying: false,
+        isFlashConfirmed: false,
+        read: null,
+      }),
+    ).toEqual(refusal('vj_setlist_not_found'));
+  });
+
+  it('arms the set list with its saved Loop and shows nothing', () => {
+    const state = buildPlayingState({ shuffle: buildShuffle({ isOn: true }) });
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(state, {
+        setlistId: SETLIST_ID,
+        index: null,
+        isPlaying: false,
+        isFlashConfirmed: true,
+        read: buildRead(null, { isLooping: true }),
+      }),
+    );
+    expect(transition.nextState.activeSetlistId).toBe(SETLIST_ID);
+    expect(transition.nextState.setlistIndex).toBeNull();
+    expect(transition.nextState.setlistPlayback).toEqual(
+      createVjSetlistPlayback(true),
+    );
+    expect(transition.nextState.shuffle.isOn).toBe(true);
+    expect(transition.show).toBeNull();
+    expect(transition.clock).toEqual({ kind: 'clear' });
+  });
+
+  it('arms an empty set list too, before the empty check', () => {
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(buildState(), {
+        setlistId: SETLIST_ID,
+        index: null,
+        isPlaying: false,
+        isFlashConfirmed: false,
+        read: buildRead(null, { itemIds: [] }),
+      }),
+    );
+    expect(transition.nextState.activeSetlistId).toBe(SETLIST_ID);
+  });
+
+  it('refuses an empty set list and a missing step', () => {
+    const input = {
+      setlistId: SETLIST_ID,
+      index: 0,
+      isPlaying: false,
+      isFlashConfirmed: false,
+    };
+    expect(
+      vjSetlistSelectTransition(buildState(), {
+        ...input,
+        read: buildRead(null, { itemIds: [] }),
+      }),
+    ).toEqual(refusal('vj_setlist_empty'));
+    expect(
+      vjSetlistSelectTransition(buildState(), {
+        ...input,
+        index: 9,
+        read: buildRead(null),
+      }),
+    ).toEqual(refusal('vj_setlist_index_invalid'));
+  });
+
+  it('refuses to play a flashing step nobody confirmed, and plays it once confirmed', () => {
+    const read = buildRead(buildSceneStep(0, { look: buildLook(true) }));
+    const input = {
+      setlistId: SETLIST_ID,
+      index: 0,
+      isPlaying: true,
+      isFlashConfirmed: false,
+      read,
+    };
+    expect(vjSetlistSelectTransition(buildState(), input)).toEqual(
+      refusal('vj_setlist_flash_unconfirmed'),
+    );
+    expect(
+      vjSetlistSelectTransition(buildState(), {
+        ...input,
+        isFlashConfirmed: true,
+      }).code,
+    ).toBeNull();
+  });
+
+  it('checks a select against its own payload alone, so an old confirmed run grants nothing', () => {
+    const oldRunConfirmed = buildSequenceState('manual', {
+      isFlashConfirmed: true,
+    });
+    expect(
+      vjSetlistSelectTransition(oldRunConfirmed, {
+        setlistId: SETLIST_ID,
+        index: 0,
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: buildRead(buildSceneStep(0, { look: buildLook(true) })),
+      }),
+    ).toEqual(refusal('vj_setlist_flash_unconfirmed'));
+  });
+
+  it('shows one step by hand and stays manual', () => {
+    const step = buildSceneStep(2, { look: buildLook(true) });
+    const state = buildSequenceState('paused', {
+      stepDurationMs: 4000,
+      pausedRemainingMs: 1000,
+    });
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(state, {
+        setlistId: SETLIST_ID,
+        index: 2,
+        isPlaying: false,
+        isFlashConfirmed: false,
+        read: buildRead(step, { isLooping: true }),
+      }),
+    );
+    expect(transition.show).toEqual({ kind: 'scene', look: step.look });
+    expect(transition.clock).toEqual({ kind: 'clear' });
+    expect(transition.nextState.activeSetlistId).toBe(SETLIST_ID);
+    expect(transition.nextState.setlistIndex).toBe(2);
+    expect(transition.nextState.setlistPlayback).toEqual(
+      buildPlayback({ status: 'manual', itemId: ITEM_C, isLooping: true }),
+    );
+  });
+
+  it('stores the payload flash flag when showing a step by hand', () => {
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(buildState(), {
+        setlistId: SETLIST_ID,
+        index: 0,
+        isPlaying: false,
+        isFlashConfirmed: true,
+        read: buildRead(buildClipStep(0)),
+      }),
+    );
+    expect(transition.nextState.setlistPlayback.isFlashConfirmed).toBe(true);
+    expect(transition.show).toEqual({ kind: 'clip', clipId: CLIP_ID });
+  });
+
+  it('plays from the step: playing, shuffle off, clock start(full, full)', () => {
+    const state = buildState({
+      shuffle: buildShuffle({ isOn: true }),
+      setlistPlayback: buildPlayback({
+        status: 'finished',
+        stepDurationMs: 99,
+      }),
+    });
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(state, {
+        setlistId: SETLIST_ID,
+        index: null,
+        isPlaying: true,
+        isFlashConfirmed: true,
+        read: buildRead(buildClipStep(0), { isLooping: true }),
+      }),
+    );
+    expect(transition.show).toEqual({ kind: 'clip', clipId: CLIP_ID });
+    expect(transition.clock).toEqual({
+      kind: 'start',
+      durationMs: 8000,
+      remainingMs: 8000,
+    });
+    expect(transition.nextState.shuffle.isOn).toBe(false);
+    expect(transition.nextState.activeSetlistId).toBe(SETLIST_ID);
+    expect(transition.nextState.setlistIndex).toBe(0);
+    expect(transition.nextState.setlistPlayback).toEqual({
+      status: 'playing',
+      itemId: ITEM_A,
+      isFlashConfirmed: true,
+      stepStartedAt: null,
+      stepEndsAt: null,
+      stepDurationMs: 8000,
+      pausedRemainingMs: null,
+      isLooping: true,
+    });
+  });
+
+  it('measures a beats step at the tempo of the moment', () => {
+    const step = buildSceneStep(0, { duration: { kind: 'beats', value: 16 } });
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(
+        buildState({ tempo: buildTempo({ bpm: 120 }) }),
+        {
+          setlistId: SETLIST_ID,
+          index: 0,
+          isPlaying: true,
+          isFlashConfirmed: false,
+          read: buildRead(step),
+        },
+      ),
+    );
+    expect(transition.clock).toEqual({
+      kind: 'start',
+      durationMs: 8000,
+      remainingMs: 8000,
+    });
+  });
+
+  it('starts a fresh run: no field of the old run survives', () => {
+    const state = buildSequenceState('paused', {
+      stepDurationMs: 4000,
+      pausedRemainingMs: 1500,
+      isFlashConfirmed: true,
+    });
+    const transition = acceptedOf(
+      vjSetlistSelectTransition(state, {
+        setlistId: SETLIST_ID,
+        index: 0,
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: buildRead(buildClipStep(0)),
+      }),
+    );
+    expect(transition.nextState.setlistPlayback.pausedRemainingMs).toBeNull();
+    expect(transition.nextState.setlistPlayback.isFlashConfirmed).toBe(false);
+    expect(transition.nextState.setlistPlayback.stepDurationMs).toBe(8000);
+  });
+});
+
+describe('vj sequences: setlistSetPlaying', () => {
+  it('reads no step when pausing or when a clock exists, else by status', () => {
+    const cases: Array<[VjStageState, boolean, VjSetlistReadPosition | null]> =
+      [
+        [buildPlayingState(), false, null],
+        [buildSequenceState('manual'), false, null],
+        [buildPlayingState(), true, null],
+        [buildSequenceState('paused'), true, null],
+        [
+          buildSequenceState('manual'),
+          true,
+          { kind: 'index', index: 1, wrapsToFirst: false },
+        ],
+        [
+          buildSequenceState('manual', {}, { setlistIndex: null }),
+          true,
+          { kind: 'index', index: 0, wrapsToFirst: false },
+        ],
+        [
+          buildSequenceState('takenOver'),
+          true,
+          { kind: 'index', index: 2, wrapsToFirst: true },
+        ],
+        [
+          buildSequenceState('takenOver', {}, { setlistIndex: null }),
+          true,
+          { kind: 'index', index: 0, wrapsToFirst: true },
+        ],
+        [
+          buildSequenceState('finished'),
+          true,
+          { kind: 'index', index: 0, wrapsToFirst: false },
+        ],
+        [
+          buildSequenceState('needsFlashConsent', { isLooping: false }),
+          true,
+          { kind: 'index', index: 2, wrapsToFirst: false },
+        ],
+        [
+          buildSequenceState('needsFlashConsent', { isLooping: true }),
+          true,
+          { kind: 'index', index: 2, wrapsToFirst: true },
+        ],
+        [
+          buildSequenceState(
+            'needsFlashConsent',
+            { isLooping: true },
+            {
+              setlistIndex: 99,
+            },
+          ),
+          true,
+          { kind: 'index', index: 0, wrapsToFirst: false },
+        ],
+        [
+          buildSequenceState(
+            'needsFlashConsent',
+            { isLooping: false },
+            {
+              setlistIndex: 99,
+            },
+          ),
+          true,
+          { kind: 'count' },
+        ],
+      ];
+    for (const [state, isPlaying, expected] of cases) {
+      expect(vjSetlistSetPlayingReadPosition(state, isPlaying)).toEqual(
+        expected,
+      );
+    }
+  });
+
+  it('pauses a running step with the time left', () => {
+    const state = buildPlayingState();
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: false,
+        isFlashConfirmed: false,
+        read: null,
+        now: NOW + 3000,
+      }),
+    );
+    expect(transition.nextState.setlistPlayback).toEqual(
+      buildPlayback({
+        status: 'paused',
+        itemId: ITEM_B,
+        stepDurationMs: 8000,
+        pausedRemainingMs: 5000,
+      }),
+    );
+    expect(transition.nextState.setlistIndex).toBe(1);
+    expect(transition.show).toBeNull();
+    expect(transition.clock).toEqual({ kind: 'clear' });
+  });
+
+  it('pauses with zero left once the step end has passed', () => {
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(buildPlayingState(), {
+        isPlaying: false,
+        isFlashConfirmed: false,
+        read: null,
+        now: NOW + 20_000,
+      }),
+    );
+    expect(transition.nextState.setlistPlayback.pausedRemainingMs).toBe(0);
+  });
+
+  it('never pauses with more time left than the step length', () => {
+    const state = buildPlayingState(
+      {},
+      { stepStartedAt: NOW + 4000, stepEndsAt: NOW + 12_000 },
+    );
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: false,
+        isFlashConfirmed: false,
+        read: null,
+        now: NOW,
+      }),
+    );
+    expect(transition.nextState.setlistPlayback.pausedRemainingMs).toBe(8000);
+  });
+
+  it('answers a pause outside playing as an accepted noop', () => {
+    for (const status of [
+      'manual',
+      'paused',
+      'takenOver',
+      'finished',
+      'needsFlashConsent',
+    ] as const) {
+      const state = buildSequenceState(status);
+      const transition = acceptedOf(
+        vjSetlistSetPlayingTransition(state, {
+          isPlaying: false,
+          isFlashConfirmed: false,
+          read: null,
+          now: NOW,
+        }),
+      );
+      expect(transition.nextState).toBe(state);
+      expect(transition.show).toBeNull();
+      expect(transition.clock).toEqual({ kind: 'keep' });
+    }
+  });
+
+  it('answers Play while playing as a noop, storing a confirmation', () => {
+    const state = buildPlayingState();
+    const noop = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: null,
+        now: NOW,
+      }),
+    );
+    expect(noop.nextState).toBe(state);
+    expect(noop.clock).toEqual({ kind: 'keep' });
+    const confirmed = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: true,
+        read: null,
+        now: NOW,
+      }),
+    );
+    expect(confirmed.nextState.setlistPlayback.isFlashConfirmed).toBe(true);
+    expect(confirmed.clock).toEqual({ kind: 'keep' });
+  });
+
+  it('resumes a paused step from the time left, shuffle off', () => {
+    const state = buildSequenceState(
+      'paused',
+      { stepDurationMs: 8000, pausedRemainingMs: 5000 },
+      { shuffle: buildShuffle({ isOn: true }) },
+    );
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: null,
+        now: NOW,
+      }),
+    );
+    expect(transition.clock).toEqual({
+      kind: 'start',
+      durationMs: 8000,
+      remainingMs: 5000,
+    });
+    expect(transition.show).toBeNull();
+    expect(transition.nextState.shuffle.isOn).toBe(false);
+    expect(transition.nextState.setlistPlayback.status).toBe('playing');
+    expect(transition.nextState.setlistPlayback.pausedRemainingMs).toBeNull();
+    expect(transition.nextState.setlistPlayback.stepDurationMs).toBe(8000);
+  });
+
+  it('resumes a paused step with no stored length from the time left', () => {
+    const state = buildSequenceState('paused', {
+      stepDurationMs: null,
+      pausedRemainingMs: 3000,
+    });
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: null,
+        now: NOW,
+      }),
+    );
+    expect(transition.clock).toEqual({
+      kind: 'start',
+      durationMs: 3000,
+      remainingMs: 3000,
+    });
+  });
+
+  it('plays the manual step in place: no recall, no flash check', () => {
+    const step = buildSceneStep(1, { look: buildLook(true) });
+    const state = buildSequenceState(
+      'manual',
+      {},
+      { shuffle: buildShuffle({ isOn: true }) },
+    );
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: buildRead(step, { isLooping: true }),
+        now: NOW,
+      }),
+    );
+    expect(transition.show).toBeNull();
+    expect(transition.clock).toEqual({
+      kind: 'start',
+      durationMs: 8000,
+      remainingMs: 8000,
+    });
+    expect(transition.nextState.shuffle.isOn).toBe(false);
+    expect(transition.nextState.setlistIndex).toBe(1);
+    expect(transition.nextState.setlistPlayback).toEqual(
+      buildPlayback({
+        status: 'playing',
+        itemId: ITEM_B,
+        stepDurationMs: 8000,
+        isLooping: true,
+      }),
+    );
+  });
+
+  it('refuses a manual play whose read found nothing', () => {
+    const state = buildSequenceState('manual');
+    const input = { isPlaying: true, isFlashConfirmed: false, now: NOW };
+    expect(
+      vjSetlistSetPlayingTransition(state, { ...input, read: null }),
+    ).toEqual(refusal('vj_setlist_not_found'));
+    expect(
+      vjSetlistSetPlayingTransition(state, {
+        ...input,
+        read: buildRead(null, { itemIds: [] }),
+      }),
+    ).toEqual(refusal('vj_setlist_empty'));
+    expect(
+      vjSetlistSetPlayingTransition(state, { ...input, read: buildRead(null) }),
+    ).toEqual(refusal('vj_setlist_index_invalid'));
+  });
+
+  it('plays step 1 from a manual run with no index, like finished', () => {
+    const state = buildSequenceState(
+      'manual',
+      { itemId: null },
+      { setlistIndex: null },
+    );
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: buildRead(buildClipStep(0)),
+        now: NOW,
+      }),
+    );
+    expect(transition.show).toEqual({ kind: 'clip', clipId: CLIP_ID });
+    expect(transition.nextState.setlistIndex).toBe(0);
+    expect(transition.nextState.setlistPlayback.itemId).toBe(ITEM_A);
+    expect(transition.nextState.setlistPlayback.status).toBe('playing');
+    expect(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: buildRead(buildSceneStep(0, { look: buildLook(true) })),
+        now: NOW,
+      }),
+    ).toEqual(refusal('vj_setlist_flash_unconfirmed'));
+  });
+
+  it('plays from the read step out of takenOver, finished and needsFlashConsent', () => {
+    for (const status of [
+      'takenOver',
+      'finished',
+      'needsFlashConsent',
+    ] as const) {
+      const state = buildSequenceState(
+        status,
+        { stepDurationMs: 123 },
+        { shuffle: buildShuffle({ isOn: true }) },
+      );
+      const input = { isPlaying: true, isFlashConfirmed: false, now: NOW };
+      expect(
+        vjSetlistSetPlayingTransition(state, { ...input, read: null }),
+      ).toEqual(refusal('vj_setlist_not_found'));
+      expect(
+        vjSetlistSetPlayingTransition(state, {
+          ...input,
+          read: buildRead(null, { itemIds: [] }),
+        }),
+      ).toEqual(refusal('vj_setlist_empty'));
+      expect(
+        vjSetlistSetPlayingTransition(state, {
+          ...input,
+          read: buildRead(null),
+        }),
+      ).toEqual(refusal('vj_setlist_index_invalid'));
+      expect(
+        vjSetlistSetPlayingTransition(state, {
+          ...input,
+          read: buildRead(buildSceneStep(2, { look: buildLook(true) })),
+        }),
+      ).toEqual(refusal('vj_setlist_flash_unconfirmed'));
+
+      const transition = acceptedOf(
+        vjSetlistSetPlayingTransition(state, {
+          ...input,
+          read: buildRead(buildClipStep(2), { isLooping: true }),
+        }),
+      );
+      expect(transition.nextState.setlistPlayback.stepDurationMs).toBe(8000);
+      expect(transition.nextState.setlistPlayback.isLooping).toBe(true);
+      expect(transition.show).toEqual({ kind: 'clip', clipId: CLIP_ID });
+      expect(transition.clock).toEqual({
+        kind: 'start',
+        durationMs: 8000,
+        remainingMs: 8000,
+      });
+      expect(transition.nextState.shuffle.isOn).toBe(false);
+      expect(transition.nextState.setlistIndex).toBe(2);
+      expect(transition.nextState.setlistPlayback.status).toBe('playing');
+      expect(transition.nextState.setlistPlayback.itemId).toBe(ITEM_C);
+    }
+  });
+
+  it('stores a confirmation on every accepted Play and lets it pass the flash check', () => {
+    const flashingRead = buildRead(
+      buildSceneStep(2, { look: buildLook(true) }),
+    );
+    for (const status of [
+      'takenOver',
+      'finished',
+      'needsFlashConsent',
+    ] as const) {
+      const transition = acceptedOf(
+        vjSetlistSetPlayingTransition(buildSequenceState(status), {
+          isPlaying: true,
+          isFlashConfirmed: true,
+          read: flashingRead,
+          now: NOW,
+        }),
+      );
+      expect(transition.nextState.setlistPlayback.isFlashConfirmed).toBe(true);
+    }
+    const resumed = acceptedOf(
+      vjSetlistSetPlayingTransition(
+        buildSequenceState('paused', {
+          stepDurationMs: 8000,
+          pausedRemainingMs: 100,
+        }),
+        { isPlaying: true, isFlashConfirmed: true, read: null, now: NOW },
+      ),
+    );
+    expect(resumed.nextState.setlistPlayback.isFlashConfirmed).toBe(true);
+    const inPlace = acceptedOf(
+      vjSetlistSetPlayingTransition(buildSequenceState('manual'), {
+        isPlaying: true,
+        isFlashConfirmed: true,
+        read: buildRead(buildSceneStep(1)),
+        now: NOW,
+      }),
+    );
+    expect(inPlace.nextState.setlistPlayback.isFlashConfirmed).toBe(true);
+  });
+
+  it('keeps a stored confirmation when the payload carries none', () => {
+    const state = buildSequenceState('finished', { isFlashConfirmed: true });
+    const transition = acceptedOf(
+      vjSetlistSetPlayingTransition(state, {
+        isPlaying: true,
+        isFlashConfirmed: false,
+        read: buildRead(buildSceneStep(0, { look: buildLook(true) })),
+        now: NOW,
+      }),
+    );
+    expect(transition.nextState.setlistPlayback.isFlashConfirmed).toBe(true);
+  });
+});
+
+/** Every playback status a Next or Previous can start from. */
+const VJ_STEP_TEST_STATUSES = [
+  'manual',
+  'playing',
+  'paused',
+  'takenOver',
+  'finished',
+  'needsFlashConsent',
+] as const;
+
+/** A stage at index 1 in `status`, running its clock when playing. */
+function buildStepTestState(
+  status: (typeof VJ_STEP_TEST_STATUSES)[number],
+  playbackOverrides: Partial<VjSetlistPlayback> = {},
+): VjStageState {
+  return status === 'playing'
+    ? buildPlayingState({}, playbackOverrides)
+    : buildSequenceState(status, playbackOverrides);
+}
+
+describe('vj sequences: Next and Previous', () => {
+  it('reads the step after the index for Next, wrapping with Loop', () => {
+    expect(
+      vjSetlistStepReadPosition(buildSequenceState('manual'), 'next'),
+    ).toEqual({ kind: 'index', index: 2, wrapsToFirst: false });
+    expect(
+      vjSetlistStepReadPosition(
+        buildSequenceState('manual', { isLooping: true }),
+        'next',
+      ),
+    ).toEqual({ kind: 'index', index: 2, wrapsToFirst: true });
+    expect(
+      vjSetlistStepReadPosition(
+        buildSequenceState('manual', {}, { setlistIndex: null }),
+        'next',
+      ),
+    ).toEqual({ kind: 'index', index: 0, wrapsToFirst: false });
+    expect(
+      vjSetlistStepReadPosition(
+        buildSequenceState('manual', { isLooping: true }, { setlistIndex: 99 }),
+        'next',
+      ),
+    ).toEqual({ kind: 'index', index: 0, wrapsToFirst: false });
+    expect(
+      vjSetlistStepReadPosition(
+        buildSequenceState('manual', {}, { setlistIndex: 99 }),
+        'next',
+      ),
+    ).toEqual({ kind: 'count' });
+  });
+
+  it('reads the step before the index for Previous, the last step or none at the start', () => {
+    expect(
+      vjSetlistStepReadPosition(buildSequenceState('manual'), 'previous'),
+    ).toEqual({ kind: 'index', index: 0, wrapsToFirst: false });
+    for (const setlistIndex of [0, null]) {
+      expect(
+        vjSetlistStepReadPosition(
+          buildSequenceState('manual', {}, { setlistIndex }),
+          'previous',
+        ),
+      ).toEqual({ kind: 'count' });
+      expect(
+        vjSetlistStepReadPosition(
+          buildSequenceState('manual', { isLooping: true }, { setlistIndex }),
+          'previous',
+        ),
+      ).toEqual({ kind: 'last' });
+    }
+  });
+
+  it('refuses by case in the contract order', () => {
+    const manual = buildSequenceState('manual');
+    const atStart = buildSequenceState('manual', {}, { setlistIndex: 0 });
+    expect(
+      vjSetlistStepTransition(manual, { direction: 'next', read: null }),
+    ).toEqual(refusal('vj_setlist_not_found'));
+    expect(
+      vjSetlistStepTransition(manual, {
+        direction: 'next',
+        read: buildRead(null, { itemIds: [] }),
+      }),
+    ).toEqual(refusal('vj_setlist_empty'));
+    expect(
+      vjSetlistStepTransition(atStart, {
+        direction: 'previous',
+        read: buildRead(null),
+      }),
+    ).toEqual(refusal('vj_setlist_start'));
+    expect(
+      vjSetlistStepTransition(manual, {
+        direction: 'next',
+        read: buildRead(null),
+      }),
+    ).toEqual(refusal('vj_setlist_end'));
+    expect(
+      vjSetlistStepTransition(manual, {
+        direction: 'previous',
+        read: buildRead(null),
+      }),
+    ).toEqual(refusal('vj_setlist_index_invalid'));
+  });
+
+  it('shows the step and restarts the clock while playing', () => {
+    const state = buildPlayingState();
+    const step = buildSceneStep(2, {
+      duration: { kind: 'beats', value: 16 },
+      look: buildLook(true),
+    });
+    const transition = acceptedOf(
+      vjSetlistStepTransition(
+        { ...state, tempo: buildTempo({ bpm: 120 }) },
+        {
+          direction: 'next',
+          isFlashConfirmed: true,
+          read: buildRead(step, { isLooping: true }),
+        },
+      ),
+    );
+    expect(transition.show).toEqual({ kind: 'scene', look: step.look });
+    expect(transition.clock).toEqual({
+      kind: 'start',
+      durationMs: 8000,
+      remainingMs: 8000,
+    });
+    expect(transition.nextState.setlistIndex).toBe(2);
+    expect(transition.nextState.setlistPlayback).toEqual(
+      buildPlayback({
+        status: 'playing',
+        itemId: ITEM_C,
+        stepDurationMs: 8000,
+        isLooping: true,
+      }),
+    );
+  });
+
+  it('shows the step and stays manual without a clock', () => {
+    const transition = acceptedOf(
+      vjSetlistStepTransition(buildSequenceState('manual'), {
+        direction: 'next',
+        read: buildRead(buildClipStep(2)),
+      }),
+    );
+    expect(transition.show).toEqual({ kind: 'clip', clipId: CLIP_ID });
+    expect(transition.clock).toEqual({ kind: 'clear' });
+    expect(transition.nextState.setlistPlayback).toEqual(
+      buildPlayback({ status: 'manual', itemId: ITEM_C }),
+    );
+  });
+
+  it('copies the saved Loop of the read in manual and paused runs', () => {
+    for (const status of ['manual', 'paused'] as const) {
+      for (const direction of ['next', 'previous'] as const) {
+        const state = buildSequenceState(status, { isLooping: false });
+        const step = buildClipStep(direction === 'next' ? 2 : 0);
+        const transition = acceptedOf(
+          vjSetlistStepTransition(state, {
+            direction,
+            read: buildRead(step, { isLooping: true }),
+          }),
+        );
+        expect(transition.nextState.setlistPlayback.isLooping).toBe(true);
+      }
+    }
+  });
+
+  it('pauses on the new step with its full length from every other status', () => {
+    for (const status of [
+      'paused',
+      'takenOver',
+      'finished',
+      'needsFlashConsent',
+    ] as const) {
+      const state = buildSequenceState(status, {
+        stepDurationMs: 1,
+        pausedRemainingMs: status === 'paused' ? 1 : null,
+      });
+      const transition = acceptedOf(
+        vjSetlistStepTransition(state, {
+          direction: 'previous',
+          isFlashConfirmed: true,
+          read: buildRead(buildSceneStep(0, { look: buildLook(true) })),
+        }),
+      );
+      expect(transition.clock).toEqual({ kind: 'clear' });
+      expect(transition.show?.kind).toBe('scene');
+      expect(transition.nextState.setlistIndex).toBe(0);
+      expect(transition.nextState.setlistPlayback).toEqual(
+        buildPlayback({
+          status: 'paused',
+          itemId: ITEM_A,
+          stepDurationMs: 8000,
+          pausedRemainingMs: 8000,
+        }),
+      );
+    }
+  });
+
+  it('refuses a flashing step nobody confirmed in every status, both ways', () => {
+    for (const status of VJ_STEP_TEST_STATUSES) {
+      for (const direction of ['next', 'previous'] as const) {
+        const state = buildStepTestState(status);
+        const flashingStep = buildSceneStep(direction === 'next' ? 2 : 0, {
+          look: buildLook(true),
+        });
+        expect(
+          vjSetlistStepTransition(state, {
+            direction,
+            read: buildRead(flashingStep),
+          }),
+        ).toEqual(refusal('vj_setlist_flash_unconfirmed'));
+        expect(
+          vjSetlistStepTransition(state, {
+            direction,
+            isFlashConfirmed: false,
+            read: buildRead(flashingStep),
+          }),
+        ).toEqual(refusal('vj_setlist_flash_unconfirmed'));
+      }
+    }
+  });
+
+  it('lands a flashing step the tap confirmed and keeps the stored run flag', () => {
+    for (const status of VJ_STEP_TEST_STATUSES) {
+      const transition = acceptedOf(
+        vjSetlistStepTransition(buildStepTestState(status), {
+          direction: 'next',
+          isFlashConfirmed: true,
+          read: buildRead(buildSceneStep(2, { look: buildLook(true) })),
+        }),
+      );
+      expect(transition.show?.kind).toBe('scene');
+      expect(transition.nextState.setlistIndex).toBe(2);
+      expect(transition.nextState.setlistPlayback.isFlashConfirmed).toBe(false);
+    }
+  });
+
+  it('lands a flashing step the stored run flag confirmed', () => {
+    for (const status of VJ_STEP_TEST_STATUSES) {
+      const transition = acceptedOf(
+        vjSetlistStepTransition(
+          buildStepTestState(status, { isFlashConfirmed: true }),
+          {
+            direction: 'previous',
+            read: buildRead(buildSceneStep(0, { look: buildLook(true) })),
+          },
+        ),
+      );
+      expect(transition.nextState.setlistIndex).toBe(0);
+      expect(transition.nextState.setlistPlayback.isFlashConfirmed).toBe(true);
+    }
+  });
+
+  it('lands clip steps and steady scene steps with no confirmation', () => {
+    for (const step of [
+      buildClipStep(2),
+      buildSceneStep(2, { look: buildLook() }),
+    ]) {
+      expect(
+        vjSetlistStepTransition(buildSequenceState('manual'), {
+          direction: 'next',
+          read: buildRead(step),
+        }).code,
+      ).toBeNull();
+    }
+  });
+
+  it('answers the read refusals before the flash check', () => {
+    const flashingFirstStep = buildSceneStep(0, { look: buildLook(true) });
+    expect(
+      vjSetlistStepTransition(
+        buildSequenceState('manual', {}, { setlistIndex: 0 }),
+        { direction: 'previous', read: buildRead(flashingFirstStep) },
+      ),
+    ).toEqual(refusal('vj_setlist_start'));
+    expect(
+      vjSetlistStepTransition(buildSequenceState('manual'), {
+        direction: 'next',
+        read: buildRead(flashingFirstStep, { itemIds: [] }),
+      }),
+    ).toEqual(refusal('vj_setlist_empty'));
+    expect(
+      vjSetlistStepTransition(buildSequenceState('manual'), {
+        direction: 'next',
+        read: null,
+      }),
+    ).toEqual(refusal('vj_setlist_not_found'));
+  });
+
+  it('turns shuffle off when the step lands paused', () => {
+    for (const status of [
+      'paused',
+      'takenOver',
+      'finished',
+      'needsFlashConsent',
+    ] as const) {
+      const base = buildSequenceState(status);
+      const state = { ...base, shuffle: { ...base.shuffle, isOn: true } };
+      const transition = acceptedOf(
+        vjSetlistStepTransition(state, {
+          direction: 'next',
+          read: buildRead(buildClipStep(2)),
+        }),
+      );
+      expect(transition.nextState.setlistPlayback.status).toBe('paused');
+      expect(transition.nextState.shuffle).toEqual({
+        ...state.shuffle,
+        isOn: false,
+      });
+    }
+  });
+});
+
+describe('vj sequences: the step timer', () => {
+  it('targets the step end less the early lead, only while playing', () => {
+    expect(vjSetlistTimerTargetAt(buildPlayingState())).toBe(NOW + 8000 - 300);
+    expect(vjSetlistTimerTargetAt(buildSequenceState('paused'))).toBeNull();
+    expect(vjSetlistTimerTargetAt(buildSequenceState('manual'))).toBeNull();
+    expect(
+      vjSetlistTimerTargetAt(
+        buildSequenceState('playing', { stepEndsAt: null }),
+      ),
+    ).toBeNull();
+  });
+
+  it('reads the step after the index while a timer is armed', () => {
+    expect(vjSetlistTimerReadPosition(buildPlayingState())).toEqual({
+      kind: 'index',
+      index: 2,
+      wrapsToFirst: false,
+    });
+    expect(
+      vjSetlistTimerReadPosition(buildPlayingState({}, { isLooping: true })),
+    ).toEqual({ kind: 'index', index: 2, wrapsToFirst: true });
+    expect(
+      vjSetlistTimerReadPosition(buildPlayingState({ setlistIndex: null })),
+    ).toEqual({ kind: 'index', index: 0, wrapsToFirst: false });
+    expect(
+      vjSetlistTimerReadPosition(
+        buildPlayingState({ setlistIndex: 99 }, { isLooping: true }),
+      ),
+    ).toEqual({ kind: 'index', index: 0, wrapsToFirst: false });
+    expect(
+      vjSetlistTimerReadPosition(buildPlayingState({ setlistIndex: 99 })),
+    ).toEqual({ kind: 'count' });
+    expect(vjSetlistTimerReadPosition(buildSequenceState('paused'))).toBeNull();
+    expect(
+      vjSetlistTimerReadPosition(buildPlayingState({ activeSetlistId: null })),
+    ).toBeNull();
+  });
+
+  it('lands nothing when the state or the read does not match', () => {
+    const read = buildRead(buildClipStep(2));
+    expect(
+      vjSetlistTimerTransition(buildSequenceState('paused'), read),
+    ).toBeNull();
+    expect(
+      vjSetlistTimerTransition(buildSequenceState('manual'), read),
+    ).toBeNull();
+    expect(
+      vjSetlistTimerTransition(
+        buildPlayingState({ activeSetlistId: null }),
+        read,
+      ),
+    ).toBeNull();
+    expect(vjSetlistTimerTransition(buildPlayingState(), null)).toBeNull();
+    expect(
+      vjSetlistTimerTransition(
+        buildPlayingState(),
+        buildRead(buildClipStep(2), { setlistId: OTHER_SETLIST_ID }),
+      ),
+    ).toBeNull();
+  });
+
+  it('matches the read set list id without regard to case', () => {
+    const transition = vjSetlistTimerTransition(
+      buildPlayingState({ activeSetlistId: SETLIST_ID.toUpperCase() }),
+      buildRead(buildClipStep(2)),
+    );
+    expect(transition).not.toBeNull();
+  });
+
+  it('goes back to manual with no index when the set list emptied', () => {
+    const transition = vjSetlistTimerTransition(
+      buildPlayingState(),
+      buildRead(null, { itemIds: [], isLooping: true }),
+    );
+    expect(transition).not.toBeNull();
+    expect(transition?.show).toBeNull();
+    expect(transition?.clock).toEqual({ kind: 'clear' });
+    expect(transition?.nextState.setlistIndex).toBeNull();
+    expect(transition?.nextState.setlistPlayback).toEqual(
+      buildPlayback({ status: 'manual', itemId: null, isLooping: true }),
+    );
+  });
+
+  it('finishes past the end, keeping the index and item id', () => {
+    const transition = vjSetlistTimerTransition(
+      buildPlayingState({ setlistIndex: 3 }, { itemId: ITEM_D }),
+      buildRead(null),
+    );
+    expect(transition?.show).toBeNull();
+    expect(transition?.clock).toEqual({ kind: 'clear' });
+    expect(transition?.nextState.setlistIndex).toBe(3);
+    expect(transition?.nextState.setlistPlayback).toEqual(
+      buildPlayback({
+        status: 'finished',
+        itemId: ITEM_D,
+        stepDurationMs: 8000,
+      }),
+    );
+  });
+
+  it('waits for consent before a flashing step, keeping the step on screen', () => {
+    const transition = vjSetlistTimerTransition(
+      buildPlayingState(),
+      buildRead(buildSceneStep(2, { look: buildLook(true) })),
+    );
+    expect(transition?.show).toBeNull();
+    expect(transition?.clock).toEqual({ kind: 'clear' });
+    expect(transition?.nextState.setlistIndex).toBe(1);
+    expect(transition?.nextState.setlistPlayback).toEqual(
+      buildPlayback({
+        status: 'needsFlashConsent',
+        itemId: ITEM_B,
+        stepDurationMs: 8000,
+      }),
+    );
+  });
+
+  it('plays a flashing step once the stored flag is set, and never flashes a clip', () => {
+    const confirmed = vjSetlistTimerTransition(
+      buildPlayingState({}, { isFlashConfirmed: true }),
+      buildRead(buildSceneStep(2, { look: buildLook(true) })),
+    );
+    expect(confirmed?.show?.kind).toBe('scene');
+    expect(confirmed?.clock).toEqual({
+      kind: 'start',
+      durationMs: 8000,
+      remainingMs: 8000,
+    });
+    const stamped = stampVjSetlistClock(
+      (confirmed as VjSetlistTransition).nextState.setlistPlayback,
+      (confirmed as VjSetlistTransition).clock,
+      NOW + 7700,
+    );
+    expect(stamped).toEqual(
+      buildPlayback({
+        status: 'playing',
+        itemId: ITEM_C,
+        isFlashConfirmed: true,
+        stepStartedAt: NOW + 7700,
+        stepEndsAt: NOW + 15_700,
+        stepDurationMs: 8000,
+      }),
+    );
+    const clip = vjSetlistTimerTransition(
+      buildPlayingState(),
+      buildRead(buildClipStep(2)),
+    );
+    expect(clip?.show).toEqual({ kind: 'clip', clipId: CLIP_ID });
+  });
+
+  it('shows the next step and restarts the clock', () => {
+    const transition = vjSetlistTimerTransition(
+      buildPlayingState(),
+      buildRead(buildClipStep(2, { duration: { kind: 'beats', value: 8 } }), {
+        isLooping: true,
+      }),
+    );
+    expect(transition?.clock).toEqual({
+      kind: 'start',
+      durationMs: 3871,
+      remainingMs: 3871,
+    });
+    expect(transition?.nextState.setlistIndex).toBe(2);
+    expect(transition?.nextState.setlistPlayback).toEqual(
+      buildPlayback({
+        status: 'playing',
+        itemId: ITEM_C,
+        stepDurationMs: 3871,
+        isLooping: true,
+      }),
+    );
+  });
+
+  it('wraps to step 0 with Loop', () => {
+    const transition = vjSetlistTimerTransition(
+      buildPlayingState(
+        { setlistIndex: 3 },
+        { itemId: ITEM_D, isLooping: true },
+      ),
+      buildRead(buildClipStep(0), { isLooping: true }),
+    );
+    expect(transition?.nextState.setlistIndex).toBe(0);
+    expect(transition?.nextState.setlistPlayback.itemId).toBe(ITEM_A);
+  });
+});
+
+describe('vj sequences: takeover, Loop and clear', () => {
+  it('takes over a running, paused or flash-waiting sequence on a source change', () => {
+    for (const status of ['playing', 'paused', 'needsFlashConsent'] as const) {
+      const previous = buildSequenceState(status, {
+        stepStartedAt: status === 'playing' ? NOW : null,
+        stepEndsAt: status === 'playing' ? NOW + 8000 : null,
+        stepDurationMs: 8000,
+        pausedRemainingMs: status === 'paused' ? 3000 : null,
+        isFlashConfirmed: true,
+      });
+      const next = { ...previous, liveClipId: CLIP_ID };
+      const taken = vjSetlistTakeoverState(previous, next);
+      expect(taken.setlistPlayback).toEqual(
+        buildPlayback({
+          status: 'takenOver',
+          itemId: ITEM_B,
+          isFlashConfirmed: true,
+        }),
+      );
+      expect(taken.setlistIndex).toBe(1);
+      expect(taken.liveClipId).toBe(CLIP_ID);
+    }
+  });
+
+  it('takes over when shuffle goes from off to on', () => {
+    const previous = buildPlayingState();
+    const next = { ...previous, shuffle: buildShuffle({ isOn: true }) };
+    expect(vjSetlistTakeoverState(previous, next).setlistPlayback.status).toBe(
+      'takenOver',
+    );
+    const alreadyOn = buildPlayingState({
+      shuffle: buildShuffle({ isOn: true }),
+    });
+    expect(vjSetlistTakeoverState(alreadyOn, alreadyOn)).toBe(alreadyOn);
+  });
+
+  it('leaves manual, takenOver and finished alone, and a change that moves nothing', () => {
+    for (const status of ['manual', 'takenOver', 'finished'] as const) {
+      const previous = buildSequenceState(status);
+      const next = { ...previous, liveClipId: CLIP_ID };
+      expect(vjSetlistTakeoverState(previous, next)).toBe(next);
+    }
+    const playing = buildPlayingState();
+    const sameSource = {
+      ...playing,
+      effects: { ...playing.effects, isBlackout: true },
+    };
+    expect(vjSetlistTakeoverState(playing, sameSource)).toBe(sameSource);
+  });
+
+  it('sets Loop only on the active set list', () => {
+    const state = buildSequenceState('manual');
+    expect(
+      vjSetlistLoopingState(state, SETLIST_ID, true).setlistPlayback.isLooping,
+    ).toBe(true);
+    expect(
+      vjSetlistLoopingState(state, SETLIST_ID.toUpperCase(), true)
+        .setlistPlayback.isLooping,
+    ).toBe(true);
+    expect(vjSetlistLoopingState(state, OTHER_SETLIST_ID, true)).toBe(state);
+    const idle = buildState();
+    expect(vjSetlistLoopingState(idle, SETLIST_ID, true)).toBe(idle);
+  });
+
+  it('answers the same state when Loop already has the asked value', () => {
+    const looping = buildSequenceState('manual', { isLooping: true });
+    expect(vjSetlistLoopingState(looping, SETLIST_ID, true)).toBe(looping);
+    const notLooping = buildSequenceState('manual', { isLooping: false });
+    expect(vjSetlistLoopingState(notLooping, SETLIST_ID, false)).toBe(
+      notLooping,
+    );
+  });
+
+  it('clears the set list and its playback', () => {
+    const cleared = vjSetlistClearedState(buildPlayingState());
+    expect(cleared.activeSetlistId).toBeNull();
+    expect(cleared.setlistIndex).toBeNull();
+    expect(cleared.setlistPlayback).toEqual(createVjSetlistPlayback(false));
+  });
+});
+
+describe('vj sequences: index follow', () => {
+  const OLD_IDS = [ITEM_A, ITEM_B, ITEM_C, ITEM_D];
+
+  function followed(
+    onScreen: { index: number | null; itemId: string | null },
+    nextIds: string[],
+    previousItemIds: readonly string[] | null = OLD_IDS,
+    isLooping = false,
+  ): VjStageState {
+    const state = buildPlayingState(
+      { setlistIndex: onScreen.index },
+      { itemId: onScreen.itemId },
+    );
+    return vjSetlistFollowState(state, {
+      setlistId: SETLIST_ID,
+      previousItemIds,
+      read: { itemIds: nextIds, isLooping },
+    });
+  }
+
+  it('follows the worked cases of the contract', () => {
+    const cases: Array<{
+      name: string;
+      onScreen: { index: number | null; itemId: string | null };
+      previous?: readonly string[];
+      nextIds: string[];
+      index: number | null;
+      itemId: string | null;
+    }> = [
+      {
+        name: 'move C first',
+        onScreen: { index: 2, itemId: ITEM_C },
+        nextIds: [ITEM_C, ITEM_A, ITEM_B, ITEM_D],
+        index: 0,
+        itemId: ITEM_C,
+      },
+      {
+        name: 'remove A',
+        onScreen: { index: 2, itemId: ITEM_C },
+        nextIds: [ITEM_B, ITEM_C, ITEM_D],
+        index: 1,
+        itemId: ITEM_C,
+      },
+      {
+        name: 'remove C',
+        onScreen: { index: 2, itemId: ITEM_C },
+        nextIds: [ITEM_A, ITEM_B, ITEM_D],
+        index: 1,
+        itemId: null,
+      },
+      {
+        name: 'remove B and C',
+        onScreen: { index: 2, itemId: ITEM_C },
+        nextIds: [ITEM_A, ITEM_D],
+        index: 0,
+        itemId: null,
+      },
+      {
+        name: 'remove A while on A',
+        onScreen: { index: 0, itemId: ITEM_A },
+        nextIds: [ITEM_B, ITEM_C, ITEM_D],
+        index: null,
+        itemId: null,
+      },
+      {
+        name: 'insert X after C',
+        onScreen: { index: 2, itemId: ITEM_C },
+        nextIds: [ITEM_A, ITEM_B, ITEM_C, ITEM_X, ITEM_D],
+        index: 2,
+        itemId: ITEM_C,
+      },
+      {
+        name: 'insert X after A with the item id gone',
+        onScreen: { index: 0, itemId: null },
+        previous: [ITEM_A, ITEM_C, ITEM_D],
+        nextIds: [ITEM_A, ITEM_X, ITEM_C, ITEM_D],
+        index: 0,
+        itemId: null,
+      },
+      {
+        name: 'scene of C deleted',
+        onScreen: { index: 2, itemId: ITEM_C },
+        nextIds: [ITEM_A, ITEM_B, ITEM_D],
+        index: 1,
+        itemId: null,
+      },
+    ];
+    for (const testCase of cases) {
+      const state = followed(
+        testCase.onScreen,
+        testCase.nextIds,
+        testCase.previous ?? OLD_IDS,
+      );
+      expect([testCase.name, state.setlistIndex]).toEqual([
+        testCase.name,
+        testCase.index,
+      ]);
+      expect([testCase.name, state.setlistPlayback.itemId]).toEqual([
+        testCase.name,
+        testCase.itemId,
+      ]);
+    }
+  });
+
+  it('goes manual with no index and no clock when every step is removed', () => {
+    const state = followed({ index: 2, itemId: ITEM_C }, []);
+    expect(state.setlistIndex).toBeNull();
+    expect(state.setlistPlayback).toEqual(
+      buildPlayback({ status: 'manual', itemId: null }),
+    );
+  });
+
+  it('keeps status and a running clock through an edit', () => {
+    const state = followed({ index: 2, itemId: ITEM_C }, [
+      ITEM_A,
+      ITEM_B,
+      ITEM_D,
+    ]);
+    expect(state.setlistPlayback).toEqual(
+      buildPlayback({
+        status: 'playing',
+        itemId: null,
+        stepStartedAt: NOW,
+        stepEndsAt: NOW + 8000,
+        stepDurationMs: 8000,
+      }),
+    );
+  });
+
+  it('copies the saved Loop into the playback', () => {
+    const state = followed(
+      { index: 2, itemId: ITEM_C },
+      OLD_IDS,
+      OLD_IDS,
+      true,
+    );
+    expect(state.setlistPlayback.isLooping).toBe(true);
+    expect(state.setlistIndex).toBe(2);
+  });
+
+  it('leaves the index null when nothing was on screen yet', () => {
+    const state = followed({ index: null, itemId: null }, [ITEM_B, ITEM_A]);
+    expect(state.setlistIndex).toBeNull();
+    expect(state.setlistPlayback.itemId).toBeNull();
+  });
+
+  it('anchors on the old list when the item id is null (rules 6 and 7)', () => {
+    const kept = followed({ index: 1, itemId: null }, [ITEM_C, ITEM_B, ITEM_A]);
+    expect(kept.setlistIndex).toBe(1);
+    const removed = followed({ index: 2, itemId: null }, [ITEM_A, ITEM_B]);
+    expect(removed.setlistIndex).toBe(1);
+    const firstRemoved = followed({ index: 0, itemId: null }, [ITEM_B, ITEM_C]);
+    expect(firstRemoved.setlistIndex).toBeNull();
+  });
+
+  it('clamps when the old list is unknown and the step id is gone (rule 8)', () => {
+    expect(
+      followed({ index: 2, itemId: ITEM_C }, [ITEM_A, ITEM_B], null)
+        .setlistIndex,
+    ).toBe(1);
+    expect(
+      followed({ index: 0, itemId: ITEM_C }, [ITEM_A, ITEM_B], null)
+        .setlistIndex,
+    ).toBeNull();
+    expect(
+      followed({ index: 3, itemId: ITEM_X }, [ITEM_A, ITEM_B], OLD_IDS)
+        .setlistIndex,
+    ).toBe(1);
+    expect(
+      followed({ index: 3, itemId: ITEM_X }, [ITEM_A, ITEM_B], OLD_IDS)
+        .setlistPlayback.itemId,
+    ).toBeNull();
+  });
+
+  it('clamps when the old list is unknown or too short and the item id is null (rule 9)', () => {
+    expect(
+      followed({ index: 3, itemId: null }, [ITEM_A, ITEM_B], null).setlistIndex,
+    ).toBe(1);
+    expect(
+      followed(
+        { index: 2, itemId: null },
+        [ITEM_A, ITEM_B, ITEM_C, ITEM_D],
+        [ITEM_A],
+      ).setlistIndex,
+    ).toBe(2);
+  });
+
+  it('answers the same state for another set list and for a change that moves nothing', () => {
+    const state = buildPlayingState();
+    expect(
+      vjSetlistFollowState(state, {
+        setlistId: OTHER_SETLIST_ID,
+        previousItemIds: OLD_IDS,
+        read: { itemIds: [], isLooping: true },
+      }),
+    ).toBe(state);
+    expect(
+      vjSetlistFollowState(state, {
+        setlistId: SETLIST_ID,
+        previousItemIds: OLD_IDS,
+        read: { itemIds: OLD_IDS, isLooping: false },
+      }),
+    ).toBe(state);
+    const idle = buildState();
+    expect(
+      vjSetlistFollowState(idle, {
+        setlistId: SETLIST_ID,
+        previousItemIds: null,
+        read: null,
+      }),
+    ).toBe(idle);
+  });
+
+  it('clears the set list when it is gone', () => {
+    const state = buildPlayingState();
+    expect(
+      vjSetlistFollowState(state, {
+        setlistId: SETLIST_ID,
+        previousItemIds: OLD_IDS,
+        read: null,
+      }),
+    ).toEqual(vjSetlistClearedState(state));
+  });
+});
+
+describe('vj sequences: clock stamp and timer landing', () => {
+  it('keeps the playback for a keep stamp', () => {
+    const playback = buildPlayback({ status: 'paused', pausedRemainingMs: 5 });
+    expect(stampVjSetlistClock(playback, { kind: 'keep' }, NOW)).toBe(playback);
+  });
+
+  it('clears only the two times for a clear stamp', () => {
+    const playback = buildPlayback({
+      status: 'paused',
+      stepStartedAt: 1,
+      stepEndsAt: 2,
+      stepDurationMs: 8000,
+      pausedRemainingMs: 5000,
+    });
+    expect(stampVjSetlistClock(playback, { kind: 'clear' }, NOW)).toEqual({
+      ...playback,
+      stepStartedAt: null,
+      stepEndsAt: null,
+    });
+  });
+
+  it('stamps a start from the change time', () => {
+    const playback = buildPlayback({
+      status: 'playing',
+      pausedRemainingMs: 5000,
+    });
+    expect(
+      stampVjSetlistClock(
+        playback,
+        { kind: 'start', durationMs: 8000, remainingMs: 5000 },
+        10_000,
+      ),
+    ).toEqual({
+      ...playback,
+      stepStartedAt: 7000,
+      stepEndsAt: 15_000,
+      stepDurationMs: 8000,
+      pausedRemainingMs: null,
+    });
+    const full = stampVjSetlistClock(
+      playback,
+      { kind: 'start', durationMs: 8000, remainingMs: 8000 },
+      10_000,
+    );
+    expect(full.stepEndsAt).toBe(18_000);
+    expect((full.stepEndsAt ?? 0) - (full.stepStartedAt ?? 0)).toBe(8000);
+  });
+
+  it('lands at the step end with quantize off, and not once it has passed', () => {
+    const tempo = buildTempo({ quantize: 'off' });
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_000, 15_000)).toBe(20_000);
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_000, 20_000)).toBeNull();
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_000, 25_000)).toBeNull();
+  });
+
+  it('lands on the first beat boundary at or after the step end with quantize on', () => {
+    const tempo = buildTempo({
+      bpm: 120,
+      downbeatAt: 10_000,
+      quantize: 'beat',
+    });
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_000, 15_000)).toBe(20_000);
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_001, 15_000)).toBe(20_000);
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_100, 15_000)).toBe(20_500);
+  });
+
+  it('lands on the next bar with quantize bar', () => {
+    const tempo = buildTempo({ bpm: 120, downbeatAt: 10_000, quantize: 'bar' });
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_000, 15_000)).toBe(20_000);
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_100, 15_000)).toBe(22_000);
+  });
+
+  it('keeps the minimum lead from now when the step end is already close', () => {
+    const tempo = buildTempo({
+      bpm: 120,
+      downbeatAt: 10_000,
+      quantize: 'beat',
+    });
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_000, 19_900)).toBe(20_500);
+    expect(vjSetlistAdvanceApplyAt(tempo, 20_000, 30_000)).toBe(30_500);
+  });
+});
+
+describe('vj sequences: restored playback', () => {
+  const restoreInput = (
+    overrides: Partial<VjSetlistRestoreInput> = {},
+  ): VjSetlistRestoreInput => ({
+    read: buildRead(buildSceneStep(1), { isLooping: true }),
+    setlistIndex: 1,
+    now: NOW,
+    ...overrides,
+  });
+
+  it('answers the default playback when no set list is restored', () => {
+    expect(
+      restoredVjSetlistPlayback(
+        buildPlayback({ status: 'playing' }),
+        restoreInput({ read: null, setlistIndex: null }),
+      ),
+    ).toEqual(createVjSetlistPlayback(false));
+  });
+
+  it('reads an unknown status or a non-record as manual', () => {
+    for (const value of [{ status: 'dancing' }, null, 'playing', 7, []]) {
+      expect(restoredVjSetlistPlayback(value, restoreInput())).toEqual(
+        buildPlayback({ status: 'manual', itemId: ITEM_B, isLooping: true }),
+      );
+    }
+  });
+
+  it('never restores the flash confirmation, and takes Loop and the item id from the read', () => {
+    const restored = restoredVjSetlistPlayback(
+      buildPlayback({
+        status: 'manual',
+        isFlashConfirmed: true,
+        isLooping: false,
+        itemId: ITEM_D,
+      }),
+      restoreInput(),
+    );
+    expect(restored.isFlashConfirmed).toBe(false);
+    expect(restored.isLooping).toBe(true);
+    expect(restored.itemId).toBe(ITEM_B);
+    expect(
+      restoredVjSetlistPlayback(
+        buildPlayback({ status: 'manual' }),
+        restoreInput({ setlistIndex: null }),
+      ).itemId,
+    ).toBeNull();
+    expect(
+      restoredVjSetlistPlayback(
+        buildPlayback({ status: 'manual' }),
+        restoreInput({ read: buildRead(null), setlistIndex: 1 }),
+      ).itemId,
+    ).toBeNull();
+  });
+
+  it('keeps the clock of a playing record, even a passed step end', () => {
+    const playing = buildPlayback({
+      status: 'playing',
+      stepStartedAt: NOW - 3000,
+      stepEndsAt: NOW + 5000,
+      stepDurationMs: 8000,
+    });
+    expect(restoredVjSetlistPlayback(playing, restoreInput())).toEqual({
+      ...playing,
+      itemId: ITEM_B,
+      isLooping: true,
+    });
+    const passed = buildPlayback({
+      status: 'playing',
+      stepStartedAt: NOW - 9000,
+      stepEndsAt: NOW - 1000,
+      stepDurationMs: 8000,
+    });
+    expect(restoredVjSetlistPlayback(passed, restoreInput()).status).toBe(
+      'playing',
+    );
+    expect(restoredVjSetlistPlayback(passed, restoreInput()).stepEndsAt).toBe(
+      NOW - 1000,
+    );
+  });
+
+  it('keeps a playing step end exactly 600000 ms ahead of now', () => {
+    const playing = buildPlayback({
+      status: 'playing',
+      stepStartedAt: NOW + 600_000 - 8000,
+      stepEndsAt: NOW + 600_000,
+      stepDurationMs: 8000,
+    });
+    const restored = restoredVjSetlistPlayback(playing, restoreInput());
+    expect(restored.status).toBe('playing');
+    expect(restored.stepEndsAt).toBe(NOW + 600_000);
+  });
+
+  it('restores a playing record that fails its check as manual with no clock', () => {
+    const failing: Array<Record<string, unknown>> = [
+      { stepStartedAt: NOW, stepEndsAt: NOW + 8000, stepDurationMs: 7999 },
+      { stepStartedAt: NOW, stepEndsAt: NOW + 8000, stepDurationMs: 0 },
+      {
+        stepStartedAt: NOW,
+        stepEndsAt: NOW + 700_000,
+        stepDurationMs: 700_000,
+      },
+      {
+        stepStartedAt: NOW + 700_000 - 8000,
+        stepEndsAt: NOW + 700_000,
+        stepDurationMs: 8000,
+      },
+      {
+        stepStartedAt: NOW + 0.5,
+        stepEndsAt: NOW + 8000.5,
+        stepDurationMs: 8000,
+      },
+      { stepStartedAt: null, stepEndsAt: null, stepDurationMs: null },
+      { stepStartedAt: '1', stepEndsAt: '2', stepDurationMs: 1 },
+    ];
+    for (const fields of failing) {
+      expect(
+        restoredVjSetlistPlayback(
+          { ...buildPlayback({ status: 'playing' }), ...fields },
+          restoreInput(),
+        ),
+      ).toEqual(
+        buildPlayback({ status: 'manual', itemId: ITEM_B, isLooping: true }),
+      );
+    }
+  });
+
+  it('keeps the length and time left of a paused record', () => {
+    const paused = buildPlayback({
+      status: 'paused',
+      stepDurationMs: 8000,
+      pausedRemainingMs: 3000,
+    });
+    expect(restoredVjSetlistPlayback(paused, restoreInput())).toEqual({
+      ...paused,
+      itemId: ITEM_B,
+      isLooping: true,
+    });
+    expect(
+      restoredVjSetlistPlayback(
+        { ...paused, pausedRemainingMs: 0 },
+        restoreInput(),
+      ).status,
+    ).toBe('paused');
+  });
+
+  it('restores a paused record that fails its check as manual with no clock', () => {
+    const failing: Array<Record<string, unknown>> = [
+      { stepDurationMs: 8000, pausedRemainingMs: 8001 },
+      { stepDurationMs: 8000, pausedRemainingMs: -1 },
+      { stepDurationMs: 600_001, pausedRemainingMs: 1 },
+      { stepDurationMs: 8000.5, pausedRemainingMs: 1 },
+      { stepDurationMs: 8000, pausedRemainingMs: null },
+      { stepDurationMs: null, pausedRemainingMs: 1 },
+    ];
+    for (const fields of failing) {
+      expect(
+        restoredVjSetlistPlayback(
+          { ...buildPlayback({ status: 'paused' }), ...fields },
+          restoreInput(),
+        ),
+      ).toEqual(
+        buildPlayback({ status: 'manual', itemId: ITEM_B, isLooping: true }),
+      );
+    }
+  });
+
+  it('restores the other statuses with only a valid step length', () => {
+    for (const status of [
+      'manual',
+      'takenOver',
+      'finished',
+      'needsFlashConsent',
+    ] as const) {
+      const record = buildPlayback({
+        status,
+        stepStartedAt: NOW,
+        stepEndsAt: NOW + 8000,
+        stepDurationMs: 8000,
+        pausedRemainingMs: 100,
+      });
+      expect(restoredVjSetlistPlayback(record, restoreInput())).toEqual(
+        buildPlayback({
+          status,
+          itemId: ITEM_B,
+          isLooping: true,
+          stepDurationMs: 8000,
+        }),
+      );
+      for (const stepDurationMs of [0, 600_001, 1.5, null, '8000']) {
+        expect(
+          restoredVjSetlistPlayback(
+            { ...record, stepDurationMs },
+            restoreInput(),
+          ).stepDurationMs,
+        ).toBeNull();
+      }
+    }
   });
 });

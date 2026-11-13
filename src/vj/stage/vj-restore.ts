@@ -1,16 +1,25 @@
 /**
  * Restore v2 (contract 7.13): the reads a screen's saved state needs and the
- * stage it seeds. The payload goes through `upgradeVjStageFieldsV1` first, so
- * a v1-shaped snapshot seeds a v2 stage. Each part is read on its own by the
+ * stage it seeds. The payload goes through `upgradeVjStageFieldsV1` and then
+ * `upgradeVjStageFieldsV2`, so a v1-shaped or pre-sequences snapshot seeds a
+ * current stage. The set list is read at the sent index (sequences contract
+ * 9), and its playback comes from `restoredVjSetlistPlayback` checked against
+ * that read. Each part is read on its own by the
  * restore reader of the module that owns its command; a bad field takes its
  * default and an id the reads did not find is dropped.
  */
 import {
   canonicalVjStageState,
   createVjStageState,
+  restoredVjSetlistPlayback,
   upgradeVjStageFieldsV1,
+  upgradeVjStageFieldsV2,
   VJ_LIMITS,
+  vjSetlistIndexPosition,
   type VjGeneratorId,
+  type VjSetlistPlayback,
+  type VjSetlistRead,
+  type VjSetlistReadPosition,
   type VjStageState,
 } from '../vj.contract';
 import { checkVjGeneratorChoice } from '../vj-field-checks';
@@ -56,14 +65,26 @@ function uuidOrNull(value: unknown): string | null {
   return isUuidString(value) ? value.toLowerCase() : null;
 }
 
-/** The restore payload after the v1 upgrade; null when it is not an object. */
+/** The restore payload after the v1 and v2 upgrades; null when it is not an object. */
 function upgradedRestoreOf(
   restoreState: unknown,
   now: number,
 ): Record<string, unknown> | null {
   return isRecord(restoreState)
-    ? upgradeVjStageFieldsV1(restoreState, now)
+    ? upgradeVjStageFieldsV2(upgradeVjStageFieldsV1(restoreState, now))
     : null;
+}
+
+/** Where the restore reads its set list: the sent index when it is an index
+ *  a set list can hold, else the item count only. */
+function restoreSetlistPositionOf(
+  restore: Record<string, unknown>,
+): VjSetlistReadPosition {
+  const sentIndex = restore.setlistIndex;
+  if (isSafeIntegerInRange(sentIndex, 0, VJ_LIMITS.setlistItemsMax - 1)) {
+    return vjSetlistIndexPosition(sentIndex, false);
+  }
+  return { kind: 'count' };
 }
 
 /** The ids the restore's reads need. */
@@ -91,7 +112,7 @@ function restoreIdsOf(restore: Record<string, unknown>): VjRestoreIds {
   };
 }
 
-/** The reads a restore needs (contract 7.13): pack, live clip, mix clip, excluded clips in the pack, the set list count. Runs upgradeVjStageFieldsV1 first. */
+/** The reads a restore needs (contract 7.13): pack, live clip, mix clip, excluded clips in the pack, the set list at the sent index. Runs both upgrade passes first. */
 export function vjRestoreLookups(
   restoreState: unknown,
   now: number,
@@ -122,7 +143,7 @@ export function vjRestoreLookups(
     lookups.push({
       kind: 'setlistItem',
       setlistId: ids.setlistId,
-      index: null,
+      position: restoreSetlistPositionOf(restore),
     });
   }
   return lookups;
@@ -184,26 +205,78 @@ function restoredSourceOf(
   return restoredGeneratorOf(restore);
 }
 
+/** The set list read a restore lists, from the payload as sent; null when
+ *  the payload names no set list or the read did not find it. The stage
+ *  service keeps its `itemIds` as the stage's `setlistItemIds`. */
+export function vjRestoreSetlistRead(
+  restoreState: unknown,
+  reads: VjLookupResults,
+  now: number,
+): VjSetlistRead | null {
+  const restore = upgradedRestoreOf(restoreState, now);
+  return restore === null
+    ? null
+    : setlistReadOf(restore, restoreIdsOf(restore).setlistId, reads);
+}
+
+/** The read of the named set list at the restore's position; null when none
+ *  is named or the read did not find it. */
+function setlistReadOf(
+  restore: Record<string, unknown>,
+  setlistId: string | null,
+  reads: VjLookupResults,
+): VjSetlistRead | null {
+  if (setlistId === null) {
+    return null;
+  }
+  return (
+    reads.setlistItems.get(
+      vjSetlistItemKey(setlistId, restoreSetlistPositionOf(restore)),
+    ) ?? null
+  );
+}
+
 /** The restored set list: kept when the read found it; an index that is no
- *  integer, or at or past the item count, becomes null. */
+ *  integer, or at or past the item count, becomes null; the playback is
+ *  restoredVjSetlistPlayback against the read (the default with none). */
 function restoredSetlistOf(
   restore: Record<string, unknown>,
   setlistId: string | null,
   reads: VjLookupResults,
-): { activeSetlistId: string | null; setlistIndex: number | null } {
-  if (setlistId === null) {
-    return { activeSetlistId: null, setlistIndex: null };
-  }
-  const setlist = reads.setlistItems.get(vjSetlistItemKey(setlistId, null));
-  if (setlist === undefined || setlist === null) {
-    return { activeSetlistId: null, setlistIndex: null };
+  now: number,
+): {
+  activeSetlistId: string | null;
+  setlistIndex: number | null;
+  setlistPlayback: VjSetlistPlayback;
+} {
+  const read = setlistReadOf(restore, setlistId, reads);
+  if (setlistId === null || read === null) {
+    return {
+      activeSetlistId: null,
+      setlistIndex: null,
+      setlistPlayback: restoredVjSetlistPlayback(restore.setlistPlayback, {
+        read: null,
+        setlistIndex: null,
+        now,
+      }),
+    };
   }
   const sentIndex = restore.setlistIndex;
+  const setlistIndex = isSafeIntegerInRange(
+    sentIndex,
+    0,
+    read.itemIds.length - 1,
+  )
+    ? sentIndex
+    : null;
   return {
     activeSetlistId: setlistId,
-    setlistIndex: isSafeIntegerInRange(sentIndex, 0, setlist.itemCount - 1)
-      ? sentIndex
-      : null,
+    setlistIndex,
+    setlistPlayback: restoredVjSetlistPlayback(restore.setlistPlayback, {
+      read,
+      setlistIndex,
+      now,
+    }),
   };
 }
 
@@ -226,7 +299,7 @@ export function restoredVjStageState(
   );
   const pack = restoredPackOf(ids.packId, reads);
   const source = restoredSourceOf(restore, ids.liveClipId, existingClipIds);
-  const setlist = restoredSetlistOf(restore, ids.setlistId, reads);
+  const setlist = restoredSetlistOf(restore, ids.setlistId, reads, now);
   const isSourceLive =
     source.liveClipId !== null || source.liveGeneratorId !== null;
   const clipIdsInPack: ReadonlySet<string> =
@@ -263,6 +336,7 @@ export function restoredVjStageState(
     screenOverrides: {},
     activeSetlistId: setlist.activeSetlistId,
     setlistIndex: setlist.setlistIndex,
+    setlistPlayback: setlist.setlistPlayback,
     updatedAt: now,
   });
 }

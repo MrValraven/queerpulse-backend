@@ -4,8 +4,10 @@
  * beat and clock helpers, the screen status and every `/vj` socket frame.
  * `queerpulse/src/shared/contracts/vj.ts` mirrors this file name for name and
  * value for value. Contract `QUEERPULSE-VJ-V2-CONTRACT-2026-11-06.md`,
- * sections 1, 3 and 7, over `QUEERPULSE-VJ-CONTRACT-2026-11-05.md`. This
- * module imports nothing at runtime.
+ * sections 1, 3 and 7, over `QUEERPULSE-VJ-CONTRACT-2026-11-05.md`, plus the
+ * sequences addendum `QUEERPULSE-VJ-SEQUENCES-CONTRACT-2026-11-13.md`
+ * (sections 3, 5.1 and 5.2: clip steps, step lengths, the playback clock and
+ * its pure transitions). This module imports nothing at runtime.
  */
 
 /** Bumped when a frame or state shape changes incompatibly. */
@@ -177,6 +179,30 @@ export type VjShuffleBeatCount = (typeof VJ_SHUFFLE_BEAT_COUNTS)[number];
 export const VJ_ATTACH_ROLES = ['screen', 'remote'] as const;
 export type VjAttachRole = (typeof VJ_ATTACH_ROLES)[number];
 
+/** What a step plays: a saved scene's look or one clip. */
+export const VJ_SETLIST_ITEM_KINDS = ['scene', 'clip'] as const;
+export type VjSetlistItemKind = (typeof VJ_SETLIST_ITEM_KINDS)[number];
+
+/** Whether a step length counts seconds or beats of the tempo. */
+export const VJ_STEP_DURATION_KINDS = ['seconds', 'beats'] as const;
+export type VjStepDurationKind = (typeof VJ_STEP_DURATION_KINDS)[number];
+
+/** The beat counts a beats step length may take. */
+export const VJ_STEP_BEAT_COUNTS = [4, 8, 16, 32, 64] as const;
+export type VjStepBeatCount = (typeof VJ_STEP_BEAT_COUNTS)[number];
+
+/** A sequence's playback status (the transitions below hold every change). */
+export const VJ_SETLIST_PLAYBACK_STATUSES = [
+  'manual',
+  'playing',
+  'paused',
+  'takenOver',
+  'finished',
+  'needsFlashConsent',
+] as const;
+export type VjSetlistPlaybackStatus =
+  (typeof VJ_SETLIST_PLAYBACK_STATUSES)[number];
+
 /** Every size, length, count and timing bound of the VJ contract. */
 export const VJ_LIMITS = {
   /** 100 MB, the `vj_clip` kind cap. */
@@ -242,6 +268,12 @@ export const VJ_LIMITS = {
   setlistNameMax: 60,
   setlistsMax: 50,
   setlistItemsMax: 100,
+  /** Bounds of a step length in the 'seconds' kind. */
+  setlistStepSecondsMin: 2,
+  setlistStepSecondsMax: 600,
+  setlistStepSecondsDefault: 8,
+  /** A failed step read retries after this long (sequences contract section 5.7). */
+  setlistTimerRetryMs: 1000,
   /** A remote's downbeatAt lies within this many ms of the server's clock. */
   downbeatSkewMsMax: 60_000,
   /** Earliest a quantized change may land after the server receives it. */
@@ -948,6 +980,32 @@ export interface VjScreenOverride {
   generatorVariant: string | null;
 }
 
+/** One step length: 'seconds' is an integer 2..600, 'beats' one of 4, 8, 16, 32, 64. */
+export interface VjStepDuration {
+  kind: VjStepDurationKind;
+  value: number;
+}
+
+/** A sequence's clock on the live stage (design 6.1, 13.1). */
+export interface VjSetlistPlayback {
+  /** Default 'manual'. */
+  status: VjSetlistPlaybackStatus;
+  /** Item id of the step on screen; null when armed, and once that step was removed (sequences contract section 7). */
+  itemId: string | null;
+  /** A person confirmed the flash warning for this run. False on a new stageEpoch. */
+  isFlashConfirmed: boolean;
+  /** Server epoch ms the running step's clock started (stepEndsAt - stepDurationMs); null unless 'playing'. */
+  stepStartedAt: number | null;
+  /** Server epoch ms the running step ends: the server timer's target. Null unless 'playing'. */
+  stepEndsAt: number | null;
+  /** Full length in ms of the step whose clock last ran; kept while 'paused'; null when no clock ran for it. */
+  stepDurationMs: number | null;
+  /** Time left when the clock stopped; a number only while 'paused'. */
+  pausedRemainingMs: number | null;
+  /** Copy of the set list's saved Loop, refreshed on every read and every setlist_updated. */
+  isLooping: boolean;
+}
+
 /** The whole live stage of one admin, broadcast in full on every change. */
 export interface VjStageState {
   /** Random uuid minted when the server creates this stage in memory. A new
@@ -984,6 +1042,8 @@ export interface VjStageState {
   activeSetlistId: string | null;
   /** Index of the set list item recalled last; null when armed and nothing recalled yet. */
   setlistIndex: number | null;
+  /** Default createVjSetlistPlayback(false). */
+  setlistPlayback: VjSetlistPlayback;
   /** Server epoch ms of the last applied change (or creation). */
   updatedAt: number;
 }
@@ -1008,6 +1068,7 @@ export type VjStageRestore = Pick<
   | 'shuffle'
   | 'activeSetlistId'
   | 'setlistIndex'
+  | 'setlistPlayback'
 >;
 
 /** Why a `stage:state` frame was sent. */
@@ -1021,6 +1082,7 @@ export const VJ_STAGE_CAUSES = [
   'mic_tempo',
   'overlay_timeout',
   'countdown_end',
+  'setlist',
 ] as const;
 export type VjStageCause = (typeof VJ_STAGE_CAUSES)[number];
 
@@ -1080,6 +1142,7 @@ export function createVjStageState(
     screenOverrides: {},
     activeSetlistId: null,
     setlistIndex: null,
+    setlistPlayback: createVjSetlistPlayback(false),
     updatedAt: now,
   };
 }
@@ -1213,6 +1276,18 @@ export function vjShuffleIntervalMs(
     return shuffle.intervalValue * 1000;
   }
   return Math.round((shuffle.intervalValue * 60000) / tempo.bpm);
+}
+
+/** A step length in ms with the tempo at the moment the step starts:
+ *  seconds give value * 1000, beats give Math.round(value * 60000 / tempo.bpm). */
+export function vjStepDurationMs(
+  duration: VjStepDuration,
+  tempo: VjTempo,
+): number {
+  if (duration.kind === 'seconds') {
+    return duration.value * 1000;
+  }
+  return Math.round((duration.value * 60000) / tempo.bpm);
 }
 
 /** Strobe flashes per second: one flash per beat, capped at 3 per second at
@@ -1386,6 +1461,16 @@ export function canonicalVjStageState(state: VjStageState): VjStageState {
     screenOverrides: canonicalVjScreenOverrides(state.screenOverrides),
     activeSetlistId: lowercaseVjId(state.activeSetlistId),
     setlistIndex: state.setlistIndex,
+    setlistPlayback: {
+      status: state.setlistPlayback.status,
+      itemId: lowercaseVjId(state.setlistPlayback.itemId),
+      isFlashConfirmed: state.setlistPlayback.isFlashConfirmed,
+      stepStartedAt: state.setlistPlayback.stepStartedAt,
+      stepEndsAt: state.setlistPlayback.stepEndsAt,
+      stepDurationMs: state.setlistPlayback.stepDurationMs,
+      pausedRemainingMs: state.setlistPlayback.pausedRemainingMs,
+      isLooping: state.setlistPlayback.isLooping,
+    },
     updatedAt: state.updatedAt,
   };
 }
@@ -1618,6 +1703,16 @@ export function upgradeVjStageFieldsV1(
   return upgraded;
 }
 
+/** Fills setlistPlayback on a record saved before sequences; any other record comes back unchanged. */
+export function upgradeVjStageFieldsV2(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  if ('setlistPlayback' in value) {
+    return value;
+  }
+  return { ...value, setlistPlayback: createVjSetlistPlayback(false) };
+}
+
 /** The live source a scene recalls. */
 export type VjSceneSource =
   | { kind: 'clip'; clipId: string }
@@ -1675,6 +1770,1036 @@ export function vjSceneLookOf(state: VjStageState): VjSceneLook {
       amount: state.mix.amount,
       blendMode: state.mix.blendMode,
     },
+  };
+}
+
+/** Whether recalling the look can flash: its transition is flash-capable,
+ *  or an effect it turns on is (the catalog flags the pads read). */
+export function vjSceneLookFlashes(look: VjSceneLook): boolean {
+  if (VJ_TRANSITION_CATALOG[look.transition.mode].isFlashCapable) {
+    return true;
+  }
+  return VJ_EFFECT_IDS.some(
+    (effectId) =>
+      look.effects.settings[effectId]?.isOn === true &&
+      VJ_EFFECT_CATALOG[effectId].isFlashCapable,
+  );
+}
+
+/** The sequence default and the step override use these bounds. */
+export const DEFAULT_VJ_STEP_DURATION: VjStepDuration = Object.freeze({
+  kind: 'seconds',
+  value: VJ_LIMITS.setlistStepSecondsDefault,
+});
+
+/** A step length in range: seconds an integer 2..600, beats one of VJ_STEP_BEAT_COUNTS. */
+export function isVjStepDuration(value: unknown): value is VjStepDuration {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const ownKeys = Object.keys(record);
+  if (ownKeys.length !== 2 || !('kind' in record) || !('value' in record)) {
+    return false;
+  }
+  if (record.kind === 'seconds') {
+    return (
+      typeof record.value === 'number' &&
+      Number.isInteger(record.value) &&
+      record.value >= VJ_LIMITS.setlistStepSecondsMin &&
+      record.value <= VJ_LIMITS.setlistStepSecondsMax
+    );
+  }
+  return (
+    record.kind === 'beats' &&
+    (VJ_STEP_BEAT_COUNTS as readonly unknown[]).includes(record.value)
+  );
+}
+
+/** The length a step plays: its own, else the sequence default. */
+export function vjResolvedStepDuration(
+  itemDuration: VjStepDuration | null,
+  sequenceDefault: VjStepDuration,
+): VjStepDuration {
+  return itemDuration ?? sequenceDefault;
+}
+
+/** The default playback; a set list's saved Loop goes in. */
+export function createVjSetlistPlayback(isLooping: boolean): VjSetlistPlayback {
+  return {
+    status: 'manual',
+    itemId: null,
+    isFlashConfirmed: false,
+    stepStartedAt: null,
+    stepEndsAt: null,
+    stepDurationMs: null,
+    pausedRemainingMs: null,
+    isLooping,
+  };
+}
+
+/** Where a set list read points (sequences contract section 5.8, SQL). 'count' reads no step;
+ *  'index' reads that step, or step 0 past the end when wrapsToFirst;
+ *  'last' reads the final step. */
+export type VjSetlistReadPosition =
+  | { kind: 'count' }
+  | { kind: 'index'; index: number; wrapsToFirst: boolean }
+  | { kind: 'last' };
+
+/** An index position, normalised: an index at or past setlistItemsMax can
+ *  hold no step, so it reads step 0 when wrapping and the count otherwise. */
+export function vjSetlistIndexPosition(
+  index: number,
+  wrapsToFirst: boolean,
+): VjSetlistReadPosition {
+  if (index < VJ_LIMITS.setlistItemsMax) {
+    return { kind: 'index', index, wrapsToFirst };
+  }
+  return wrapsToFirst
+    ? { kind: 'index', index: 0, wrapsToFirst: false }
+    : { kind: 'count' };
+}
+
+/** One step as a read hands it back. */
+export type VjSetlistStepRead =
+  | {
+      kind: 'scene';
+      itemId: string;
+      index: number;
+      sceneId: string;
+      look: VjSceneLook;
+      /** Resolved: the step's own length, else the sequence default. */
+      duration: VjStepDuration;
+    }
+  | {
+      kind: 'clip';
+      itemId: string;
+      index: number;
+      clipId: string;
+      duration: VjStepDuration;
+    };
+
+/** A set list read for a command, the timer or a restore. */
+export interface VjSetlistRead {
+  setlistId: string;
+  isLooping: boolean;
+  stepDuration: VjStepDuration;
+  /** Every item id in play order (position, id); its length is the item count. */
+  itemIds: string[];
+  /** The step at the asked position; null for 'count' and past the end. */
+  step: VjSetlistStepRead | null;
+}
+
+/** A set list read after a library change (sequences contract section 7). */
+export interface VjSetlistFollowRead {
+  itemIds: string[];
+  isLooping: boolean;
+}
+
+/** Whether recalling the step can flash. Clip steps never flash. */
+export function vjSetlistStepFlashes(step: VjSetlistStepRead): boolean {
+  return step.kind === 'scene' && vjSceneLookFlashes(step.look);
+}
+
+/** Whether a change moves what is live: source, variant, clipSequence or pack. */
+export function vjIsLiveSourceChange(
+  previous: VjStageState,
+  next: VjStageState,
+): boolean {
+  return (
+    previous.liveClipId !== next.liveClipId ||
+    previous.liveGeneratorId !== next.liveGeneratorId ||
+    previous.liveGeneratorVariant !== next.liveGeneratorVariant ||
+    previous.clipSequence !== next.clipSequence ||
+    previous.activePackId !== next.activePackId
+  );
+}
+
+/** The step the caller puts on screen before landing: a scene goes through
+ *  recallVjScene (look switch, overlay hideAt cleared); a clip goes through
+ *  withVjLiveSource only (look switch, hideAt kept), like goClip with the
+ *  pack rule skipped, as scene recall skips it. */
+export type VjSetlistShow =
+  { kind: 'scene'; look: VjSceneLook } | { kind: 'clip'; clipId: string };
+
+/** What the landing writes into the clock fields (stampVjSetlistClock). */
+export type VjSetlistClockStamp =
+  | { kind: 'keep' }
+  | { kind: 'clear' }
+  | { kind: 'start'; durationMs: number; remainingMs: number };
+
+export interface VjSetlistTransition {
+  /** activeSetlistId, setlistIndex, setlistPlayback and (when play starts or
+   *  a step lands paused) shuffle.isOn changed; every other field as given. */
+  nextState: VjStageState;
+  show: VjSetlistShow | null;
+  clock: VjSetlistClockStamp;
+}
+
+export type VjSetlistRefusalCode =
+  | 'vj_setlist_not_found'
+  | 'vj_setlist_empty'
+  | 'vj_setlist_index_invalid'
+  | 'vj_setlist_start'
+  | 'vj_setlist_end'
+  | 'vj_setlist_flash_unconfirmed';
+
+export type VjSetlistTransitionResult =
+  | { code: VjSetlistRefusalCode; transition: null }
+  | { code: null; transition: VjSetlistTransition };
+
+export interface VjSetlistSelectInput {
+  setlistId: string | null;
+  index: number | null;
+  isPlaying: boolean;
+  isFlashConfirmed: boolean;
+  /** Null when setlistId is null or no set list has the id. */
+  read: VjSetlistRead | null;
+}
+
+export interface VjSetlistSetPlayingInput {
+  isPlaying: boolean;
+  isFlashConfirmed: boolean;
+  /** Null when no read was needed (position null) or the set list is gone. */
+  read: VjSetlistRead | null;
+  now: number;
+}
+
+export interface VjSetlistStepInput {
+  direction: 'next' | 'previous';
+  /** The remote confirmed the flash warning for this tap; absent reads as false. */
+  isFlashConfirmed?: boolean;
+  read: VjSetlistRead | null;
+}
+
+export interface VjSetlistFollowInput {
+  setlistId: string;
+  /** Item ids in play order before the change; null when unknown. */
+  previousItemIds: readonly string[] | null;
+  /** The set list now; null when it is gone. */
+  read: VjSetlistFollowRead | null;
+}
+
+/** The clock times every non-running result leaves empty. */
+const VJ_SETLIST_NO_CLOCK_TIMES = {
+  stepStartedAt: null,
+  stepEndsAt: null,
+} as const;
+
+function refuseVjSetlist(
+  code: VjSetlistRefusalCode,
+): VjSetlistTransitionResult {
+  return { code, transition: null };
+}
+
+function acceptVjSetlist(
+  transition: VjSetlistTransition,
+): VjSetlistTransitionResult {
+  return { code: null, transition };
+}
+
+/** The `show` a step asks for. */
+function vjSetlistShowOf(step: VjSetlistStepRead): VjSetlistShow {
+  if (step.kind === 'scene') {
+    return { kind: 'scene', look: step.look };
+  }
+  return { kind: 'clip', clipId: step.clipId };
+}
+
+/** The flash check: it fails when the step can flash and neither the
+ *  payload nor the stored run flag confirmed the warning. */
+function vjSetlistFlashCheckFails(
+  step: VjSetlistStepRead,
+  isInputConfirmed: boolean,
+  playback: VjSetlistPlayback,
+): boolean {
+  return (
+    vjSetlistStepFlashes(step) &&
+    !isInputConfirmed &&
+    !playback.isFlashConfirmed
+  );
+}
+
+/** A transition that puts `step` on screen: index and item id follow the
+ *  step, Loop follows the read, and `playbackFields` set the rest. */
+function vjSetlistShowingStep(
+  base: VjStageState,
+  read: VjSetlistRead,
+  step: VjSetlistStepRead,
+  playbackFields: Partial<VjSetlistPlayback>,
+  clock: VjSetlistClockStamp,
+): VjSetlistTransition {
+  return {
+    nextState: {
+      ...base,
+      setlistIndex: step.index,
+      setlistPlayback: {
+        ...base.setlistPlayback,
+        itemId: step.itemId,
+        isLooping: read.isLooping,
+        ...playbackFields,
+      },
+    },
+    show: vjSetlistShowOf(step),
+    clock,
+  };
+}
+
+/** The playback fields of a running step; the landing stamps the two times. */
+function vjSetlistRunningFields(
+  durationMs: number,
+): Partial<VjSetlistPlayback> {
+  return {
+    status: 'playing',
+    ...VJ_SETLIST_NO_CLOCK_TIMES,
+    stepDurationMs: durationMs,
+    pausedRemainingMs: null,
+  };
+}
+
+/** Playing from step: show it, status playing, shuffle off, clock start(full, full). */
+function vjSetlistPlayingFromStep(
+  base: VjStageState,
+  read: VjSetlistRead,
+  step: VjSetlistStepRead,
+  isFlashConfirmed: boolean,
+): VjSetlistTransition {
+  const durationMs = vjStepDurationMs(step.duration, base.tempo);
+  return vjSetlistShowingStep(
+    { ...base, shuffle: { ...base.shuffle, isOn: false } },
+    read,
+    step,
+    { ...vjSetlistRunningFields(durationMs), isFlashConfirmed },
+    { kind: 'start', durationMs, remainingMs: durationMs },
+  );
+}
+
+/** `state` with some playback fields replaced. */
+function vjSetlistWithPlayback(
+  state: VjStageState,
+  playbackFields: Partial<VjSetlistPlayback>,
+): VjStageState {
+  return {
+    ...state,
+    setlistPlayback: { ...state.setlistPlayback, ...playbackFields },
+  };
+}
+
+/** The read position of `stage:setlistSelect`. */
+export function vjSetlistSelectReadPosition(
+  index: number | null,
+  isPlaying: boolean,
+): VjSetlistReadPosition {
+  if (index === null) {
+    return isPlaying ? vjSetlistIndexPosition(0, false) : { kind: 'count' };
+  }
+  return vjSetlistIndexPosition(index, false);
+}
+
+/** The state after the active set list was cleared. */
+export function vjSetlistClearedState(state: VjStageState): VjStageState {
+  return {
+    ...state,
+    activeSetlistId: null,
+    setlistIndex: null,
+    setlistPlayback: createVjSetlistPlayback(false),
+  };
+}
+
+/** `stage:setlistSelect`: clear, arm, show one step by hand, or play from it.
+ *  A select always starts a fresh run. */
+export function vjSetlistSelectTransition(
+  state: VjStageState,
+  input: VjSetlistSelectInput,
+): VjSetlistTransitionResult {
+  if (input.setlistId === null) {
+    return acceptVjSetlist({
+      nextState: vjSetlistClearedState(state),
+      show: null,
+      clock: { kind: 'clear' },
+    });
+  }
+  const read = input.read;
+  if (read === null) {
+    return refuseVjSetlist('vj_setlist_not_found');
+  }
+  const freshState: VjStageState = {
+    ...state,
+    activeSetlistId: input.setlistId,
+    setlistPlayback: createVjSetlistPlayback(read.isLooping),
+  };
+  if (input.index === null && !input.isPlaying) {
+    return acceptVjSetlist({
+      nextState: { ...freshState, setlistIndex: null },
+      show: null,
+      clock: { kind: 'clear' },
+    });
+  }
+  if (read.itemIds.length === 0) {
+    return refuseVjSetlist('vj_setlist_empty');
+  }
+  const step = read.step;
+  if (step === null) {
+    return refuseVjSetlist('vj_setlist_index_invalid');
+  }
+  if (
+    input.isPlaying &&
+    vjSetlistFlashCheckFails(
+      step,
+      input.isFlashConfirmed,
+      freshState.setlistPlayback,
+    )
+  ) {
+    return refuseVjSetlist('vj_setlist_flash_unconfirmed');
+  }
+  if (!input.isPlaying) {
+    return acceptVjSetlist(
+      vjSetlistShowingStep(
+        freshState,
+        read,
+        step,
+        {
+          status: 'manual',
+          isFlashConfirmed: input.isFlashConfirmed,
+          ...VJ_SETLIST_NO_CLOCK_TIMES,
+          stepDurationMs: null,
+          pausedRemainingMs: null,
+        },
+        { kind: 'clear' },
+      ),
+    );
+  }
+  return acceptVjSetlist(
+    vjSetlistPlayingFromStep(freshState, read, step, input.isFlashConfirmed),
+  );
+}
+
+/** The read `stage:setlistSetPlaying` needs; null when it needs none. */
+export function vjSetlistSetPlayingReadPosition(
+  state: VjStageState,
+  isPlaying: boolean,
+): VjSetlistReadPosition | null {
+  if (!isPlaying) {
+    return null;
+  }
+  const index = state.setlistIndex;
+  switch (state.setlistPlayback.status) {
+    case 'playing':
+    case 'paused':
+      return null;
+    case 'manual':
+      return vjSetlistIndexPosition(index ?? 0, false);
+    case 'takenOver':
+      return vjSetlistIndexPosition((index ?? -1) + 1, true);
+    case 'finished':
+      return vjSetlistIndexPosition(0, false);
+    case 'needsFlashConsent':
+      return vjSetlistIndexPosition(
+        (index ?? -1) + 1,
+        state.setlistPlayback.isLooping,
+      );
+  }
+}
+
+/** `stage:setlistSetPlaying`: Play, Pause, Resume and Play again. */
+export function vjSetlistSetPlayingTransition(
+  state: VjStageState,
+  input: VjSetlistSetPlayingInput,
+): VjSetlistTransitionResult {
+  const playback = state.setlistPlayback;
+  const noop = acceptVjSetlist({
+    nextState: state,
+    show: null,
+    clock: { kind: 'keep' },
+  });
+  if (!input.isPlaying) {
+    if (playback.status !== 'playing') {
+      return noop;
+    }
+    const rawRemainingMs = Math.max(
+      0,
+      (playback.stepEndsAt ?? input.now) - input.now,
+    );
+    // A step stamped at a future applyAt has not started; the invariant is
+    // 0..stepDurationMs, so the remaining time never exceeds the full length.
+    const pausedRemainingMs =
+      playback.stepDurationMs === null
+        ? rawRemainingMs
+        : Math.min(rawRemainingMs, playback.stepDurationMs);
+    return acceptVjSetlist({
+      nextState: vjSetlistWithPlayback(state, {
+        status: 'paused',
+        ...VJ_SETLIST_NO_CLOCK_TIMES,
+        pausedRemainingMs,
+      }),
+      show: null,
+      clock: { kind: 'clear' },
+    });
+  }
+  const confirmedPlayback = input.isFlashConfirmed
+    ? { isFlashConfirmed: true }
+    : {};
+  if (playback.status === 'playing') {
+    return acceptVjSetlist({
+      nextState: input.isFlashConfirmed
+        ? vjSetlistWithPlayback(state, confirmedPlayback)
+        : state,
+      show: null,
+      clock: { kind: 'keep' },
+    });
+  }
+  if (playback.status === 'paused') {
+    const remainingMs =
+      playback.pausedRemainingMs ?? playback.stepDurationMs ?? 0;
+    const durationMs = playback.stepDurationMs ?? remainingMs;
+    return acceptVjSetlist({
+      nextState: vjSetlistWithPlayback(
+        { ...state, shuffle: { ...state.shuffle, isOn: false } },
+        { ...vjSetlistRunningFields(durationMs), ...confirmedPlayback },
+      ),
+      show: null,
+      clock: { kind: 'start', durationMs, remainingMs },
+    });
+  }
+  const read = input.read;
+  const isManualInPlace =
+    playback.status === 'manual' && state.setlistIndex !== null;
+  if (read === null) {
+    return refuseVjSetlist('vj_setlist_not_found');
+  }
+  if (read.itemIds.length === 0) {
+    return refuseVjSetlist('vj_setlist_empty');
+  }
+  const step = read.step;
+  if (step === null) {
+    return refuseVjSetlist('vj_setlist_index_invalid');
+  }
+  if (isManualInPlace) {
+    const durationMs = vjStepDurationMs(step.duration, state.tempo);
+    return acceptVjSetlist({
+      nextState: vjSetlistWithPlayback(
+        { ...state, shuffle: { ...state.shuffle, isOn: false } },
+        {
+          ...vjSetlistRunningFields(durationMs),
+          ...confirmedPlayback,
+          isLooping: read.isLooping,
+        },
+      ),
+      show: null,
+      clock: { kind: 'start', durationMs, remainingMs: durationMs },
+    });
+  }
+  if (vjSetlistFlashCheckFails(step, input.isFlashConfirmed, playback)) {
+    return refuseVjSetlist('vj_setlist_flash_unconfirmed');
+  }
+  return acceptVjSetlist(
+    vjSetlistPlayingFromStep(
+      state,
+      read,
+      step,
+      input.isFlashConfirmed || playback.isFlashConfirmed,
+    ),
+  );
+}
+
+/** The read Next and Previous need. */
+export function vjSetlistStepReadPosition(
+  state: VjStageState,
+  direction: 'next' | 'previous',
+): VjSetlistReadPosition {
+  const index = state.setlistIndex;
+  if (direction === 'next') {
+    return vjSetlistIndexPosition(
+      (index ?? -1) + 1,
+      state.setlistPlayback.isLooping,
+    );
+  }
+  if (index === null || index === 0) {
+    return state.setlistPlayback.isLooping
+      ? { kind: 'last' }
+      : { kind: 'count' };
+  }
+  return vjSetlistIndexPosition(index - 1, false);
+}
+
+/** `stage:setlistNext` and `stage:setlistPrevious`. A step that can flash
+ *  lands only when the tap or the stored run flag confirmed the warning, in
+ *  every status, so a remote with a stale index never lands an unconfirmed
+ *  flashing step. */
+export function vjSetlistStepTransition(
+  state: VjStageState,
+  input: VjSetlistStepInput,
+): VjSetlistTransitionResult {
+  const read = input.read;
+  if (read === null) {
+    return refuseVjSetlist('vj_setlist_not_found');
+  }
+  if (read.itemIds.length === 0) {
+    return refuseVjSetlist('vj_setlist_empty');
+  }
+  const position = vjSetlistStepReadPosition(state, input.direction);
+  if (input.direction === 'previous' && position.kind === 'count') {
+    return refuseVjSetlist('vj_setlist_start');
+  }
+  const step = read.step;
+  if (step === null) {
+    return refuseVjSetlist(
+      input.direction === 'next'
+        ? 'vj_setlist_end'
+        : 'vj_setlist_index_invalid',
+    );
+  }
+  if (
+    vjSetlistFlashCheckFails(
+      step,
+      input.isFlashConfirmed === true,
+      state.setlistPlayback,
+    )
+  ) {
+    return refuseVjSetlist('vj_setlist_flash_unconfirmed');
+  }
+  const status = state.setlistPlayback.status;
+  if (status === 'playing') {
+    const durationMs = vjStepDurationMs(step.duration, state.tempo);
+    return acceptVjSetlist(
+      vjSetlistShowingStep(
+        state,
+        read,
+        step,
+        vjSetlistRunningFields(durationMs),
+        { kind: 'start', durationMs, remainingMs: durationMs },
+      ),
+    );
+  }
+  if (status === 'manual') {
+    return acceptVjSetlist(
+      vjSetlistShowingStep(
+        state,
+        read,
+        step,
+        { ...VJ_SETLIST_NO_CLOCK_TIMES },
+        { kind: 'clear' },
+      ),
+    );
+  }
+  // Shuffle turns off so it cannot replace the paused step before Resume.
+  const fullMs = vjStepDurationMs(step.duration, state.tempo);
+  return acceptVjSetlist(
+    vjSetlistShowingStep(
+      { ...state, shuffle: { ...state.shuffle, isOn: false } },
+      read,
+      step,
+      {
+        status: 'paused',
+        ...VJ_SETLIST_NO_CLOCK_TIMES,
+        stepDurationMs: fullMs,
+        pausedRemainingMs: fullMs,
+      },
+      { kind: 'clear' },
+    ),
+  );
+}
+
+/** When the server step timer fires: `quantizedAdvanceEarlyMs` before the
+ *  step ends, so the advance lands on its boundary. Null unless playing. */
+export function vjSetlistTimerTargetAt(state: VjStageState): number | null {
+  const playback = state.setlistPlayback;
+  if (playback.status === 'playing' && playback.stepEndsAt !== null) {
+    return playback.stepEndsAt - VJ_LIMITS.quantizedAdvanceEarlyMs;
+  }
+  return null;
+}
+
+/** The read the timer needs; null when it has nothing to do. */
+export function vjSetlistTimerReadPosition(
+  state: VjStageState,
+): VjSetlistReadPosition | null {
+  if (
+    vjSetlistTimerTargetAt(state) === null ||
+    state.activeSetlistId === null
+  ) {
+    return null;
+  }
+  return vjSetlistIndexPosition(
+    (state.setlistIndex ?? -1) + 1,
+    state.setlistPlayback.isLooping,
+  );
+}
+
+/** What the server timer lands once its read is back; null lands nothing. */
+export function vjSetlistTimerTransition(
+  state: VjStageState,
+  read: VjSetlistRead | null,
+): VjSetlistTransition | null {
+  const playback = state.setlistPlayback;
+  if (
+    playback.status !== 'playing' ||
+    state.activeSetlistId === null ||
+    read === null ||
+    read.setlistId.toLowerCase() !== state.activeSetlistId.toLowerCase()
+  ) {
+    return null;
+  }
+  if (read.itemIds.length === 0) {
+    return {
+      nextState: {
+        ...state,
+        setlistIndex: null,
+        setlistPlayback: {
+          ...playback,
+          status: 'manual',
+          itemId: null,
+          ...VJ_SETLIST_NO_CLOCK_TIMES,
+          stepDurationMs: null,
+          pausedRemainingMs: null,
+          isLooping: read.isLooping,
+        },
+      },
+      show: null,
+      clock: { kind: 'clear' },
+    };
+  }
+  const step = read.step;
+  if (step === null) {
+    return {
+      nextState: vjSetlistWithPlayback(state, {
+        status: 'finished',
+        ...VJ_SETLIST_NO_CLOCK_TIMES,
+        pausedRemainingMs: null,
+        isLooping: read.isLooping,
+      }),
+      show: null,
+      clock: { kind: 'clear' },
+    };
+  }
+  if (vjSetlistFlashCheckFails(step, false, playback)) {
+    return {
+      nextState: vjSetlistWithPlayback(state, {
+        status: 'needsFlashConsent',
+        ...VJ_SETLIST_NO_CLOCK_TIMES,
+        pausedRemainingMs: null,
+        isLooping: read.isLooping,
+      }),
+      show: null,
+      clock: { kind: 'clear' },
+    };
+  }
+  const durationMs = vjStepDurationMs(step.duration, state.tempo);
+  return vjSetlistShowingStep(
+    state,
+    read,
+    step,
+    vjSetlistRunningFields(durationMs),
+    { kind: 'start', durationMs, remainingMs: durationMs },
+  );
+}
+
+/** Applied after every accepted pick of a clip, generator, pack, mix swap,
+ *  scene or shuffle: a running, paused or flash-waiting sequence becomes
+ *  `takenOver` when the live source moved or shuffle went from off to on. */
+export function vjSetlistTakeoverState(
+  previous: VjStageState,
+  next: VjStageState,
+): VjStageState {
+  const status = next.setlistPlayback.status;
+  if (
+    status !== 'playing' &&
+    status !== 'paused' &&
+    status !== 'needsFlashConsent'
+  ) {
+    return next;
+  }
+  const isShuffleTurnedOn = !previous.shuffle.isOn && next.shuffle.isOn;
+  if (!vjIsLiveSourceChange(previous, next) && !isShuffleTurnedOn) {
+    return next;
+  }
+  return vjSetlistWithPlayback(next, {
+    status: 'takenOver',
+    stepStartedAt: null,
+    stepEndsAt: null,
+    stepDurationMs: null,
+    pausedRemainingMs: null,
+  });
+}
+
+/** `stage:setlistSetLooping`, and a refreshed Loop copy: sets Loop on the
+ *  playback when `setlistId` is the active set list. */
+export function vjSetlistLoopingState(
+  state: VjStageState,
+  setlistId: string,
+  isLooping: boolean,
+): VjStageState {
+  if (
+    state.activeSetlistId === null ||
+    state.activeSetlistId.toLowerCase() !== setlistId.toLowerCase()
+  ) {
+    return state;
+  }
+  if (state.setlistPlayback.isLooping === isLooping) {
+    return state;
+  }
+  return vjSetlistWithPlayback(state, { isLooping });
+}
+
+/** The index in `nextIds` of the nearest id of `previousIds` before position
+ *  `removedAt` that is still there; null when none is. */
+function vjSetlistNearestKeptIndex(
+  previousIds: readonly string[],
+  removedAt: number,
+  nextIds: readonly string[],
+): number | null {
+  for (let position = removedAt - 1; position >= 0; position -= 1) {
+    const previousId = previousIds[position];
+    if (previousId === undefined) {
+      continue;
+    }
+    const keptIndex = nextIds.indexOf(previousId);
+    if (keptIndex !== -1) {
+      return keptIndex;
+    }
+  }
+  return null;
+}
+
+/** Whether two playbacks hold the same fields. */
+function isSameVjSetlistPlayback(
+  first: VjSetlistPlayback,
+  second: VjSetlistPlayback,
+): boolean {
+  return (
+    first.status === second.status &&
+    first.itemId === second.itemId &&
+    first.isFlashConfirmed === second.isFlashConfirmed &&
+    first.stepStartedAt === second.stepStartedAt &&
+    first.stepEndsAt === second.stepEndsAt &&
+    first.stepDurationMs === second.stepDurationMs &&
+    first.pausedRemainingMs === second.pausedRemainingMs &&
+    first.isLooping === second.isLooping
+  );
+}
+
+/** Where the index and item id sit after the set list changed (rules 3 to 9
+ *  of the follow table; rules 1 and 2 are answered by the caller). */
+function vjSetlistFollowedPosition(
+  index: number | null,
+  itemId: string | null,
+  previousIds: readonly string[] | null,
+  nextIds: readonly string[],
+): { index: number | null; itemId: string | null } {
+  if (itemId !== null) {
+    if (nextIds.includes(itemId)) {
+      return { index: nextIds.indexOf(itemId), itemId };
+    }
+    const removedAt = previousIds === null ? -1 : previousIds.indexOf(itemId);
+    if (previousIds !== null && removedAt !== -1) {
+      return {
+        index: vjSetlistNearestKeptIndex(previousIds, removedAt, nextIds),
+        itemId: null,
+      };
+    }
+    const fallbackIndex = Math.min(index ?? 0, nextIds.length) - 1;
+    return { index: fallbackIndex < 0 ? null : fallbackIndex, itemId: null };
+  }
+  if (index === null) {
+    return { index: null, itemId: null };
+  }
+  if (previousIds !== null && previousIds.length > index) {
+    const anchorId = previousIds[index];
+    if (anchorId !== undefined && nextIds.includes(anchorId)) {
+      return { index: nextIds.indexOf(anchorId), itemId: null };
+    }
+    return {
+      index: vjSetlistNearestKeptIndex(previousIds, index, nextIds),
+      itemId: null,
+    };
+  }
+  return { index: Math.min(index, nextIds.length - 1), itemId: null };
+}
+
+/** The state after the active set list's items or Loop changed (sequences contract section 7).
+ *  The step on screen never changes and a running clock keeps going; only
+ *  the index, the item id and the Loop copy follow. Another set list, or a
+ *  change that moves nothing, answers `state` itself. */
+export function vjSetlistFollowState(
+  state: VjStageState,
+  input: VjSetlistFollowInput,
+): VjStageState {
+  if (
+    state.activeSetlistId === null ||
+    state.activeSetlistId.toLowerCase() !== input.setlistId.toLowerCase()
+  ) {
+    return state;
+  }
+  const read = input.read;
+  if (read === null) {
+    return vjSetlistClearedState(state);
+  }
+  const playback = state.setlistPlayback;
+  let nextIndex: number | null;
+  let nextPlayback: VjSetlistPlayback;
+  if (read.itemIds.length === 0) {
+    nextIndex = null;
+    nextPlayback = {
+      ...playback,
+      status: 'manual',
+      itemId: null,
+      stepStartedAt: null,
+      stepEndsAt: null,
+      stepDurationMs: null,
+      pausedRemainingMs: null,
+      isLooping: read.isLooping,
+    };
+  } else {
+    const followed = vjSetlistFollowedPosition(
+      state.setlistIndex,
+      playback.itemId,
+      input.previousItemIds,
+      read.itemIds,
+    );
+    nextIndex = followed.index;
+    nextPlayback = {
+      ...playback,
+      itemId: followed.itemId,
+      isLooping: read.isLooping,
+    };
+  }
+  if (
+    nextIndex === state.setlistIndex &&
+    isSameVjSetlistPlayback(playback, nextPlayback)
+  ) {
+    return state;
+  }
+  return { ...state, setlistIndex: nextIndex, setlistPlayback: nextPlayback };
+}
+
+/** The clock fields a landing writes, from the change's stampAt (its applyAt, or now). */
+export function stampVjSetlistClock(
+  playback: VjSetlistPlayback,
+  clock: VjSetlistClockStamp,
+  stampAt: number,
+): VjSetlistPlayback {
+  if (clock.kind === 'keep') {
+    return playback;
+  }
+  if (clock.kind === 'clear') {
+    return { ...playback, stepStartedAt: null, stepEndsAt: null };
+  }
+  const stepEndsAt = stampAt + clock.remainingMs;
+  return {
+    ...playback,
+    stepStartedAt: stepEndsAt - clock.durationMs,
+    stepEndsAt,
+    stepDurationMs: clock.durationMs,
+    pausedRemainingMs: null,
+  };
+}
+
+/** Slack under a step end that came from rounded beat lengths, so a step
+ *  that ends on a boundary lands on it. */
+const VJ_SETLIST_GRID_SLACK_MS = 2;
+
+/** Where a timer advance lands: quantize off lands at the step end (null
+ *  once it has passed); quantize on lands on the first boundary at or after
+ *  the step end (less the slack) and at least quantizeMinLeadMs from now. */
+export function vjSetlistAdvanceApplyAt(
+  tempo: VjTempo,
+  stepEndsAt: number,
+  now: number,
+): number | null {
+  if (tempo.quantize === 'off') {
+    return stepEndsAt > now ? stepEndsAt : null;
+  }
+  const earliest = Math.max(
+    stepEndsAt - VJ_SETLIST_GRID_SLACK_MS,
+    now + VJ_LIMITS.quantizeMinLeadMs,
+  );
+  return vjNextBoundaryAt(tempo, tempo.quantize, earliest);
+}
+
+export interface VjSetlistRestoreInput {
+  /** The restore's set list read at the restored index; null when no set list is restored. */
+  read: VjSetlistRead | null;
+  /** The restored setlistIndex (already range-checked). */
+  setlistIndex: number | null;
+  now: number;
+}
+
+/** The longest step length a restore accepts, in ms. */
+const VJ_SETLIST_RESTORE_MAX_MS = 600_000;
+
+function isVjSafeIntegerBetween(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+  );
+}
+
+/** The playback a restore adopts from a screen's saved value, checked
+ *  against the restored set list read. */
+export function restoredVjSetlistPlayback(
+  value: unknown,
+  input: VjSetlistRestoreInput,
+): VjSetlistPlayback {
+  const read = input.read;
+  if (read === null) {
+    return createVjSetlistPlayback(false);
+  }
+  const record = asVjRecord(value) ?? {};
+  const savedStatus = (
+    VJ_SETLIST_PLAYBACK_STATUSES as readonly unknown[]
+  ).includes(record.status)
+    ? (record.status as VjSetlistPlaybackStatus)
+    : 'manual';
+  const base: VjSetlistPlayback = {
+    ...createVjSetlistPlayback(read.isLooping),
+    itemId: input.setlistIndex === null ? null : (read.step?.itemId ?? null),
+  };
+  if (savedStatus === 'playing') {
+    const { stepStartedAt, stepEndsAt, stepDurationMs } = record;
+    if (
+      isVjSafeIntegerBetween(stepDurationMs, 1, VJ_SETLIST_RESTORE_MAX_MS) &&
+      Number.isSafeInteger(stepStartedAt) &&
+      Number.isSafeInteger(stepEndsAt) &&
+      (stepEndsAt as number) - (stepStartedAt as number) === stepDurationMs &&
+      (stepEndsAt as number) <= input.now + VJ_SETLIST_RESTORE_MAX_MS
+    ) {
+      return {
+        ...base,
+        status: 'playing',
+        stepStartedAt: stepStartedAt as number,
+        stepEndsAt: stepEndsAt as number,
+        stepDurationMs,
+      };
+    }
+    return base;
+  }
+  if (savedStatus === 'paused') {
+    const { stepDurationMs, pausedRemainingMs } = record;
+    if (
+      isVjSafeIntegerBetween(stepDurationMs, 0, VJ_SETLIST_RESTORE_MAX_MS) &&
+      isVjSafeIntegerBetween(pausedRemainingMs, 0, stepDurationMs)
+    ) {
+      return { ...base, status: 'paused', stepDurationMs, pausedRemainingMs };
+    }
+    return base;
+  }
+  const keptDurationMs = record.stepDurationMs;
+  return {
+    ...base,
+    status: savedStatus,
+    stepDurationMs: isVjSafeIntegerBetween(
+      keptDurationMs,
+      1,
+      VJ_SETLIST_RESTORE_MAX_MS,
+    )
+      ? keptDurationMs
+      : null,
   };
 }
 
@@ -1874,6 +2999,7 @@ export const VJ_SOCKET_ERROR_CODES = [
   'vj_stopped',
   'vj_render_mode_invalid',
   'vj_no_screens_connected',
+  'vj_setlist_flash_unconfirmed',
 ] as const;
 export type VjSocketErrorCode = (typeof VJ_SOCKET_ERROR_CODES)[number];
 
@@ -1958,7 +3084,7 @@ export const VJ_LIBRARY_CHANGE_KINDS = [
   'scene_deleted',
   'scenes_reordered',
   'setlist_created',
-  'setlist_renamed',
+  'setlist_updated',
   'setlist_items_changed',
   'setlist_deleted',
   'setlists_reordered',
@@ -2083,14 +3209,30 @@ export type VjResetLookPayload = {
 /** `stage:recallScene`. */
 export type VjRecallScenePayload = { sceneId: string } & VjClientCommandFields;
 
-/** `stage:setlistSelect`: index null arms the set list without recalling; a number recalls that item. */
+/** `stage:setlistSelect`: index null arms; isPlaying true plays from index (null reads as 0). */
 export type VjSetlistSelectPayload = {
   setlistId: string | null;
   index: number | null;
+  isPlaying?: boolean;
+  isFlashConfirmed?: boolean;
 } & VjClientCommandFields;
 
-/** `stage:setlistNext` and `stage:setlistPrevious`. */
-export type VjSetlistStepPayload = VjClientCommandFields;
+/** `stage:setlistNext` and `stage:setlistPrevious`: isFlashConfirmed records
+ *  the flash warning consent for the step the tap lands. */
+export type VjSetlistStepPayload = {
+  isFlashConfirmed?: boolean;
+} & VjClientCommandFields;
+
+/** `stage:setlistSetPlaying`: Play, Pause, Resume and Play again. */
+export type VjSetlistSetPlayingPayload = {
+  isPlaying: boolean;
+  isFlashConfirmed?: boolean;
+} & VjClientCommandFields;
+
+/** `stage:setlistSetLooping`: saves Loop on the active set list. */
+export type VjSetlistSetLoopingPayload = {
+  isLooping: boolean;
+} & VjClientCommandFields;
 
 /** `stage:setCountdown`, a partial patch. */
 export type VjSetCountdownPayload = {
@@ -2195,6 +3337,8 @@ export const VJ_CLIENT_FRAME_NAMES = [
   'stage:setlistSelect',
   'stage:setlistNext',
   'stage:setlistPrevious',
+  'stage:setlistSetPlaying',
+  'stage:setlistSetLooping',
   'stage:setCountdown',
   'stage:setLogo',
   'stage:setEventCard',
@@ -2236,6 +3380,8 @@ export const VJ_REMOTE_COMMAND_NAMES = [
   'stage:setlistSelect',
   'stage:setlistNext',
   'stage:setlistPrevious',
+  'stage:setlistSetPlaying',
+  'stage:setlistSetLooping',
   'stage:setCountdown',
   'stage:setLogo',
   'stage:setEventCard',

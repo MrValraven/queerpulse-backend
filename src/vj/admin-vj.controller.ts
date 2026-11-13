@@ -40,7 +40,6 @@ import {
   CreateVjSceneDto,
   CreateVjSetlistDto,
   RenameVjPackDto,
-  RenameVjSetlistDto,
   ReorderVjPackClipsDto,
   ReorderVjPacksDto,
   ReorderVjScenesDto,
@@ -48,6 +47,7 @@ import {
   SetVjClipPreviewDto,
   SetVjPackEventDto,
   SetVjSetlistItemsDto,
+  UpdateVjSetlistDto,
   UpdateVjClipDto,
   UpdateVjSceneDto,
   VjClipsMediaQuery,
@@ -111,8 +111,8 @@ import { VjSetlistService } from './vj-setlist.service';
  *   GET    admin/vj/setlists                     list set lists
  *   POST   admin/vj/setlists                     create a set list
  *   PATCH  admin/vj/setlists/reorder             set the order of every set list
- *   PUT    admin/vj/setlists/:id/items           replace a set list's scenes
- *   PATCH  admin/vj/setlists/:id                 rename a set list
+ *   PUT    admin/vj/setlists/:id/items           write a set list's steps
+ *   PATCH  admin/vj/setlists/:id                 update a set list's name, Loop or step length
  *   DELETE admin/vj/setlists/:id                 delete a set list
  *
  * The literal routes (`packs/reorder`, `clips/media`, `scenes/reorder`,
@@ -491,10 +491,11 @@ export class AdminVjController {
   @ApiOperation({
     summary: 'Delete a VJ clip',
     description:
-      'Removes the clip from every pack, clears it from every scene look that names it, and deletes its stored files.',
+      'Removes the clip from every pack, removes every set list step that plays it (closing the gaps), clears it from every scene look that names it, and deletes its stored files.',
   })
   @ApiOkResponse({
-    description: 'The deleted clip id and how many packs held it.',
+    description:
+      'The deleted clip id, how many packs held it and how many set list steps it removed.',
   })
   @ApiNotFoundResponse({
     description:
@@ -606,7 +607,8 @@ export class AdminVjController {
   @Header('Cache-Control', 'no-store')
   @ApiOperation({
     summary: 'List the VJ set lists',
-    description: 'Every set list in position order, each with its scenes.',
+    description:
+      'Every set list in position order, each with its Loop, its step length and its scene and clip steps.',
   })
   @ApiOkResponse({ description: 'The set lists in position order.' })
   listSetlists() {
@@ -617,14 +619,17 @@ export class AdminVjController {
   @ApiOperation({
     summary: 'Create a VJ set list',
     description:
-      'Appends the set list after the last one, with the scenes of `sceneIds` (optional, empty by default; a scene may appear more than once). Checks run in this order: `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_FULL`, `VJ_SETLIST_LIMIT_REACHED`, `VJ_SETLIST_NAME_TAKEN`, `VJ_SCENE_NOT_FOUND`.',
+      'Appends the set list after the last one, with scene steps from `sceneIds` or scene and clip steps from `items` (one of the two, both optional, empty by default; a scene or clip may appear more than once). `isLooping` defaults to false and `stepDuration` to 8 seconds. Checks run in this order: `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_FULL`, `VJ_SETLIST_STEP_INVALID`, `VJ_SETLIST_STEP_DURATION_INVALID`, `VJ_SETLIST_LOOP_INVALID`, `VJ_SETLIST_STEP_DURATION_INVALID` (the default length), `VJ_SETLIST_ITEM_NOT_FOUND` (a step with an id), `VJ_SETLIST_LIMIT_REACHED`, `VJ_SETLIST_NAME_TAKEN`, `VJ_SCENE_NOT_FOUND`, `VJ_CLIP_NOT_FOUND`.',
   })
   @ApiCreatedResponse({ description: 'The new set list.' })
   @ApiBadRequestResponse({
     description:
-      'Code `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG` or `VJ_SETLIST_ITEMS_INVALID`.',
+      'Code `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_STEP_INVALID`, `VJ_SETLIST_STEP_DURATION_INVALID` or `VJ_SETLIST_LOOP_INVALID`.',
   })
-  @ApiNotFoundResponse({ description: 'Code `VJ_SCENE_NOT_FOUND`.' })
+  @ApiNotFoundResponse({
+    description:
+      'Code `VJ_SETLIST_ITEM_NOT_FOUND`, `VJ_SCENE_NOT_FOUND` (with `sceneId`) or `VJ_CLIP_NOT_FOUND` (with `clipId`).',
+  })
   @ApiConflictResponse({
     description:
       'Code `VJ_SETLIST_FULL`, `VJ_SETLIST_LIMIT_REACHED` or `VJ_SETLIST_NAME_TAKEN` (the body names the set list holding the name).',
@@ -653,17 +658,21 @@ export class AdminVjController {
 
   @Put('setlists/:id/items')
   @ApiOperation({
-    summary: 'Replace the scenes of a VJ set list',
+    summary: 'Write the steps of a VJ set list',
     description:
-      'The body lists the scenes in play order; a scene may appear more than once. Checks run in this order: `VJ_SETLIST_NOT_FOUND` (malformed id), `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_FULL`, `VJ_SETLIST_NOT_FOUND`, `VJ_SCENE_NOT_FOUND`.',
+      'The body lists every step in play order. A step with an `id` keeps that item, one without is added, and a stored item left out is removed; a scene or clip may appear more than once. A body equal to the stored list writes nothing. Checks run in this order: `VJ_SETLIST_NOT_FOUND` (malformed id), `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_FULL`, `VJ_SETLIST_STEP_INVALID`, `VJ_SETLIST_STEP_DURATION_INVALID`, `VJ_SETLIST_NOT_FOUND`, `VJ_SETLIST_ITEM_NOT_FOUND`, `VJ_SCENE_NOT_FOUND`, `VJ_CLIP_NOT_FOUND`.',
   })
-  @ApiOkResponse({ description: 'The set list with its new scenes.' })
-  @ApiBadRequestResponse({ description: 'Code `VJ_SETLIST_ITEMS_INVALID`.' })
+  @ApiOkResponse({ description: 'The set list with its steps.' })
+  @ApiBadRequestResponse({
+    description:
+      'Code `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_STEP_INVALID` or `VJ_SETLIST_STEP_DURATION_INVALID`.',
+  })
   @ApiNotFoundResponse({
-    description: 'Code `VJ_SETLIST_NOT_FOUND` or `VJ_SCENE_NOT_FOUND`.',
+    description:
+      'Code `VJ_SETLIST_NOT_FOUND`, `VJ_SETLIST_ITEM_NOT_FOUND`, `VJ_SCENE_NOT_FOUND` (with `sceneId`) or `VJ_CLIP_NOT_FOUND` (with `clipId`).',
   })
   @ApiConflictResponse({
-    description: 'Code `VJ_SETLIST_FULL`: the list is over its scene limit.',
+    description: 'Code `VJ_SETLIST_FULL`: the list is over its step limit.',
   })
   setSetlistItems(
     @Param('id') setlistId: string,
@@ -674,29 +683,29 @@ export class AdminVjController {
 
   @Patch('setlists/:id')
   @ApiOperation({
-    summary: 'Rename a VJ set list',
+    summary: 'Update a VJ set list',
     description:
-      'An unchanged name is a no-op. Checks run in this order: `VJ_SETLIST_NOT_FOUND` (malformed id), `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_NOT_FOUND`, `VJ_SETLIST_NAME_TAKEN`.',
+      'Changes the name, Loop or step length; the body names at least one. Every field equal to the stored one is a no-op. Checks run in this order: `VJ_SETLIST_NOT_FOUND` (malformed id), `VJ_SETLIST_PATCH_EMPTY`, `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_LOOP_INVALID`, `VJ_SETLIST_STEP_DURATION_INVALID`, `VJ_SETLIST_NOT_FOUND`, `VJ_SETLIST_NAME_TAKEN`.',
   })
   @ApiOkResponse({ description: 'The set list.' })
   @ApiBadRequestResponse({
     description:
-      'Code `VJ_SETLIST_NAME_REQUIRED` or `VJ_SETLIST_NAME_TOO_LONG`.',
+      'Code `VJ_SETLIST_PATCH_EMPTY`, `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_LOOP_INVALID` or `VJ_SETLIST_STEP_DURATION_INVALID`.',
   })
   @ApiNotFoundResponse({ description: 'Code `VJ_SETLIST_NOT_FOUND`.' })
   @ApiConflictResponse({ description: 'Code `VJ_SETLIST_NAME_TAKEN`.' })
-  renameSetlist(
+  updateSetlist(
     @Param('id') setlistId: string,
-    @Body() body: RenameVjSetlistDto,
+    @Body() body: UpdateVjSetlistDto,
   ) {
-    return this.setlists.renameSetlist(setlistId, body);
+    return this.setlists.updateSetlist(setlistId, body);
   }
 
   @Delete('setlists/:id')
   @ApiOperation({
     summary: 'Delete a VJ set list',
     description:
-      'Every scene of the set list stays in the library. The remaining set lists keep their order. Checks: `VJ_SETLIST_NOT_FOUND`.',
+      'Every scene and clip of the set list stays in the library. The remaining set lists keep their order. Checks: `VJ_SETLIST_NOT_FOUND`.',
   })
   @ApiOkResponse({ description: 'The deleted set list id.' })
   @ApiNotFoundResponse({

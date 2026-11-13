@@ -1,4 +1,8 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  ApiHideProperty,
+  ApiProperty,
+  ApiPropertyOptional,
+} from '@nestjs/swagger';
 import { Allow } from 'class-validator';
 import { VJ_FIT_MODES, VJ_LOOP_MODES, VJ_SPEEDS } from '../vj.contract';
 
@@ -295,11 +299,13 @@ export class ReorderVjScenesDto {
   sceneIds?: unknown;
 }
 
-/** Body of `POST /admin/vj/setlists`. The service answers, in this order,
- *  `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG`,
- *  `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_FULL`,
- *  `VJ_SETLIST_LIMIT_REACHED`, `VJ_SETLIST_NAME_TAKEN` and
- *  `VJ_SCENE_NOT_FOUND`. */
+/** Body of `POST /admin/vj/setlists`: `sceneIds` or `items`, one of the two.
+ *  The service answers, in this order, `VJ_SETLIST_NAME_REQUIRED`,
+ *  `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_ITEMS_INVALID` (both lists sent),
+ *  the `sceneIds` or `items` codes, `VJ_SETLIST_LOOP_INVALID`,
+ *  `VJ_SETLIST_STEP_DURATION_INVALID`, `VJ_SETLIST_ITEM_NOT_FOUND` (an item
+ *  with an `id`), `VJ_SETLIST_LIMIT_REACHED`, `VJ_SETLIST_NAME_TAKEN`,
+ *  `VJ_SCENE_NOT_FOUND` and `VJ_CLIP_NOT_FOUND`. */
 export class CreateVjSetlistDto {
   @ApiProperty({
     description:
@@ -311,24 +317,67 @@ export class CreateVjSetlistDto {
 
   @ApiPropertyOptional({
     description:
-      'Scene ids in play order, repeats allowed, up to 100. Defaults to none. Answers VJ_SETLIST_ITEMS_INVALID, VJ_SETLIST_FULL or VJ_SCENE_NOT_FOUND.',
+      'Scene ids in play order, repeats allowed, up to 100, each a scene step on the sequence default length. Defaults to none. Answers VJ_SETLIST_ITEMS_INVALID, VJ_SETLIST_FULL or VJ_SCENE_NOT_FOUND.',
     type: [String],
   })
   @Allow()
   sceneIds?: unknown;
+
+  @ApiPropertyOptional({
+    description:
+      'Steps in play order, up to 100: { kind: "scene", sceneId } or { kind: "clip", clipId }, each with an optional duration. No step may carry an id. Answers VJ_SETLIST_ITEMS_INVALID, VJ_SETLIST_FULL, VJ_SETLIST_STEP_INVALID, VJ_SETLIST_STEP_DURATION_INVALID, VJ_SETLIST_ITEM_NOT_FOUND, VJ_SCENE_NOT_FOUND or VJ_CLIP_NOT_FOUND.',
+    type: [Object],
+  })
+  @Allow()
+  items?: unknown;
+
+  @ApiPropertyOptional({
+    description:
+      'Whether the sequence starts over after its last step. Defaults to false. Answers VJ_SETLIST_LOOP_INVALID.',
+    type: Boolean,
+  })
+  @Allow()
+  isLooping?: unknown;
+
+  @ApiPropertyOptional({
+    description:
+      'The length every step without its own plays: { kind: "seconds", value: 2..600 } or { kind: "beats", value: 4, 8, 16, 32 or 64 }. Defaults to 8 seconds. Answers VJ_SETLIST_STEP_DURATION_INVALID.',
+    type: Object,
+  })
+  @Allow()
+  stepDuration?: unknown;
 }
 
-/** Body of `PATCH /admin/vj/setlists/:id`. The service answers
- *  `VJ_SETLIST_NAME_REQUIRED`, `VJ_SETLIST_NAME_TOO_LONG` and
+/** Body of `PATCH /admin/vj/setlists/:id`: at least one field. The service
+ *  answers, in this order, `VJ_SETLIST_NOT_FOUND` (route id),
+ *  `VJ_SETLIST_PATCH_EMPTY`, `VJ_SETLIST_NAME_REQUIRED`,
+ *  `VJ_SETLIST_NAME_TOO_LONG`, `VJ_SETLIST_LOOP_INVALID`,
+ *  `VJ_SETLIST_STEP_DURATION_INVALID`, `VJ_SETLIST_NOT_FOUND` (row) and
  *  `VJ_SETLIST_NAME_TAKEN`. */
-export class RenameVjSetlistDto {
-  @ApiProperty({
+export class UpdateVjSetlistDto {
+  @ApiPropertyOptional({
     description:
       'New set list name. Trimmed, 1 to 60 characters, unique ignoring case. Answers VJ_SETLIST_NAME_REQUIRED, VJ_SETLIST_NAME_TOO_LONG or VJ_SETLIST_NAME_TAKEN.',
     type: String,
   })
   @Allow()
   name?: unknown;
+
+  @ApiPropertyOptional({
+    description:
+      'Whether the sequence starts over after its last step. Answers VJ_SETLIST_LOOP_INVALID.',
+    type: Boolean,
+  })
+  @Allow()
+  isLooping?: unknown;
+
+  @ApiPropertyOptional({
+    description:
+      'The length every step without its own plays: { kind: "seconds", value: 2..600 } or { kind: "beats", value: 4, 8, 16, 32 or 64 }. Answers VJ_SETLIST_STEP_DURATION_INVALID.',
+    type: Object,
+  })
+  @Allow()
+  stepDuration?: unknown;
 }
 
 /** Body of `PATCH /admin/vj/setlists/reorder`. The service answers
@@ -344,15 +393,26 @@ export class ReorderVjSetlistsDto {
   setlistIds?: unknown;
 }
 
-/** Body of `PUT /admin/vj/setlists/:id/items`. The service answers
- *  `VJ_SETLIST_ITEMS_INVALID`, `VJ_SETLIST_FULL` and `VJ_SCENE_NOT_FOUND`
- *  (with `sceneId`). */
+/** Body of `PUT /admin/vj/setlists/:id/items`: the whole step list. The
+ *  service answers, in this order, `VJ_SETLIST_ITEMS_INVALID`,
+ *  `VJ_SETLIST_FULL`, `VJ_SETLIST_STEP_INVALID`,
+ *  `VJ_SETLIST_STEP_DURATION_INVALID`, `VJ_SETLIST_NOT_FOUND`,
+ *  `VJ_SETLIST_ITEM_NOT_FOUND`, `VJ_SCENE_NOT_FOUND` (with `sceneId`) and
+ *  `VJ_CLIP_NOT_FOUND` (with `clipId`). */
 export class SetVjSetlistItemsDto {
   @ApiProperty({
     description:
-      'Scene ids in play order, repeats allowed, up to 100. Answers VJ_SETLIST_ITEMS_INVALID, VJ_SETLIST_FULL or VJ_SCENE_NOT_FOUND.',
-    type: [String],
+      'Steps in play order, up to 100: { id?, kind: "scene", sceneId, duration? } or { id?, kind: "clip", clipId, duration? }. A step with an id keeps that item; one without is added; a stored item left out is removed. Answers VJ_SETLIST_ITEMS_INVALID, VJ_SETLIST_FULL, VJ_SETLIST_STEP_INVALID, VJ_SETLIST_STEP_DURATION_INVALID, VJ_SETLIST_ITEM_NOT_FOUND, VJ_SCENE_NOT_FOUND or VJ_CLIP_NOT_FOUND.',
+    type: [Object],
   })
+  @Allow()
+  items?: unknown;
+
+  /** The pre-sequences body field. Still declared so the global pipe lets it
+   *  reach the service, which answers `VJ_SETLIST_ITEMS_INVALID` for it
+   *  (contract 4.2) where the pipe would answer a bare 400. Hidden from the
+   *  API docs. */
+  @ApiHideProperty()
   @Allow()
   sceneIds?: unknown;
 }

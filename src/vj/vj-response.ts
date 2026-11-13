@@ -12,7 +12,10 @@ import type {
   VjLoopMode,
   VjMediaKind,
   VjSceneLook,
+  VjSetlistItemKind,
   VjSpeed,
+  VjStepDuration,
+  VjStepDurationKind,
 } from './vj.contract';
 
 /** The admin or VJ operator who created a pack, clip, scene or set list. */
@@ -81,6 +84,8 @@ export interface VjClipDTO {
   packIds: string[];
   /** `packIds.length`; the delete dialog's count. */
   packCount: number;
+  /** How many set list items play this clip; the delete dialog's count. */
+  setlistItemCount: number;
   createdBy: VjCreatorDTO | null;
   createdAt: string;
   updatedAt: string;
@@ -138,6 +143,8 @@ export interface VjPackDeletedDTO {
 export interface VjClipDeletedDTO {
   deletedClipId: string;
   removedFromPackCount: number;
+  /** How many set list steps the delete removed with the clip. */
+  removedFromSetlistCount: number;
 }
 
 /** One upcoming event a pack may link. */
@@ -212,15 +219,23 @@ export interface VjSceneDeletedDTO {
 
 export interface VjSetlistItemDTO {
   id: string;
-  sceneId: string;
   position: number;
+  kind: VjSetlistItemKind;
+  /** Set on a scene step; null on a clip step. */
+  sceneId: string | null;
+  /** Set on a clip step; null on a scene step. */
+  clipId: string | null;
+  /** Null plays the sequence's stepDuration. */
+  duration: VjStepDuration | null;
 }
 
 export interface VjSetlistDTO {
   id: string;
   name: string;
   position: number;
-  /** `position ASC, id ASC`. */
+  isLooping: boolean;
+  stepDuration: VjStepDuration;
+  /** position ASC, id ASC. */
   items: VjSetlistItemDTO[];
   createdBy: VjCreatorDTO | null;
   createdAt: string;
@@ -261,10 +276,40 @@ export interface UpdateVjSceneBody {
   look?: VjSceneLook;
 }
 
-/** `POST setlists` body. */
+/** One step in a whole-list write. `id` keeps an existing item of this set list. */
+export type VjSetlistItemInput =
+  | {
+      id?: string;
+      kind: 'scene';
+      sceneId: string;
+      duration?: VjStepDuration | null;
+    }
+  | {
+      id?: string;
+      kind: 'clip';
+      clipId: string;
+      duration?: VjStepDuration | null;
+    };
+
+/** `PUT setlists/:id/items`. */
+export interface SetVjSetlistItemsBody {
+  items: VjSetlistItemInput[];
+}
+
+/** `POST setlists`: sceneIds (remote "Make a sequence from these scenes") or items, one of the two. */
 export interface CreateVjSetlistBody {
   name: string;
   sceneIds?: string[];
+  items?: VjSetlistItemInput[];
+  isLooping?: boolean;
+  stepDuration?: VjStepDuration;
+}
+
+/** `PATCH setlists/:id`: at least one field. */
+export interface UpdateVjSetlistBody {
+  name?: string;
+  isLooping?: boolean;
+  stepDuration?: VjStepDuration;
 }
 
 /** The profile columns the creator name needs. */
@@ -351,6 +396,9 @@ export interface VjSetlistRow {
   id: string;
   name: string;
   position: number;
+  isLooping: boolean;
+  stepDurationKind: VjStepDurationKind;
+  stepDurationValue: number;
   createdByUserId: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -359,8 +407,12 @@ export interface VjSetlistRow {
 /** One set list item as `toVjSetlist` reads it. */
 export interface VjSetlistItemRow {
   id: string;
-  sceneId: string;
   position: number;
+  kind: VjSetlistItemKind;
+  sceneId: string | null;
+  clipId: string | null;
+  durationKind: VjStepDurationKind | null;
+  durationValue: number | null;
 }
 
 /** The visibilities a listed event may have. */
@@ -432,12 +484,13 @@ export function toVjPack(
   };
 }
 
-/** A clip and the ids of every pack holding it as the contract's
- *  `VjClipDTO`. A key `toImageUrl` cannot resolve answers an empty URL; a
- *  null preview key answers a null `previewUrl`. */
+/** A clip, the ids of every pack holding it and how many set list items
+ *  play it, as the contract's `VjClipDTO`. A key `toImageUrl` cannot resolve
+ *  answers an empty URL; a null preview key answers a null `previewUrl`. */
 export function toVjClip(
   clip: VjClipRow,
   packIds: string[],
+  setlistItemCount: number,
   profiles: Map<string, VjCreatorProfileRow>,
 ): VjClipDTO {
   return {
@@ -454,6 +507,7 @@ export function toVjClip(
     mediaUrl: toImageUrl(clip.storageKey) ?? '',
     packIds: [...packIds],
     packCount: packIds.length,
+    setlistItemCount: Number(setlistItemCount),
     createdBy: toVjCreator(clip.createdByUserId, profiles),
     createdAt: clip.createdAt.toISOString(),
     updatedAt: clip.updatedAt.toISOString(),
@@ -547,6 +601,18 @@ export function toVjScene(
   };
 }
 
+/** A stored kind and value pair as a step length; either column null gives
+ *  null (the step plays the sequence default). */
+export function toVjStepDuration(
+  kind: VjStepDurationKind | null,
+  value: number | null,
+): VjStepDuration | null {
+  if (kind === null || value === null) {
+    return null;
+  }
+  return { kind, value: Number(value) };
+}
+
 /** A set list row and its items, copied in the order given, as the
  *  contract's `VjSetlistDTO`. */
 export function toVjSetlist(
@@ -558,10 +624,18 @@ export function toVjSetlist(
     id: row.id,
     name: row.name,
     position: row.position,
+    isLooping: row.isLooping,
+    stepDuration: {
+      kind: row.stepDurationKind,
+      value: Number(row.stepDurationValue),
+    },
     items: items.map((item) => ({
       id: item.id,
-      sceneId: item.sceneId,
       position: item.position,
+      kind: item.kind,
+      sceneId: item.sceneId,
+      clipId: item.clipId,
+      duration: toVjStepDuration(item.durationKind, item.durationValue),
     })),
     createdBy: toVjCreator(row.createdByUserId, profiles),
     createdAt: row.createdAt.toISOString(),

@@ -26,14 +26,15 @@
  *
  * Stage state lives in memory in `VjStageService`, which also reads the
  * lookups of every stage command (contract 7.7). This gateway reads the
- * restore lookups of a screen attach and the set list counts a library change
- * needs, stamps `serverNow` on every ack (contract 7.2) and fans the frames
+ * restore lookups of a screen attach and the set list follow reads a library
+ * change needs, saves Loop before `stage:setlistSetLooping` lands, stamps `serverNow` on every ack (contract 7.2) and fans the frames
  * out to the rooms of contract 6.3. Log lines name frames, codes, the stage
  * owner's user id, socket ids and entity ids only: payloads, overlay text, clip
  * titles, pack, scene and set list names, countdown labels and event titles
  * stay out.
  */
 import {
+  HttpException,
   Logger,
   type OnModuleDestroy,
   type OnModuleInit,
@@ -100,6 +101,8 @@ import {
   VjSetEffectsPayloadDto,
   VjSetEventCardPayloadDto,
   VjSetlistSelectPayloadDto,
+  VjSetlistSetLoopingPayloadDto,
+  VjSetlistSetPlayingPayloadDto,
   VjSetlistStepPayloadDto,
   VjSetLogoPayloadDto,
   VjSetMixPayloadDto,
@@ -117,6 +120,7 @@ import { vjAttachApplyAt } from './stage/vj-quantize';
 import {
   EMPTY_VJ_LOOKUP_RESULTS,
   isOneOf,
+  isRecord,
   isUuidString,
   type VjLookupResults,
 } from './stage/vj-rule-kit';
@@ -144,6 +148,7 @@ import {
   type VjRenderMode,
   type VjScreenIdentifyFrame,
   type VjScreenRenderModeFrame,
+  type VjSetlistFollowRead,
   type VjSocketErrorCode,
   type VjStageFrame,
   type VjStageState,
@@ -159,9 +164,11 @@ import {
 } from './vj-live-response';
 import { resolveVjLookups } from './vj-lookup-resolver';
 import { toVjCreator } from './vj-response';
+import { VjSetlistService } from './vj-setlist.service';
 import { VjStageReadsService } from './vj-stage-reads.service';
 import {
   VjStageService,
+  type VjRemoteWriteRefusal,
   type VjScreenAttachOutcome,
   type VjStageOutcome,
 } from './vj-stage.service';
@@ -228,12 +235,18 @@ const UNLOGGED_REFUSALS: ReadonlySet<VjSocketErrorCode> =
     'vj_clip_not_favorite',
     'vj_stale_setlist',
     'vj_no_screens_connected',
+    'vj_setlist_flash_unconfirmed',
   ]);
 
-/** Library change kinds whose stage effect needs the item count of each
- *  active set list they name (contract 7.10). */
-const SETLIST_COUNT_CHANGE_KINDS: ReadonlySet<VjLibraryChange['kind']> =
-  new Set<VjLibraryChange['kind']>(['setlist_items_changed', 'scene_deleted']);
+/** Library change kinds whose stage effect needs the follow read (item ids
+ *  and Loop) of each active set list they name (sequences 5.9). */
+const SETLIST_FOLLOW_CHANGE_KINDS: ReadonlySet<VjLibraryChange['kind']> =
+  new Set<VjLibraryChange['kind']>([
+    'setlist_items_changed',
+    'scene_deleted',
+    'clip_deleted',
+    'setlist_updated',
+  ]);
 
 /** An ack before `serverNow` is stamped: a success carries its own fields,
  *  a refusal is the `vjAckFailure` one. */
@@ -349,6 +362,19 @@ function allowVjHandshakeOrigin(
   callback(null, resolveAllowedOrigins().includes(origin));
 }
 
+/** The socket code a failed Loop save answers (sequences 5.6): a set list
+ *  the write no longer found answers `vj_setlist_not_found`; every other
+ *  failure `vj_server_error`. */
+function setlistWriteRefusalOf(error: unknown): VjRemoteWriteRefusal {
+  if (error instanceof HttpException) {
+    const body = error.getResponse();
+    if (isRecord(body) && body.code === 'VJ_SETLIST_NOT_FOUND') {
+      return 'vj_setlist_not_found';
+    }
+  }
+  return 'vj_server_error';
+}
+
 /** The own enumerable fields of a validated payload as a plain record for `VjStageService`. */
 function toPayloadRecord(payload: unknown): Record<string, unknown> {
   if (typeof payload !== 'object' || payload === null) return {};
@@ -442,6 +468,7 @@ export class VjGateway
     @InjectRepository(UserStaffRole)
     private readonly staffRoles: Repository<UserStaffRole>,
     private readonly platformSettings: PlatformSettingsService,
+    private readonly setlists: VjSetlistService,
   ) {}
 
   /** The stage service broadcasts its timer frames (strobe, overlay and
@@ -568,10 +595,12 @@ export class VjGateway
    * broadcasts the `stage:state` frame of each stage the change touched
    * (contract 7.10) on the next tick, queued behind any command frame
    * already waiting so revisions reach clients in order. Only the eight
-   * contract fields are relayed. A set list
-   * items change or a scene delete first reads the item count of each set
-   * list a stage has active; a failed read logs the kind and the ids only and
-   * the change applies with the counts that were read. Never rejects.
+   * contract fields are relayed. A set list items change or update, a scene
+   * delete or a clip delete first reads the follow read (item ids and Loop)
+   * of each set list it names that a stage has active (sequences 5.9), so
+   * every stage with that set list active follows; a failed read logs the
+   * kind and the ids only and the change applies with the reads that came
+   * back. Never rejects.
    */
   @OnEvent(VJ_LIBRARY_CHANGED)
   async handleLibraryChanged(change: VjLibraryChange): Promise<void> {
@@ -587,13 +616,13 @@ export class VjGateway
     };
     this.namespace?.to(VJ_LIBRARY_ROOM).emit('library:changed', relayed);
     try {
-      const setlistItemCounts = SETLIST_COUNT_CHANGE_KINDS.has(relayed.kind)
-        ? await this.readActiveSetlistCounts(relayed)
-        : new Map<string, number | null>();
+      const setlistReads = SETLIST_FOLLOW_CHANGE_KINDS.has(relayed.kind)
+        ? await this.readActiveSetlistFollows(relayed)
+        : new Map<string, VjSetlistFollowRead | null>();
       for (const { adminUserId, frame } of this.stages.applyLibraryChange(
         relayed,
         Date.now(),
-        setlistItemCounts,
+        setlistReads,
       )) {
         this.broadcastOnNextTick(adminUserId, frame);
       }
@@ -850,6 +879,38 @@ export class VjGateway
     @MessageBody() payload: VjSetlistStepPayloadDto,
   ): Promise<VjAck<VjCommandSuccess>> {
     return this.runRemoteCommand(client, 'stage:setlistPrevious', payload);
+  }
+
+  @SubscribeMessage('stage:setlistSetPlaying')
+  handleSetlistSetPlaying(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetlistSetPlayingPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    return this.runRemoteCommand(client, 'stage:setlistSetPlaying', payload);
+  }
+
+  /** `stage:setlistSetLooping` (sequences 5.6): Loop is saved on the active
+   *  set list first, then the playback change lands. */
+  @SubscribeMessage('stage:setlistSetLooping')
+  async handleSetlistSetLooping(
+    @ConnectedSocket() client: VjSocket,
+    @MessageBody() payload: VjSetlistSetLoopingPayloadDto,
+  ): Promise<VjAck<VjCommandSuccess>> {
+    const name: VjRemoteCommandName = 'stage:setlistSetLooping';
+    const ack = await this.queueMeteredFrame(
+      client,
+      name,
+      this.commandLimiterOf(name),
+      async () => {
+        const gate = await this.frameGate(client, name, null, 'remote');
+        if (gate.failure !== null) return gate.failure;
+        const userId = gate.userId;
+        return this.landOutcome(client, userId, name, () =>
+          this.saveLoopingAndRun(userId, toPayloadRecord(payload)),
+        );
+      },
+    );
+    return withServerNow(ack);
   }
 
   @SubscribeMessage('stage:setCountdown')
@@ -1437,6 +1498,62 @@ export class VjGateway
     return withServerNow(ack);
   }
 
+  /**
+   * The stage side of `stage:setlistSetLooping` (sequences 5.6): the field
+   * rules and `vj_setlist_none` run first with nothing written; a refusal
+   * there answers through `runRemoteCommand`, which records the sequence and
+   * answers the same code. Then Loop is saved through the set list service
+   * (it emits `setlist_updated`, which every other stage with this set list
+   * active follows); a failed save answers `vj_setlist_not_found` or
+   * `vj_server_error` with the sequence recorded. When another remote
+   * stopped or switched the sequence while the save ran, nothing lands and
+   * it answers `vj_stale_setlist` with the state, the sequence recorded.
+   * Otherwise the Loop the save answered (the row as stored) lands the
+   * playback change with cause `command`.
+   */
+  private async saveLoopingAndRun(
+    userId: string,
+    payload: Record<string, unknown>,
+  ): Promise<VjStageOutcome> {
+    const name: VjRemoteCommandName = 'stage:setlistSetLooping';
+    const prepared = this.stages.prepareRemoteCommand(
+      userId,
+      name,
+      payload,
+      Date.now(),
+    );
+    const activeSetlistId =
+      this.stages.getState(userId)?.activeSetlistId ?? null;
+    if (prepared.failure !== null || activeSetlistId === null) {
+      return this.stages.runRemoteCommand(userId, name, payload);
+    }
+    let savedIsLooping: boolean;
+    try {
+      const saved = await this.setlists.updateSetlist(activeSetlistId, {
+        isLooping: payload.isLooping,
+      });
+      savedIsLooping = saved.isLooping;
+    } catch (error) {
+      return this.stages.refuseRemoteWrite(
+        userId,
+        payload,
+        setlistWriteRefusalOf(error),
+      );
+    }
+    // Another remote may have stopped or switched the sequence while the
+    // save ran: Loop then landed on a set list this stage no longer plays.
+    const activeAfterSave =
+      this.stages.getState(userId)?.activeSetlistId ?? null;
+    if (activeAfterSave !== activeSetlistId) {
+      return this.stages.refuseRemoteWrite(userId, payload, 'vj_stale_setlist');
+    }
+    // The row's Loop after the save, so the switch and the row agree.
+    return this.stages.runRemoteCommand(userId, name, {
+      ...payload,
+      isLooping: savedIsLooping,
+    });
+  }
+
   /** The bucket a remote command is metered on (contract 7.12). */
   private commandLimiterOf(name: VjRemoteCommandName): TokenBucketLimiter {
     if (name === 'stage:setMix') return this.mixLimiter;
@@ -1578,20 +1695,21 @@ export class VjGateway
   }
 
   /**
-   * The item count of each set list the change names that some stage has
-   * active, read in parallel. A failed read leaves its id out of the map and
-   * logs the change kind and the set list ids only.
+   * The follow read (item ids and Loop) of each set list the change names
+   * that some stage has active, read in parallel and keyed by lowercased id;
+   * null for a set list that is gone. A failed read leaves its id out of the
+   * map and logs the change kind and the set list ids only.
    */
-  private async readActiveSetlistCounts(
+  private async readActiveSetlistFollows(
     change: VjLibraryChange,
-  ): Promise<Map<string, number | null>> {
+  ): Promise<Map<string, VjSetlistFollowRead | null>> {
     const activeSetlistIds = this.stages.activeSetlistIdsAmong(
       change.setlistIds,
     );
-    const counts = new Map<string, number | null>();
+    const follows = new Map<string, VjSetlistFollowRead | null>();
     const settled = await Promise.allSettled(
       activeSetlistIds.map((setlistId) =>
-        this.reads.setlistItemCount(setlistId),
+        this.reads.readSetlistFollow(setlistId),
       ),
     );
     const failedSetlistIds: string[] = [];
@@ -1599,17 +1717,17 @@ export class VjGateway
       const setlistId = activeSetlistIds[position];
       if (setlistId === undefined) return;
       if (result.status === 'fulfilled') {
-        counts.set(setlistId, result.value);
+        follows.set(setlistId, result.value);
       } else {
         failedSetlistIds.push(setlistId);
       }
     });
     if (failedSetlistIds.length > 0) {
       this.logger.error(
-        `VJ set list count read failed: ${change.kind} set lists ${failedSetlistIds.join(',')}`,
+        `VJ set list follow read failed: ${change.kind} set lists ${failedSetlistIds.join(',')}`,
       );
     }
-    return counts;
+    return follows;
   }
 
   /** Signature, pinned algorithm and the claims-level status. */

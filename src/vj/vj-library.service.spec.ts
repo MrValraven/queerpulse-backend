@@ -12,7 +12,11 @@ import { VjClip } from './entities/vj-clip.entity';
 import { VjPackClip } from './entities/vj-pack-clip.entity';
 import { VjPack } from './entities/vj-pack.entity';
 import { VjScene } from './entities/vj-scene.entity';
-import { VJ_PACK_SUMMARY_V2_SQL } from './vj-library-reads';
+import { DENSIFY_VJ_SETLIST_ITEMS_SQL } from './vj-library-kit';
+import {
+  VJ_CLIP_SETLIST_ITEM_COUNTS_SQL,
+  VJ_PACK_SUMMARY_V2_SQL,
+} from './vj-library-reads';
 import {
   DENSIFY_VJ_PACK_CLIPS_SQL,
   DENSIFY_VJ_PACKS_SQL,
@@ -20,15 +24,18 @@ import {
   LOCK_VJ_CLIPS_SQL,
   LOCK_VJ_PACK_CLIPS_SQL,
   LOCK_VJ_PACKS_SQL,
+  VJ_CLIP_ITEM_COUNT_SQL,
   VJ_CLIP_PACK_IDS_SQL,
   VJ_PACK_NAME_HOLDER_SQL,
   VJ_PACK_SUMMARY_SQL,
   VJ_SCENES_NAMING_CLIP_SQL,
+  VJ_SETLISTS_HOLDING_CLIP_SQL,
   type VjCaller,
   VjLibraryService,
 } from './vj-library.service';
 import { normalizeStoredVjSceneLook } from './vj-scene-look';
 import { LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL } from './vj-scene.service';
+import { LOCK_VJ_SETLISTS_SQL } from './vj-setlist.service';
 import {
   VJ_LIBRARY_CHANGED,
   VJ_LIMITS,
@@ -56,6 +63,8 @@ const EVENT_ID = uuidAt(5, 1);
 const SCENE_ID = uuidAt(6, 1);
 const OTHER_SCENE_ID = uuidAt(6, 2);
 const THIRD_SCENE_ID = uuidAt(6, 3);
+const SETLIST_ID = uuidAt(7, 1);
+const OTHER_SETLIST_ID = uuidAt(7, 2);
 const EVENT_TITLE = 'Pride closing night';
 
 function clipKeyAt(position: number, extension: string): string {
@@ -243,6 +252,34 @@ function foreignKeyViolation(constraint: string): QueryFailedError {
   );
 }
 
+/** A `vj_setlist_items` row as the clip delete's raw reads see it. */
+interface StoredSetlistItem {
+  id: string;
+  setlistId: string;
+  kind: 'scene' | 'clip';
+  sceneId: string | null;
+  clipId: string | null;
+  position: number;
+}
+
+function buildClipStep(
+  id: string,
+  setlistId: string,
+  clipId: string,
+  position: number,
+): StoredSetlistItem {
+  return { id, setlistId, kind: 'clip', sceneId: null, clipId, position };
+}
+
+function buildSceneStep(
+  id: string,
+  setlistId: string,
+  sceneId: string,
+  position: number,
+): StoredSetlistItem {
+  return { id, setlistId, kind: 'scene', sceneId, clipId: null, position };
+}
+
 type Row = Record<string, unknown>;
 type Criteria = Record<string, unknown>;
 interface FindOptions {
@@ -265,6 +302,7 @@ describe('VjLibraryService', () => {
   let storedProfiles: Profile[];
   let storedScenes: VjScene[];
   let storedEvents: StoredEventRow[];
+  let storedSetlistItems: StoredSetlistItem[];
   let settledTransactions: number;
   let settledAtEmit: number[];
   let objectSizes: Map<string, number>;
@@ -377,8 +415,59 @@ describe('VjLibraryService', () => {
       sql === LOCK_VJ_CLIPS_SQL ||
       sql === LOCK_VJ_PACK_CLIPS_SQL ||
       sql === LOCK_VJ_CLIPS_ROW_EXCLUSIVE_SQL ||
-      sql === LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL
+      sql === LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL ||
+      sql === LOCK_VJ_SETLISTS_SQL
     ) {
+      return [];
+    }
+    if (sql === VJ_CLIP_SETLIST_ITEM_COUNTS_SQL) {
+      const clipIds = parameters[0] as string[];
+      const countByClip = new Map<string, number>();
+      for (const item of storedSetlistItems) {
+        if (item.clipId !== null && clipIds.includes(item.clipId)) {
+          countByClip.set(item.clipId, (countByClip.get(item.clipId) ?? 0) + 1);
+        }
+      }
+      return [...countByClip].map(([clipId, itemCount]) => ({
+        clip_id: clipId,
+        item_count: itemCount,
+      }));
+    }
+    if (sql === VJ_SETLISTS_HOLDING_CLIP_SQL) {
+      const clipId = parameters[0] as string;
+      return [
+        ...new Set(
+          storedSetlistItems
+            .filter((item) => item.clipId === clipId)
+            .map((item) => item.setlistId),
+        ),
+      ]
+        .sort()
+        .map((setlistId) => ({ id: setlistId }));
+    }
+    if (sql === VJ_CLIP_ITEM_COUNT_SQL) {
+      const clipId = parameters[0] as string;
+      return [
+        {
+          item_count: storedSetlistItems.filter(
+            (item) => item.clipId === clipId,
+          ).length,
+        },
+      ];
+    }
+    if (sql === DENSIFY_VJ_SETLIST_ITEMS_SQL) {
+      for (const setlistId of parameters[0] as string[]) {
+        storedSetlistItems
+          .filter((item) => item.setlistId === setlistId)
+          .sort(
+            (first, second) =>
+              first.position - second.position ||
+              first.id.localeCompare(second.id),
+          )
+          .forEach((item, position) => {
+            item.position = position;
+          });
+      }
       return [];
     }
     if (sql === VJ_PACK_SUMMARY_V2_SQL) {
@@ -481,6 +570,7 @@ describe('VjLibraryService', () => {
     storedMemberships = [];
     storedScenes = [];
     storedEvents = [];
+    storedSetlistItems = [];
     storedProfiles = [
       { userId: ADMIN_ID, firstName: 'Rui', lastName: 'Lopes' } as Profile,
     ];
@@ -520,6 +610,9 @@ describe('VjLibraryService', () => {
         }
         if (entity === VjClip) {
           removeRows(VjPackClip, { clipId: criteria.id });
+          storedSetlistItems = storedSetlistItems.filter(
+            (item) => item.clipId !== criteria.id,
+          );
         }
         return Promise.resolve({ affected: 1 });
       }),
@@ -1582,6 +1675,7 @@ describe('VjLibraryService', () => {
       expect(deleted).toEqual({
         deletedClipId: CLIP_ID,
         removedFromPackCount: 2,
+        removedFromSetlistCount: 0,
       });
       expect(findOneOptionsOf(VjClip)[0]).toMatchObject({
         where: { id: CLIP_ID },
@@ -1619,6 +1713,130 @@ describe('VjLibraryService', () => {
       expect((await codeOf(service.deleteClip(uuidAt(2, 99)))).status).toBe(
         404,
       );
+    });
+
+    it('removes the clip steps, closes each set list gap and names every set list that held it', async () => {
+      storedPacks.push(buildPack());
+      storedClips.push(buildClip(), buildClip({ id: OTHER_CLIP_ID }));
+      storedMemberships.push(buildMembership(PACK_ID, CLIP_ID, 0));
+      storedSetlistItems.push(
+        buildSceneStep(uuidAt(8, 1), OTHER_SETLIST_ID, SCENE_ID, 0),
+        buildClipStep(uuidAt(8, 2), OTHER_SETLIST_ID, CLIP_ID, 1),
+        buildClipStep(uuidAt(8, 3), OTHER_SETLIST_ID, OTHER_CLIP_ID, 2),
+        buildClipStep(uuidAt(8, 4), OTHER_SETLIST_ID, CLIP_ID, 3),
+        buildClipStep(uuidAt(8, 5), SETLIST_ID, CLIP_ID, 0),
+        buildSceneStep(uuidAt(8, 6), SETLIST_ID, SCENE_ID, 1),
+      );
+
+      const deleted = await service.deleteClip(CLIP_ID);
+
+      expect(deleted).toEqual({
+        deletedClipId: CLIP_ID,
+        removedFromPackCount: 1,
+        removedFromSetlistCount: 3,
+      });
+      expect(manager.query).toHaveBeenCalledWith(VJ_SETLISTS_HOLDING_CLIP_SQL, [
+        CLIP_ID,
+      ]);
+      expect(manager.query).toHaveBeenCalledWith(VJ_CLIP_ITEM_COUNT_SQL, [
+        CLIP_ID,
+      ]);
+      expect(manager.query).toHaveBeenCalledWith(DENSIFY_VJ_SETLIST_ITEMS_SQL, [
+        [SETLIST_ID, OTHER_SETLIST_ID],
+      ]);
+      expect(
+        storedSetlistItems.map((item) => [
+          item.setlistId,
+          item.id,
+          item.position,
+        ]),
+      ).toEqual([
+        [OTHER_SETLIST_ID, uuidAt(8, 1), 0],
+        [OTHER_SETLIST_ID, uuidAt(8, 3), 1],
+        [SETLIST_ID, uuidAt(8, 6), 0],
+      ]);
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        VJ_LIBRARY_CHANGED,
+        expectedChange({
+          kind: 'clip_deleted',
+          clipId: CLIP_ID,
+          packIds: [PACK_ID],
+          setlistIds: [SETLIST_ID, OTHER_SETLIST_ID],
+        }),
+      );
+    });
+
+    it('takes the set list lock after the clip row and the scene rewrite, and reads its set lists before the delete', async () => {
+      storedClips.push(buildClip());
+      storedSetlistItems.push(
+        buildClipStep(uuidAt(8, 1), SETLIST_ID, CLIP_ID, 0),
+      );
+
+      await service.deleteClip(CLIP_ID);
+
+      const sqlOrder = queriedSql();
+      const sceneLockIndex = sqlOrder.indexOf(LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL);
+      const scenesReadIndex = sqlOrder.indexOf(VJ_SCENES_NAMING_CLIP_SQL);
+      const setlistLockIndex = sqlOrder.indexOf(LOCK_VJ_SETLISTS_SQL);
+      const holdingIndex = sqlOrder.indexOf(VJ_SETLISTS_HOLDING_CLIP_SQL);
+      const countIndex = sqlOrder.indexOf(VJ_CLIP_ITEM_COUNT_SQL);
+      const densifyIndex = sqlOrder.indexOf(DENSIFY_VJ_SETLIST_ITEMS_SQL);
+      expect(sceneLockIndex).toBeGreaterThan(-1);
+      expect(scenesReadIndex).toBeGreaterThan(sceneLockIndex);
+      expect(setlistLockIndex).toBeGreaterThan(scenesReadIndex);
+      expect(holdingIndex).toBeGreaterThan(setlistLockIndex);
+      expect(countIndex).toBeGreaterThan(holdingIndex);
+      expect(densifyIndex).toBeGreaterThan(countIndex);
+      const clipReadOrder = manager.findOne.mock.invocationCallOrder[0];
+      const setlistLockOrder =
+        manager.query.mock.invocationCallOrder[setlistLockIndex];
+      const countOrder = manager.query.mock.invocationCallOrder[countIndex];
+      const densifyOrder = manager.query.mock.invocationCallOrder[densifyIndex];
+      const clipDeleteOrder = manager.delete.mock.invocationCallOrder[0];
+      if (
+        clipReadOrder === undefined ||
+        setlistLockOrder === undefined ||
+        countOrder === undefined ||
+        densifyOrder === undefined ||
+        clipDeleteOrder === undefined
+      ) {
+        throw new Error('A delete step never ran');
+      }
+      expect(clipReadOrder).toBeLessThan(setlistLockOrder);
+      expect(countOrder).toBeLessThan(clipDeleteOrder);
+      expect(clipDeleteOrder).toBeLessThan(densifyOrder);
+    });
+
+    it('skips the set list densify when no set list held the clip', async () => {
+      storedClips.push(buildClip());
+
+      const deleted = await service.deleteClip(CLIP_ID);
+
+      expect(deleted.removedFromSetlistCount).toBe(0);
+      expect(queriedSql()).toContain(LOCK_VJ_SETLISTS_SQL);
+      expect(queriedSql()).not.toContain(DENSIFY_VJ_SETLIST_ITEMS_SQL);
+    });
+
+    it('counts the set list items that play each listed clip', async () => {
+      storedClips.push(buildClip(), buildClip({ id: OTHER_CLIP_ID }));
+      storedSetlistItems.push(
+        buildClipStep(uuidAt(8, 1), SETLIST_ID, CLIP_ID, 0),
+        buildClipStep(uuidAt(8, 2), SETLIST_ID, CLIP_ID, 1),
+        buildClipStep(uuidAt(8, 3), OTHER_SETLIST_ID, CLIP_ID, 0),
+      );
+
+      const listed = await service.listClips();
+
+      expect(
+        listed.items.map((clip) => [clip.id, clip.setlistItemCount]),
+      ).toEqual(
+        expect.arrayContaining([
+          [CLIP_ID, 3],
+          [OTHER_CLIP_ID, 0],
+        ]),
+      );
+      expect(queriedSql()).toContain(VJ_CLIP_SETLIST_ITEM_COUNTS_SQL);
     });
 
     it('locks the clip table and then the membership table before any membership write on a clip delete', async () => {
@@ -2208,6 +2426,9 @@ describe('VjLibraryService', () => {
     });
 
     it('takes the scene table lock in row exclusive mode after the clip row and before the scenes on a clip delete', async () => {
+      expect(VJ_SCENES_NAMING_CLIP_SQL).toBe(
+        `SELECT "id", "look" FROM "vj_scenes" WHERE "look"->'source'->>'clipId' = $1 OR "look"->'mix'->>'clipId' = $1 FOR NO KEY UPDATE`,
+      );
       storedClips.push(buildClip());
 
       await service.deleteClip(CLIP_ID);
@@ -2394,6 +2615,7 @@ describe('VjLibraryService', () => {
       expect(deletedClip).toEqual({
         deletedClipId: CLIP_ID,
         removedFromPackCount: 1,
+        removedFromSetlistCount: 0,
       });
 
       const emitted = eventEmitter.emit.mock.calls.map(

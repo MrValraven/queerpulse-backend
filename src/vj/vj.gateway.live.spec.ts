@@ -8,6 +8,7 @@ import type { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import type { User } from '../users/entities/user.entity';
 import { VJ_STOPPED_MESSAGE } from './vj.constants';
 import { VjGateway, vjRemotesRoomName, type VjLiveScope } from './vj.gateway';
+import type { VjSetlistService } from './vj-setlist.service';
 import type { VjStageReadsService } from './vj-stage-reads.service';
 import { VjStageService } from './vj-stage.service';
 
@@ -81,6 +82,7 @@ function createHarness() {
     {} as unknown as Repository<RefreshToken>,
     {} as unknown as Repository<UserStaffRole>,
     {} as unknown as PlatformSettingsService,
+    {} as unknown as VjSetlistService,
   );
   gateway.namespace = namespace;
   gateway.afterInit();

@@ -6,6 +6,9 @@ import {
   type VjGeneratorId,
   type VjRemoteCommandName,
   type VjSceneLook,
+  type VjSetlistClockStamp,
+  type VjSetlistRead,
+  type VjSetlistReadPosition,
   type VjSocketErrorCode,
   type VjStageState,
 } from '../vj.contract';
@@ -18,17 +21,11 @@ export type VjCommandLookup =
   | { kind: 'clipsInPack'; packId: string; clipIds: string[] }
   | { kind: 'packClip'; packId: string; clipId: string }
   | { kind: 'scene'; sceneId: string }
-  | { kind: 'setlistItem'; setlistId: string; index: number | null };
-
-/** A set list read for a recall or a step: the item at `index` (its scene and
- *  look, null when the index holds none) and how many items the list has. */
-export interface VjSetlistItemRead {
-  setlistId: string;
-  index: number | null;
-  itemCount: number;
-  sceneId: string | null;
-  look: VjSceneLook | null;
-}
+  | {
+      kind: 'setlistItem';
+      setlistId: string;
+      position: VjSetlistReadPosition;
+    };
 
 /** The answers to a command's lookups, read by the apply step's rules. */
 export interface VjLookupResults {
@@ -43,7 +40,7 @@ export interface VjLookupResults {
   /** 'scene' answers; null when no scene has the id. */
   scenes: ReadonlyMap<string, VjSceneLook | null>;
   /** 'setlistItem' answers keyed by vjSetlistItemKey; null when the set list is gone. */
-  setlistItems: ReadonlyMap<string, VjSetlistItemRead | null>;
+  setlistItems: ReadonlyMap<string, VjSetlistRead | null>;
 }
 
 /** The answers of a command that listed no lookups. */
@@ -53,7 +50,7 @@ export const EMPTY_VJ_LOOKUP_RESULTS: VjLookupResults = Object.freeze({
   clipIdsInPack: new Set<string>(),
   packClips: new Map<string, { isFavorite: boolean } | null>(),
   scenes: new Map<string, VjSceneLook | null>(),
-  setlistItems: new Map<string, VjSetlistItemRead | null>(),
+  setlistItems: new Map<string, VjSetlistRead | null>(),
 });
 
 /** The `packClips` key of one pack and clip pair, both lowercased. */
@@ -61,13 +58,23 @@ export function vjPackClipKey(packId: string, clipId: string): string {
   return `${packId.toLowerCase()}:${clipId.toLowerCase()}`;
 }
 
-/** The `setlistItems` key of one set list and index; a null index reads the
- *  list's item count only. */
+/** The `setlistItems` key of one set list read, the id lowercased:
+ *  `${id}:count`, `${id}:${index}`, `${id}:${index}:first` or `${id}:last`. */
 export function vjSetlistItemKey(
   setlistId: string,
-  index: number | null,
+  position: VjSetlistReadPosition,
 ): string {
-  return `${setlistId.toLowerCase()}:${index === null ? 'null' : String(index)}`;
+  const id = setlistId.toLowerCase();
+  switch (position.kind) {
+    case 'count':
+      return `${id}:count`;
+    case 'last':
+      return `${id}:last`;
+    case 'index':
+      return position.wrapsToFirst
+        ? `${id}:${String(position.index)}:first`
+        : `${id}:${String(position.index)}`;
+  }
 }
 
 /** What every rule reads besides the state and the payload. */
@@ -89,6 +96,10 @@ export interface VjAcceptedChange {
   isLookSwitch: boolean;
   /** undefined keeps overlay.hideAt; null clears it; a number stamps stampAt + value. */
   overlayHideAfterMs: number | null | undefined;
+  /** The clock the landing stamps (stampVjSetlistClock); default { kind: 'keep' }. */
+  setlistClock: VjSetlistClockStamp;
+  /** The step end a timer advance lands at (vjSetlistAdvanceApplyAt); null for every command. */
+  scheduledAt: number | null;
 }
 
 /** What a remote command's rules answer: a refusal or an accepted change. */
@@ -103,6 +114,11 @@ export type VjRuleFunction = (
   context: VjRuleContext,
 ) => VjCommandRuleResult;
 
+/** The clock stamp of a change that leaves the set list clock as it is. */
+export const VJ_SETLIST_CLOCK_KEEP: VjSetlistClockStamp = Object.freeze({
+  kind: 'keep',
+});
+
 /** A refusal with its code, and the current state for the codes that carry it. */
 export function refuseRule(
   code: VjSocketErrorCode,
@@ -112,7 +128,8 @@ export function refuseRule(
 }
 
 /** An accepted change; options left out default to an empty lookup list,
- *  isImmediate false, isLookSwitch false and the overlay hide time kept. */
+ *  isImmediate false, isLookSwitch false, the overlay hide time kept, the
+ *  set list clock kept and no scheduled step end. */
 export function acceptRule(
   nextState: VjStageState,
   options: Partial<Omit<VjAcceptedChange, 'nextState'>> = {},
@@ -125,6 +142,8 @@ export function acceptRule(
       isImmediate: options.isImmediate ?? false,
       isLookSwitch: options.isLookSwitch ?? false,
       overlayHideAfterMs: options.overlayHideAfterMs,
+      setlistClock: options.setlistClock ?? VJ_SETLIST_CLOCK_KEEP,
+      scheduledAt: options.scheduledAt ?? null,
     },
   };
 }

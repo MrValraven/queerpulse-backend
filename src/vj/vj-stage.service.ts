@@ -1,16 +1,23 @@
-import { Injectable, type OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { vjAckFailure } from './vj.constants';
 import {
   canonicalVjStageState,
   createVjStageState,
   isSameVjStageContent,
+  VJ_LIMITS,
+  vjSetlistFollowState,
+  vjSetlistTimerReadPosition,
+  vjSetlistTimerTargetAt,
+  vjSetlistTimerTransition,
   type VjAckFailure,
   type VjCommandSuccess,
   type VjLibraryChange,
   type VjRemoteCommandName,
   type VjRenderer,
   type VjScreenStatus,
+  type VjSetlistFollowRead,
+  type VjSetlistRead,
   type VjSocketErrorCode,
   type VjStageCause,
   type VjStageFrame,
@@ -29,12 +36,18 @@ import {
   vjApplyAtFor,
   vjAttachApplyAt,
 } from './stage/vj-quantize';
-import { restoredVjStageState, vjRestoreLookups } from './stage/vj-restore';
+import {
+  restoredVjStageState,
+  vjRestoreLookups,
+  vjRestoreSetlistRead,
+} from './stage/vj-restore';
 import {
   EMPTY_VJ_LOOKUP_RESULTS,
   isRecord,
   isUuidString,
+  VJ_SETLIST_CLOCK_KEEP,
   vjPackClipKey,
+  vjSetlistItemKey,
   type VjAcceptedChange,
   type VjCommandLookup,
   type VjLookupResults,
@@ -45,6 +58,7 @@ import {
   toVjScreenStatusList,
   type VjScreenEntry,
 } from './stage/vj-screen-status';
+import { vjSetlistTransitionChange } from './stage/vj-scene-recall';
 import { applyVjAdvance, checkVjAdvance } from './stage/vj-shuffle-rules';
 import {
   VJ_TIMER_CAUSES,
@@ -111,6 +125,13 @@ export type VjScreenAttachOutcome =
  *  lookups the rule lists moved on both reads. */
 type VjLookupReadRefusal = 'read_failed' | 'lookups_moved';
 
+/** What a remote write before a landing (the Loop save of
+ *  `stage:setlistSetLooping`, sequences 5.6) answers when it fails, or when
+ *  another remote moved the active set list while it ran
+ *  (`vj_stale_setlist`, sent with the state). */
+export type VjRemoteWriteRefusal =
+  'vj_setlist_not_found' | 'vj_server_error' | 'vj_stale_setlist';
+
 /** What a prepare step answers: a refusal, or the reads the apply step needs. */
 export type VjPreparedLookups =
   | { failure: VjAckFailure; lookups: [] }
@@ -134,7 +155,29 @@ interface VjStage {
   /** Screen sockets that sent a stored `screen:status` since they attached,
    *  so the live list can tell a reported fullscreen flag from the default. */
   statusReportedSocketIds: Set<string>;
+  /** The active set list's item ids in play order, from the last read that
+   *  answered them (sequences 5.4, memory only, never sent); null with no
+   *  active set list or before any read. Index follow reads it. */
+  setlistItemIds: string[] | null;
+  /** The lowercased set list id `setlistItemIds` belongs to; null with none. */
+  setlistItemIdsSetlistId: string | null;
+  /** How many library follows stored item ids so far. A command read that
+   *  started before the latest one never overwrites them: its ids are older. */
+  setlistFollowCount: number;
 }
+
+/** The set list reads a landing refreshes `setlistItemIds` from, and the
+ *  stage's follow count when they were started (null: no follow can have
+ *  landed meanwhile, as for the step timer, whose stale check rereads). */
+interface VjLandingSetlistReads {
+  reads: Iterable<VjSetlistRead | null>;
+  followCountAtRead: number | null;
+}
+
+const NO_LANDING_SETLIST_READS: VjLandingSetlistReads = Object.freeze({
+  reads: [],
+  followCountAtRead: null,
+});
 
 /** One connected screen as the live connections list reads it. */
 export interface VjLiveScreenRead {
@@ -170,7 +213,8 @@ function refuseOutcome(code: VjSocketErrorCode): VjStageOutcome {
 }
 
 /** A change the server makes on its own (timers, mic adoption, library):
- *  `isImmediate` and `isLookSwitch` false, an empty lookup list, `hideAt` kept. */
+ *  `isImmediate` and `isLookSwitch` false, an empty lookup list, `hideAt`
+ *  and the set list clock kept, no scheduled step end. */
 function serverVjChange(nextState: VjStageState): VjAcceptedChange {
   return {
     nextState,
@@ -178,7 +222,157 @@ function serverVjChange(nextState: VjStageState): VjAcceptedChange {
     isImmediate: false,
     isLookSwitch: false,
     overlayHideAfterMs: undefined,
+    setlistClock: VJ_SETLIST_CLOCK_KEEP,
+    scheduledAt: null,
   };
+}
+
+/** Whether two set list ids name the same set list, case ignored. */
+function isSameSetlistId(first: string, second: string): boolean {
+  return first.toLowerCase() === second.toLowerCase();
+}
+
+/** Keeps `itemIds` (copied, a new array) as the item ids of `setlistId`. */
+function storeSetlistItemIds(
+  stage: VjStage,
+  setlistId: string,
+  itemIds: readonly string[],
+): void {
+  stage.setlistItemIds = [...itemIds];
+  stage.setlistItemIdsSetlistId = setlistId.toLowerCase();
+}
+
+/** Forgets the item ids: no set list is active. */
+function forgetSetlistItemIds(stage: VjStage): void {
+  stage.setlistItemIds = null;
+  stage.setlistItemIdsSetlistId = null;
+}
+
+/** Sequences 5.4: the stage's `setlistItemIds` after a landing. With no
+ *  active set list it is null; a read of the active set list among the
+ *  reads gives its item ids, unless a library follow stored ids of that same
+ *  set list after the read started (the follow's ids are newer); with no
+ *  read the memory stays as it was. */
+function rememberSetlistItemIds(
+  stage: VjStage,
+  setlistReads: VjLandingSetlistReads,
+): void {
+  const activeSetlistId = stage.state.activeSetlistId;
+  if (activeSetlistId === null) {
+    forgetSetlistItemIds(stage);
+    return;
+  }
+  for (const read of setlistReads.reads) {
+    if (read === null || !isSameSetlistId(read.setlistId, activeSetlistId)) {
+      continue;
+    }
+    const isOlderThanFollow =
+      setlistReads.followCountAtRead !== null &&
+      setlistReads.followCountAtRead !== stage.setlistFollowCount &&
+      stage.setlistItemIdsSetlistId === activeSetlistId.toLowerCase();
+    if (!isOlderThanFollow) {
+      storeSetlistItemIds(stage, activeSetlistId, read.itemIds);
+    }
+    return;
+  }
+}
+
+/** Sequences 5.4 after a library follow: the follow read of the active set
+ *  list gives its item ids; a set list the change left inactive gives null;
+ *  no read for it keeps the memory. */
+function rememberFollowedSetlistItemIds(
+  stage: VjStage,
+  setlistReads: ReadonlyMap<string, VjSetlistFollowRead | null>,
+): void {
+  const activeSetlistId = stage.state.activeSetlistId;
+  if (activeSetlistId === null) {
+    forgetSetlistItemIds(stage);
+    return;
+  }
+  const read = setlistReads.get(activeSetlistId.toLowerCase());
+  if (read !== undefined && read !== null) {
+    storeSetlistItemIds(stage, activeSetlistId, read.itemIds);
+    stage.setlistFollowCount += 1;
+  }
+}
+
+/** Whether two item id lists hold the same ids in the same order. */
+function isSameItemIdList(
+  first: readonly string[],
+  second: readonly string[],
+): boolean {
+  return (
+    first.length === second.length &&
+    first.every((itemId, position) => itemId === second[position])
+  );
+}
+
+/** Whether the stage holds item ids of `setlistId` that differ from the
+ *  ones a newer read answered: a library write committed and its follow has
+ *  not landed yet. */
+function hasUnfollowedItemEdit(
+  stage: VjStage,
+  setlistId: string,
+  readItemIds: readonly string[],
+): boolean {
+  return (
+    stage.setlistItemIds !== null &&
+    stage.setlistItemIdsSetlistId === setlistId.toLowerCase() &&
+    !isSameItemIdList(stage.setlistItemIds, readItemIds)
+  );
+}
+
+/** Whether a command's lookup answers hold a read of the active set list
+ *  while a library follow stored newer item ids after the read started: the
+ *  rule would place the step on positions the follow has moved. */
+function isSetlistReadOlderThanFollow(
+  stage: VjStage,
+  lookups: VjLookupResults,
+  followCountAtRead: number | null,
+): boolean {
+  const activeSetlistId = stage.state.activeSetlistId;
+  if (
+    followCountAtRead === null ||
+    followCountAtRead === stage.setlistFollowCount ||
+    activeSetlistId === null
+  ) {
+    return false;
+  }
+  const keyPrefix = `${activeSetlistId.toLowerCase()}:`;
+  for (const key of lookups.setlistItems.keys()) {
+    if (key.startsWith(keyPrefix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** What the step timer's fire read from: the state and the item ids array
+ *  the stage held (its identity changes on every store). */
+interface VjSetlistTimerFire {
+  state: VjStageState;
+  setlistItemIds: string[] | null;
+}
+
+/** Whether something the step timer's fire read from changed while its read
+ *  was out (sequences 5.7): the stage epoch, the set list, the index, the
+ *  status, the step end, Loop, or the item ids (a step edit). */
+function hasSetlistTimerStateMoved(
+  fired: VjSetlistTimerFire,
+  stage: VjStage,
+): boolean {
+  const current = stage.state;
+  return (
+    fired.state.stageEpoch !== current.stageEpoch ||
+    fired.state.activeSetlistId !== current.activeSetlistId ||
+    fired.state.setlistIndex !== current.setlistIndex ||
+    fired.state.setlistPlayback.status !== current.setlistPlayback.status ||
+    fired.state.setlistPlayback.stepEndsAt !==
+      current.setlistPlayback.stepEndsAt ||
+    fired.state.setlistPlayback.isLooping !==
+      current.setlistPlayback.isLooping ||
+    fired.setlistItemIds !== stage.setlistItemIds
+  );
 }
 
 /** The connected screen with the earliest `connectedAt`, earliest attach first
@@ -283,10 +477,12 @@ function withoutDepartedScreenOverrides(
  * the last `listScreens` or sweep loses its override here), the canonical
  * next state, its applyAt, then the overrides of departed screens dropped
  * (after the grid check, so that drop never puts an unrelated change on the
- * beat; the demo keeps the same order), the time stamps, the noop compare,
- * then the pending
+ * beat; the demo keeps the same order), the time stamps (the set list clock
+ * included, sequences 3.5), the noop compare, then the pending
  * applyAt, the revision, the timers and the frame. A noop answers applyAt
- * null and leaves the pending applyAt alone.
+ * null and leaves the pending applyAt alone. Only the step timer's landing
+ * (cause `setlist`) places itself by its scheduled step end. Every landing,
+ * a noop included, refreshes `setlistItemIds` from `setlistReads`.
  */
 function landVjChange(
   stage: VjStage,
@@ -294,6 +490,7 @@ function landVjChange(
   cause: VjStageCause,
   sourceClientId: string | null,
   now: number,
+  setlistReads: VjLandingSetlistReads = NO_LANDING_SETLIST_READS,
 ): VjAppliedOutcome {
   pruneOfflineScreens(stage, now);
   const previous = stage.state;
@@ -304,6 +501,7 @@ function landVjChange(
     isLookSwitch: accepted.isLookSwitch,
     isImmediate: accepted.isImmediate,
     cause,
+    scheduledAt: cause === 'setlist' ? accepted.scheduledAt : null,
     pendingApplyAt: stage.pendingApplyAt,
     now,
   });
@@ -312,8 +510,11 @@ function landVjChange(
     withoutDepartedScreenOverrides(proposed, stage.screens),
     applyAt ?? now,
     accepted.overlayHideAfterMs,
+    accepted.setlistClock,
   );
   if (isSameVjStageContent(previous, stamped)) {
+    rememberSetlistItemIds(stage, setlistReads);
+    stage.timers.sync(previous);
     return {
       ok: true,
       success: { revision: previous.revision, isNoop: true, applyAt: null },
@@ -327,6 +528,7 @@ function landVjChange(
   });
   stage.pendingApplyAt = applyAt;
   stage.state = applied;
+  rememberSetlistItemIds(stage, setlistReads);
   stage.timers.sync(applied);
   return {
     ok: true,
@@ -409,7 +611,8 @@ function newScreenEntry(
  * The live VJ stages. One stage per admin user id, held in process memory
  * only: `chat/chat-single-instance.guard.ts` keeps the backend on one
  * replica, so every screen and remote of an admin reaches this map. Nothing
- * is written to the database and nothing is logged. The rules live in the
+ * is written to the database; the only log line is a failed step timer
+ * landing, naming the stage owner's id. The rules live in the
  * pure modules under `stage/`; this service keeps the stage map, screens,
  * sequences, timers and the one change landing of contract 7.4. It touches
  * no socket: the gateway fans out the frames it returns (contract 7).
@@ -418,6 +621,7 @@ function newScreenEntry(
 export class VjStageService implements OnModuleDestroy {
   private readonly stages = new Map<string, VjStage>();
   private broadcaster: VjStageBroadcaster | null = null;
+  private readonly logger = new Logger(VjStageService.name);
 
   constructor(private readonly stageReads: VjStageReadsService) {}
 
@@ -429,6 +633,12 @@ export class VjStageService implements OnModuleDestroy {
   /** The admin's stage state, or null when no stage is in memory. */
   getState(adminUserId: string): VjStageState | null {
     return this.stages.get(adminUserId)?.state ?? null;
+  }
+
+  /** The active set list's item ids the admin's stage holds (sequences 5.4,
+   *  memory only), or null with none or no stage in memory. */
+  getSetlistItemIds(adminUserId: string): readonly string[] | null {
+    return this.stages.get(adminUserId)?.setlistItemIds ?? null;
   }
 
   /** The admin's last stamped applyAt (contract 7.4), or null with no stage
@@ -571,13 +781,19 @@ export class VjStageService implements OnModuleDestroy {
   }
 
   /** Reruns every check of a remote command with the lookup answers, records
-   *  its sequence on every outcome past the stale check, and lands it. */
+   *  its sequence on every outcome past the stale check, and lands it.
+   *  `followCountAtRead` is the stage's follow count when the lookups were
+   *  read (null: unknown, the read ids are kept as they are). When a library
+   *  follow landed since and the answers hold a read of the active set list,
+   *  nothing lands: it answers `vj_stale_setlist` with the state through
+   *  `refuseRemoteWrite`, so the remote retries on the followed state. */
   applyRemoteCommand(
     adminUserId: string,
     name: VjRemoteCommandName,
     payload: Record<string, unknown>,
     lookups: VjLookupResults,
     now: number,
+    followCountAtRead: number | null = null,
   ): VjStageOutcome {
     const stage = this.stages.get(adminUserId);
     if (stage === undefined) {
@@ -586,6 +802,9 @@ export class VjStageService implements OnModuleDestroy {
     const clientCheck = checkClientCommand(stage, payload);
     if (clientCheck.failure !== null) {
       return { ok: false, failure: clientCheck.failure };
+    }
+    if (isSetlistReadOlderThanFollow(stage, lookups, followCountAtRead)) {
+      return this.refuseRemoteWrite(adminUserId, payload, 'vj_stale_setlist');
     }
     recordClientSequence(
       stage,
@@ -607,6 +826,7 @@ export class VjStageService implements OnModuleDestroy {
       'command',
       clientCheck.clientId,
       now,
+      { reads: lookups.setlistItems.values(), followCountAtRead },
     );
   }
 
@@ -622,6 +842,8 @@ export class VjStageService implements OnModuleDestroy {
     payload: Record<string, unknown>,
     clock: () => number = () => Date.now(),
   ): Promise<VjStageOutcome> {
+    const followCountAtRead =
+      this.stages.get(adminUserId)?.setlistFollowCount ?? null;
     const prepared = this.prepareRemoteCommand(
       adminUserId,
       name,
@@ -641,7 +863,14 @@ export class VjStageService implements OnModuleDestroy {
       prepared.lookups,
       (now) => this.relistRemoteLookups(adminUserId, name, payload, now),
       (results, now) =>
-        this.applyRemoteCommand(adminUserId, name, payload, results, now),
+        this.applyRemoteCommand(
+          adminUserId,
+          name,
+          payload,
+          results,
+          now,
+          followCountAtRead,
+        ),
       (reason) => this.refuseRemoteRead(adminUserId, payload, reason),
       clock,
     );
@@ -657,6 +886,39 @@ export class VjStageService implements OnModuleDestroy {
     payload: Record<string, unknown>,
     reason: VjLookupReadRefusal,
   ): VjStageOutcome {
+    return this.refuseRecordedCommand(adminUserId, payload, (stage) =>
+      reason === 'read_failed'
+        ? vjAckFailure('vj_server_error')
+        : vjAckFailure('vj_stale_command', stage.state),
+    );
+  }
+
+  /** The answer of a remote command whose write before the landing failed
+   *  or went stale (the Loop save of `stage:setlistSetLooping`, sequences
+   *  5.6), or whose set list read a library follow overtook
+   *  (`applyRemoteCommand`): the client checks rerun, the sequence recorded
+   *  like `refuseRemoteRead`, then the code; `vj_stale_setlist` carries the
+   *  state. */
+  refuseRemoteWrite(
+    adminUserId: string,
+    payload: Record<string, unknown>,
+    code: VjRemoteWriteRefusal,
+  ): VjStageOutcome {
+    return this.refuseRecordedCommand(adminUserId, payload, (stage) =>
+      code === 'vj_stale_setlist'
+        ? vjAckFailure(code, stage.state)
+        : vjAckFailure(code),
+    );
+  }
+
+  /** Reruns the client checks of a command that ends without an apply (a
+   *  newer command of the same client makes it stale), records its sequence
+   *  (plan note 20) and answers the refusal `failureOf` builds. */
+  private refuseRecordedCommand(
+    adminUserId: string,
+    payload: Record<string, unknown>,
+    failureOf: (stage: VjStage) => VjAckFailure,
+  ): VjStageOutcome {
     const stage = this.stages.get(adminUserId);
     if (stage === undefined) {
       return refuseOutcome('vj_not_attached');
@@ -670,9 +932,7 @@ export class VjStageService implements OnModuleDestroy {
       clientCheck.clientId,
       clientCheck.commandSequence,
     );
-    return reason === 'read_failed'
-      ? refuseOutcome('vj_server_error')
-      : { ok: false, failure: vjAckFailure('vj_stale_command', stage.state) };
+    return { ok: false, failure: failureOf(stage) };
   }
 
   /** The `screen:advance` checks with no read, and the `packClip` lookup. */
@@ -885,21 +1145,28 @@ export class VjStageService implements OnModuleDestroy {
     return Array.from(listed).filter((setlistId) => activeIds.has(setlistId));
   }
 
-  /** Applies a library change to every stage it touches (contract 7.10) and
-   *  answers one frame per changed stage, cause `'library'`. */
+  /** Applies a library change to every stage it touches (contract 7.10,
+   *  sequences 5.9) and answers one frame per changed stage, cause
+   *  `'library'`. `setlistReads` holds the gateway's follow reads by
+   *  lowercased set list id; each stage follows with the item ids it held
+   *  before the change, then keeps the read's item ids (an unchanged state
+   *  included, so an append after the current step is remembered too). */
   applyLibraryChange(
     change: VjLibraryChange,
     now: number,
-    setlistItemCounts: ReadonlyMap<string, number | null>,
+    setlistReads: ReadonlyMap<string, VjSetlistFollowRead | null>,
   ): { adminUserId: string; frame: VjStageFrame }[] {
     const frames: { adminUserId: string; frame: VjStageFrame }[] = [];
     for (const stage of this.stages.values()) {
       const proposed = vjLibraryChangeState(
         stage.state,
         change,
-        setlistItemCounts,
+        setlistReads,
+        stage.setlistItemIds,
+        now,
       );
       if (proposed === null) {
+        rememberFollowedSetlistItemIds(stage, setlistReads);
         continue;
       }
       const outcome = landVjChange(
@@ -909,6 +1176,7 @@ export class VjStageService implements OnModuleDestroy {
         null,
         now,
       );
+      rememberFollowedSetlistItemIds(stage, setlistReads);
       if (outcome.frame !== null) {
         frames.push({ adminUserId: stage.adminUserId, frame: outcome.frame });
       }
@@ -1017,13 +1285,19 @@ export class VjStageService implements OnModuleDestroy {
       }),
       lastMicAdoptedAt: null,
       statusReportedSocketIds: new Set(),
+      setlistItemIds: null,
+      setlistItemIdsSetlistId: null,
+      setlistFollowCount: 0,
     };
     this.stages.set(adminUserId, stage);
     return stage;
   }
 
   /** Contract 7.13 adoption at revision 0, when the gateway read the restore's
-   *  lookups: the restored state, the pending applyAt cleared, timers armed. */
+   *  lookups: the restored state, the pending applyAt cleared, the set list's
+   *  item ids from the restore read (sequences 5.4), timers rebuilt. A
+   *  restored `playing` sequence resumes from its `stepEndsAt`; one whose
+   *  step end has passed fires at once and advances one step (sequences 5.7). */
   private adoptRestore(
     stage: VjStage,
     input: { restoreState: unknown; restoreReads: VjLookupResults | null },
@@ -1045,6 +1319,20 @@ export class VjStageService implements OnModuleDestroy {
       ),
     );
     stage.pendingApplyAt = null;
+    const restoredRead =
+      stage.state.activeSetlistId === null
+        ? null
+        : vjRestoreSetlistRead(input.restoreState, input.restoreReads, now);
+    if (stage.state.activeSetlistId === null || restoredRead === null) {
+      forgetSetlistItemIds(stage);
+    } else {
+      storeSetlistItemIds(
+        stage,
+        stage.state.activeSetlistId,
+        restoredRead.itemIds,
+      );
+    }
+    stage.timers.clear();
     stage.timers.sync(stage.state);
     return true;
   }
@@ -1173,9 +1461,15 @@ export class VjStageService implements OnModuleDestroy {
   }
 
   /** Lands a fired timer's state (contract 7.14) with its cause, broadcasts
-   *  it, then syncs the timers again. A stage evicted since does nothing. */
+   *  it, then syncs the timers again. The step timer needs a set list read,
+   *  so it runs on its own async path (sequences 5.7). A stage evicted since
+   *  does nothing. */
   private handleTimerFire(stage: VjStage, kind: VjTimerKind): void {
     if (this.stages.get(stage.adminUserId) !== stage) {
+      return;
+    }
+    if (kind === 'setlist') {
+      void this.runSetlistTimer(stage);
       return;
     }
     const fired = vjTimerFireState(kind, stage.state);
@@ -1192,5 +1486,148 @@ export class VjStageService implements OnModuleDestroy {
       }
     }
     stage.timers.sync(stage.state);
+  }
+
+  /**
+   * Sequences 5.7, the server step timer's fire: read the next step of the
+   * state that fired, then land its transition with cause `setlist` at the
+   * step end it fired for. After the read nothing lands when the stage left
+   * the map or a newer state moved the timer target (that state armed its
+   * own timer). With the target unchanged, a rejected read retries after
+   * `setlistTimerRetryMs` (nothing logged, the show holds its step), and a
+   * fire whose inputs moved anyway (a library follow that moved the index or
+   * the items under the same clock, a Loop toggle) reads again at once, so
+   * the run never stalls past its step end. A read whose item ids differ
+   * from the ones the stage holds for that set list (a library write whose
+   * follow has not landed) lands that follow first with cause `library` and
+   * reads again at once. Never rejects: a throw logs the
+   * stage owner's id only and retries after `setlistTimerRetryMs` while the
+   * target is unchanged.
+   */
+  private async runSetlistTimer(stage: VjStage): Promise<void> {
+    const fired: VjSetlistTimerFire = {
+      state: stage.state,
+      setlistItemIds: stage.setlistItemIds,
+    };
+    try {
+      await this.advanceSetlistTimer(stage, fired);
+    } catch {
+      this.logger.error(
+        `VJ sequence step timer landing failed: user ${stage.adminUserId}`,
+      );
+      if (this.isSetlistTimerTargetKept(stage, fired)) {
+        stage.timers.retry(
+          'setlist',
+          Date.now() + VJ_LIMITS.setlistTimerRetryMs,
+        );
+      }
+    }
+  }
+
+  /** Whether the stage is still in the map with the timer target the fire
+   *  served. */
+  private isSetlistTimerTargetKept(
+    stage: VjStage,
+    fired: VjSetlistTimerFire,
+  ): boolean {
+    return (
+      this.stages.get(stage.adminUserId) === stage &&
+      vjSetlistTimerTargetAt(stage.state) ===
+        vjSetlistTimerTargetAt(fired.state)
+    );
+  }
+
+  /** The body of `runSetlistTimer`: read, the stale checks, then the landing
+   *  and its broadcast. */
+  private async advanceSetlistTimer(
+    stage: VjStage,
+    fired: VjSetlistTimerFire,
+  ): Promise<void> {
+    const position = vjSetlistTimerReadPosition(fired.state);
+    const setlistId = fired.state.activeSetlistId;
+    if (position === null || setlistId === null) {
+      return;
+    }
+    const lookup: VjCommandLookup = {
+      kind: 'setlistItem',
+      setlistId,
+      position,
+    };
+    let read: VjSetlistRead | null = null;
+    let isReadRejected = false;
+    try {
+      const results = await resolveVjLookups(this.stageReads, [lookup]);
+      read =
+        results.setlistItems.get(vjSetlistItemKey(setlistId, position)) ?? null;
+    } catch {
+      isReadRejected = true;
+    }
+    if (!this.isSetlistTimerTargetKept(stage, fired)) {
+      return;
+    }
+    if (isReadRejected) {
+      stage.timers.retry('setlist', Date.now() + VJ_LIMITS.setlistTimerRetryMs);
+      return;
+    }
+    if (hasSetlistTimerStateMoved(fired, stage)) {
+      stage.timers.retry('setlist', Date.now());
+      return;
+    }
+    if (
+      read !== null &&
+      hasUnfollowedItemEdit(stage, setlistId, read.itemIds)
+    ) {
+      this.landTimerSetlistFollow(stage, setlistId, read);
+      stage.timers.retry('setlist', Date.now());
+      return;
+    }
+    const transition = vjSetlistTimerTransition(stage.state, read);
+    if (transition === null) {
+      return;
+    }
+    const outcome = landVjChange(
+      stage,
+      vjSetlistTransitionChange(
+        transition,
+        [lookup],
+        fired.state.setlistPlayback.stepEndsAt,
+      ),
+      VJ_TIMER_CAUSES.setlist,
+      null,
+      Date.now(),
+      { reads: [read], followCountAtRead: null },
+    );
+    if (outcome.frame !== null) {
+      this.broadcaster?.broadcastState(stage.adminUserId, outcome.frame);
+    }
+  }
+
+  /** The step timer's read answered item ids newer than the stage holds (a
+   *  library write committed and its follow has not landed): the follow
+   *  lands first with cause `library` (sequences 7) and the read's ids are
+   *  stored as a follow's, so the step after the edit is the one that
+   *  plays. The library follow that lands later finds nothing to move. */
+  private landTimerSetlistFollow(
+    stage: VjStage,
+    setlistId: string,
+    read: VjSetlistRead,
+  ): void {
+    const followed = vjSetlistFollowState(stage.state, {
+      setlistId,
+      previousItemIds: stage.setlistItemIds,
+      read: { itemIds: read.itemIds, isLooping: read.isLooping },
+    });
+    const outcome = landVjChange(
+      stage,
+      serverVjChange(followed),
+      'library',
+      null,
+      Date.now(),
+      { reads: [read], followCountAtRead: null },
+    );
+    stage.setlistFollowCount += 1;
+    if (outcome.frame !== null) {
+      this.broadcaster?.broadcastState(stage.adminUserId, outcome.frame);
+    }
   }
 }

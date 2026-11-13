@@ -6,13 +6,14 @@ import {
   VJ_STAGE_PACK_CLIP_SQL,
   VJ_STAGE_PACK_SQL,
   VJ_STAGE_SCENE_LOOK_SQL,
-  VJ_STAGE_SETLIST_COUNT_SQL,
-  VJ_STAGE_SETLIST_ITEM_SQL,
+  VJ_STAGE_SETLIST_FOLLOW_SQL,
+  VJ_STAGE_SETLIST_READ_SQL,
   VjStageReadsService,
 } from './vj-stage-reads.service';
+import { DEFAULT_VJ_STEP_DURATION } from './vj.contract';
 
 /** A v4 uuid in a numbered family: 1 packs, 2 clips, 3 scenes, 4 set lists,
- *  5 events. */
+ *  5 events, 6 set list items. */
 function uuidAt(family: number, position: number): string {
   return `a7190000-0000-4000-8000-${String(family)}${String(position).padStart(11, '0')}`;
 }
@@ -22,6 +23,8 @@ const CLIP_ID = uuidAt(2, 1);
 const OTHER_CLIP_ID = uuidAt(2, 2);
 const SCENE_ID = uuidAt(3, 1);
 const SETLIST_ID = uuidAt(4, 1);
+const ITEM_ID = uuidAt(6, 1);
+const OTHER_ITEM_ID = uuidAt(6, 2);
 const EVENT_ID = uuidAt(5, 1);
 const MALFORMED_ID = 'not-a-uuid';
 
@@ -157,108 +160,305 @@ describe('VjStageReadsService', () => {
     expect(query).toHaveBeenCalledTimes(2);
   });
 
-  it('reads the set list item at an offset with its scene look', async () => {
+  it('reads a set list in one query: Loop, default length, item ids and a scene step', async () => {
     query.mockResolvedValueOnce([
-      {
-        item_count: 4,
+      setlistRow({
+        item_id: ITEM_ID.toUpperCase(),
+        item_index: 1,
+        kind: 'scene',
         scene_id: SCENE_ID.toUpperCase(),
         look: storedLookWithUnknownEffect(),
-      },
+      }),
     ]);
     await expect(
-      reads.readSetlistItem(SETLIST_ID.toUpperCase(), 2),
+      reads.readSetlist(SETLIST_ID.toUpperCase(), {
+        kind: 'index',
+        index: 1,
+        wrapsToFirst: false,
+      }),
     ).resolves.toEqual({
-      itemCount: 4,
-      sceneId: SCENE_ID,
-      look: normalizeStoredVjSceneLook(storedLookWithUnknownEffect()),
+      setlistId: SETLIST_ID,
+      isLooping: true,
+      stepDuration: { kind: 'beats', value: 16 },
+      itemIds: [OTHER_ITEM_ID, ITEM_ID],
+      step: {
+        kind: 'scene',
+        itemId: ITEM_ID,
+        index: 1,
+        sceneId: SCENE_ID,
+        look: normalizeStoredVjSceneLook(storedLookWithUnknownEffect()),
+        duration: { kind: 'beats', value: 16 },
+      },
     });
-    expect(query).toHaveBeenCalledWith(VJ_STAGE_SETLIST_ITEM_SQL, [
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
+      SETLIST_ID,
+      1,
+      'none',
+    ]);
+  });
+
+  it('reads a clip step with its own length', async () => {
+    query.mockResolvedValueOnce([
+      setlistRow({
+        item_id: ITEM_ID,
+        item_index: '0',
+        kind: 'clip',
+        clip_id: CLIP_ID.toUpperCase(),
+        duration_kind: 'seconds',
+        duration_value: 30,
+      }),
+    ]);
+    const read = await reads.readSetlist(SETLIST_ID, {
+      kind: 'index',
+      index: 2,
+      wrapsToFirst: true,
+    });
+    expect(read?.step).toEqual({
+      kind: 'clip',
+      itemId: ITEM_ID,
+      index: 0,
+      clipId: CLIP_ID,
+      duration: { kind: 'seconds', value: 30 },
+    });
+    expect(query).toHaveBeenCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
       SETLIST_ID,
       2,
-    ]);
-    expect(VJ_STAGE_SETLIST_ITEM_SQL).toContain(
-      'ORDER BY "indexed_item"."position", "indexed_item"."id" OFFSET $2::int LIMIT 1',
-    );
-  });
-
-  it('answers the count with a null scene past the last item and for a null index', async () => {
-    query.mockResolvedValueOnce([
-      { item_count: '3', scene_id: null, look: null },
-    ]);
-    await expect(reads.readSetlistItem(SETLIST_ID, 3)).resolves.toEqual({
-      itemCount: 3,
-      sceneId: null,
-      look: null,
-    });
-
-    query.mockResolvedValueOnce([{ item_count: 3 }]);
-    await expect(reads.readSetlistItem(SETLIST_ID, null)).resolves.toEqual({
-      itemCount: 3,
-      sceneId: null,
-      look: null,
-    });
-    expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_COUNT_SQL, [
-      SETLIST_ID,
-    ]);
-
-    query.mockResolvedValueOnce([{ item_count: 3 }]);
-    await expect(reads.readSetlistItem(SETLIST_ID, -1)).resolves.toEqual({
-      itemCount: 3,
-      sceneId: null,
-      look: null,
-    });
-    expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_COUNT_SQL, [
-      SETLIST_ID,
+      'first',
     ]);
   });
 
-  it('reads the count only for an index a set list cannot hold, so the offset always fits an int', async () => {
-    for (const index of [100, 3_000_000_000]) {
-      query.mockResolvedValueOnce([{ item_count: 3 }]);
-      await expect(reads.readSetlistItem(SETLIST_ID, index)).resolves.toEqual({
-        itemCount: 3,
-        sceneId: null,
-        look: null,
-      });
-      expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_COUNT_SQL, [
-        SETLIST_ID,
-      ]);
-    }
-
-    query.mockResolvedValueOnce([
-      { item_count: 3, scene_id: null, look: null },
+  it('passes each read position as its index and mode', async () => {
+    query.mockResolvedValue([setlistRow({})]);
+    await reads.readSetlist(SETLIST_ID, { kind: 'count' });
+    expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
+      SETLIST_ID,
+      null,
+      'none',
     ]);
-    await reads.readSetlistItem(SETLIST_ID, 99);
-    expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_ITEM_SQL, [
+    await reads.readSetlist(SETLIST_ID, { kind: 'last' });
+    expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
+      SETLIST_ID,
+      null,
+      'last',
+    ]);
+    await reads.readSetlist(SETLIST_ID, {
+      kind: 'index',
+      index: 99,
+      wrapsToFirst: false,
+    });
+    expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
       SETLIST_ID,
       99,
+      'none',
     ]);
+  });
+
+  it('keeps the step index inside an int for an index no set list can hold', async () => {
+    query.mockResolvedValue([setlistRow({})]);
+    for (const index of [100, 3_000_000_000]) {
+      await reads.readSetlist(SETLIST_ID, {
+        kind: 'index',
+        index,
+        wrapsToFirst: false,
+      });
+      expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
+        SETLIST_ID,
+        null,
+        'none',
+      ]);
+      await reads.readSetlist(SETLIST_ID, {
+        kind: 'index',
+        index,
+        wrapsToFirst: true,
+      });
+      expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
+        SETLIST_ID,
+        0,
+        'none',
+      ]);
+    }
+    for (const index of [-1, 1.5, Number.NaN]) {
+      await reads.readSetlist(SETLIST_ID, {
+        kind: 'index',
+        index,
+        wrapsToFirst: true,
+      });
+      expect(query).toHaveBeenLastCalledWith(VJ_STAGE_SETLIST_READ_SQL, [
+        SETLIST_ID,
+        null,
+        'none',
+      ]);
+    }
+  });
+
+  it('answers no step past the end, with the count in the item ids', async () => {
+    query.mockResolvedValueOnce([setlistRow({})]);
+    await expect(
+      reads.readSetlist(SETLIST_ID, {
+        kind: 'index',
+        index: 2,
+        wrapsToFirst: false,
+      }),
+    ).resolves.toEqual({
+      setlistId: SETLIST_ID,
+      isLooping: true,
+      stepDuration: { kind: 'beats', value: 16 },
+      itemIds: [OTHER_ITEM_ID, ITEM_ID],
+      step: null,
+    });
+
+    query.mockResolvedValueOnce([
+      setlistRow({ item_ids: [], is_looping: false }),
+    ]);
+    await expect(
+      reads.readSetlist(SETLIST_ID, { kind: 'count' }),
+    ).resolves.toMatchObject({ isLooping: false, itemIds: [], step: null });
+  });
+
+  it('reads a stored length out of bounds as the sequence default, and a bad default as 8 seconds', async () => {
+    query.mockResolvedValueOnce([
+      setlistRow({
+        item_id: ITEM_ID,
+        item_index: 0,
+        kind: 'clip',
+        clip_id: CLIP_ID,
+        duration_kind: 'seconds',
+        duration_value: 601,
+      }),
+    ]);
+    const outOfBounds = await reads.readSetlist(SETLIST_ID, {
+      kind: 'index',
+      index: 0,
+      wrapsToFirst: false,
+    });
+    expect(outOfBounds?.step?.duration).toEqual({ kind: 'beats', value: 16 });
+
+    query.mockResolvedValueOnce([
+      setlistRow({
+        step_duration_kind: 'bars',
+        step_duration_value: 4,
+        item_id: ITEM_ID,
+        item_index: 0,
+        kind: 'clip',
+        clip_id: CLIP_ID,
+        duration_kind: 'beats',
+        duration_value: 12,
+      }),
+    ]);
+    const badDefault = await reads.readSetlist(SETLIST_ID, {
+      kind: 'index',
+      index: 0,
+      wrapsToFirst: false,
+    });
+    expect(badDefault?.stepDuration).toEqual(DEFAULT_VJ_STEP_DURATION);
+    expect(badDefault?.step?.duration).toEqual(DEFAULT_VJ_STEP_DURATION);
+
+    query.mockResolvedValueOnce([
+      setlistRow({
+        step_duration_kind: 'seconds',
+        step_duration_value: '12',
+        item_id: ITEM_ID,
+        item_index: 0,
+        kind: 'scene',
+        scene_id: SCENE_ID,
+        duration_kind: 'beats',
+        duration_value: '32',
+      }),
+    ]);
+    const textNumbers = await reads.readSetlist(SETLIST_ID, {
+      kind: 'index',
+      index: 0,
+      wrapsToFirst: false,
+    });
+    expect(textNumbers?.stepDuration).toEqual({ kind: 'seconds', value: 12 });
+    expect(textNumbers?.step?.duration).toEqual({ kind: 'beats', value: 32 });
   });
 
   it('answers null for a set list gone and skips the query for a malformed id', async () => {
     query.mockResolvedValueOnce([]);
-    await expect(reads.readSetlistItem(SETLIST_ID, 0)).resolves.toBeNull();
-    query.mockResolvedValueOnce([]);
-    await expect(reads.readSetlistItem(SETLIST_ID, null)).resolves.toBeNull();
-    expect(query).toHaveBeenCalledTimes(2);
+    await expect(
+      reads.readSetlist(SETLIST_ID, { kind: 'count' }),
+    ).resolves.toBeNull();
+    expect(query).toHaveBeenCalledTimes(1);
 
-    await expect(reads.readSetlistItem(MALFORMED_ID, 0)).resolves.toBeNull();
-    expect(query).toHaveBeenCalledTimes(2);
+    await expect(
+      reads.readSetlist(MALFORMED_ID, { kind: 'last' }),
+    ).resolves.toBeNull();
+    expect(query).toHaveBeenCalledTimes(1);
   });
 
-  it('reads a set list item count and null for an unknown set list', async () => {
-    query.mockResolvedValueOnce([{ item_count: '5' }]);
+  it('reads the set list SQL in one statement with every column the contract names', () => {
+    for (const fragment of [
+      'SELECT "setlist"."is_looping", "setlist"."step_duration_kind", "setlist"."step_duration_value"',
+      'array_agg("listed_item"."id"::text ORDER BY "listed_item"."position", "listed_item"."id")',
+      'ARRAY[]::text[]',
+      '"item"."id" AS "item_id", "item"."item_index", "item"."kind", "item"."scene_id", "item"."clip_id", "item"."duration_kind", "item"."duration_value", "scene"."look"',
+      'LEFT JOIN LATERAL (',
+      '(ROW_NUMBER() OVER (ORDER BY "indexed_item"."position", "indexed_item"."id") - 1)::int AS "item_index"',
+      '(COUNT(*) OVER ())::int AS "item_count"',
+      `WHERE "ranked"."item_index" = CASE WHEN $3::text = 'last' THEN "ranked"."item_count" - 1 WHEN $2::int IS NULL THEN -1 WHEN $2::int < "ranked"."item_count" THEN $2::int WHEN $3::text = 'first' THEN 0 ELSE -1 END`,
+      'LEFT JOIN "vj_scenes" "scene" ON "scene"."id" = "item"."scene_id"',
+      'WHERE "setlist"."id" = $1::uuid',
+    ]) {
+      expect(VJ_STAGE_SETLIST_READ_SQL).toContain(fragment);
+    }
+    expect(VJ_STAGE_SETLIST_FOLLOW_SQL).toContain(
+      'array_agg("item"."id"::text ORDER BY "item"."position", "item"."id")',
+    );
+    expect(VJ_STAGE_SETLIST_FOLLOW_SQL).toContain(
+      'FROM "vj_setlists" "setlist" WHERE "setlist"."id" = $1::uuid',
+    );
+    expect(VJ_STAGE_SETLIST_READ_SQL).not.toContain(';');
+    expect(VJ_STAGE_SETLIST_FOLLOW_SQL).not.toContain(';');
+  });
+
+  it('reads a set list follow: Loop and item ids lowercased, null when gone', async () => {
+    query.mockResolvedValueOnce([
+      {
+        is_looping: true,
+        item_ids: [ITEM_ID.toUpperCase(), OTHER_ITEM_ID],
+      },
+    ]);
     await expect(
-      reads.setlistItemCount(SETLIST_ID.toUpperCase()),
-    ).resolves.toBe(5);
-    expect(query).toHaveBeenCalledWith(VJ_STAGE_SETLIST_COUNT_SQL, [
+      reads.readSetlistFollow(SETLIST_ID.toUpperCase()),
+    ).resolves.toEqual({ itemIds: [ITEM_ID, OTHER_ITEM_ID], isLooping: true });
+    expect(query).toHaveBeenCalledWith(VJ_STAGE_SETLIST_FOLLOW_SQL, [
       SETLIST_ID,
     ]);
 
-    query.mockResolvedValueOnce([]);
-    await expect(reads.setlistItemCount(SETLIST_ID)).resolves.toBeNull();
+    query.mockResolvedValueOnce([{ is_looping: false, item_ids: [] }]);
+    await expect(reads.readSetlistFollow(SETLIST_ID)).resolves.toEqual({
+      itemIds: [],
+      isLooping: false,
+    });
 
-    await expect(reads.setlistItemCount(MALFORMED_ID)).resolves.toBeNull();
-    expect(query).toHaveBeenCalledTimes(2);
+    query.mockResolvedValueOnce([]);
+    await expect(reads.readSetlistFollow(SETLIST_ID)).resolves.toBeNull();
+
+    await expect(reads.readSetlistFollow(MALFORMED_ID)).resolves.toBeNull();
+    expect(query).toHaveBeenCalledTimes(3);
   });
 });
+
+/** One `VJ_STAGE_SETLIST_READ_SQL` row: a looping set list of two items on
+ *  16 beats, with no step unless the overrides add one. */
+function setlistRow(
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    is_looping: true,
+    step_duration_kind: 'beats',
+    step_duration_value: 16,
+    item_ids: [OTHER_ITEM_ID.toUpperCase(), ITEM_ID],
+    item_id: null,
+    item_index: null,
+    kind: null,
+    scene_id: null,
+    clip_id: null,
+    duration_kind: null,
+    duration_value: null,
+    look: null,
+    ...overrides,
+  };
+}

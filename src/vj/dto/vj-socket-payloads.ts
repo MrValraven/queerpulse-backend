@@ -215,17 +215,43 @@ export class VjRecallScenePayloadDto extends VjRemoteCommandPayloadDto {
   sceneId?: unknown;
 }
 
-/** `stage:setlistSelect`: index null arms the set list without recalling. */
+/** `stage:setlistSelect`: index null arms the set list without recalling;
+ *  isPlaying true plays from the index (null reads as 0). */
 export class VjSetlistSelectPayloadDto extends VjRemoteCommandPayloadDto {
   @Allow()
   setlistId?: unknown;
 
   @Allow()
   index?: unknown;
+
+  @Allow()
+  isPlaying?: unknown;
+
+  @Allow()
+  isFlashConfirmed?: unknown;
 }
 
-/** `stage:setlistNext` and `stage:setlistPrevious`: the stamp only. */
-export class VjSetlistStepPayloadDto extends VjRemoteCommandPayloadDto {}
+/** `stage:setlistNext` and `stage:setlistPrevious`: isFlashConfirmed records
+ *  the flash warning consent for the step the tap lands. */
+export class VjSetlistStepPayloadDto extends VjRemoteCommandPayloadDto {
+  @Allow()
+  isFlashConfirmed?: unknown;
+}
+
+/** `stage:setlistSetPlaying`: Play, Pause, Resume and Play again. */
+export class VjSetlistSetPlayingPayloadDto extends VjRemoteCommandPayloadDto {
+  @Allow()
+  isPlaying?: unknown;
+
+  @Allow()
+  isFlashConfirmed?: unknown;
+}
+
+/** `stage:setlistSetLooping`: saves Loop on the active set list. */
+export class VjSetlistSetLoopingPayloadDto extends VjRemoteCommandPayloadDto {
+  @Allow()
+  isLooping?: unknown;
+}
 
 /** `stage:setCountdown`, a partial patch: `targetAt` or `durationMs`. */
 export class VjSetCountdownPayloadDto extends VjRemoteCommandPayloadDto {

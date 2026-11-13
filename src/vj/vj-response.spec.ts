@@ -14,6 +14,7 @@ import {
   toVjPackEventSummary,
   toVjScene,
   toVjSetlist,
+  toVjStepDuration,
   vjEventCardUnavailableReason,
   type VjClipRow,
   type VjCreatorProfileRow,
@@ -21,6 +22,7 @@ import {
   type VjPackEventRow,
   type VjPackSummaryRow,
   type VjSceneRow,
+  type VjSetlistItemRow,
   type VjSetlistRow,
 } from './vj-response';
 
@@ -131,7 +133,7 @@ describe('VJ response mappers', () => {
   });
 
   it('maps a clip with its v2 defaults and preview URL', () => {
-    const dto = toVjClip(clipRow(), [PACK_ID, SECOND_PACK_ID], profiles());
+    const dto = toVjClip(clipRow(), [PACK_ID, SECOND_PACK_ID], 3, profiles());
     expect(dto).toEqual({
       id: CLIP_ID,
       title: 'Peak hour',
@@ -146,6 +148,7 @@ describe('VJ response mappers', () => {
       mediaUrl: `https://api.test/files/${CLIP_KEY}`,
       packIds: [PACK_ID, SECOND_PACK_ID],
       packCount: 2,
+      setlistItemCount: 3,
       createdBy: { userId: ADMIN_ID, displayName: 'Ana Silva' },
       createdAt: '2026-11-05T10:00:00.000Z',
       updatedAt: '2026-11-05T11:30:00.000Z',
@@ -168,9 +171,11 @@ describe('VJ response mappers', () => {
     const withoutPreview = toVjClip(
       clipRow({ previewStorageKey: null }),
       [],
+      0,
       profiles(),
     );
     expect(withoutPreview.previewUrl).toBeNull();
+    expect(withoutPreview.setlistItemCount).toBe(0);
   });
 
   it('names the creator from the profile and answers null without one', () => {
@@ -181,7 +186,7 @@ describe('VJ response mappers', () => {
     expect(toVjCreator(null, profiles())).toBeNull();
     expect(toVjCreator(ADMIN_ID, new Map())).toBeNull();
     expect(
-      toVjClip(clipRow({ createdByUserId: null }), [], profiles()).createdBy,
+      toVjClip(clipRow({ createdByUserId: null }), [], 0, profiles()).createdBy,
     ).toBeNull();
   });
 
@@ -353,22 +358,57 @@ describe('VJ response mappers', () => {
       id: SETLIST_ID,
       name: 'Saturday',
       position: 1,
+      isLooping: true,
+      stepDurationKind: 'beats',
+      stepDurationValue: 16,
       createdByUserId: ADMIN_ID,
       createdAt: CREATED_AT,
       updatedAt: UPDATED_AT,
     };
-    const items = [
-      { id: SECOND_ITEM_ID, sceneId: SECOND_SCENE_ID, position: 0 },
-      { id: ITEM_ID, sceneId: SCENE_ID, position: 1 },
+    const items: VjSetlistItemRow[] = [
+      {
+        id: SECOND_ITEM_ID,
+        position: 0,
+        kind: 'scene',
+        sceneId: SECOND_SCENE_ID,
+        clipId: null,
+        durationKind: null,
+        durationValue: null,
+      },
+      {
+        id: ITEM_ID,
+        position: 1,
+        kind: 'clip',
+        sceneId: null,
+        clipId: CLIP_ID,
+        durationKind: 'seconds',
+        durationValue: 12,
+      },
     ];
     const setlist = toVjSetlist(setlistRow, items, profiles());
     expect(setlist).toEqual({
       id: SETLIST_ID,
       name: 'Saturday',
       position: 1,
+      isLooping: true,
+      stepDuration: { kind: 'beats', value: 16 },
       items: [
-        { id: SECOND_ITEM_ID, sceneId: SECOND_SCENE_ID, position: 0 },
-        { id: ITEM_ID, sceneId: SCENE_ID, position: 1 },
+        {
+          id: SECOND_ITEM_ID,
+          position: 0,
+          kind: 'scene',
+          sceneId: SECOND_SCENE_ID,
+          clipId: null,
+          duration: null,
+        },
+        {
+          id: ITEM_ID,
+          position: 1,
+          kind: 'clip',
+          sceneId: null,
+          clipId: CLIP_ID,
+          duration: { kind: 'seconds', value: 12 },
+        },
       ],
       createdBy: { userId: ADMIN_ID, displayName: 'Ana Silva' },
       createdAt: '2026-11-05T10:00:00.000Z',
@@ -378,6 +418,17 @@ describe('VJ response mappers', () => {
     expect(
       toVjSetlist({ ...setlistRow, createdByUserId: null }, [], new Map()),
     ).toMatchObject({ items: [], createdBy: null });
+  });
+
+  it('maps a stored step length pair, null when either half is null', () => {
+    expect(toVjStepDuration('beats', 32)).toEqual({ kind: 'beats', value: 32 });
+    expect(toVjStepDuration('seconds', 8)).toEqual({
+      kind: 'seconds',
+      value: 8,
+    });
+    expect(toVjStepDuration(null, null)).toBeNull();
+    expect(toVjStepDuration('seconds', null)).toBeNull();
+    expect(toVjStepDuration(null, 8)).toBeNull();
   });
 
   it('maps a media item', () => {

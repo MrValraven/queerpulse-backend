@@ -11,6 +11,7 @@ import {
 const PACK_ID = '5b0c8d2e-4f1a-4c3b-9d7e-2a6f8b1c0d3e';
 const SETLIST_ID = '7d2e4f6a-8b1c-4d3e-9f5a-6b7c8d9e0f1a';
 const SCENE_ID = '9f1a2b3c-4d5e-4f6a-8b7c-0d1e2f3a4b5c';
+const CLIP_ID = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f';
 const LOOK_FIELD = 'effects.settings.kaleidoscope.variant';
 
 /** En and em dash, built from char codes so the source holds neither. */
@@ -26,6 +27,7 @@ const EVERY_OPTION: VjErrorOptions = {
   maxBytes: 524288,
   setlistId: SETLIST_ID,
   sceneId: SCENE_ID,
+  clipId: CLIP_ID,
   lookField: LOOK_FIELD,
 };
 
@@ -78,6 +80,11 @@ describe('vjError', () => {
     ['VJ_SETLIST_REORDER_MISMATCH', 400],
     ['VJ_SETLIST_ITEMS_INVALID', 400],
     ['VJ_SETLIST_FULL', 409],
+    ['VJ_SETLIST_STEP_INVALID', 400],
+    ['VJ_SETLIST_STEP_DURATION_INVALID', 400],
+    ['VJ_SETLIST_ITEM_NOT_FOUND', 404],
+    ['VJ_SETLIST_LOOP_INVALID', 400],
+    ['VJ_SETLIST_PATCH_EMPTY', 400],
     ['VJ_CONNECTION_NOT_FOUND', 404],
     ['VJ_CONNECTION_NOT_YOURS', 403],
   ] as const)(
@@ -93,14 +100,21 @@ describe('vjError', () => {
     },
   );
 
-  it('lists the 49 server codes in contract order', () => {
-    expect(VJ_REFUSAL_CODES).toHaveLength(49);
+  it('lists the 54 server codes in contract order', () => {
+    expect(VJ_REFUSAL_CODES).toHaveLength(54);
     expect(VJ_REFUSAL_CODES[0]).toBe('VJ_PACK_NOT_FOUND');
     expect(VJ_REFUSAL_CODES[25]).toBe('VJ_UPLOAD_MISSING');
     expect(VJ_REFUSAL_CODES[26]).toBe('VJ_CLIP_FAVORITE_INVALID');
     expect(VJ_REFUSAL_CODES[46]).toBe('VJ_SETLIST_FULL');
-    expect(VJ_REFUSAL_CODES[47]).toBe('VJ_CONNECTION_NOT_FOUND');
-    expect(VJ_REFUSAL_CODES[48]).toBe('VJ_CONNECTION_NOT_YOURS');
+    expect(VJ_REFUSAL_CODES.slice(47, 52)).toEqual([
+      'VJ_SETLIST_STEP_INVALID',
+      'VJ_SETLIST_STEP_DURATION_INVALID',
+      'VJ_SETLIST_ITEM_NOT_FOUND',
+      'VJ_SETLIST_LOOP_INVALID',
+      'VJ_SETLIST_PATCH_EMPTY',
+    ]);
+    expect(VJ_REFUSAL_CODES[52]).toBe('VJ_CONNECTION_NOT_FOUND');
+    expect(VJ_REFUSAL_CODES[53]).toBe('VJ_CONNECTION_NOT_YOURS');
     expect(Object.keys(VJ_REFUSALS)).toEqual([...VJ_REFUSAL_CODES]);
   });
 
@@ -141,6 +155,12 @@ describe('vjError', () => {
       code: 'VJ_SCENE_NOT_FOUND',
       sceneId: SCENE_ID,
     });
+    expect(vjError('VJ_CLIP_NOT_FOUND', EVERY_OPTION).getResponse()).toEqual({
+      statusCode: 404,
+      message: VJ_REFUSALS.VJ_CLIP_NOT_FOUND.message,
+      code: 'VJ_CLIP_NOT_FOUND',
+      clipId: CLIP_ID,
+    });
     expect(vjError('VJ_UPLOAD_TOO_LARGE', EVERY_OPTION).getResponse()).toEqual({
       statusCode: 413,
       message: VJ_REFUSALS.VJ_UPLOAD_TOO_LARGE.message,
@@ -175,6 +195,11 @@ describe('vjError', () => {
       'VJ_SETLIST_NOT_FOUND',
       'VJ_CLIP_LOOP_INVALID',
       'VJ_SETLIST_ITEMS_INVALID',
+      'VJ_SETLIST_STEP_INVALID',
+      'VJ_SETLIST_STEP_DURATION_INVALID',
+      'VJ_SETLIST_ITEM_NOT_FOUND',
+      'VJ_SETLIST_LOOP_INVALID',
+      'VJ_SETLIST_PATCH_EMPTY',
     ] as const) {
       expect(vjError(code, EVERY_OPTION).getResponse()).toEqual({
         statusCode: VJ_REFUSALS[code].status,
@@ -227,6 +252,7 @@ describe('vjError', () => {
         PACK_ID,
         SETLIST_ID,
         SCENE_ID,
+        CLIP_ID,
         LOOK_FIELD,
         'Secret title',
         sceneName,
@@ -247,7 +273,31 @@ describe('vjError', () => {
     }
     expect(
       new Set(Object.values(VJ_REFUSALS).map(({ message }) => message)).size,
-    ).toBe(47);
+    ).toBe(52);
+  });
+
+  it('carries the sequences contract 4.3 sentences', () => {
+    expect(VJ_REFUSALS.VJ_SETLIST_STEP_INVALID.message).toBe(
+      'Each step needs a kind of scene or clip, the matching uuid, and only the fields id, kind, sceneId, clipId and duration.',
+    );
+    expect(VJ_REFUSALS.VJ_SETLIST_STEP_DURATION_INVALID.message).toBe(
+      'A step length must be 2 to 600 seconds, or 4, 8, 16, 32 or 64 beats.',
+    );
+    expect(VJ_REFUSALS.VJ_SETLIST_ITEM_NOT_FOUND.message).toBe(
+      'A step id names no item of this set list.',
+    );
+    expect(VJ_REFUSALS.VJ_SETLIST_LOOP_INVALID.message).toBe(
+      'isLooping must be true or false.',
+    );
+    expect(VJ_REFUSALS.VJ_SETLIST_PATCH_EMPTY.message).toBe(
+      'The update names no field to change.',
+    );
+    expect(VJ_REFUSALS.VJ_SETLIST_ITEMS_INVALID.message).toBe(
+      'items must be an array of steps.',
+    );
+    expect(VJ_REFUSALS.VJ_SETLIST_FULL.message).toBe(
+      'A set list holds at most 100 steps.',
+    );
   });
 });
 
@@ -279,11 +329,11 @@ describe('vjAckFailure', () => {
   });
 
   it('holds one distinct fixed sentence per socket code', () => {
-    expect(Object.keys(VJ_SOCKET_ERROR_MESSAGES)).toHaveLength(75);
+    expect(Object.keys(VJ_SOCKET_ERROR_MESSAGES)).toHaveLength(76);
     expect(Object.keys(VJ_SOCKET_ERROR_MESSAGES).sort()).toEqual(
       [...VJ_SOCKET_ERROR_CODES].sort(),
     );
-    expect(new Set(Object.values(VJ_SOCKET_ERROR_MESSAGES)).size).toBe(75);
+    expect(new Set(Object.values(VJ_SOCKET_ERROR_MESSAGES)).size).toBe(76);
     for (const message of Object.values(VJ_SOCKET_ERROR_MESSAGES)) {
       expect(message).not.toMatch(LONG_DASH_PATTERN);
     }
@@ -295,6 +345,21 @@ describe('vjAckFailure', () => {
     );
     expect(VJ_SOCKET_ERROR_MESSAGES.vj_speed_invalid).toBe(
       'The speed must be 0.25, 0.5, 1, 1.5, 2 or 4.',
+    );
+  });
+
+  it('words the set list sentences in steps and names the flash warning', () => {
+    expect(VJ_SOCKET_ERROR_MESSAGES.vj_setlist_empty).toBe(
+      'The set list holds no steps.',
+    );
+    expect(VJ_SOCKET_ERROR_MESSAGES.vj_setlist_start).toBe(
+      'The set list is already at its first step.',
+    );
+    expect(VJ_SOCKET_ERROR_MESSAGES.vj_setlist_end).toBe(
+      'The set list holds no step after this one.',
+    );
+    expect(VJ_SOCKET_ERROR_MESSAGES.vj_setlist_flash_unconfirmed).toBe(
+      'The next step flashes and no one confirmed the flash warning for this run.',
     );
   });
 

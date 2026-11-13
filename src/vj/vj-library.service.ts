@@ -42,6 +42,7 @@ import {
 } from './vj-input';
 import {
   buildVjLibraryChange,
+  DENSIFY_VJ_SETLIST_ITEMS_SQL,
   deleteVjStoredObject,
   lowercaseIdOrRefuse,
   runVjTransaction,
@@ -51,6 +52,7 @@ import {
 import {
   readVjClipDto,
   readVjClipPackIds,
+  readVjClipSetlistItemCounts,
   readVjCreatorProfiles,
   readVjPackDto,
   readVjPackSummaries,
@@ -76,6 +78,7 @@ import {
   withoutVjSceneClip,
 } from './vj-scene-look';
 import { LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL } from './vj-scene.service';
+import { LOCK_VJ_SETLISTS_SQL } from './vj-setlist.service';
 import { vjError } from './vj.constants';
 import {
   VJ_LIBRARY_CHANGED,
@@ -149,10 +152,25 @@ FROM (SELECT "pack_id", "clip_id", (ROW_NUMBER() OVER (PARTITION BY "pack_id" OR
 WHERE "pack_clip"."pack_id" = "ranked"."pack_id" AND "pack_clip"."clip_id" = "ranked"."clip_id" AND "pack_clip"."position" <> "ranked"."dense_position"`;
 
 /** `$1` a deleted clip's id. Every scene whose look names the clip as its
- *  source or its mix clip, read `FOR UPDATE` inside the clip delete after
- *  the clip row lock and `LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL`, so the delete
- *  rewrites each look in its transaction. */
-export const VJ_SCENES_NAMING_CLIP_SQL = `SELECT "id", "look" FROM "vj_scenes" WHERE "look"->'source'->>'clipId' = $1 OR "look"->'mix'->>'clipId' = $1 FOR UPDATE`;
+ *  source or its mix clip, read `FOR NO KEY UPDATE` inside the clip delete
+ *  after the clip row lock and `LOCK_VJ_SCENES_ROW_EXCLUSIVE_SQL`, so the
+ *  delete rewrites each look in its transaction. The rewrite changes only
+ *  `look`, a non-key column, so the no-key lock is enough: it still waits
+ *  on a scene update or delete (both hold the row `FOR UPDATE`) and on a
+ *  scene write's own `look` update, and it lets a set list write's
+ *  `FOR KEY SHARE` read of the same scene (`VJ_SCENES_FOR_SHARE_SQL`) run
+ *  past it. A plain `FOR UPDATE` here deadlocks against a set list write
+ *  holding the scene in key share while it waits on this clip's row. */
+export const VJ_SCENES_NAMING_CLIP_SQL = `SELECT "id", "look" FROM "vj_scenes" WHERE "look"->'source'->>'clipId' = $1 OR "look"->'mix'->>'clipId' = $1 FOR NO KEY UPDATE`;
+
+/** `$1` a clip id. The ids of the set lists holding the clip, in id order,
+ *  read inside the clip delete after `LOCK_VJ_SETLISTS_SQL` (contract 4.5),
+ *  so the delete densifies each of them after the cascade. */
+export const VJ_SETLISTS_HOLDING_CLIP_SQL = `SELECT DISTINCT "item"."setlist_id" AS "id" FROM "vj_setlist_items" "item" WHERE "item"."clip_id" = $1::uuid ORDER BY "item"."setlist_id"`;
+
+/** `$1` a clip id. How many set list items play the clip: the delete
+ *  answer's `removedFromSetlistCount`. */
+export const VJ_CLIP_ITEM_COUNT_SQL = `SELECT COUNT(*)::int AS "item_count" FROM "vj_setlist_items" WHERE "clip_id" = $1::uuid`;
 
 /** The membership row's reference to its clip; it fires when a clip delete
  *  commits between an add's clip read and its membership insert. */
@@ -216,6 +234,16 @@ const VJ_CLIP_DEFAULT_FIELDS: readonly VjClipUpdateField[] = [
 interface VjSceneLookRow {
   id: string;
   look: unknown;
+}
+
+/** One row of `VJ_SETLISTS_HOLDING_CLIP_SQL`. */
+interface VjSetlistIdRow {
+  id: string;
+}
+
+/** One row of `VJ_CLIP_ITEM_COUNT_SQL`. */
+interface VjClipItemCountRow {
+  item_count: number | string;
 }
 
 /** One row of `VJ_CLIP_PACK_IDS_SQL`. */
@@ -717,13 +745,17 @@ export class VjLibraryService {
     return clip;
   }
 
-  /** Deletes a clip (its memberships cascade), rewrites every scene look
-   *  naming it, closes the gap in every pack that held it, then deletes its
-   *  three stored objects after the commit. The clip table lock comes first
-   *  and the membership table lock second (the clip create order), then
-   *  the clip row, the scene table lock in row exclusive mode and the
-   *  scenes naming it `FOR UPDATE`. A failed object
-   *  delete is logged with the key only and left to the orphan sweep. */
+  /** Deletes a clip (its memberships and set list steps cascade), rewrites
+   *  every scene look naming it, closes the gap in every pack and every set
+   *  list that held it, then deletes its three stored objects after the
+   *  commit. The clip table lock comes first and the membership table lock
+   *  second (the clip create order), then the clip row, the scene table lock
+   *  in row exclusive mode and the scenes naming it `FOR NO KEY UPDATE`, then
+   *  `LOCK_VJ_SETLISTS_SQL` with the set lists holding it and their step
+   *  count (contract 4.5: row first, set list lock after, as the scene
+   *  delete does). Emits `clip_deleted` with every pack and set list that
+   *  held it. A failed object delete is logged with the key only and left
+   *  to the orphan sweep. */
   async deleteClip(requestedClipId: string): Promise<VjClipDeletedDTO> {
     const clipId = lowercaseIdOrRefuse(requestedClipId, 'VJ_CLIP_NOT_FOUND');
     const deleted = await this.runVjWrite(async (manager) => {
@@ -748,19 +780,42 @@ export class VjLibraryService {
         [[clipId]],
       );
       const packIds = rows.map((row) => row.pack_id);
+      await manager.query(LOCK_VJ_SETLISTS_SQL);
+      const setlistRows: VjSetlistIdRow[] = await manager.query(
+        VJ_SETLISTS_HOLDING_CLIP_SQL,
+        [clipId],
+      );
+      const countRows: VjClipItemCountRow[] = await manager.query(
+        VJ_CLIP_ITEM_COUNT_SQL,
+        [clipId],
+      );
+      const setlistIds = setlistRows.map((row) => row.id);
       await manager.delete(VjClip, { id: clipId });
       if (packIds.length > 0) {
         await manager.query(DENSIFY_VJ_PACK_CLIPS_SQL, [packIds]);
       }
-      return { clip, packIds };
+      if (setlistIds.length > 0) {
+        await manager.query(DENSIFY_VJ_SETLIST_ITEMS_SQL, [setlistIds]);
+      }
+      return {
+        clip,
+        packIds,
+        setlistIds,
+        removedFromSetlistCount: Number(countRows[0]?.item_count ?? 0),
+      };
     });
-    this.emitChange('clip_deleted', { clipId, packIds: deleted.packIds });
+    this.emitChange('clip_deleted', {
+      clipId,
+      packIds: deleted.packIds,
+      setlistIds: deleted.setlistIds,
+    });
     await this.deleteStoredObject(deleted.clip.storageKey);
     await this.deleteStoredObject(deleted.clip.thumbnailStorageKey);
     await this.deleteStoredObject(deleted.clip.previewStorageKey);
     return {
       deletedClipId: clipId,
       removedFromPackCount: deleted.packIds.length,
+      removedFromSetlistCount: deleted.removedFromSetlistCount,
     };
   }
 
@@ -1188,14 +1243,18 @@ export class VjLibraryService {
       row.summary.createdByUserId,
       ...clips.map((clip) => clip.createdByUserId),
     ]);
-    const packIdsByClip = await readVjClipPackIds(
-      manager,
-      clips.map((clip) => clip.id),
-    );
+    const clipIds = clips.map((clip) => clip.id);
+    const packIdsByClip = await readVjClipPackIds(manager, clipIds);
+    const itemCountByClip = await readVjClipSetlistItemCounts(manager, clipIds);
     return {
       pack: toVjPack(row.summary, profiles, toVjPackEventSummary(row.event)),
       items: clips.map((clip) =>
-        toVjClip(clip, packIdsByClip.get(clip.id) ?? [], profiles),
+        toVjClip(
+          clip,
+          packIdsByClip.get(clip.id) ?? [],
+          itemCountByClip.get(clip.id) ?? 0,
+          profiles,
+        ),
       ),
     };
   }

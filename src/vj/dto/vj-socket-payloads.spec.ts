@@ -32,6 +32,8 @@ import {
   VjSetTempoPayloadDto,
   VjSetTransitionPayloadDto,
   VjSetlistSelectPayloadDto,
+  VjSetlistSetLoopingPayloadDto,
+  VjSetlistSetPlayingPayloadDto,
   VjSetlistStepPayloadDto,
   VjSwapMixPayloadDto,
 } from './vj-socket-payloads';
@@ -151,10 +153,30 @@ const FRAME_PAYLOADS: Record<
   ],
   'stage:setlistSelect': [
     VjSetlistSelectPayloadDto,
-    { ...STAMP, setlistId: SETLIST_ID, index: 2 },
+    {
+      ...STAMP,
+      setlistId: SETLIST_ID,
+      index: 2,
+      isPlaying: true,
+      isFlashConfirmed: false,
+    },
   ],
-  'stage:setlistNext': [VjSetlistStepPayloadDto, { ...STAMP }],
-  'stage:setlistPrevious': [VjSetlistStepPayloadDto, { ...STAMP }],
+  'stage:setlistNext': [
+    VjSetlistStepPayloadDto,
+    { ...STAMP, isFlashConfirmed: true },
+  ],
+  'stage:setlistPrevious': [
+    VjSetlistStepPayloadDto,
+    { ...STAMP, isFlashConfirmed: false },
+  ],
+  'stage:setlistSetPlaying': [
+    VjSetlistSetPlayingPayloadDto,
+    { ...STAMP, isPlaying: true, isFlashConfirmed: true },
+  ],
+  'stage:setlistSetLooping': [
+    VjSetlistSetLoopingPayloadDto,
+    { ...STAMP, isLooping: true },
+  ],
   'stage:setCountdown': [
     VjSetCountdownPayloadDto,
     { ...STAMP, isVisible: true, durationMs: 60_000, label: 'Doors' },
@@ -286,6 +308,37 @@ describe('VJ socket payload DTOs', () => {
     };
     const instance = await piped(VjSetTempoPayloadDto, plain);
     expect({ ...instance }).toEqual(plain);
+  });
+
+  it('lets wrong sequence flags through so the stage rules answer vj_effect_flag_invalid', async () => {
+    const playing = { ...STAMP, isPlaying: 'yes', isFlashConfirmed: 1 };
+    expect({
+      ...(await piped(VjSetlistSetPlayingPayloadDto, playing)),
+    }).toEqual(playing);
+    const looping = { ...STAMP, isLooping: null };
+    expect({
+      ...(await piped(VjSetlistSetLoopingPayloadDto, looping)),
+    }).toEqual(looping);
+    const stepping = { ...STAMP, isFlashConfirmed: 'yes' };
+    expect({
+      ...(await piped(VjSetlistStepPayloadDto, stepping)),
+    }).toEqual(stepping);
+  });
+
+  it('refuses a field the sequence frames do not declare', async () => {
+    await expect(
+      piped(VjSetlistStepPayloadDto, { ...STAMP, isPlaying: true }),
+    ).rejects.toBeInstanceOf(WsException);
+    await expect(
+      piped(VjSetlistSetPlayingPayloadDto, { ...STAMP, index: 1 }),
+    ).rejects.toBeInstanceOf(WsException);
+    await expect(
+      piped(VjSetlistSetLoopingPayloadDto, {
+        ...STAMP,
+        isLooping: true,
+        setlistId: SETLIST_ID,
+      }),
+    ).rejects.toBeInstanceOf(WsException);
   });
 
   it('lets screenId null through on screen:identify', async () => {

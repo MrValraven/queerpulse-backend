@@ -15,6 +15,12 @@ const MIGRATION_SOURCE = readFileSync(
   'utf8',
 );
 
+/** The sequences migration source, read once so its CHECKs and indexes can be matched. */
+const SEQUENCES_MIGRATION_SOURCE = readFileSync(
+  join(__dirname, '../../migrations/1840200000000-AddVjSequences.ts'),
+  'utf8',
+);
+
 const columnOf = (target: object, propertyName: string) =>
   getMetadataArgsStorage().columns.find(
     (column) =>
@@ -75,6 +81,44 @@ describe('VJ v2 entities', () => {
     expect(columnOf(VjSetlistItem, 'setlistId')?.options.type).toBe('uuid');
   });
 
+  it('declares every sequences column with the contract types and defaults', () => {
+    expect(columnOf(VjSetlist, 'isLooping')?.options).toMatchObject({
+      type: 'boolean',
+      default: false,
+    });
+    expect(columnOf(VjSetlist, 'stepDurationKind')?.options).toMatchObject({
+      type: 'varchar',
+      length: 10,
+      default: 'seconds',
+    });
+    expect(columnOf(VjSetlist, 'stepDurationValue')?.options).toMatchObject({
+      type: 'integer',
+      default: 8,
+    });
+    expect(columnOf(VjSetlistItem, 'kind')?.options).toMatchObject({
+      type: 'varchar',
+      length: 10,
+      default: 'scene',
+    });
+    expect(columnOf(VjSetlistItem, 'sceneId')?.options).toMatchObject({
+      type: 'uuid',
+      nullable: true,
+    });
+    expect(columnOf(VjSetlistItem, 'clipId')?.options).toMatchObject({
+      type: 'uuid',
+      nullable: true,
+    });
+    expect(columnOf(VjSetlistItem, 'durationKind')?.options).toMatchObject({
+      type: 'varchar',
+      length: 10,
+      nullable: true,
+    });
+    expect(columnOf(VjSetlistItem, 'durationValue')?.options).toMatchObject({
+      type: 'integer',
+      nullable: true,
+    });
+  });
+
   it('maps the three new tables', () => {
     const tableNames = getMetadataArgsStorage()
       .tables.filter((table) =>
@@ -126,6 +170,24 @@ describe('VJ v2 entities', () => {
     }
   });
 
+  it('carries each sequences CHECK with the migration SQL', () => {
+    const expectedCheckNames = [
+      'CHK_vj_setlists_step_duration',
+      'CHK_vj_setlist_items_kind',
+      'CHK_vj_setlist_items_duration',
+    ];
+    const checks = getMetadataArgsStorage().checks.filter((check) =>
+      V2_ENTITY_CLASSES.includes(check.target as typeof VjClip),
+    );
+    for (const checkName of expectedCheckNames) {
+      const check = checks.find((candidate) => candidate.name === checkName);
+      expect(check).toBeDefined();
+      expect(SEQUENCES_MIGRATION_SOURCE).toContain(
+        `"${checkName}" CHECK (${check?.expression ?? ''})`,
+      );
+    }
+  });
+
   it('keeps the preview key unique', () => {
     const unique = getMetadataArgsStorage().uniques.find(
       (candidate) =>
@@ -151,6 +213,9 @@ describe('VJ v2 entities', () => {
     expect(relationOf(VjSetlistItem, 'scene')?.options.onDelete).toBe(
       'CASCADE',
     );
+    expect(relationOf(VjSetlistItem, 'scene')?.options.nullable).toBe(true);
+    expect(relationOf(VjSetlistItem, 'clip')?.options.onDelete).toBe('CASCADE');
+    expect(relationOf(VjSetlistItem, 'clip')?.options.nullable).toBe(true);
 
     const joinNames = getMetadataArgsStorage()
       .joinColumns.filter((joinColumn) =>
@@ -165,6 +230,7 @@ describe('VJ v2 entities', () => {
         'FK_vj_setlists_created_by_user',
         'FK_vj_setlist_items_setlist',
         'FK_vj_setlist_items_scene',
+        'FK_vj_setlist_items_clip',
       ]),
     );
   });
@@ -181,6 +247,12 @@ describe('VJ v2 entities', () => {
     );
     expect(indexNamed('IDX_vj_setlists_created_by_user_id')?.where).toBe(
       '"created_by_user_id" IS NOT NULL',
+    );
+    expect(indexNamed('IDX_vj_setlist_items_clip_id')?.where).toBe(
+      '"clip_id" IS NOT NULL',
+    );
+    expect(SEQUENCES_MIGRATION_SOURCE).toContain(
+      `CREATE INDEX "IDX_vj_setlist_items_clip_id" ON "vj_setlist_items" ("clip_id") WHERE "clip_id" IS NOT NULL`,
     );
     for (const indexName of [
       'IDX_vj_packs_event_id',

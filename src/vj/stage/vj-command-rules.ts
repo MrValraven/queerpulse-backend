@@ -1,11 +1,17 @@
 /**
  * The command dispatch of `/vj` (contract 7.5): every remote command name
- * mapped to its rule function in the stage modules, and the lookup list
+ * mapped to its rule function in the stage modules, the sequence takeover
+ * of the manual picks (sequences contract 5.4), and the lookup list
  * comparison the stage service runs between the prepare and apply steps.
  * Pure; the rules read `isImmediate` themselves (contract 7.4), so the
  * dispatch never does.
  */
-import type { VjRemoteCommandName, VjStageState } from '../vj.contract';
+import {
+  vjSetlistTakeoverState,
+  type VjRemoteCommandName,
+  type VjSetlistPlaybackStatus,
+  type VjStageState,
+} from '../vj.contract';
 import { ruleSetEffects, ruleSetStrobe } from './vj-effects-rules';
 import {
   ruleResetLook,
@@ -15,17 +21,20 @@ import {
   ruleSetOverlay,
   ruleSetTransition,
 } from './vj-look-rules';
-import type {
-  VjCommandLookup,
-  VjCommandRuleResult,
-  VjRuleContext,
-  VjRuleFunction,
+import {
+  vjSetlistItemKey,
+  type VjCommandLookup,
+  type VjCommandRuleResult,
+  type VjRuleContext,
+  type VjRuleFunction,
 } from './vj-rule-kit';
 import {
   ruleRecallScene,
   ruleSetlistNext,
   ruleSetlistPrevious,
   ruleSetlistSelect,
+  ruleSetlistSetLooping,
+  ruleSetlistSetPlaying,
 } from './vj-scene-recall';
 import { ruleSetShuffle } from './vj-shuffle-rules';
 import {
@@ -38,7 +47,7 @@ import {
 } from './vj-source-rules';
 import { ruleSetTempo } from './vj-tempo-rules';
 
-/** The 20 remote commands to their rule functions, in contract 7.5 order. */
+/** The 22 remote commands to their rule functions, in VJ_REMOTE_COMMAND_NAMES order. */
 export const VJ_REMOTE_COMMAND_RULES: Readonly<
   Record<VjRemoteCommandName, VjRuleFunction>
 > = Object.freeze({
@@ -59,26 +68,105 @@ export const VJ_REMOTE_COMMAND_RULES: Readonly<
   'stage:setlistSelect': ruleSetlistSelect,
   'stage:setlistNext': ruleSetlistNext,
   'stage:setlistPrevious': ruleSetlistPrevious,
+  'stage:setlistSetPlaying': ruleSetlistSetPlaying,
+  'stage:setlistSetLooping': ruleSetlistSetLooping,
   'stage:setCountdown': ruleSetCountdown,
   'stage:setLogo': ruleSetLogo,
   'stage:setEventCard': ruleSetEventCard,
 });
 
-/** Runs one remote command's rules against the state. */
+/** The manual picks that take a running sequence over (sequences contract
+ *  5.4, design 13.1): a clip, a generator, a pack, the mix swap (it changes
+ *  the live clip, contract call 11), a scene recalled outside the sequence
+ *  and shuffle turned on. */
+export const VJ_SETLIST_TAKEOVER_COMMANDS: readonly VjRemoteCommandName[] =
+  Object.freeze([
+    'stage:setPack',
+    'stage:goClip',
+    'stage:goGenerator',
+    'stage:swapMix',
+    'stage:recallScene',
+    'stage:setShuffle',
+  ]);
+
+/** The statuses a manual pick takes over; manual, takenOver and finished never change. */
+const VJ_SETLIST_TAKEOVER_STATUSES: readonly VjSetlistPlaybackStatus[] =
+  Object.freeze(['playing', 'paused', 'needsFlashConsent']);
+
+/** A scene recalled by hand takes the sequence over whatever it changes
+ *  (design 13.1): the operator chose a look, and the next scene step would
+ *  replace it. Index, itemId, isFlashConfirmed and isLooping are kept; every
+ *  clock field is cleared, as vjSetlistTakeoverState clears them. */
+function vjSetlistSceneTakeoverState(next: VjStageState): VjStageState {
+  if (!VJ_SETLIST_TAKEOVER_STATUSES.includes(next.setlistPlayback.status)) {
+    return next;
+  }
+  return {
+    ...next,
+    setlistPlayback: {
+      ...next.setlistPlayback,
+      status: 'takenOver',
+      stepStartedAt: null,
+      stepEndsAt: null,
+      stepDurationMs: null,
+      pausedRemainingMs: null,
+    },
+  };
+}
+
+/** A takeover command's accepted change with the sequence taken over: a
+ *  `playing`, `paused` or `needsFlashConsent` sequence becomes `takenOver`.
+ *  An accepted `stage:recallScene` always takes it over, a look with no
+ *  source included; the other five commands go through
+ *  vjSetlistTakeoverState (the live source moved, or shuffle went from off
+ *  to on). Refusals, other commands and every other status come back as
+ *  they are. Running it twice changes nothing more. */
+export function withVjSetlistTakeover(
+  name: VjRemoteCommandName,
+  previousState: VjStageState,
+  result: VjCommandRuleResult,
+): VjCommandRuleResult {
+  if (
+    result.accepted === null ||
+    !VJ_SETLIST_TAKEOVER_COMMANDS.includes(name)
+  ) {
+    return result;
+  }
+  const nextState =
+    name === 'stage:recallScene'
+      ? vjSetlistSceneTakeoverState(result.accepted.nextState)
+      : vjSetlistTakeoverState(previousState, result.accepted.nextState);
+  if (nextState === result.accepted.nextState) {
+    return result;
+  }
+  return { failure: null, accepted: { ...result.accepted, nextState } };
+}
+
+/** Runs one remote command's rules against the state, with the sequence
+ *  takeover applied to the manual picks. */
 export function ruleForVjCommand(
   name: VjRemoteCommandName,
   state: VjStageState,
   payload: Record<string, unknown>,
   context: VjRuleContext,
 ): VjCommandRuleResult {
-  return VJ_REMOTE_COMMAND_RULES[name](state, payload, context);
+  return withVjSetlistTakeover(
+    name,
+    state,
+    VJ_REMOTE_COMMAND_RULES[name](state, payload, context),
+  );
 }
 
-/** The set list steps detect a moved position themselves and answer
- *  `vj_stale_setlist` with the state (contract 7.5, plan note 11), so the
- *  service never reads their lookups a second time. */
+/** The set list commands that read at a position the state names detect a
+ *  moved position themselves and answer `vj_stale_setlist` with the state
+ *  (contract 7.5, plan note 11, sequences contract 5.3), so the service
+ *  never reads their lookups a second time. */
 export const VJ_SELF_STALE_CHECKED_COMMANDS: readonly VjRemoteCommandName[] =
-  Object.freeze(['stage:setlistNext', 'stage:setlistPrevious']);
+  Object.freeze([
+    'stage:setlistNext',
+    'stage:setlistPrevious',
+    'stage:setlistSetPlaying',
+  ]);
 
 /** One lookup as comparable text: ids lowercased, a clip id list sorted. */
 function vjLookupText(lookup: VjCommandLookup): string {
@@ -97,7 +185,7 @@ function vjLookupText(lookup: VjCommandLookup): string {
     case 'scene':
       return `scene:${lookup.sceneId.toLowerCase()}`;
     case 'setlistItem':
-      return `setlistItem:${lookup.setlistId.toLowerCase()}:${lookup.index === null ? 'null' : String(lookup.index)}`;
+      return `setlistItem:${vjSetlistItemKey(lookup.setlistId, lookup.position)}`;
   }
 }
 

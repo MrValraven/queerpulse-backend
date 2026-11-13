@@ -11,6 +11,7 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import type { VjAttachPayloadDto } from './dto/vj-socket-payloads';
 import {
   vjAckFailure,
+  vjError,
   VJ_NOT_ADMIN_MESSAGE,
   VJ_SCREEN_REPLACED_MESSAGE,
 } from './vj.constants';
@@ -22,16 +23,21 @@ import {
   type VjAck,
   type VjLibraryChange,
   type VjSceneLook,
+  type VjSetlistFollowRead,
+  type VjSetlistRead,
+  type VjSetlistReadPosition,
   type VjStageFrame,
   type VjStageRestore,
 } from './vj.contract';
 import {
+  VJ_COMMAND_RATE_LIMIT,
   VJ_LIBRARY_ROOM,
   VJ_ROLE_RECHECK_MS,
   VjGateway,
   vjRemotesRoomName,
   vjStageRoomName,
 } from './vj.gateway';
+import type { VjSetlistService } from './vj-setlist.service';
 import type { VjStageReadsService } from './vj-stage-reads.service';
 import { VjStageService } from './vj-stage.service';
 
@@ -97,20 +103,84 @@ function createReads() {
     readSceneLook: jest
       .fn<Promise<VjSceneLook | null>, [string]>()
       .mockResolvedValue(null),
-    readSetlistItem: jest
-      .fn<
-        Promise<{
-          itemCount: number;
-          sceneId: string | null;
-          look: VjSceneLook | null;
-        } | null>,
-        [string, number | null]
-      >()
+    readSetlist: jest
+      .fn<Promise<VjSetlistRead | null>, [string, VjSetlistReadPosition]>()
       .mockResolvedValue(null),
-    setlistItemCount: jest
-      .fn<Promise<number | null>, [string]>()
+    readSetlistFollow: jest
+      .fn<Promise<VjSetlistFollowRead | null>, [string]>()
       .mockResolvedValue(null),
   };
+}
+
+/** The item ids of a test sequence of `stepCount` steps, in play order. */
+function setlistItemIdsOf(stepCount: number): string[] {
+  return Array.from(
+    { length: stepCount },
+    (_unused, index) =>
+      `9${String(index).padStart(7, '0')}-0000-4000-8000-000000000000`,
+  );
+}
+
+/** A read of SETLIST_ID with `stepCount` scene steps at a position, as
+ *  VJ_STAGE_SETLIST_READ_SQL answers it. */
+function setlistReadOf(
+  stepCount: number,
+  position: VjSetlistReadPosition,
+  isLooping = false,
+  look: VjSceneLook = vjSceneLookOf(createVjStageState(RESTORED_EPOCH, START)),
+): VjSetlistRead {
+  const itemIds = setlistItemIdsOf(stepCount);
+  let index: number | null = null;
+  if (position.kind === 'last') {
+    index = stepCount > 0 ? stepCount - 1 : null;
+  } else if (position.kind === 'index') {
+    if (position.index < stepCount) {
+      index = position.index;
+    } else if (position.wrapsToFirst && stepCount > 0) {
+      index = 0;
+    }
+  }
+  const duration = { kind: 'seconds' as const, value: 8 };
+  const itemId = index === null ? undefined : itemIds[index];
+  return {
+    setlistId: SETLIST_ID,
+    isLooping,
+    stepDuration: duration,
+    itemIds,
+    step:
+      index === null || itemId === undefined
+        ? null
+        : {
+            kind: 'scene',
+            itemId,
+            index,
+            sceneId: SCENE_ID,
+            look,
+            duration,
+          },
+  };
+}
+
+/** Answers every SETLIST_ID read with a sequence of `stepCount` steps. */
+function serveSetlistReads(
+  reads: ReturnType<typeof createReads>,
+  stepCount: number,
+  isLooping = false,
+  look?: VjSceneLook,
+): void {
+  reads.readSetlist.mockImplementation((setlistId, position) =>
+    Promise.resolve(
+      setlistId === SETLIST_ID
+        ? setlistReadOf(stepCount, position, isLooping, look)
+        : null,
+    ),
+  );
+}
+
+/** A scene look whose dip to white flashes. */
+function flashingLook(): VjSceneLook {
+  const look = vjSceneLookOf(createVjStageState(RESTORED_EPOCH, START));
+  return { ...look, transition: { ...look.transition, mode: 'dipWhite' } };
 }
 
 interface Harness {
@@ -132,6 +202,7 @@ interface Harness {
   refreshTokens: { exists: jest.Mock };
   jwt: { verifyAsync: jest.Mock };
   reads: ReturnType<typeof createReads>;
+  setlists: { updateSetlist: jest.Mock };
 }
 
 function createHarness(): Harness {
@@ -194,6 +265,12 @@ function createHarness(): Harness {
     ),
   };
   const reads = createReads();
+  const setlists = {
+    updateSetlist: jest.fn(
+      (_setlistId: string, body: { isLooping?: unknown }) =>
+        Promise.resolve({ isLooping: body.isLooping }),
+    ),
+  };
   const stages = new VjStageService(reads as unknown as VjStageReadsService);
   const gateway = new VjGateway(
     jwt as unknown as JwtService,
@@ -204,6 +281,7 @@ function createHarness(): Harness {
     refreshTokens as unknown as Repository<RefreshToken>,
     staffRoles as unknown as Repository<UserStaffRole>,
     platformSettings as unknown as PlatformSettingsService,
+    setlists as unknown as VjSetlistService,
   );
   gateway.namespace = namespace;
   gateway.afterInit();
@@ -221,6 +299,7 @@ function createHarness(): Harness {
     refreshTokens,
     jwt,
     reads,
+    setlists,
   };
 }
 
@@ -410,6 +489,7 @@ function buildRestoreState(
     shuffle: base.shuffle,
     activeSetlistId: null,
     setlistIndex: null,
+    setlistPlayback: base.setlistPlayback,
     ...parts,
   };
 }
@@ -1153,11 +1233,10 @@ describe('VjGateway', () => {
       expect(harness.reads.clipIdsInPack).toHaveBeenCalledWith(PACK_ID, [
         EXCLUDED_CLIP_ID,
       ]);
-      expect(harness.reads.readSetlistItem).toHaveBeenCalledTimes(1);
-      expect(harness.reads.readSetlistItem).toHaveBeenCalledWith(
-        SETLIST_ID,
-        null,
-      );
+      expect(harness.reads.readSetlist).toHaveBeenCalledTimes(1);
+      expect(harness.reads.readSetlist).toHaveBeenCalledWith(SETLIST_ID, {
+        kind: 'count',
+      });
 
       resolvePackRead({ eventId: null });
       expect(await attachPending).toMatchObject({
@@ -1785,7 +1864,7 @@ describe('VjGateway', () => {
       expect(frame.cause).toBe('library');
       expect(frame.sourceClientId).toBeNull();
       expect(frame.state.activePackId).toBeNull();
-      expect(harness.reads.setlistItemCount).not.toHaveBeenCalled();
+      expect(harness.reads.readSetlistFollow).not.toHaveBeenCalled();
     });
 
     it('keeps a library frame behind a command frame still waiting for its tick', async () => {
@@ -1813,13 +1892,297 @@ describe('VjGateway', () => {
       ]);
     });
 
-    it('relays the eight library change fields and reads set list counts for the active set list', async () => {
-      const remote = await attachedRemote(harness, 'socket-remote');
-      harness.reads.readSetlistItem.mockResolvedValue({
-        itemCount: 3,
-        sceneId: SCENE_ID,
-        look: vjSceneLookOf(createVjStageState(RESTORED_EPOCH, START)),
+    describe('sequence playback and Loop', () => {
+      /** An attached remote with SETLIST_ID (three steps) shown at step 1. */
+      async function remoteOnSequence(isPlaying = false): Promise<FakeClient> {
+        const remote = await attachedRemote(harness, 'socket-remote');
+        serveSetlistReads(harness.reads, 3);
+        const select = await harness.gateway.handleSetlistSelect(
+          asClient(remote),
+          {
+            clientId: CLIENT_ID,
+            commandSequence: 1,
+            setlistId: SETLIST_ID,
+            index: 0,
+            isPlaying,
+          },
+        );
+        expect(select.ok).toBe(true);
+        await flushImmediate();
+        harness.roomEmits.length = 0;
+        return remote;
+      }
+
+      it('pauses and resumes a playing sequence through stage:setlistSetPlaying', async () => {
+        const remote = await remoteOnSequence(true);
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.status,
+        ).toBe('playing');
+
+        const paused = await harness.gateway.handleSetlistSetPlaying(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 2, isPlaying: false },
+        );
+        expect(paused).toMatchObject({ ok: true, isNoop: false });
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback,
+        ).toMatchObject({ status: 'paused', stepEndsAt: null });
+
+        const resumed = await harness.gateway.handleSetlistSetPlaying(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 3, isPlaying: true },
+        );
+        expect(resumed).toMatchObject({ ok: true, isNoop: false });
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.status,
+        ).toBe('playing');
+        await flushImmediate();
+        expect(
+          stageFrames(harness).map((record) => payloadOf(record).cause),
+        ).toEqual(['command', 'command']);
       });
+
+      it('answers vj_setlist_flash_unconfirmed without a log line', async () => {
+        const readLogLines = spyOnEveryLogLine();
+        const remote = await attachedRemote(harness, 'socket-remote');
+        serveSetlistReads(harness.reads, 3, false, flashingLook());
+
+        const ack = await harness.gateway.handleSetlistSelect(
+          asClient(remote),
+          {
+            clientId: CLIENT_ID,
+            commandSequence: 1,
+            setlistId: SETLIST_ID,
+            index: 0,
+            isPlaying: true,
+          },
+        );
+
+        expect(codeOf(ack)).toBe('vj_setlist_flash_unconfirmed');
+        expect(
+          readLogLines().some((line) =>
+            line.includes('vj_setlist_flash_unconfirmed'),
+          ),
+        ).toBe(false);
+      });
+
+      it('saves Loop on the active set list before the playback change lands', async () => {
+        const remote = await remoteOnSequence();
+        const loopingAtWrite: (boolean | undefined)[] = [];
+        harness.setlists.updateSetlist.mockImplementationOnce(() => {
+          loopingAtWrite.push(
+            harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.isLooping,
+          );
+          return Promise.resolve({ isLooping: true });
+        });
+
+        const ack = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 2, isLooping: true },
+        );
+
+        expect(ack).toMatchObject({ ok: true, isNoop: false });
+        expect(harness.setlists.updateSetlist).toHaveBeenCalledTimes(1);
+        expect(harness.setlists.updateSetlist).toHaveBeenCalledWith(
+          SETLIST_ID,
+          { isLooping: true },
+        );
+        expect(loopingAtWrite).toEqual([false]);
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.isLooping,
+        ).toBe(true);
+        await flushImmediate();
+        const frame = payloadOf(stageFrames(harness)[0]);
+        expect(frame.cause).toBe('command');
+        expect(frame.sourceClientId).toBe(CLIENT_ID);
+      });
+
+      it('lands the Loop the save answered when it differs from the payload', async () => {
+        const remote = await remoteOnSequence();
+        harness.setlists.updateSetlist.mockResolvedValueOnce({
+          isLooping: false,
+        });
+
+        const ack = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 2, isLooping: true },
+        );
+
+        expect(harness.setlists.updateSetlist).toHaveBeenCalledWith(
+          SETLIST_ID,
+          { isLooping: true },
+        );
+        expect(ack).toMatchObject({ ok: true, isNoop: true });
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.isLooping,
+        ).toBe(false);
+        await flushImmediate();
+        expect(stageFrames(harness)).toEqual([]);
+      });
+
+      it('answers vj_setlist_not_found when the Loop save no longer finds the set list and records the sequence', async () => {
+        const remote = await remoteOnSequence();
+        harness.setlists.updateSetlist.mockRejectedValueOnce(
+          vjError('VJ_SETLIST_NOT_FOUND'),
+        );
+        const payload = {
+          clientId: CLIENT_ID,
+          commandSequence: 2,
+          isLooping: true,
+        };
+
+        const ack = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          payload,
+        );
+
+        expect(codeOf(ack)).toBe('vj_setlist_not_found');
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.isLooping,
+        ).toBe(false);
+        const again = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          payload,
+        );
+        expect(codeOf(again)).toBe('vj_stale_command');
+        expect(harness.setlists.updateSetlist).toHaveBeenCalledTimes(1);
+        await flushImmediate();
+        expect(stageFrames(harness)).toEqual([]);
+      });
+
+      it('answers vj_stale_setlist and lands nothing when another remote stopped the sequence during the Loop save', async () => {
+        const otherClientId = 'abababab-abab-4bab-8bab-abababababab';
+        const remote = await remoteOnSequence();
+        const otherRemote = await attachedRemote(harness, 'socket-other');
+        await flushImmediate();
+        harness.roomEmits.length = 0;
+        harness.setlists.updateSetlist.mockImplementationOnce(async () => {
+          const stop = await harness.gateway.handleSetlistSelect(
+            asClient(otherRemote),
+            {
+              clientId: otherClientId,
+              commandSequence: 1,
+              setlistId: null,
+              index: null,
+            },
+          );
+          expect(stop.ok).toBe(true);
+          return {};
+        });
+        const payload = {
+          clientId: CLIENT_ID,
+          commandSequence: 2,
+          isLooping: true,
+        };
+
+        const ack = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          payload,
+        );
+
+        expect(codeOf(ack)).toBe('vj_stale_setlist');
+        if (ack.ok) {
+          throw new Error('expected a refusal');
+        }
+        expect(ack.state?.activeSetlistId).toBeNull();
+        expect(harness.stages.getState(ADMIN_USER_ID)?.activeSetlistId).toBe(
+          null,
+        );
+        await flushImmediate();
+        expect(
+          stageFrames(harness).map(
+            (record) => payloadOf(record).sourceClientId,
+          ),
+        ).toEqual([otherClientId]);
+        const again = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          payload,
+        );
+        expect(codeOf(again)).toBe('vj_stale_command');
+        expect(harness.setlists.updateSetlist).toHaveBeenCalledTimes(1);
+      });
+
+      it('never saves Loop for a frame past the command bucket', async () => {
+        const remote = await remoteOnSequence();
+        // The select took one token; transitions take the rest.
+        for (
+          let sequence = 2;
+          sequence <= VJ_COMMAND_RATE_LIMIT.capacity;
+          sequence += 1
+        ) {
+          expect(
+            (await setFadeLength(harness, remote, sequence, sequence * 10)).ok,
+          ).toBe(true);
+        }
+
+        const flood = await Promise.all(
+          Array.from({ length: 5 }, (_unused, offset) =>
+            harness.gateway.handleSetlistSetLooping(asClient(remote), {
+              clientId: CLIENT_ID,
+              commandSequence: VJ_COMMAND_RATE_LIMIT.capacity + 1 + offset,
+              isLooping: true,
+            }),
+          ),
+        );
+
+        expect(flood.map(codeOf)).toEqual(
+          Array.from({ length: 5 }, () => 'vj_rate_limited'),
+        );
+        expect(harness.setlists.updateSetlist).not.toHaveBeenCalled();
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.isLooping,
+        ).toBe(false);
+      });
+
+      it('answers vj_server_error for any other failed Loop save', async () => {
+        const remote = await remoteOnSequence();
+        harness.setlists.updateSetlist.mockRejectedValueOnce(
+          new Error('write failed near SECRET-DB-DETAIL'),
+        );
+
+        const ack = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 2, isLooping: true },
+        );
+
+        expect(codeOf(ack)).toBe('vj_server_error');
+        expect(
+          harness.stages.getState(ADMIN_USER_ID)?.setlistPlayback.isLooping,
+        ).toBe(false);
+      });
+
+      it('writes nothing when the Loop frame fails its rules', async () => {
+        const remote = await attachedRemote(harness, 'socket-remote');
+        const withoutSetlist = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 1, isLooping: true },
+        );
+        expect(codeOf(withoutSetlist)).toBe('vj_setlist_none');
+
+        serveSetlistReads(harness.reads, 3);
+        await harness.gateway.handleSetlistSelect(asClient(remote), {
+          clientId: CLIENT_ID,
+          commandSequence: 2,
+          setlistId: SETLIST_ID,
+          index: null,
+        });
+        const wrongFlag = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 3, isLooping: 'yes' },
+        );
+        expect(codeOf(wrongFlag)).toBe('vj_effect_flag_invalid');
+        expect(harness.setlists.updateSetlist).not.toHaveBeenCalled();
+        const next = await harness.gateway.handleSetlistSetLooping(
+          asClient(remote),
+          { clientId: CLIENT_ID, commandSequence: 3, isLooping: true },
+        );
+        expect(codeOf(next)).toBe('vj_stale_command');
+      });
+    });
+
+    it('relays the eight library change fields and follows the active set list with its follow read', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      serveSetlistReads(harness.reads, 3);
       const select = await harness.gateway.handleSetlistSelect(
         asClient(remote),
         {
@@ -1836,7 +2199,12 @@ describe('VjGateway', () => {
       });
       await flushImmediate();
       harness.roomEmits.length = 0;
-      harness.reads.setlistItemCount.mockResolvedValueOnce(2);
+      // The step on screen (index 2) is removed: the follow lands on the one
+      // before it.
+      harness.reads.readSetlistFollow.mockResolvedValueOnce({
+        itemIds: setlistItemIdsOf(2),
+        isLooping: false,
+      });
       const change: VjLibraryChange = {
         kind: 'setlist_items_changed',
         packId: PACK_ID,
@@ -1857,23 +2225,85 @@ describe('VjGateway', () => {
       const relayedPayload = relayed[0]?.payload as VjLibraryChange;
       expect(relayedPayload).not.toBe(change);
       expect(relayedPayload.setlistIds).not.toBe(change.setlistIds);
-      expect(harness.reads.setlistItemCount).toHaveBeenCalledTimes(1);
-      expect(harness.reads.setlistItemCount).toHaveBeenCalledWith(SETLIST_ID);
+      expect(harness.reads.readSetlistFollow).toHaveBeenCalledTimes(1);
+      expect(harness.reads.readSetlistFollow).toHaveBeenCalledWith(SETLIST_ID);
       await flushImmediate();
       const frame = payloadOf(stageFrames(harness)[0]);
       expect(frame.cause).toBe('library');
       expect(frame.state.activeSetlistId).toBe(SETLIST_ID);
+      expect(frame.state.setlistIndex).toBe(1);
+      expect(frame.state.setlistPlayback.itemId).toBeNull();
+    });
+
+    it.each(['clip_deleted', 'setlist_updated'] as const)(
+      'reads the follow of the active set list on %s',
+      async (kind) => {
+        const remote = await attachedRemote(harness, 'socket-remote');
+        serveSetlistReads(harness.reads, 3);
+        await harness.gateway.handleSetlistSelect(asClient(remote), {
+          clientId: CLIENT_ID,
+          commandSequence: 1,
+          setlistId: SETLIST_ID,
+          index: 1,
+        });
+        await flushImmediate();
+        harness.roomEmits.length = 0;
+        harness.reads.readSetlistFollow.mockResolvedValueOnce({
+          itemIds: setlistItemIdsOf(3),
+          isLooping: true,
+        });
+
+        await harness.gateway.handleLibraryChanged(
+          libraryChange({
+            kind,
+            clipId: kind === 'clip_deleted' ? CLIP_ID : null,
+            setlistId: kind === 'setlist_updated' ? SETLIST_ID : null,
+            setlistIds: [SETLIST_ID],
+          }),
+        );
+        await flushImmediate();
+
+        expect(harness.reads.readSetlistFollow).toHaveBeenCalledWith(
+          SETLIST_ID,
+        );
+        const frame = payloadOf(stageFrames(harness)[0]);
+        expect(frame.cause).toBe('library');
+        expect(frame.state.setlistIndex).toBe(1);
+        expect(frame.state.setlistPlayback.isLooping).toBe(true);
+      },
+    );
+
+    it('clears the active set list when the follow read of a clip delete finds it gone', async () => {
+      const remote = await attachedRemote(harness, 'socket-remote');
+      serveSetlistReads(harness.reads, 3);
+      await harness.gateway.handleSetlistSelect(asClient(remote), {
+        clientId: CLIENT_ID,
+        commandSequence: 1,
+        setlistId: SETLIST_ID,
+        index: 1,
+      });
+      await flushImmediate();
+      harness.roomEmits.length = 0;
+      harness.reads.readSetlistFollow.mockResolvedValueOnce(null);
+
+      await harness.gateway.handleLibraryChanged(
+        libraryChange({
+          kind: 'clip_deleted',
+          clipId: CLIP_ID,
+          setlistIds: [SETLIST_ID],
+        }),
+      );
+      await flushImmediate();
+
+      const frame = payloadOf(stageFrames(harness)[0]);
+      expect(frame.state.activeSetlistId).toBeNull();
       expect(frame.state.setlistIndex).toBeNull();
     });
 
-    it('applies a set list change with the counts it has when a read fails and logs ids only', async () => {
+    it('applies a set list change with the reads it has when a follow read fails and logs ids only', async () => {
       const readLogLines = spyOnEveryLogLine();
       const remote = await attachedRemote(harness, 'socket-remote');
-      harness.reads.readSetlistItem.mockResolvedValue({
-        itemCount: 3,
-        sceneId: SCENE_ID,
-        look: vjSceneLookOf(createVjStageState(RESTORED_EPOCH, START)),
-      });
+      serveSetlistReads(harness.reads, 3);
       await harness.gateway.handleSetlistSelect(asClient(remote), {
         clientId: CLIENT_ID,
         commandSequence: 1,
@@ -1882,7 +2312,7 @@ describe('VjGateway', () => {
       });
       await flushImmediate();
       harness.roomEmits.length = 0;
-      harness.reads.setlistItemCount.mockRejectedValueOnce(
+      harness.reads.readSetlistFollow.mockRejectedValueOnce(
         new Error('read failed near SECRET-SETLIST-NAME'),
       );
 

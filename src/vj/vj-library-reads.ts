@@ -17,8 +17,9 @@ import { vjError } from './vj.constants';
 /**
  * The reads that build pack and clip DTOs, shared by every VJ library
  * service: pack summaries with the linked event's summary, creator names,
- * each clip's pack list, and the one-row DTO reads a write answers with.
- * Every list reads in one query; nothing here writes or logs.
+ * each clip's pack list and set list item count, and the one-row DTO reads a
+ * write answers with. Every list reads in one query; nothing here writes or
+ * logs.
  */
 
 /** `$1` one pack id, or null for every pack. One row per pack in position
@@ -43,6 +44,16 @@ ORDER BY "pack"."position", "pack"."id"`;
  *  position order, so each clip's pack list reads in the order the library
  *  shows the packs. */
 const VJ_CLIP_PACK_IDS_READ_SQL = `SELECT "pack_clip"."clip_id", "pack_clip"."pack_id" FROM "vj_pack_clips" "pack_clip" JOIN "vj_packs" "pack" ON "pack"."id" = "pack_clip"."pack_id" WHERE "pack_clip"."clip_id" = ANY($1::uuid[]) ORDER BY "pack"."position", "pack"."id"`;
+
+/** `$1` clip ids. How many set list items play each clip, one row per clip
+ *  that sits in at least one set list (contract 4.1). */
+export const VJ_CLIP_SETLIST_ITEM_COUNTS_SQL = `SELECT "item"."clip_id", COUNT(*)::int AS "item_count" FROM "vj_setlist_items" "item" WHERE "item"."clip_id" = ANY($1::uuid[]) GROUP BY "item"."clip_id"`;
+
+/** One row of `VJ_CLIP_SETLIST_ITEM_COUNTS_SQL`. */
+interface VjClipSetlistItemCountRow {
+  clip_id: string;
+  item_count: number | string;
+}
 
 /** One row of `VJ_PACK_SUMMARY_V2_SQL` as the driver hands it back. */
 interface VjPackSummaryV2RawRow {
@@ -169,7 +180,28 @@ export async function readVjClipPackIds(
   return packIdsByClip;
 }
 
-/** Clip DTOs with their pack lists and creators, each read in one batch. */
+/** How many set list items play each clip, in one read; a clip in no set
+ *  list is absent from the map (read it as 0). No read for an empty list. */
+export async function readVjClipSetlistItemCounts(
+  manager: EntityManager,
+  clipIds: readonly string[],
+): Promise<Map<string, number>> {
+  const countByClip = new Map<string, number>();
+  if (clipIds.length === 0) {
+    return countByClip;
+  }
+  const rows: VjClipSetlistItemCountRow[] = await manager.query(
+    VJ_CLIP_SETLIST_ITEM_COUNTS_SQL,
+    [clipIds],
+  );
+  for (const row of rows) {
+    countByClip.set(row.clip_id, Number(row.item_count));
+  }
+  return countByClip;
+}
+
+/** Clip DTOs with their pack lists, set list item counts and creators,
+ *  each read in one batch. */
 export async function toVjClipDtos(
   manager: EntityManager,
   clips: VjClip[],
@@ -177,16 +209,20 @@ export async function toVjClipDtos(
   if (clips.length === 0) {
     return [];
   }
-  const packIdsByClip = await readVjClipPackIds(
-    manager,
-    clips.map((clip) => clip.id),
-  );
+  const clipIds = clips.map((clip) => clip.id);
+  const packIdsByClip = await readVjClipPackIds(manager, clipIds);
+  const itemCountByClip = await readVjClipSetlistItemCounts(manager, clipIds);
   const profiles = await readVjCreatorProfiles(
     manager,
     clips.map((clip) => clip.createdByUserId),
   );
   return clips.map((clip) =>
-    toVjClip(clip, packIdsByClip.get(clip.id) ?? [], profiles),
+    toVjClip(
+      clip,
+      packIdsByClip.get(clip.id) ?? [],
+      itemCountByClip.get(clip.id) ?? 0,
+      profiles,
+    ),
   );
 }
 
