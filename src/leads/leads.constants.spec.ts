@@ -15,6 +15,9 @@ import {
   LEAD_PERSONA_SEARCH_LIMIT,
   LEAD_PHONE_MAX,
   LEAD_REFUSALS,
+  LEAD_REVERT_REFUSAL_MESSAGES,
+  LEAD_REVERT_REFUSAL_REASONS,
+  LEAD_REVERT_WINDOW_MS,
   LEAD_SEARCH_QUERY_MAX,
   LEAD_STAGES,
   LEAD_TIME_ZONE,
@@ -50,6 +53,8 @@ describe('leadError', () => {
     ['LEAD_NOTE_NOT_FOUND', 404],
     ['LEAD_NOTE_NOT_YOURS', 403],
     ['LEAD_ENTRY_NOT_EDITABLE', 409],
+    ['LEAD_ENTRY_NOT_FOUND', 404],
+    ['LEAD_ENTRY_NOT_REVERTIBLE', 409],
     ['LEAD_CURSOR_INVALID', 400],
   ] as const)(
     'answers %s with status %i and the code in the body',
@@ -149,7 +154,42 @@ describe('leadError', () => {
     }
     expect(
       new Set(Object.values(LEAD_REFUSALS).map(({ message }) => message)).size,
-    ).toBe(23);
+    ).toBe(25);
+  });
+
+  it.each(LEAD_REVERT_REFUSAL_REASONS)(
+    'names the reason %s on LEAD_ENTRY_NOT_REVERTIBLE',
+    (reason) => {
+      expect(
+        leadError('LEAD_ENTRY_NOT_REVERTIBLE', { reason }).getResponse(),
+      ).toEqual({
+        statusCode: 409,
+        message: LEAD_REVERT_REFUSAL_MESSAGES[reason],
+        code: 'LEAD_ENTRY_NOT_REVERTIBLE',
+        reason,
+      });
+    },
+  );
+
+  it('gives every revert reason its own message', () => {
+    const messages = Object.values(LEAD_REVERT_REFUSAL_MESSAGES);
+    expect(new Set(messages).size).toBe(LEAD_REVERT_REFUSAL_REASONS.length);
+    for (const message of messages) {
+      expect(
+        Object.values(LEAD_REFUSALS).map((refusal) => refusal.message),
+      ).not.toContain(message);
+    }
+    expect(LEAD_REVERT_REFUSAL_MESSAGES.too_old).toContain('10 minutes');
+  });
+
+  it('carries no reason on LEAD_ENTRY_NOT_FOUND', () => {
+    expect(
+      leadError('LEAD_ENTRY_NOT_FOUND', { reason: 'too_old' }).getResponse(),
+    ).toEqual({
+      statusCode: 404,
+      message: LEAD_REFUSALS.LEAD_ENTRY_NOT_FOUND.message,
+      code: 'LEAD_ENTRY_NOT_FOUND',
+    });
   });
 });
 
@@ -199,5 +239,13 @@ describe('lead constants', () => {
       LEAD_FOLLOW_UP_MIN,
       LEAD_FOLLOW_UP_MAX,
     ]).toEqual(['to_contact', 'Europe/Lisbon', '2000-01-01', '2100-12-31']);
+    expect(LEAD_REVERT_WINDOW_MS).toBe(600_000);
+    expect(LEAD_REVERT_REFUSAL_REASONS).toEqual([
+      'not_stage_change',
+      'not_newest',
+      'stage_moved',
+      'not_yours',
+      'too_old',
+    ]);
   });
 });

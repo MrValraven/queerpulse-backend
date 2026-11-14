@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -71,6 +73,8 @@ const LEAD_FIELD_CODES =
  *   POST   admin/leads/:id/entries                add a note
  *   PATCH  admin/leads/:id/entries/:entryId       edit a note
  *   DELETE admin/leads/:id/entries/:entryId       delete a note
+ *   POST   admin/leads/:id/entries/:entryId/revert
+ *                                                  revert a stage change
  *
  * Reason codes per route, in check order:
  *
@@ -95,6 +99,12 @@ const LEAD_FIELD_CODES =
  *                        LEAD_NOTE_NOT_YOURS
  *   DELETE :id/entries/:entryId
  *                        the PATCH order without the two body codes
+ *   POST   :id/entries/:entryId/revert
+ *                        LEAD_NOT_FOUND (malformed id), LEAD_ENTRY_NOT_FOUND
+ *                        (malformed entry id), LEAD_NOT_FOUND,
+ *                        LEAD_ENTRY_NOT_FOUND, then LEAD_ENTRY_NOT_REVERTIBLE
+ *                        with `reason` not_stage_change, not_newest,
+ *                        stage_moved, not_yours, too_old
  *
  * `:id` and `:entryId` are plain strings: the services check the uuid shape
  * and answer the route's not-found code, so no pipe can answer a generic 400.
@@ -123,9 +133,12 @@ export class AdminLeadsController {
   @ApiOperation({
     summary: 'List leads',
     description:
-      'One page of at most 50 leads, due follow-ups first, then the most recently changed. `stageCounts` and `totalCount` count every stage under the `q` and `type` filters. Send `nextCursor` back as `cursor`, with the same filters, for the next page.',
+      'One page of at most 50 leads, due follow-ups first, then the most recently changed. `stageCounts` and `totalCount` count every stage under the `q` and `type` filters, and `dueCount` counts the leads among them with a follow-up due today or earlier, read in Europe/Lisbon. Every page carries the three counts. Send `nextCursor` back as `cursor`, with the same filters, for the next page.',
   })
-  @ApiOkResponse({ description: 'The page, its next cursor and the counts.' })
+  @ApiOkResponse({
+    description:
+      'The page, its next cursor, `stageCounts`, `totalCount` and `dueCount`.',
+  })
   @ApiBadRequestResponse({
     description:
       'Code `LEAD_STAGE_INVALID`, `LEAD_TYPE_INVALID` or `LEAD_CURSOR_INVALID`, checked in this order.',
@@ -306,5 +319,29 @@ export class AdminLeadsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.leadEntries.deleteNote(leadId, entryId, user);
+  }
+
+  @Post(':id/entries/:entryId/revert')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Revert a stage change on a lead',
+    description:
+      'Sets the lead back to the stage before the change and deletes the `stage_changed` entry, writing no entry of its own. Its author or an Admin can revert the newest stage change on a lead for 10 minutes after it was made, while the lead still sits in the stage the change set. No body.',
+  })
+  @ApiOkResponse({ description: 'The refreshed lead with its entries.' })
+  @ApiNotFoundResponse({
+    description:
+      'Code `LEAD_NOT_FOUND` or `LEAD_ENTRY_NOT_FOUND`: the lead or the entry is gone, or its id is no uuid. A second revert of an entry already reverted answers `LEAD_ENTRY_NOT_FOUND`.',
+  })
+  @ApiConflictResponse({
+    description:
+      'Code `LEAD_ENTRY_NOT_REVERTIBLE` with `reason`: `not_stage_change`, `not_newest`, `stage_moved`, `not_yours` or `too_old`, checked in this order.',
+  })
+  revertStageChange(
+    @Param('id') leadId: string,
+    @Param('entryId') entryId: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.leadEntries.revertStageChange(leadId, entryId, user);
   }
 }

@@ -74,6 +74,20 @@ export const LEAD_TIME_ZONE = 'Europe/Lisbon';
 /** Follow-up dates outside this range answer LEAD_FOLLOW_UP_INVALID. */
 export const LEAD_FOLLOW_UP_MIN = '2000-01-01';
 export const LEAD_FOLLOW_UP_MAX = '2100-12-31';
+/** How long after a stage change its author or an Admin can revert it. An
+ *  entry exactly this old can still be reverted. */
+export const LEAD_REVERT_WINDOW_MS = 10 * 60 * 1000;
+
+/** Why a stage change can no longer be reverted, in check order. */
+export const LEAD_REVERT_REFUSAL_REASONS = [
+  'not_stage_change',
+  'not_newest',
+  'stage_moved',
+  'not_yours',
+  'too_old',
+] as const;
+export type LeadRevertRefusalReason =
+  (typeof LEAD_REVERT_REFUSAL_REASONS)[number];
 
 /** The persona's public state, reused from the persona wall:
  *  'shown' | 'draft' | 'not_open' | 'removed' | 'taken_down'. */
@@ -106,6 +120,8 @@ export type LeadRefusalCode =
   | 'LEAD_NOTE_NOT_FOUND'
   | 'LEAD_NOTE_NOT_YOURS'
   | 'LEAD_ENTRY_NOT_EDITABLE'
+  | 'LEAD_ENTRY_NOT_FOUND'
+  | 'LEAD_ENTRY_NOT_REVERTIBLE'
   | 'LEAD_CURSOR_INVALID';
 
 /** Status and fixed message of every refusal the leads routes answer with.
@@ -207,6 +223,14 @@ export const LEAD_REFUSALS: Record<
     message:
       'Only notes can be edited or deleted. Stage, persona and creation entries stay as the record.',
   },
+  LEAD_ENTRY_NOT_FOUND: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This entry is no longer on the lead.',
+  },
+  LEAD_ENTRY_NOT_REVERTIBLE: {
+    status: HttpStatus.CONFLICT,
+    message: 'This stage change can no longer be reverted.',
+  },
   LEAD_CURSOR_INVALID: {
     status: HttpStatus.BAD_REQUEST,
     message: 'The list cursor is malformed. Load the list again from the top.',
@@ -225,8 +249,25 @@ export const LEAD_PERSONA_NOT_LISTED_MESSAGES: Record<
     "This persona was taken down by a moderator, so it can't be linked to a lead.",
 };
 
+/** What LEAD_ENTRY_NOT_REVERTIBLE says for each reason a revert is refused. */
+export const LEAD_REVERT_REFUSAL_MESSAGES: Record<
+  LeadRevertRefusalReason,
+  string
+> = {
+  not_stage_change:
+    'Only a stage change can be reverted. Notes, persona and creation entries stay as the record.',
+  not_newest:
+    'Only the latest stage change on a lead can be reverted, and a newer one sits on this lead.',
+  stage_moved:
+    'The lead has left the stage this change set, so the change can no longer be reverted.',
+  not_yours:
+    'Only the person who changed the stage or an Admin can revert the change.',
+  too_old: `A stage change can be reverted for ${LEAD_REVERT_WINDOW_MS / 60_000} minutes after it was made, and this one is older.`,
+};
+
 /** A body field a refusal may carry beside `statusCode`, `message` and `code`. */
-export type LeadRefusalExtra = 'leadId' | 'leadName' | 'index' | 'publicState';
+export type LeadRefusalExtra =
+  'leadId' | 'leadName' | 'index' | 'publicState' | 'reason';
 
 /** The extra body fields each code carries. `leadError` copies only these
  *  from its options, so a stray option never reaches a body. */
@@ -256,6 +297,8 @@ export const LEAD_REFUSAL_EXTRAS: Record<
   LEAD_NOTE_NOT_FOUND: [],
   LEAD_NOTE_NOT_YOURS: [],
   LEAD_ENTRY_NOT_EDITABLE: [],
+  LEAD_ENTRY_NOT_FOUND: [],
+  LEAD_ENTRY_NOT_REVERTIBLE: ['reason'],
   LEAD_CURSOR_INVALID: [],
 };
 
@@ -267,24 +310,39 @@ export interface LeadErrorOptions {
   leadName?: string;
   index?: number;
   publicState?: LeadPersonaHiddenState;
+  reason?: LeadRevertRefusalReason;
+}
+
+/** The fixed message of a refusal: LEAD_PERSONA_NOT_LISTED names the hidden
+ *  state and LEAD_ENTRY_NOT_REVERTIBLE names the reason when the option is
+ *  given, and every other code answers the table's message. */
+function refusalMessageOf(
+  code: LeadRefusalCode,
+  options: LeadErrorOptions | undefined,
+): string {
+  const publicState = options?.publicState;
+  if (code === 'LEAD_PERSONA_NOT_LISTED' && publicState !== undefined) {
+    return LEAD_PERSONA_NOT_LISTED_MESSAGES[publicState];
+  }
+  const reason = options?.reason;
+  if (code === 'LEAD_ENTRY_NOT_REVERTIBLE' && reason !== undefined) {
+    return LEAD_REVERT_REFUSAL_MESSAGES[reason];
+  }
+  return LEAD_REFUSALS[code].message;
 }
 
 /** The one way the leads routes refuse a request:
  *  `{ statusCode, message, code }` plus each extra listed for the code in
  *  `LEAD_REFUSAL_EXTRAS` whose option is defined. LEAD_PERSONA_NOT_LISTED
- *  swaps in the message that names the state when `publicState` is given.
- *  The message is always a fixed sentence from the tables above. */
+ *  swaps in the message that names the state when `publicState` is given,
+ *  and LEAD_ENTRY_NOT_REVERTIBLE the message that names the `reason`. The
+ *  message is always a fixed sentence from the tables above. */
 export function leadError(
   code: LeadRefusalCode,
   options?: LeadErrorOptions,
 ): HttpException {
-  const refusal = LEAD_REFUSALS[code];
-  const status = options?.status ?? refusal.status;
-  const publicState = options?.publicState;
-  const message =
-    code === 'LEAD_PERSONA_NOT_LISTED' && publicState !== undefined
-      ? LEAD_PERSONA_NOT_LISTED_MESSAGES[publicState]
-      : refusal.message;
+  const status = options?.status ?? LEAD_REFUSALS[code].status;
+  const message = refusalMessageOf(code, options);
   const body: Record<string, unknown> = { statusCode: status, message, code };
   for (const extra of LEAD_REFUSAL_EXTRAS[code]) {
     const value = options?.[extra];

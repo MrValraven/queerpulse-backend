@@ -78,6 +78,10 @@ const OPEN_STAGE_LIST = OPEN_LEAD_STAGES.map((stage) => `'${stage}'`).join(
  *  open stage and a follow-up day on or before today. */
 export const LEAD_IS_DUE_SQL = `("lead"."stage" IN (${OPEN_STAGE_LIST}) AND "lead"."follow_up_on" IS NOT NULL AND "lead"."follow_up_on" <= CAST(:today AS date))`;
 
+/** The due leads of one stage group: the list page sums it into
+ *  `dueCount`. */
+export const LEAD_DUE_COUNT_SQL = `(COUNT(*) FILTER (WHERE ${LEAD_IS_DUE_SQL}))::int`;
+
 /** 0 for a due lead, 1 for every other lead: the first sort key. */
 export const LEAD_DUE_RANK_SQL = `CASE WHEN ${LEAD_IS_DUE_SQL} THEN 0 ELSE 1 END`;
 
@@ -151,10 +155,11 @@ interface LeadEntryStatsRow {
   last_entry_at: Date | string;
 }
 
-/** One row of the stage count. */
+/** One row of the stage count, with the due leads of that stage. */
 interface LeadStageCountRow {
   stage: string;
   count: number | string;
+  due_count: number | string;
 }
 
 /** The Postgres error code and constraint name of a failed query, or null
@@ -227,7 +232,8 @@ export class LeadsService {
   /** One page of the list, due follow-ups first. The filters are checked
    *  before any query. A cursor carries the Lisbon day its first page read,
    *  so a later page keeps that page's order across midnight. The stage
-   *  counts read the `q` and `type` filters only. */
+   *  counts and `dueCount` read the `q` and `type` filters only, in one
+   *  grouped query, against the same day the page reads. */
   async listLeads(
     query: ListLeadsQuery,
     now: Date = new Date(),
@@ -265,11 +271,14 @@ export class LeadsService {
       .limit(LEAD_PAGE_SIZE + 1)
       .getRawAndEntities<LeadPageRawRow>();
 
-    const countQuery = manager.createQueryBuilder(Lead, 'lead');
+    const countQuery = manager
+      .createQueryBuilder(Lead, 'lead')
+      .setParameter('today', today);
     this.applyLeadFilters(countQuery, filters);
     const countRows = await countQuery
       .select('lead.stage', 'stage')
       .addSelect('COUNT(*)::int', 'count')
+      .addSelect(LEAD_DUE_COUNT_SQL, 'due_count')
       .groupBy('lead.stage')
       .getRawMany<LeadStageCountRow>();
 
@@ -303,6 +312,10 @@ export class LeadsService {
       (sum, stage) => sum + stageCounts[stage],
       0,
     );
+    const dueCount = countRows.reduce(
+      (sum, row) => sum + Number(row.due_count),
+      0,
+    );
 
     const pageIds = pageLeads.map((lead) => lead.id);
     const statsRows =
@@ -334,7 +347,7 @@ export class LeadsService {
         today,
       );
     });
-    return { items, nextCursor, stageCounts, totalCount };
+    return { items, nextCursor, stageCounts, totalCount, dueCount };
   }
 
   /** How many leads have a follow-up due on the Lisbon day of `now`: the

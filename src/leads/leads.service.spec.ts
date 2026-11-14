@@ -25,6 +25,7 @@ import { LeadPersonaService } from './lead-persona.service';
 import type { LeadCaller, LeadPersonaRecord } from './lead-response';
 import {
   LEAD_AFTER_CURSOR_SQL,
+  LEAD_DUE_COUNT_SQL,
   LEAD_DUE_ON_SQL,
   LEAD_DUE_RANK_SQL,
   LEAD_ENTRY_STATS_SQL,
@@ -212,7 +213,7 @@ describe('LeadsService', () => {
   let builders: QueryBuilderStub[];
   let pageLeads: Lead[];
   let pageRaw: Record<string, unknown>[];
-  let stageCountRows: { stage: string; count: string }[];
+  let stageCountRows: { stage: string; count: string; due_count: string }[];
   let dueCountValue: number;
   let storedLead: Lead | null;
   let storedEntries: LeadEntry[];
@@ -463,7 +464,7 @@ describe('LeadsService', () => {
     });
 
     it('counts every stage for q and type only', async () => {
-      stageCountRows = [{ stage: 'contacted', count: '2' }];
+      stageCountRows = [{ stage: 'contacted', count: '2', due_count: '1' }];
 
       const page = await service.listLeads({
         q: 'ana',
@@ -483,6 +484,10 @@ describe('LeadsService', () => {
         'COUNT(*)::int',
         'count',
       );
+      expect(countBuilder.addSelect).toHaveBeenCalledWith(
+        LEAD_DUE_COUNT_SQL,
+        'due_count',
+      );
       expect(countBuilder.groupBy).toHaveBeenCalledWith('lead.stage');
       expect(countBuilder.getRawMany).toHaveBeenCalledTimes(1);
       expect(page.stageCounts).toEqual({
@@ -493,12 +498,74 @@ describe('LeadsService', () => {
         not_now: 0,
       });
       expect(page.totalCount).toBe(2);
+      expect(page.dueCount).toBe(1);
 
       const pageBuilder = builderAt(0);
       expect(pageBuilder.andWhere).toHaveBeenCalledWith('lead.stage = :stage', {
         stage: 'contacted',
       });
       expect(pageBuilder.andWhere).toHaveBeenCalledWith(LEAD_IS_DUE_SQL);
+    });
+
+    it('sums the due leads of every stage group into dueCount on the first page', async () => {
+      stageCountRows = [
+        { stage: 'to_contact', count: '4', due_count: '3' },
+        { stage: 'contacted', count: '2', due_count: '2' },
+        { stage: 'on_board', count: '5', due_count: '0' },
+      ];
+
+      const page = await service.listLeads(
+        { q: 'ana', type: 'dj' },
+        new Date('2026-07-01T23:30:00Z'),
+      );
+
+      expect(LEAD_DUE_COUNT_SQL).toBe(
+        `(COUNT(*) FILTER (WHERE ${LEAD_IS_DUE_SQL}))::int`,
+      );
+      const countBuilder = builderAt(1);
+      expect(countBuilder.setParameter).toHaveBeenCalledWith(
+        'today',
+        '2026-07-02',
+      );
+      expect(countBuilder.andWhere.mock.calls).toEqual([
+        [LEAD_SEARCH_SQL, { term: '%ana%' }],
+        ['lead.type = :type', { type: 'dj' }],
+      ]);
+      expect(page.dueCount).toBe(5);
+      expect(page.totalCount).toBe(11);
+    });
+
+    it('answers dueCount on a later page with the cursor day and no cursor filter', async () => {
+      stageCountRows = [{ stage: 'in_talks', count: '3', due_count: '2' }];
+      const cursor = encodeLeadCursor({
+        today: '2026-07-01',
+        dueRank: 1,
+        dueOn: null,
+        updatedAt: '2026-07-01T09:00:00.000001Z',
+        leadId: OTHER_LEAD_ID,
+      });
+
+      const page = await service.listLeads(
+        { cursor, stage: 'in_talks', due: 'true' },
+        new Date('2026-07-02T08:00:00Z'),
+      );
+
+      expect(builders).toHaveLength(2);
+      const countBuilder = builderAt(1);
+      expect(countBuilder.setParameter).toHaveBeenCalledWith(
+        'today',
+        '2026-07-01',
+      );
+      expect(countBuilder.andWhere).not.toHaveBeenCalled();
+      expect(countBuilder.where).not.toHaveBeenCalled();
+      expect(page.dueCount).toBe(2);
+    });
+
+    it('answers dueCount 0 when no lead matches', async () => {
+      const page = await service.listLeads({});
+
+      expect(page.dueCount).toBe(0);
+      expect(page.totalCount).toBe(0);
     });
 
     it('reads note counts, last entries and linked personas in one batch each', async () => {

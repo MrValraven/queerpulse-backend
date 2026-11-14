@@ -1,6 +1,7 @@
-import { ExecutionContext, RequestMethod } from '@nestjs/common';
+import { ExecutionContext, HttpStatus, RequestMethod } from '@nestjs/common';
 import {
   GUARDS_METADATA,
+  HTTP_CODE_METADATA,
   METHOD_METADATA,
   PATH_METADATA,
   ROUTE_ARGS_METADATA,
@@ -46,6 +47,7 @@ const HANDLER_NAMES = [
   'addNote',
   'editNote',
   'deleteNote',
+  'revertStageChange',
 ] as const;
 
 type HandlerName = (typeof HANDLER_NAMES)[number];
@@ -167,7 +169,14 @@ describe('AdminLeadsController routes', () => {
       ['addNote', RequestMethod.POST, ':id/entries'],
       ['editNote', RequestMethod.PATCH, ':id/entries/:entryId'],
       ['deleteNote', RequestMethod.DELETE, ':id/entries/:entryId'],
+      ['revertStageChange', RequestMethod.POST, ':id/entries/:entryId/revert'],
     ]);
+  });
+
+  it('answers 200 on a revert', () => {
+    expect(
+      Reflect.getMetadata(HTTP_CODE_METADATA, handlerOf('revertStageChange')),
+    ).toBe(HttpStatus.OK);
   });
 
   it('declares the literal routes before :id', () => {
@@ -185,7 +194,11 @@ describe('AdminLeadsController routes', () => {
   });
 
   it('binds no pipe to :id or :entryId', () => {
-    for (const handlerName of ['getLead', 'editNote'] as const) {
+    for (const handlerName of [
+      'getLead',
+      'editNote',
+      'revertStageChange',
+    ] as const) {
       const routeArguments = Object.values(
         Reflect.getMetadata(
           ROUTE_ARGS_METADATA,
@@ -198,7 +211,7 @@ describe('AdminLeadsController routes', () => {
           routeArgument.data === 'id' || routeArgument.data === 'entryId',
       );
 
-      expect(idArguments).toHaveLength(handlerName === 'editNote' ? 2 : 1);
+      expect(idArguments).toHaveLength(handlerName === 'getLead' ? 1 : 2);
       for (const routeArgument of routeArguments) {
         expect(routeArgument.pipes ?? []).toEqual([]);
       }
@@ -257,6 +270,7 @@ describe('AdminLeadsController delegation', () => {
     addNote: jest.Mock;
     editNote: jest.Mock;
     deleteNote: jest.Mock;
+    revertStageChange: jest.Mock;
   };
   let leadPersonaService: { searchPersonas: jest.Mock };
   let controller: AdminLeadsController;
@@ -274,6 +288,7 @@ describe('AdminLeadsController delegation', () => {
       addNote: jest.fn().mockResolvedValue(lead),
       editNote: jest.fn().mockResolvedValue(lead),
       deleteNote: jest.fn().mockResolvedValue(lead),
+      revertStageChange: jest.fn().mockResolvedValue(lead),
     };
     leadPersonaService = { searchPersonas: jest.fn() };
     controller = new AdminLeadsController(
@@ -289,6 +304,7 @@ describe('AdminLeadsController delegation', () => {
       nextCursor: null,
       stageCounts: {},
       totalCount: 0,
+      dueCount: 0,
     };
     leadsService.listLeads.mockResolvedValue(page);
     const query = { q: 'ana', stage: 'contacted', due: 'true' };
@@ -363,6 +379,22 @@ describe('AdminLeadsController delegation', () => {
     expect(added).toBe(lead);
     expect(edited).toBe(lead);
     expect(deleted).toBe(lead);
+  });
+
+  it('passes the ids and caller through on a stage change revert', async () => {
+    const reverted = await controller.revertStageChange(
+      LEAD_ID,
+      ENTRY_ID,
+      CALLER,
+    );
+
+    expect(leadEntriesService.revertStageChange).toHaveBeenCalledTimes(1);
+    expect(leadEntriesService.revertStageChange).toHaveBeenCalledWith(
+      LEAD_ID,
+      ENTRY_ID,
+      CALLER,
+    );
+    expect(reverted).toBe(lead);
   });
 
   it('passes q through on persona search', async () => {

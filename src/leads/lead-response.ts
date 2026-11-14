@@ -66,6 +66,9 @@ export interface LeadListPageDTO {
   stageCounts: Record<LeadStage, number>;
   /** The sum of `stageCounts`. */
   totalCount: number;
+  /** Leads in an open stage with `followUpOn` on or before the page's Lisbon
+   *  day, under the `q` and `type` filters only, like `stageCounts`. */
+  dueCount: number;
 }
 
 /** The staff member who wrote an entry. */
@@ -244,6 +247,18 @@ export function canEditLeadEntry(
   caller: LeadCaller,
 ): boolean {
   if (entry.kind !== 'note') return false;
+  // `CurrentUserData.role` is typed as text; it holds a `UserRole` value.
+  if ((caller.role as UserRole) === UserRole.Admin) return true;
+  return entry.authorId !== null && entry.authorId === caller.userId;
+}
+
+/** Whether the caller may revert an entry: they wrote it or they are an
+ *  Admin. An entry whose author account is gone is revertible
+ *  by an Admin only. The kind is checked by the caller. */
+export function canRevertLeadEntry(
+  entry: Pick<LeadEntry, 'authorId'>,
+  caller: LeadCaller,
+): boolean {
   // `CurrentUserData.role` is typed as text; it holds a `UserRole` value.
   if ((caller.role as UserRole) === UserRole.Admin) return true;
   return entry.authorId !== null && entry.authorId === caller.userId;

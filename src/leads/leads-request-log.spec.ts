@@ -17,6 +17,7 @@ describe('isLeadsRequest', () => {
     '/v1/admin/leads?q=ana',
     '/v1/admin/leads/due-count',
     `/v1/admin/leads/${LEAD_ID}/entries/${ENTRY_ID}`,
+    `/v1/admin/leads/${LEAD_ID}/entries/${ENTRY_ID}/revert`,
     '/V1/ADMIN/LEADS',
   ])('recognises the leads API path %s', (url) => {
     expect(isLeadsRequest(url)).toBe(true);
@@ -101,6 +102,9 @@ describe('redactLeadsPath', () => {
     );
     expect(
       redactLeadsPath(`/v1/admin/leads/${LEAD_ID}/entries/${ENTRY_ID}`),
+    ).toBe(`/v1/admin/leads/${REDACTED_LEADS_PATH}`);
+    expect(
+      redactLeadsPath(`/v1/admin/leads/${LEAD_ID}/entries/${ENTRY_ID}/revert`),
     ).toBe(`/v1/admin/leads/${REDACTED_LEADS_PATH}`);
     expect(redactLeadsPath('/v1/admin/leads')).toBe('/v1/admin/leads');
     expect(redactLeadsPath('/v1/events?q=a')).toBe('/v1/events?q=a');

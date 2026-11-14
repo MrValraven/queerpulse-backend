@@ -1,15 +1,20 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable } from '@nestjs/common';
 import { isUUID } from 'class-validator';
-import { DataSource, EntityManager } from 'typeorm';
+import { DataSource, EntityManager, FindOptionsSelect } from 'typeorm';
 import { LeadEntry } from './entities/lead-entry.entity';
 import { Lead } from './entities/lead.entity';
 import { normalizeNoteBody } from './lead-input';
 import {
   canEditLeadEntry,
+  canRevertLeadEntry,
   type LeadCaller,
   type LeadDTO,
 } from './lead-response';
-import { leadError } from './leads.constants';
+import {
+  LEAD_REVERT_WINDOW_MS,
+  leadError,
+  type LeadRevertRefusalReason,
+} from './leads.constants';
 import {
   leadCheckRefusal,
   LeadsService,
@@ -30,14 +35,21 @@ function noteTextOf(requestBody: unknown): unknown {
   return (requestBody as { body?: unknown }).body;
 }
 
+/** The 409 a revert answers for one failing check. */
+function revertRefusal(reason: LeadRevertRefusalReason): HttpException {
+  return leadError('LEAD_ENTRY_NOT_REVERTIBLE', { reason });
+}
+
 /**
- * Leads: the notes on a lead's entry log (add, edit, delete). Every refusal
- * goes through `leadError` in the contract's check order: the id shapes and
- * the note text are checked before any query, then the lead and the entry
- * are read inside the write's transaction with the lead row locked. Only
- * notes change, and only their author or an Admin changes them. Each write
- * stamps the lead's `updated_at` and answers the whole lead, read after the
- * commit. No note text is logged.
+ * Leads: the notes on a lead's entry log (add, edit, delete) and the revert
+ * of a recent stage change. Every refusal goes through `leadError` in the
+ * contract's check order: the id shapes and the note text are checked before
+ * any query, then the lead and the entry are read inside the write's
+ * transaction with the lead row locked. Notes change by their author or an
+ * Admin; a stage change is reverted by its author or an Admin while it is the
+ * newest one, the lead still sits in its stage and it is at most
+ * `LEAD_REVERT_WINDOW_MS` old. Each write stamps the lead's `updated_at` and
+ * answers the whole lead, read after the commit. No note text is logged.
  */
 @Injectable()
 export class LeadEntriesService {
@@ -124,6 +136,74 @@ export class LeadEntriesService {
     return this.leads.getLead(leadId, caller);
   }
 
+  /**
+   * Reverts a stage change: sets the lead back to the entry's `fromStage`,
+   * deletes the entry and stamps the lead's `updated_at`. The revert writes
+   * no entry of its own, so the log reads as if the change never happened.
+   * Check order: malformed lead id (`LEAD_NOT_FOUND`), malformed entry id
+   * (`LEAD_ENTRY_NOT_FOUND`), then inside one transaction with the leads
+   * table lock and the lead row lock: unknown lead (`LEAD_NOT_FOUND`), entry
+   * missing from this lead (`LEAD_ENTRY_NOT_FOUND`), then
+   * `LEAD_ENTRY_NOT_REVERTIBLE` with `reason` `not_stage_change`,
+   * `not_newest`, `stage_moved`, `not_yours`, `too_old`. An entry exactly
+   * `LEAD_REVERT_WINDOW_MS` old is still revertible. Two reverts of one entry
+   * queue on the table lock, and the second finds the entry gone and answers
+   * `LEAD_ENTRY_NOT_FOUND`.
+   */
+  async revertStageChange(
+    leadId: string,
+    entryId: string,
+    caller: LeadCaller,
+    now: Date = new Date(),
+  ): Promise<LeadDTO> {
+    if (!isUUID(leadId)) {
+      throw leadError('LEAD_NOT_FOUND');
+    }
+    if (!isUUID(entryId)) {
+      throw leadError('LEAD_ENTRY_NOT_FOUND');
+    }
+    await this.runNoteWrite(async (manager) => {
+      const lead = await this.lockLeadRow(manager, leadId, {
+        id: true,
+        stage: true,
+      });
+      const entry = await manager.findOne(LeadEntry, {
+        where: { id: entryId, leadId: lead.id },
+      });
+      if (!entry) {
+        throw leadError('LEAD_ENTRY_NOT_FOUND');
+      }
+      const fromStage = entry.fromStage;
+      if (entry.kind !== 'stage_changed' || fromStage === null) {
+        throw revertRefusal('not_stage_change');
+      }
+      const newestStageChange = await manager.findOne(LeadEntry, {
+        where: { leadId: lead.id, kind: 'stage_changed' },
+        select: { id: true },
+        order: { createdAt: 'DESC', id: 'DESC' },
+      });
+      if (newestStageChange?.id !== entry.id) {
+        throw revertRefusal('not_newest');
+      }
+      if (lead.stage !== entry.toStage) {
+        throw revertRefusal('stage_moved');
+      }
+      if (!canRevertLeadEntry(entry, caller)) {
+        throw revertRefusal('not_yours');
+      }
+      const entryAgeMs = now.getTime() - entry.createdAt.getTime();
+      if (entryAgeMs > LEAD_REVERT_WINDOW_MS) {
+        throw revertRefusal('too_old');
+      }
+      await manager.delete(LeadEntry, { id: entry.id });
+      await manager.update(Lead, lead.id, {
+        stage: fromStage,
+        updatedAt: () => 'now()',
+      });
+    });
+    return this.leads.getLead(leadId, caller, now);
+  }
+
   /** A malformed lead id answers `LEAD_NOT_FOUND`, then a malformed entry id
    *  answers `LEAD_NOTE_NOT_FOUND`, before any query. */
   private assertIdShapes(leadId: string, entryId: string): void {
@@ -144,16 +224,27 @@ export class LeadEntriesService {
     manager: EntityManager,
     leadId: string,
   ): Promise<string> {
+    const lead = await this.lockLeadRow(manager, leadId, { id: true });
+    return lead.id;
+  }
+
+  /** `lockLead` reading the given columns of the locked row, so a revert
+   *  reads the lead's stage under the same lock. */
+  private async lockLeadRow(
+    manager: EntityManager,
+    leadId: string,
+    select: FindOptionsSelect<Lead>,
+  ): Promise<Lead> {
     await manager.query(LOCK_LEADS_SQL);
     const lead = await manager.findOne(Lead, {
       where: { id: leadId },
-      select: { id: true },
+      select,
       lock: { mode: 'pessimistic_write' },
     });
     if (!lead) {
       throw leadError('LEAD_NOT_FOUND');
     }
-    return lead.id;
+    return lead;
   }
 
   /** The note the caller may change, in the contract order: the lead

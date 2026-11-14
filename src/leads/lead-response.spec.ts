@@ -10,6 +10,7 @@ import type { LeadEntry } from './entities/lead-entry.entity';
 import type { Lead } from './entities/lead.entity';
 import {
   canEditLeadEntry,
+  canRevertLeadEntry,
   type LeadCaller,
   type LeadPersonaSummaryRow,
   toLead,
@@ -289,6 +290,24 @@ describe('lead response shaping', () => {
         { kind: 'note', authorId: null },
         { userId: HOLDER_ID, role: UserRole.Moderator },
       ),
+    ).toBe(false);
+  });
+
+  it('lets the author or an Admin revert an entry', () => {
+    const ownStageChange = { authorId: HOLDER_ID };
+    const adminStageChange = { authorId: ADMIN_ID };
+    const orphanStageChange = { authorId: null };
+
+    expect(canRevertLeadEntry(ownStageChange, GRANT_HOLDER)).toBe(true);
+    expect(canRevertLeadEntry(adminStageChange, GRANT_HOLDER)).toBe(false);
+    expect(canRevertLeadEntry(ownStageChange, ADMIN)).toBe(true);
+    expect(canRevertLeadEntry(orphanStageChange, ADMIN)).toBe(true);
+    expect(canRevertLeadEntry(orphanStageChange, GRANT_HOLDER)).toBe(false);
+    expect(
+      canRevertLeadEntry(ownStageChange, {
+        userId: ADMIN_ID,
+        role: UserRole.Moderator,
+      }),
     ).toBe(false);
   });
 
