@@ -40,21 +40,24 @@ import { leadLinkKey } from './lead-link-key';
 import { LeadPersonaService } from './lead-persona.service';
 import {
   canEditLeadEntry,
-  type LeadAuthorProfileRow,
   type LeadCaller,
   type LeadDTO,
   type LeadEntryDTO,
   type LeadLinkedPersonaDTO,
   type LeadListPageDTO,
   type LeadPersonaRecord,
+  type LeadStaffProfileRow,
+  type LeadStaffSummaryDTO,
   toLead,
   toLeadEntry,
   toLeadEntryAuthor,
   toLeadLinkedPersona,
   toLeadListItem,
   toLeadPersona,
+  toLeadStaffSummary,
 } from './lead-response';
 import {
+  LEAD_LIST_ASSIGNEES_SHOWN,
   LEAD_PAGE_SIZE,
   LEAD_STAGES,
   type LeadRefusalCode,
@@ -107,6 +110,35 @@ export const LEAD_SEARCH_SQL = `(${foldedHaystack('lead', ['name', 'email'])} LI
 /** `$1` the page's lead ids. One row per lead with its note count and the
  *  time of its newest entry. */
 export const LEAD_ENTRY_STATS_SQL = `SELECT "lead_id", (COUNT(*) FILTER (WHERE "kind" = 'note'))::int AS "note_count", MAX("created_at") AS "last_entry_at" FROM "lead_entries" WHERE "lead_id" = ANY($1::uuid[]) GROUP BY "lead_id"`;
+
+/** A lead the caller is in charge of. `"lead"` is the leads alias and
+ *  `:callerId` binds the caller's id. */
+export const LEAD_ASSIGNED_TO_CALLER_SQL = `EXISTS (SELECT 1 FROM "lead_assignees" "mine" WHERE "mine"."lead_id" = "lead"."id" AND "mine"."user_id" = CAST(:callerId AS uuid))`;
+
+/** A lead nobody is in charge of. `"lead"` is the leads alias; no
+ *  parameter. */
+export const LEAD_UNASSIGNED_SQL = `NOT EXISTS (SELECT 1 FROM "lead_assignees" "anyone" WHERE "anyone"."lead_id" = "lead"."id")`;
+
+/** A lead the caller is in charge of or nobody is: the `me_or_unassigned`
+ *  view and the nav badge's set. `:callerId` binds the caller's id. */
+export const LEAD_MINE_OR_UNASSIGNED_SQL = `(${LEAD_ASSIGNED_TO_CALLER_SQL} OR ${LEAD_UNASSIGNED_SQL})`;
+
+/** `$1` the lead ids. Every assignee of those leads with their profile
+ *  columns (all null when the profile row is missing), grouped by lead in
+ *  assignment order. `photo_visible` gates the avatar. */
+export const LEAD_ASSIGNEE_ROWS_SQL = `SELECT "la"."lead_id", "la"."user_id", "p"."slug", "p"."first_name", "p"."last_name", "p"."avatar_url", "p"."photo_visible" FROM "lead_assignees" "la" LEFT JOIN "profiles" "p" ON "p"."user_id" = "la"."user_id" WHERE "la"."lead_id" = ANY($1::uuid[]) ORDER BY "la"."lead_id", "la"."assigned_at" ASC, "la"."user_id" ASC`;
+
+/** One row of `LEAD_ASSIGNEE_ROWS_SQL`. The profile columns are null when
+ *  the profile row is missing. */
+export interface LeadAssigneeRow {
+  lead_id: string;
+  user_id: string;
+  slug: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  avatar_url: string | null;
+  photo_visible: boolean | null;
+}
 
 /** Select alias of `LEAD_DUE_RANK_SQL` on the list page. */
 export const LEAD_DUE_RANK_ALIAS = 'due_rank';
@@ -198,6 +230,30 @@ function personaAvatarKeysOf(records: Iterable<LeadPersonaRecord>): string[] {
     .filter((avatarKey): avatarKey is string => Boolean(avatarKey));
 }
 
+/** The staff profile of an assignee row, or null when the profile join
+ *  found no row (`slug` is null). A null `photo_visible` reads as hidden. */
+function assigneeProfileOf(row: LeadAssigneeRow): LeadStaffProfileRow | null {
+  if (row.slug === null) {
+    return null;
+  }
+  return {
+    slug: row.slug,
+    firstName: row.first_name ?? '',
+    lastName: row.last_name ?? '',
+    avatarUrl: row.avatar_url,
+    photoVisible: row.photo_visible === true,
+  };
+}
+
+/** The avatar keys of assignee rows whose photo is visible, blanks dropped.
+ *  A hidden photo never reaches the crop batch. */
+function assigneeAvatarKeysOf(rows: Iterable<LeadAssigneeRow>): string[] {
+  return [...rows]
+    .filter((row) => row.photo_visible === true)
+    .map((row) => row.avatar_url)
+    .filter((avatarKey): avatarKey is string => Boolean(avatarKey));
+}
+
 /** Whether two link lists hold the same text in the same order. */
 function hasSameLinks(first: string[], second: string[]): boolean {
   return (
@@ -232,10 +288,13 @@ export class LeadsService {
   /** One page of the list, due follow-ups first. The filters are checked
    *  before any query. A cursor carries the Lisbon day its first page read,
    *  so a later page keeps that page's order across midnight. The stage
-   *  counts and `dueCount` read the `q` and `type` filters only, in one
-   *  grouped query, against the same day the page reads. */
+   *  counts and `dueCount` read the `q`, `type` and `assignedTo` filters
+   *  only, in one grouped query, against the same day the page reads. The
+   *  caller's id binds the `assignedTo` views. Every assignee of the page
+   *  comes from one query. */
   async listLeads(
     query: ListLeadsQuery,
+    caller: LeadCaller,
     now: Date = new Date(),
   ): Promise<LeadListPageDTO> {
     const filters = normalizeLeadListFilters(query);
@@ -245,7 +304,7 @@ export class LeadsService {
     const pageQuery = manager
       .createQueryBuilder(Lead, 'lead')
       .setParameter('today', today);
-    this.applyLeadFilters(pageQuery, filters);
+    this.applyLeadFilters(pageQuery, filters, caller.userId);
     if (filters.stage !== null) {
       pageQuery.andWhere('lead.stage = :stage', { stage: filters.stage });
     }
@@ -274,7 +333,7 @@ export class LeadsService {
     const countQuery = manager
       .createQueryBuilder(Lead, 'lead')
       .setParameter('today', today);
-    this.applyLeadFilters(countQuery, filters);
+    this.applyLeadFilters(countQuery, filters, caller.userId);
     const countRows = await countQuery
       .select('lead.stage', 'stage')
       .addSelect('COUNT(*)::int', 'count')
@@ -325,18 +384,27 @@ export class LeadsService {
             pageIds,
           ]);
     const statsByLeadId = new Map(statsRows.map((row) => [row.lead_id, row]));
+    const assigneeRowsByLeadId = await this.loadAssigneeRows(manager, pageIds);
+    const shownAssigneeRows = pageIds.flatMap((pageId) =>
+      (assigneeRowsByLeadId.get(pageId) ?? []).slice(
+        0,
+        LEAD_LIST_ASSIGNEES_SHOWN,
+      ),
+    );
     const linkedIds = pageLeads
       .map((lead) => lead.linkedSubprofileId)
       .filter((subprofileId): subprofileId is string => subprofileId !== null);
     const personaRecords = await this.leadPersonas.loadPersonaRecords([
       ...new Set(linkedIds),
     ]);
-    const crops = await this.mediaCropService.getMany(
-      personaAvatarKeysOf(personaRecords.values()),
-    );
+    const crops = await this.mediaCropService.getMany([
+      ...personaAvatarKeysOf(personaRecords.values()),
+      ...assigneeAvatarKeysOf(shownAssigneeRows),
+    ]);
 
     const items = pageLeads.map((lead) => {
       const stats = statsByLeadId.get(lead.id);
+      const assigneeRows = assigneeRowsByLeadId.get(lead.id) ?? [];
       return toLeadListItem(
         lead,
         {
@@ -345,18 +413,31 @@ export class LeadsService {
         },
         this.linkedPersonaOf(lead, personaRecords, crops),
         today,
+        {
+          shown: this.assigneeSummariesOf(
+            assigneeRows.slice(0, LEAD_LIST_ASSIGNEES_SHOWN),
+            crops,
+          ),
+          count: assigneeRows.length,
+        },
       );
     });
     return { items, nextCursor, stageCounts, totalCount, dueCount };
   }
 
-  /** How many leads have a follow-up due on the Lisbon day of `now`: the
-   *  nav badge. */
-  async dueCount(now: Date = new Date()): Promise<{ count: number }> {
+  /** The nav badge: how many open leads have a follow-up due on the Lisbon
+   *  day of `now` and are the caller's or nobody's. Equal by construction to
+   *  the list's `dueCount` for `assignedTo=me_or_unassigned` with no `q` and
+   *  no `type`. */
+  async dueCount(
+    caller: LeadCaller,
+    now: Date = new Date(),
+  ): Promise<{ count: number }> {
     const count = await this.dataSource.manager
       .createQueryBuilder(Lead, 'lead')
       .setParameter('today', lisbonWallDay(now))
       .where(LEAD_IS_DUE_SQL)
+      .andWhere(LEAD_MINE_OR_UNASSIGNED_SQL, { callerId: caller.userId })
       .getCount();
     return { count };
   }
@@ -429,9 +510,10 @@ export class LeadsService {
     return this.getLead(leadId, caller, now);
   }
 
-  /** The whole lead with its entries newest first. One read each of the
-   *  lead, its entries, their authors' profiles, the personas they name
-   *  (with their takedowns) and the avatar crops. */
+  /** The whole lead with its entries newest first and its assignees in
+   *  assignment order. One read each of the lead, its entries, the profiles
+   *  of their authors and assignee subjects, the personas they name (with
+   *  their takedowns), the lead's assignees and the avatar crops. */
   async getLead(
     leadId: string,
     caller: LeadCaller,
@@ -450,13 +532,13 @@ export class LeadsService {
       order: { createdAt: 'DESC', id: 'DESC' },
     });
 
-    const authorIds = [
-      ...new Set(
-        entries
-          .map((entry) => entry.authorId)
-          .filter((authorId): authorId is string => authorId !== null),
-      ),
-    ];
+    const authorIds = entries
+      .map((entry) => entry.authorId)
+      .filter((authorId): authorId is string => authorId !== null);
+    const subjectIds = entries
+      .map((entry) => entry.subjectUserId)
+      .filter((subjectId): subjectId is string => subjectId !== null);
+    const profileUserIds = [...new Set([...authorIds, ...subjectIds])];
     const personaIds = [
       ...new Set(
         [
@@ -467,28 +549,34 @@ export class LeadsService {
         ),
       ),
     ];
-    const [profiles, personaRecords] = await Promise.all([
-      authorIds.length === 0
+    const [profiles, personaRecords, assigneeRowsByLeadId] = await Promise.all([
+      profileUserIds.length === 0
         ? Promise.resolve([] as Profile[])
         : manager.find(Profile, {
-            where: { userId: In(authorIds) },
+            where: { userId: In(profileUserIds) },
             select: {
               userId: true,
+              slug: true,
               firstName: true,
               lastName: true,
               avatarUrl: true,
+              photoVisible: true,
             },
           }),
       this.leadPersonas.loadPersonaRecords(personaIds),
+      this.loadAssigneeRows(manager, [lead.id]),
     ]);
-    const profileByUserId = new Map<string, LeadAuthorProfileRow>(
+    const assigneeRows = assigneeRowsByLeadId.get(lead.id) ?? [];
+    const profileByUserId = new Map<string, LeadStaffProfileRow>(
       profiles.map((profile) => [profile.userId, profile]),
     );
     const crops = await this.mediaCropService.getMany([
       ...personaAvatarKeysOf(personaRecords.values()),
       ...profiles
+        .filter((profile) => profile.photoVisible)
         .map((profile) => profile.avatarUrl)
         .filter((avatarKey): avatarKey is string => Boolean(avatarKey)),
+      ...assigneeAvatarKeysOf(assigneeRows),
     ]);
 
     const entryDTOs: LeadEntryDTO[] = entries.map((entry) => {
@@ -507,11 +595,20 @@ export class LeadsService {
       const persona = personaRecord
         ? toLeadPersona(personaRecord.row, crops)
         : null;
+      const subject =
+        entry.subjectUserId === null
+          ? null
+          : toLeadStaffSummary(
+              entry.subjectUserId,
+              profileByUserId.get(entry.subjectUserId) ?? null,
+              crops,
+            );
       return toLeadEntry(
         entry,
         author,
         persona,
         canEditLeadEntry(entry, caller),
+        subject,
       );
     });
     return toLead(
@@ -519,6 +616,7 @@ export class LeadsService {
       this.linkedPersonaOf(lead, personaRecords, crops),
       entryDTOs,
       lisbonWallDay(now),
+      this.assigneeSummariesOf(assigneeRows, crops),
     );
   }
 
@@ -735,10 +833,12 @@ export class LeadsService {
     return { ok: true };
   }
 
-  /** The search and type filters, shared by the page and the stage count. */
+  /** The search, type and `assignedTo` filters, shared by the page and the
+   *  stage count. `callerId` binds the `me` and `me_or_unassigned` views. */
   private applyLeadFilters(
     queryBuilder: SelectQueryBuilder<Lead>,
-    filters: Pick<LeadListFilters, 'term' | 'type'>,
+    filters: Pick<LeadListFilters, 'term' | 'type' | 'assignedTo'>,
+    callerId: string,
   ): void {
     if (filters.term) {
       queryBuilder.andWhere(LEAD_SEARCH_SQL, {
@@ -748,6 +848,48 @@ export class LeadsService {
     if (filters.type !== null) {
       queryBuilder.andWhere('lead.type = :type', { type: filters.type });
     }
+    if (filters.assignedTo === 'me') {
+      queryBuilder.andWhere(LEAD_ASSIGNED_TO_CALLER_SQL, { callerId });
+    } else if (filters.assignedTo === 'me_or_unassigned') {
+      queryBuilder.andWhere(LEAD_MINE_OR_UNASSIGNED_SQL, { callerId });
+    } else if (filters.assignedTo === 'unassigned') {
+      queryBuilder.andWhere(LEAD_UNASSIGNED_SQL);
+    }
+  }
+
+  /** Every assignee row of the given leads, keyed by lead id, each list in
+   *  the query's assignment order. No ids runs no query. */
+  private async loadAssigneeRows(
+    manager: EntityManager,
+    leadIds: string[],
+  ): Promise<Map<string, LeadAssigneeRow[]>> {
+    const rowsByLeadId = new Map<string, LeadAssigneeRow[]>();
+    if (leadIds.length === 0) {
+      return rowsByLeadId;
+    }
+    const rows = await manager.query<LeadAssigneeRow[]>(
+      LEAD_ASSIGNEE_ROWS_SQL,
+      [leadIds],
+    );
+    for (const row of rows) {
+      const leadRows = rowsByLeadId.get(row.lead_id);
+      if (leadRows) {
+        leadRows.push(row);
+      } else {
+        rowsByLeadId.set(row.lead_id, [row]);
+      }
+    }
+    return rowsByLeadId;
+  }
+
+  /** The staff summaries of assignee rows, in row order. */
+  private assigneeSummariesOf(
+    rows: LeadAssigneeRow[],
+    crops: Map<string, CropRect>,
+  ): LeadStaffSummaryDTO[] {
+    return rows.map((row) =>
+      toLeadStaffSummary(row.user_id, assigneeProfileOf(row), crops),
+    );
   }
 
   /** The linked persona of a lead with its public state, or null when it

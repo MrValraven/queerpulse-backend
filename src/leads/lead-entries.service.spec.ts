@@ -86,6 +86,7 @@ function buildEntry(overrides: Partial<LeadEntry> = {}): LeadEntry {
     toStage: null,
     subprofileId: null,
     authorId: HOLDER_ID,
+    subjectUserId: null,
     createdAt: new Date('2026-06-03T09:00:00.000Z'),
     editedAt: null,
     ...overrides,

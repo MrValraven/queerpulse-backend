@@ -8,6 +8,10 @@ import {
   CommunityMember,
   RosterRole,
 } from '../communities/entities/community-member.entity';
+import {
+  DROP_LEAD_ASSIGNMENTS_SQL,
+  LOCK_LEADS_OF_ASSIGNEE_SQL,
+} from '../leads/lead-assignee-access';
 import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
@@ -1169,6 +1173,132 @@ describe('AdminMembersService', () => {
 
       expect(ambassadorsService.releaseStaffSeat).not.toHaveBeenCalled();
     });
+
+    describe('lead assignments', () => {
+      /** The access hook's lock and DELETE calls on the transactional `query`. */
+      const dropCalls = (): unknown[] =>
+        transactionQuery.mock.calls.filter(
+          ([sql]: [unknown]) =>
+            sql === LOCK_LEADS_OF_ASSIGNEE_SQL ||
+            sql === DROP_LEAD_ASSIGNMENTS_SQL,
+        );
+      /** Where the first call of `sql` ran in the global call order. */
+      const firstCallOrderOf = (sql: string) =>
+        transactionQuery.mock.invocationCallOrder[
+          transactionQuery.mock.calls.findIndex(
+            ([calledSql]: [unknown]) => calledSql === sql,
+          )
+        ] ?? 0;
+
+      beforeEach(() => {
+        profiles.findOne.mockResolvedValue(makeProfile());
+      });
+
+      it('reads the role with the target', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Member,
+          isSystem: false,
+        });
+
+        await service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'magazine_editor',
+        );
+
+        expect(transactionUsers.findOne).toHaveBeenCalledWith(
+          expect.objectContaining({
+            select: ['id', 'role', 'isSystem'],
+            lock: { mode: 'pessimistic_read' },
+          }),
+        );
+      });
+
+      it('drops lead assignments in the transaction when a non-admin loses the music grant', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Member,
+          isSystem: false,
+        });
+        transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+
+        await service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'music_manager_producer',
+        );
+
+        expect(dropCalls()).toEqual([
+          [LOCK_LEADS_OF_ASSIGNEE_SQL, ['user-ines']],
+          [DROP_LEAD_ASSIGNMENTS_SQL, ['user-ines']],
+        ]);
+        const lockCallOrder = firstCallOrderOf(LOCK_LEADS_OF_ASSIGNEE_SQL);
+        const dropCallOrder = firstCallOrderOf(DROP_LEAD_ASSIGNMENTS_SQL);
+        const deleteCallOrder =
+          transactionStaffRoles.delete.mock.invocationCallOrder[0] ?? 0;
+        const holdingsReadCallOrder =
+          transactionStaffRoles.find.mock.invocationCallOrder[0] ?? 0;
+        expect(deleteCallOrder).toBeGreaterThan(0);
+        expect(lockCallOrder).toBeGreaterThan(deleteCallOrder);
+        expect(dropCallOrder).toBeGreaterThan(lockCallOrder);
+        expect(holdingsReadCallOrder).toBeGreaterThan(dropCallOrder);
+      });
+
+      it('runs the cleanup on a revoke that deleted nothing', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Member,
+          isSystem: false,
+        });
+        transactionStaffRoles.delete.mockResolvedValue({ affected: 0 });
+
+        await service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'music_manager_producer',
+        );
+
+        expect(dropCalls()).toEqual([
+          [LOCK_LEADS_OF_ASSIGNEE_SQL, ['user-ines']],
+          [DROP_LEAD_ASSIGNMENTS_SQL, ['user-ines']],
+        ]);
+      });
+
+      it('keeps the assignments of an admin when the grant goes', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Admin,
+          isSystem: false,
+        });
+        transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+
+        await service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'music_manager_producer',
+        );
+
+        expect(dropCalls()).toEqual([]);
+      });
+
+      it('leaves lead assignments alone when another grant goes', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Member,
+          isSystem: false,
+        });
+        transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+
+        await service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'magazine_editor',
+        );
+
+        expect(dropCalls()).toEqual([]);
+      });
+    });
   });
 
   describe('updateRole', () => {
@@ -1314,6 +1444,90 @@ describe('AdminMembersService', () => {
       await service.updateRole('user-admin', 'ines-martins', UserRole.Member);
 
       expect(transactionQuery).not.toHaveBeenCalled();
+    });
+
+    describe('lead assignments', () => {
+      /** The access hook's lock and DELETE calls on the transactional `query`. */
+      const dropCalls = (): unknown[] =>
+        transactionQuery.mock.calls.filter(
+          ([sql]: [unknown]) =>
+            sql === LOCK_LEADS_OF_ASSIGNEE_SQL ||
+            sql === DROP_LEAD_ASSIGNMENTS_SQL,
+        );
+
+      beforeEach(() => {
+        profiles.findOne.mockResolvedValue(makeProfile());
+      });
+
+      it('drops lead assignments inside the transaction when an admin leaves the admin tier', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Admin,
+          isSystem: false,
+        });
+
+        await service.updateRole('user-admin', 'ines-martins', UserRole.Member);
+
+        expect(dropCalls()).toEqual([
+          [LOCK_LEADS_OF_ASSIGNEE_SQL, ['user-ines']],
+          [DROP_LEAD_ASSIGNMENTS_SQL, ['user-ines']],
+        ]);
+        const dropCallOrder =
+          transactionQuery.mock.invocationCallOrder[
+            transactionQuery.mock.calls.findIndex(
+              ([sql]: [unknown]) => sql === DROP_LEAD_ASSIGNMENTS_SQL,
+            )
+          ] ?? 0;
+        const roleWriteCallOrder =
+          transactionUsers.update.mock.invocationCallOrder[0] ?? 0;
+        const auditSaveCallOrder =
+          transactionAuditLogs.save.mock.invocationCallOrder[0] ?? 0;
+        expect(roleWriteCallOrder).toBeGreaterThan(0);
+        expect(auditSaveCallOrder).toBeGreaterThan(0);
+        expect(dropCallOrder).toBeGreaterThan(roleWriteCallOrder);
+        expect(dropCallOrder).toBeGreaterThan(auditSaveCallOrder);
+      });
+
+      it('drops them when an admin becomes a moderator', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Admin,
+          isSystem: false,
+        });
+
+        await service.updateRole(
+          'user-admin',
+          'ines-martins',
+          UserRole.Moderator,
+        );
+
+        expect(dropCalls()).toEqual([
+          [LOCK_LEADS_OF_ASSIGNEE_SQL, ['user-ines']],
+          [DROP_LEAD_ASSIGNMENTS_SQL, ['user-ines']],
+        ]);
+      });
+
+      it('leaves lead assignments alone outside a move down from the admin tier', async () => {
+        const roleMoves: Array<[UserRole, UserRole]> = [
+          [UserRole.Member, UserRole.Admin],
+          [UserRole.Member, UserRole.Moderator],
+          [UserRole.Moderator, UserRole.Member],
+          [UserRole.Admin, UserRole.Admin],
+        ];
+
+        for (const [previousRole, targetRole] of roleMoves) {
+          transactionQuery.mockClear();
+          transactionUsers.findOne.mockResolvedValue({
+            id: 'user-ines',
+            role: previousRole,
+            isSystem: false,
+          });
+
+          await service.updateRole('user-admin', 'ines-martins', targetRole);
+
+          expect(dropCalls()).toEqual([]);
+        }
+      });
     });
   });
 

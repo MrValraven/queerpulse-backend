@@ -13,12 +13,15 @@ import {
   canRevertLeadEntry,
   type LeadCaller,
   type LeadPersonaSummaryRow,
+  type LeadStaffProfileRow,
+  type LeadStaffSummaryDTO,
   toLead,
   toLeadEntry,
   toLeadEntryAuthor,
   toLeadLinkedPersona,
   toLeadListItem,
   toLeadPersona,
+  toLeadStaffSummary,
 } from './lead-response';
 
 // Well-formed storage keys (`persona/<uuid>/<uuid><ext>`, `avatars/...`):
@@ -53,9 +56,26 @@ const ADMIN_ID = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const HOLDER_ID = '8b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e';
 const NOTE_ID = '9c3d4e5f-6a7b-4c8d-8e9f-1a2b3c4d5e6f';
 const CREATED_ENTRY_ID = 'ad4e5f6a-7b8c-4d9e-9f0a-2b3c4d5e6f7a';
+const USER_ID = 'cf5a6b7c-8d9e-4f0a-9b1c-4d5e6f7a8b9c';
+const TODAY = '2026-11-05';
+const STATS = {
+  noteCount: 0,
+  lastEntryAt: new Date('2026-11-04T18:30:00.000Z'),
+};
+const NO_ASSIGNEES = { shown: [], count: 0 };
 
 const ADMIN: LeadCaller = { userId: ADMIN_ID, role: UserRole.Admin };
 const GRANT_HOLDER: LeadCaller = { userId: HOLDER_ID, role: UserRole.Member };
+
+function summaryOf(userId: string): LeadStaffSummaryDTO {
+  return {
+    id: userId,
+    slug: `slug-${userId}`,
+    displayName: 'Ana Silva',
+    avatarUrl: null,
+    avatarCrop: null,
+  };
+}
 
 function personaRow(
   overrides: Partial<LeadPersonaSummaryRow> = {},
@@ -103,6 +123,8 @@ function entryRow(overrides: Partial<LeadEntry> = {}): LeadEntry {
     subprofile: null,
     authorId: HOLDER_ID,
     author: null,
+    subjectUserId: null,
+    subjectUser: null,
     createdAt: new Date('2026-11-02T12:00:00.000Z'),
     editedAt: null,
     ...overrides,
@@ -206,6 +228,7 @@ describe('lead response shaping', () => {
       { noteCount: 4, lastEntryAt },
       linkedPersona,
       '2026-11-05',
+      NO_ASSIGNEES,
     );
     expect(item).toEqual({
       id: LEAD_ID,
@@ -221,6 +244,8 @@ describe('lead response shaping', () => {
       noteCount: 4,
       lastEntryAt: '2026-11-04T18:30:00.123Z',
       updatedAt: '2026-11-04T18:30:00.000Z',
+      assignees: [],
+      assigneeCount: 0,
     });
     expect(Object.keys(item)).not.toContain('email');
     expect(Object.keys(item)).not.toContain('phone');
@@ -229,11 +254,17 @@ describe('lead response shaping', () => {
   it('reads the due flag from the stage and the day', () => {
     const stats = { noteCount: 0, lastEntryAt: new Date() };
     expect(
-      toLeadListItem(leadRow({ stage: 'on_board' }), stats, null, '2026-11-05')
-        .isFollowUpDue,
+      toLeadListItem(
+        leadRow({ stage: 'on_board' }),
+        stats,
+        null,
+        '2026-11-05',
+        NO_ASSIGNEES,
+      ).isFollowUpDue,
     ).toBe(false);
     expect(
-      toLeadListItem(leadRow(), stats, null, '2026-11-04').isFollowUpDue,
+      toLeadListItem(leadRow(), stats, null, '2026-11-04', NO_ASSIGNEES)
+        .isFollowUpDue,
     ).toBe(false);
   });
 
@@ -241,7 +272,12 @@ describe('lead response shaping', () => {
     expect(
       toLeadEntryAuthor(
         HOLDER_ID,
-        { firstName: 'Ana', lastName: '', avatarUrl: AUTHOR_AVATAR_KEY },
+        {
+          firstName: 'Ana',
+          lastName: '',
+          avatarUrl: AUTHOR_AVATAR_KEY,
+          photoVisible: true,
+        },
         CROPS,
       ),
     ).toEqual({
@@ -253,7 +289,12 @@ describe('lead response shaping', () => {
     expect(
       toLeadEntryAuthor(
         HOLDER_ID,
-        { firstName: 'Ana', lastName: 'Silva', avatarUrl: null },
+        {
+          firstName: 'Ana',
+          lastName: 'Silva',
+          avatarUrl: null,
+          photoVisible: true,
+        },
         CROPS,
       ).displayName,
     ).toBe('Ana Silva');
@@ -314,7 +355,12 @@ describe('lead response shaping', () => {
   it('maps every lead field and the entries in the given order', () => {
     const author = toLeadEntryAuthor(
       HOLDER_ID,
-      { firstName: 'Rui', lastName: 'Costa', avatarUrl: AUTHOR_AVATAR_KEY },
+      {
+        firstName: 'Rui',
+        lastName: 'Costa',
+        avatarUrl: AUTHOR_AVATAR_KEY,
+        photoVisible: true,
+      },
       CROPS,
     );
     const persona = toLeadPersona(personaRow(), CROPS);
@@ -327,6 +373,7 @@ describe('lead response shaping', () => {
       author,
       null,
       true,
+      null,
     );
     const linkedEntry = toLeadEntry(
       entryRow({
@@ -339,6 +386,7 @@ describe('lead response shaping', () => {
       author,
       persona,
       false,
+      null,
     );
     const createdEntry = toLeadEntry(
       entryRow({
@@ -352,12 +400,14 @@ describe('lead response shaping', () => {
       null,
       null,
       false,
+      null,
     );
     const lead = toLead(
       leadRow({ links: ['https://instagram.com/ana', 'https://a.org/press'] }),
       linkedPersona,
       [noteEntry, linkedEntry, createdEntry],
       '2026-11-05',
+      [],
     );
     expect(lead).toEqual({
       id: LEAD_ID,
@@ -385,6 +435,7 @@ describe('lead response shaping', () => {
           createdAt: '2026-11-02T12:00:00.000Z',
           editedAt: '2026-11-03T08:00:00.000Z',
           canEdit: true,
+          subject: null,
         },
         {
           id: 'be5f6a7b-8c9d-4e0f-8a1b-3c4d5e6f7a8b',
@@ -397,6 +448,7 @@ describe('lead response shaping', () => {
           createdAt: '2026-10-20T12:00:00.000Z',
           editedAt: null,
           canEdit: false,
+          subject: null,
         },
         {
           id: CREATED_ENTRY_ID,
@@ -409,10 +461,13 @@ describe('lead response shaping', () => {
           createdAt: '2026-10-01T09:00:00.000Z',
           editedAt: null,
           canEdit: false,
+          subject: null,
         },
       ],
+      assignees: [],
     });
     expect(Object.keys(lead).sort()).toEqual([
+      'assignees',
       'createdAt',
       'email',
       'entries',
@@ -432,8 +487,155 @@ describe('lead response shaping', () => {
 
   it('copies the links array so a later change to the row stays off the answer', () => {
     const row = leadRow({ links: ['https://a.org/1'] });
-    const lead = toLead(row, null, [], '2026-11-05');
+    const lead = toLead(row, null, [], '2026-11-05', []);
     row.links.push('https://a.org/2');
     expect(lead.links).toEqual(['https://a.org/1']);
+  });
+
+  it('builds a staff summary from five profile columns only', () => {
+    const profile = {
+      slug: 'ana-r',
+      firstName: 'Ana',
+      lastName: ' ',
+      avatarUrl: AVATAR_KEY,
+      photoVisible: true,
+      email: 'x@y.pt',
+      bio: 'b',
+    } as LeadStaffProfileRow;
+    const summary = toLeadStaffSummary(
+      USER_ID,
+      profile,
+      new Map([[AVATAR_KEY, AVATAR_CROP]]),
+    );
+    expect(Object.keys(summary).sort()).toEqual([
+      'avatarCrop',
+      'avatarUrl',
+      'displayName',
+      'id',
+      'slug',
+    ]);
+    expect(summary).toEqual({
+      id: USER_ID,
+      slug: 'ana-r',
+      displayName: 'Ana',
+      avatarUrl: toImageUrl(AVATAR_KEY),
+      avatarCrop: AVATAR_CROP,
+    });
+  });
+
+  it('answers an empty summary when the profile row is missing', () => {
+    expect(toLeadStaffSummary(USER_ID, null, new Map())).toEqual({
+      id: USER_ID,
+      slug: '',
+      displayName: '',
+      avatarUrl: null,
+      avatarCrop: null,
+    });
+  });
+
+  it('drops the crop of an avatar that resolves to no url', () => {
+    expect(
+      toLeadStaffSummary(
+        USER_ID,
+        {
+          slug: 's',
+          firstName: 'A',
+          lastName: 'B',
+          avatarUrl: '',
+          photoVisible: true,
+        },
+        new Map([['', AVATAR_CROP]]),
+      ),
+    ).toMatchObject({ avatarUrl: null, avatarCrop: null });
+  });
+
+  it('hides the avatar of a staff summary whose photo is hidden and keeps a shown one', () => {
+    const shownProfile: LeadStaffProfileRow = {
+      slug: 'ana-r',
+      firstName: 'Ana',
+      lastName: 'Silva',
+      avatarUrl: AVATAR_KEY,
+      photoVisible: true,
+    };
+    expect(
+      toLeadStaffSummary(
+        USER_ID,
+        { ...shownProfile, photoVisible: false },
+        CROPS,
+      ),
+    ).toEqual({
+      id: USER_ID,
+      slug: 'ana-r',
+      displayName: 'Ana Silva',
+      avatarUrl: null,
+      avatarCrop: null,
+    });
+    expect(toLeadStaffSummary(USER_ID, shownProfile, CROPS)).toMatchObject({
+      avatarUrl: toImageUrl(AVATAR_KEY),
+      avatarCrop: AVATAR_CROP,
+    });
+  });
+
+  it('hides the avatar of an entry author whose photo is hidden and keeps a shown one', () => {
+    const shownProfile = {
+      firstName: 'Rui',
+      lastName: 'Costa',
+      avatarUrl: AUTHOR_AVATAR_KEY,
+      photoVisible: true,
+    };
+    expect(
+      toLeadEntryAuthor(
+        HOLDER_ID,
+        { ...shownProfile, photoVisible: false },
+        CROPS,
+      ),
+    ).toEqual({
+      id: HOLDER_ID,
+      displayName: 'Rui Costa',
+      avatarUrl: null,
+      avatarCrop: null,
+    });
+    expect(toLeadEntryAuthor(HOLDER_ID, shownProfile, CROPS)).toMatchObject({
+      avatarUrl: toImageUrl(AUTHOR_AVATAR_KEY),
+      avatarCrop: AUTHOR_CROP,
+    });
+  });
+
+  it('shows at most three assignees on a list row and counts them all', () => {
+    const five = [1, 2, 3, 4, 5].map((index) => summaryOf(`user-${index}`));
+    const item = toLeadListItem(leadRow(), STATS, null, TODAY, {
+      shown: five,
+      count: 5,
+    });
+    expect(item.assignees.map((assignee) => assignee.id)).toEqual([
+      'user-1',
+      'user-2',
+      'user-3',
+    ]);
+    expect(item.assigneeCount).toBe(5);
+    expect(
+      toLeadListItem(leadRow(), STATS, null, TODAY, { shown: [], count: 0 }),
+    ).toMatchObject({ assignees: [], assigneeCount: 0 });
+  });
+
+  it('carries the subject of an entry and every assignee of a lead', () => {
+    const subject = summaryOf(USER_ID);
+    expect(
+      toLeadEntry(
+        entryRow({
+          kind: 'assignee_added',
+          body: null,
+          subjectUserId: USER_ID,
+        }),
+        null,
+        null,
+        false,
+        subject,
+      ).subject,
+    ).toBe(subject);
+    expect(toLeadEntry(entryRow(), null, null, true, null).subject).toBeNull();
+    expect(toLead(leadRow(), null, [], TODAY, [subject]).assignees).toEqual([
+      subject,
+    ]);
   });
 });

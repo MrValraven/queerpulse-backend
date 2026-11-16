@@ -1,14 +1,20 @@
 import { HttpStatus } from '@nestjs/common';
 import {
   DEFAULT_LEAD_STAGE,
+  LEAD_ACCESS_STAFF_ROLE,
+  LEAD_ASSIGNED_TO_FILTERS,
+  LEAD_ASSIGNEE_NOT_STAFF_MESSAGES,
+  LEAD_ASSIGNEE_REFUSAL_REASONS,
   LEAD_EMAIL_MAX,
   LEAD_ENTRY_KINDS,
   LEAD_FOLLOW_UP_MAX,
   LEAD_FOLLOW_UP_MIN,
   LEAD_LINK_MAX,
   LEAD_LINKS_MAX,
+  LEAD_LIST_ASSIGNEES_SHOWN,
   LEAD_LIST_LINKS_SHOWN,
   LEAD_LOCATION_MAX,
+  LEAD_MAX_ASSIGNEES,
   LEAD_NAME_MAX,
   LEAD_NOTE_MAX,
   LEAD_PAGE_SIZE,
@@ -19,6 +25,8 @@ import {
   LEAD_REVERT_REFUSAL_REASONS,
   LEAD_REVERT_WINDOW_MS,
   LEAD_SEARCH_QUERY_MAX,
+  LEAD_STAFF_PREVIEW_LIMIT,
+  LEAD_STAFF_SEARCH_LIMIT,
   LEAD_STAGES,
   LEAD_TIME_ZONE,
   LEAD_TYPES,
@@ -56,6 +64,10 @@ describe('leadError', () => {
     ['LEAD_ENTRY_NOT_FOUND', 404],
     ['LEAD_ENTRY_NOT_REVERTIBLE', 409],
     ['LEAD_CURSOR_INVALID', 400],
+    ['LEAD_ASSIGNED_TO_INVALID', 400],
+    ['LEAD_ASSIGNEE_NOT_FOUND', 404],
+    ['LEAD_ASSIGNEE_NOT_STAFF', 400],
+    ['LEAD_TOO_MANY_ASSIGNEES', 409],
   ] as const)(
     'answers %s with status %i and the code in the body',
     (code, status) => {
@@ -154,7 +166,7 @@ describe('leadError', () => {
     }
     expect(
       new Set(Object.values(LEAD_REFUSALS).map(({ message }) => message)).size,
-    ).toBe(25);
+    ).toBe(29);
   });
 
   it.each(LEAD_REVERT_REFUSAL_REASONS)(
@@ -193,6 +205,96 @@ describe('leadError', () => {
   });
 });
 
+describe('leadError assignee refusals', () => {
+  it.each(LEAD_ASSIGNEE_REFUSAL_REASONS)(
+    'names the reason %s on LEAD_ASSIGNEE_NOT_STAFF',
+    (reason) => {
+      expect(
+        leadError('LEAD_ASSIGNEE_NOT_STAFF', { reason }).getResponse(),
+      ).toEqual({
+        statusCode: 400,
+        message: LEAD_ASSIGNEE_NOT_STAFF_MESSAGES[reason],
+        code: 'LEAD_ASSIGNEE_NOT_STAFF',
+        reason,
+      });
+    },
+  );
+
+  it('keeps the table message on LEAD_ASSIGNEE_NOT_STAFF with no reason', () => {
+    expect(leadError('LEAD_ASSIGNEE_NOT_STAFF').getResponse()).toEqual({
+      statusCode: 400,
+      message: 'This person cannot be put in charge of a lead.',
+      code: 'LEAD_ASSIGNEE_NOT_STAFF',
+    });
+  });
+
+  it('reads each reason table only for its own code', () => {
+    expect(
+      (
+        leadError('LEAD_ENTRY_NOT_REVERTIBLE', {
+          reason: 'no_access',
+        }).getResponse() as { message: string }
+      ).message,
+    ).toBe(LEAD_REFUSALS.LEAD_ENTRY_NOT_REVERTIBLE.message);
+    expect(
+      (
+        leadError('LEAD_ASSIGNEE_NOT_STAFF', {
+          reason: 'too_old',
+        }).getResponse() as { message: string }
+      ).message,
+    ).toBe(LEAD_REFUSALS.LEAD_ASSIGNEE_NOT_STAFF.message);
+  });
+
+  it('answers a malformed assignee id with 400 and the same code', () => {
+    const error = leadError('LEAD_ASSIGNEE_NOT_FOUND', {
+      status: HttpStatus.BAD_REQUEST,
+    });
+    expect(error.getStatus()).toBe(400);
+    expect(error.getResponse()).toEqual({
+      statusCode: 400,
+      message: 'No account has this id.',
+      code: 'LEAD_ASSIGNEE_NOT_FOUND',
+    });
+  });
+
+  it('carries no extras on the other three new codes', () => {
+    const options = {
+      leadId: LEAD_ID,
+      leadName: 'Ana Dj',
+      index: 2,
+      reason: 'suspended',
+    } as const;
+    for (const code of [
+      'LEAD_ASSIGNED_TO_INVALID',
+      'LEAD_ASSIGNEE_NOT_FOUND',
+      'LEAD_TOO_MANY_ASSIGNEES',
+    ] as const) {
+      expect(
+        Object.keys(leadError(code, options).getResponse() as object).sort(),
+      ).toEqual(['code', 'message', 'statusCode']);
+    }
+  });
+
+  it('names the cap in the too many message', () => {
+    expect(LEAD_REFUSALS.LEAD_TOO_MANY_ASSIGNEES.message).toBe(
+      'A lead can have at most 10 people in charge.',
+    );
+    expect(LEAD_REFUSALS.LEAD_ASSIGNED_TO_INVALID.message).toBe(
+      'The assignedTo filter must be me, me_or_unassigned or unassigned.',
+    );
+  });
+
+  it('gives every assignee reason its own message', () => {
+    const messages = Object.values(LEAD_ASSIGNEE_NOT_STAFF_MESSAGES);
+    expect(new Set(messages).size).toBe(LEAD_ASSIGNEE_REFUSAL_REASONS.length);
+    for (const message of messages) {
+      expect(
+        Object.values(LEAD_REFUSALS).map((refusal) => refusal.message),
+      ).not.toContain(message);
+    }
+  });
+});
+
 describe('lead constants', () => {
   it('match the contract', () => {
     expect(LEAD_TYPES).toEqual([
@@ -219,7 +321,30 @@ describe('lead constants', () => {
       'persona_linked',
       'persona_unlinked',
       'created',
+      'assignee_added',
+      'assignee_removed',
+      'assignee_access_ended',
     ]);
+    expect([
+      LEAD_MAX_ASSIGNEES,
+      LEAD_STAFF_PREVIEW_LIMIT,
+      LEAD_STAFF_SEARCH_LIMIT,
+      LEAD_LIST_ASSIGNEES_SHOWN,
+    ]).toEqual([10, 5, 20, 3]);
+    expect(LEAD_ASSIGNED_TO_FILTERS).toEqual([
+      'me',
+      'me_or_unassigned',
+      'unassigned',
+    ]);
+    expect(LEAD_ASSIGNEE_REFUSAL_REASONS).toEqual([
+      'no_access',
+      'suspended',
+      'deactivated',
+    ]);
+    expect(LEAD_ACCESS_STAFF_ROLE).toBe('music_manager_producer');
+    expect(
+      Math.max(...LEAD_ENTRY_KINDS.map((kind) => kind.length)),
+    ).toBeLessThanOrEqual(32);
     expect([
       LEAD_NAME_MAX,
       LEAD_LOCATION_MAX,

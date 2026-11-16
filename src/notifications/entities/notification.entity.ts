@@ -2073,6 +2073,24 @@ export enum NotificationType {
    * See migration `AddStudioPurchaseNotificationTypes1838000100000`.
    */
   StudioPurchaseExpired = 'studio_purchase_expired',
+
+  /**
+   * Leads. Somebody else put this staff member in charge of a lead.
+   *
+   * RECIPIENTS: the staff member someone else put in charge of a lead.
+   *
+   * ACTOR: `assignedById`, resolved for the bell. The emit site passes no
+   * `actorId` argument, so a mute never silences it while a block hides the
+   * row at read time.
+   *
+   * PAYLOAD: `{ leadId, assignedById }` and nothing about the lead itself
+   * (name, email, notes), since the bell can show on a locked phone.
+   *
+   * UNBUNDLED and always delivered; in-app only, with no push and no email.
+   *
+   * See migration `AddLeadAssignees1840300000000`.
+   */
+  LeadAssigned = 'lead_assigned',
 }
 
 @Entity('notifications')

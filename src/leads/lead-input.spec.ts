@@ -1,6 +1,7 @@
 import { HttpException } from '@nestjs/common';
 import { encodeLeadCursor } from './lead-cursor';
 import {
+  isLeadAssignedToFilter,
   isLeadFollowUpDue,
   isLeadStage,
   isLeadType,
@@ -10,6 +11,7 @@ import {
   normalizeLeadListFilters,
   normalizeLeadUpdate,
   normalizeNoteBody,
+  normalizeSearchTerm,
   sanitizeLeadText,
 } from './lead-input';
 
@@ -438,6 +440,7 @@ describe('normalizeLeadListFilters', () => {
       term: '',
       stage: null,
       type: null,
+      assignedTo: null,
       isDueOnly: false,
       cursor: null,
     });
@@ -485,9 +488,63 @@ describe('normalizeLeadListFilters', () => {
       term: 'ana',
       stage: 'in_talks',
       type: 'venue',
+      assignedTo: null,
       isDueOnly: false,
       cursor: position,
     });
+  });
+
+  it('checks list filters in the order stage, type, assignedTo, cursor', () => {
+    expect(listCodeOf({ stage: 'x', assignedTo: 'mine' })).toBe(
+      'LEAD_STAGE_INVALID',
+    );
+    expect(listCodeOf({ type: 'y', assignedTo: 'mine' })).toBe(
+      'LEAD_TYPE_INVALID',
+    );
+    expect(
+      codeOf(() =>
+        normalizeLeadListFilters({ assignedTo: 'mine', cursor: 'bad' }),
+      ),
+    ).toEqual({ code: 'LEAD_ASSIGNED_TO_INVALID', status: 400 });
+    expect(listCodeOf({ assignedTo: 'me', cursor: 'bad' })).toBe(
+      'LEAD_CURSOR_INVALID',
+    );
+  });
+
+  it('reads a blank or absent assignedTo as everyone', () => {
+    expect(normalizeLeadListFilters({}).assignedTo).toBeNull();
+    expect(normalizeLeadListFilters({ assignedTo: '' }).assignedTo).toBeNull();
+    expect(
+      normalizeLeadListFilters({ assignedTo: '  ' }).assignedTo,
+    ).toBeNull();
+  });
+
+  it('accepts the three views, trimmed', () => {
+    expect(normalizeLeadListFilters({ assignedTo: 'me' }).assignedTo).toBe(
+      'me',
+    );
+    expect(
+      normalizeLeadListFilters({ assignedTo: ' me_or_unassigned ' }).assignedTo,
+    ).toBe('me_or_unassigned');
+    expect(
+      normalizeLeadListFilters({ assignedTo: 'unassigned' }).assignedTo,
+    ).toBe('unassigned');
+  });
+
+  it('refuses a repeated, cased or unknown view', () => {
+    for (const assignedTo of [['me'], ['me', 'me'], 'ME', 'mine', 5, null]) {
+      expect(codeOf(() => normalizeLeadListFilters({ assignedTo }))).toEqual({
+        code: 'LEAD_ASSIGNED_TO_INVALID',
+        status: 400,
+      });
+    }
+  });
+
+  it('exports the list search normaliser', () => {
+    expect(normalizeSearchTerm(' ana ')).toBe('ana');
+    expect(normalizeSearchTerm(['a', 'b'])).toBe('');
+    expect(normalizeSearchTerm(5)).toBe('');
+    expect(normalizeSearchTerm('🌈'.repeat(150))).toBe('🌈'.repeat(100));
   });
 });
 
@@ -515,6 +572,9 @@ describe('lead guards', () => {
     expect(isLeadStage('done')).toBe(false);
     expect(isOpenLeadStage('in_talks')).toBe(true);
     expect(isOpenLeadStage('on_board')).toBe(false);
+    expect(isLeadAssignedToFilter('me_or_unassigned')).toBe(true);
+    expect(isLeadAssignedToFilter(' me')).toBe(false);
+    expect(isLeadAssignedToFilter(['me'])).toBe(false);
   });
 });
 

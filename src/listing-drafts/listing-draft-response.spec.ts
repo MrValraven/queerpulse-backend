@@ -4,6 +4,7 @@ import {
   deriveListingDraftName,
   toAdminListingDraftDetailDTO,
   toAdminListingDraftDTO,
+  toListingDraftSummaryDTO,
 } from './listing-draft-response';
 
 const createdAt = new Date('2026-09-01T10:00:00.000Z');
@@ -52,6 +53,43 @@ describe('deriveListingDraftName', () => {
     expect(deriveListingDraftName({ step: 0, draft: { name: ' ' } })).toBe(
       'Untitled listing',
     );
+  });
+});
+
+describe('toListingDraftSummaryDTO', () => {
+  it('carries the id, name, step and update time', () => {
+    expect(
+      toListingDraftSummaryDTO(
+        draftRow({ step: 3, draft: { name: 'Café Rosa' } }),
+      ),
+    ).toEqual({
+      id: 'draft-1',
+      name: 'Café Rosa',
+      step: 3,
+      updatedAt: updatedAt.toISOString(),
+    });
+  });
+
+  it('reads a payload with no step as step 0', () => {
+    expect(
+      toListingDraftSummaryDTO(draftRow({ draft: { name: 'x' } })).step,
+    ).toBe(0);
+  });
+
+  it.each([
+    ['a negative step', { step: -2, draft: {} }],
+    ['a fractional step', { step: 2.5, draft: {} }],
+    ['a string step', { step: '4', draft: {} }],
+  ])('reads %s as step 0', (_label, payload) => {
+    expect(toListingDraftSummaryDTO(draftRow(payload)).step).toBe(0);
+  });
+
+  it('leaves the payload and resume token off the row', () => {
+    const serialised = JSON.stringify(
+      toListingDraftSummaryDTO(draftRow(wizardPayload)),
+    );
+    expect(serialised).not.toContain('secret-token');
+    expect(serialised).not.toContain('Private bio');
   });
 });
 

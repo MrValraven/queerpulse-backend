@@ -33,12 +33,15 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import {
+  AssignLeadStaffDto,
   CreateLeadDto,
   LeadNoteDto,
   LeadPersonaSearchQuery,
+  LeadStaffSearchQuery,
   ListLeadsQuery,
   UpdateLeadDto,
 } from './dto/leads.dto';
+import { LeadAssigneesService } from './lead-assignees.service';
 import { LeadEntriesService } from './lead-entries.service';
 import { LeadPersonaService } from './lead-persona.service';
 import { LeadsService } from './leads.service';
@@ -64,8 +67,11 @@ const LEAD_FIELD_CODES =
  * lead, and every refusal carries a `code`:
  *
  *   GET    admin/leads                            one list page
- *   GET    admin/leads/due-count                  follow-ups due today
+ *   GET    admin/leads/due-count                  nav badge count: open leads due
+ *                                                 today or earlier, assigned to
+ *                                                 the caller or to nobody
  *   GET    admin/leads/personas/search            persona picker, at most 20
+ *   GET    admin/leads/staff                      staff picker, at most 20
  *   POST   admin/leads                            add a lead
  *   GET    admin/leads/:id                        one lead with its entries
  *   PATCH  admin/leads/:id                        change a lead
@@ -75,11 +81,14 @@ const LEAD_FIELD_CODES =
  *   DELETE admin/leads/:id/entries/:entryId       delete a note
  *   POST   admin/leads/:id/entries/:entryId/revert
  *                                                  revert a stage change
+ *   POST   admin/leads/:id/assignees              put a staff member in charge
+ *   DELETE admin/leads/:id/assignees/:userId      take a staff member off
  *
  * Reason codes per route, in check order:
  *
  *   GET    /             LEAD_STAGE_INVALID, LEAD_TYPE_INVALID,
- *                        LEAD_CURSOR_INVALID
+ *                        LEAD_ASSIGNED_TO_INVALID, LEAD_CURSOR_INVALID
+ *   GET    staff         none (a blank `q` previews 5, the caller first)
  *   POST   /             the field codes, LEAD_NOTE_EMPTY, LEAD_NOTE_TOO_LONG,
  *                        LEAD_EMAIL_TAKEN, LEAD_LINK_TAKEN
  *   GET    :id           LEAD_NOT_FOUND
@@ -105,11 +114,20 @@ const LEAD_FIELD_CODES =
  *                        LEAD_ENTRY_NOT_FOUND, then LEAD_ENTRY_NOT_REVERTIBLE
  *                        with `reason` not_stage_change, not_newest,
  *                        stage_moved, not_yours, too_old
+ *   POST   :id/assignees LEAD_NOT_FOUND (malformed id),
+ *                        LEAD_ASSIGNEE_NOT_FOUND (400, malformed body id),
+ *                        LEAD_NOT_FOUND, LEAD_ASSIGNEE_NOT_FOUND (404),
+ *                        LEAD_ASSIGNEE_NOT_STAFF with `reason`,
+ *                        LEAD_TOO_MANY_ASSIGNEES
+ *   DELETE :id/assignees/:userId
+ *                        LEAD_NOT_FOUND (malformed id),
+ *                        LEAD_ASSIGNEE_NOT_FOUND (404, malformed user id),
+ *                        LEAD_NOT_FOUND
  *
- * `:id` and `:entryId` are plain strings: the services check the uuid shape
- * and answer the route's not-found code, so no pipe can answer a generic 400.
- * The literal `due-count` and `personas/search` routes are declared before
- * `:id` so Nest matches the literal.
+ * `:id`, `:entryId` and `:userId` are plain strings: the services check the
+ * uuid shape and answer the route's not-found code, so no pipe can answer a
+ * generic 400. The literal `due-count`, `personas/search` and `staff` routes
+ * are declared before `:id` so Nest matches the literal.
  */
 @ApiTags('Admin - Leads')
 @ApiCookieAuth()
@@ -127,13 +145,14 @@ export class AdminLeadsController {
     private readonly leads: LeadsService,
     private readonly leadEntries: LeadEntriesService,
     private readonly leadPersonas: LeadPersonaService,
+    private readonly leadAssignees: LeadAssigneesService,
   ) {}
 
   @Get()
   @ApiOperation({
     summary: 'List leads',
     description:
-      'One page of at most 50 leads, due follow-ups first, then the most recently changed. `stageCounts` and `totalCount` count every stage under the `q` and `type` filters, and `dueCount` counts the leads among them with a follow-up due today or earlier, read in Europe/Lisbon. Every page carries the three counts. Send `nextCursor` back as `cursor`, with the same filters, for the next page.',
+      'One page of at most 50 leads, due follow-ups first, then the most recently changed. `stageCounts` and `totalCount` count every stage under the `q`, `type` and `assignedTo` filters, and `dueCount` counts the leads among them with a follow-up due today or earlier, read in Europe/Lisbon. Every page carries the three counts. Send `nextCursor` back as `cursor`, with the same filters, for the next page.',
   })
   @ApiOkResponse({
     description:
@@ -141,21 +160,24 @@ export class AdminLeadsController {
   })
   @ApiBadRequestResponse({
     description:
-      'Code `LEAD_STAGE_INVALID`, `LEAD_TYPE_INVALID` or `LEAD_CURSOR_INVALID`, checked in this order.',
+      'Code `LEAD_STAGE_INVALID`, `LEAD_TYPE_INVALID`, `LEAD_ASSIGNED_TO_INVALID` or `LEAD_CURSOR_INVALID`, checked in this order.',
   })
-  listLeads(@Query() query: ListLeadsQuery) {
-    return this.leads.listLeads(query);
+  listLeads(
+    @Query() query: ListLeadsQuery,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.leads.listLeads(query, user);
   }
 
   @Get('due-count')
   @ApiOperation({
-    summary: 'Count leads with a follow-up due',
+    summary: 'Count the leads behind the nav badge',
     description:
-      'Leads in an open stage whose follow-up day is today or earlier, read in Europe/Lisbon.',
+      'Leads in an open stage whose follow-up day is today or earlier, read in Europe/Lisbon, that are assigned to the caller or to nobody.',
   })
   @ApiOkResponse({ description: '`{ count }`.' })
-  dueCount() {
-    return this.leads.dueCount();
+  dueCount(@CurrentUser() user: CurrentUserData) {
+    return this.leads.dueCount(user);
   }
 
   @Get('personas/search')
@@ -167,6 +189,20 @@ export class AdminLeadsController {
   @ApiOkResponse({ description: 'The matching personas.' })
   searchPersonas(@Query() query: LeadPersonaSearchQuery) {
     return this.leadPersonas.searchPersonas(query.q);
+  }
+
+  @Get('staff')
+  @ApiOperation({
+    summary: 'Search staff to put in charge of a lead',
+    description:
+      'Active people with Leads access, matched on first name, last name and slug. A blank `q` previews 5 people, the caller first; a typed `q` answers at most 20 matches, and a `q` over 100 characters is cut to its first 100.',
+  })
+  @ApiOkResponse({ description: '`{ items }`, the matching staff summaries.' })
+  searchStaff(
+    @Query() query: LeadStaffSearchQuery,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.leadAssignees.searchStaff(query.q, user);
   }
 
   @Post()
@@ -343,5 +379,52 @@ export class AdminLeadsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.leadEntries.revertStageChange(leadId, entryId, user);
+  }
+
+  @Post(':id/assignees')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Put a staff member in charge of a lead',
+    description:
+      'Adds the person to the lead assignees and writes an `assignee_added` entry. Assigning someone already in charge changes nothing. The person gets a notice unless they assigned themselves.',
+  })
+  @ApiOkResponse({ description: 'The refreshed lead with its entries.' })
+  @ApiBadRequestResponse({
+    description:
+      'Code `LEAD_ASSIGNEE_NOT_FOUND` when `userId` is missing or no uuid, or `LEAD_ASSIGNEE_NOT_STAFF` with `reason` `no_access`, `suspended` or `deactivated`.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Code `LEAD_NOT_FOUND` or `LEAD_ASSIGNEE_NOT_FOUND`: the lead is gone or its id is no uuid, or no account has the `userId`.',
+  })
+  @ApiConflictResponse({
+    description:
+      'Code `LEAD_TOO_MANY_ASSIGNEES`: the lead already has 10 people in charge.',
+  })
+  assignStaff(
+    @Param('id') leadId: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: AssignLeadStaffDto,
+  ) {
+    return this.leadAssignees.assign(leadId, user, body);
+  }
+
+  @Delete(':id/assignees/:userId')
+  @ApiOperation({
+    summary: 'Take a staff member off a lead',
+    description:
+      'Removes the person from the lead assignees and writes an `assignee_removed` entry. Removing someone who is not in charge changes nothing.',
+  })
+  @ApiOkResponse({ description: 'The refreshed lead with its entries.' })
+  @ApiNotFoundResponse({
+    description:
+      'Code `LEAD_NOT_FOUND` or `LEAD_ASSIGNEE_NOT_FOUND`: the lead is gone or its id is no uuid, or `:userId` is no uuid.',
+  })
+  unassignStaff(
+    @Param('id') leadId: string,
+    @Param('userId') userId: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.leadAssignees.unassign(leadId, userId, user);
   }
 }

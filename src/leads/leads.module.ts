@@ -3,21 +3,25 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofilesModule } from '../subprofiles/subprofiles.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { User } from '../users/entities/user.entity';
 import { AdminLeadsController } from './admin-leads.controller';
+import { LeadAssignee } from './entities/lead-assignee.entity';
 import { LeadEntry } from './entities/lead-entry.entity';
 import { Lead } from './entities/lead.entity';
+import { LeadAssigneesService } from './lead-assignees.service';
 import { LeadEntriesService } from './lead-entries.service';
 import { LeadPersonaService } from './lead-persona.service';
 import { LeadsService } from './leads.service';
 
 /**
- * The staff leads directory at `admin/leads`: one controller and three
- * services (lead reads and writes, notes, persona search and link checks).
+ * The staff leads directory at `admin/leads`: one controller and four
+ * services (lead reads and writes, notes, persona search and link checks,
+ * assignees).
  * Exports nothing; no other module reads leads, and the pseudonym unlink hook
  * (`lead-persona-unlink.ts`) runs raw SQL inside the unlink transaction.
  */
@@ -30,10 +34,11 @@ import { LeadsService } from './leads.service';
       // precedent as `LandingModule` and `HousingListingsModule`.
       UserStaffRole,
 
-      // The leads tables, plus the entities the three services read and
+      // The leads tables, plus the entities the four services read and
       // write inside their transactions.
       Lead,
       LeadEntry,
+      LeadAssignee,
       Subprofile,
       ModAuditLog,
       Profile,
@@ -45,8 +50,15 @@ import { LeadsService } from './leads.service';
     ContentModerationModule,
     // Exports `MediaCropService` (avatar crops).
     MediaCropsModule,
+    // Exports `NotificationsService` (the lead_assigned notice).
+    NotificationsModule,
   ],
   controllers: [AdminLeadsController],
-  providers: [LeadsService, LeadEntriesService, LeadPersonaService],
+  providers: [
+    LeadsService,
+    LeadEntriesService,
+    LeadPersonaService,
+    LeadAssigneesService,
+  ],
 })
 export class LeadsModule {}

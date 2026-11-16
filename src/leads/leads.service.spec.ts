@@ -14,6 +14,7 @@ import {
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
+import { LeadAssignee } from './entities/lead-assignee.entity';
 import { LeadEntry } from './entities/lead-entry.entity';
 import { Lead } from './entities/lead.entity';
 import {
@@ -25,18 +26,24 @@ import { LeadPersonaService } from './lead-persona.service';
 import type { LeadCaller, LeadPersonaRecord } from './lead-response';
 import {
   LEAD_AFTER_CURSOR_SQL,
+  LEAD_ASSIGNED_TO_CALLER_SQL,
+  LEAD_ASSIGNEE_ROWS_SQL,
   LEAD_DUE_COUNT_SQL,
   LEAD_DUE_ON_SQL,
   LEAD_DUE_RANK_SQL,
   LEAD_ENTRY_STATS_SQL,
   LEAD_IS_DUE_SQL,
+  LEAD_MINE_OR_UNASSIGNED_SQL,
   LEAD_SEARCH_SQL,
+  LEAD_UNASSIGNED_SQL,
+  type LeadAssigneeRow,
   LeadsService,
   LOCK_LEADS_SQL,
 } from './leads.service';
 
 const ADMIN_ID = 'd7400000-0000-4000-8000-000000000001';
 const HOLDER_ID = 'd7400000-0000-4000-8000-000000000002';
+const SUBJECT_ID = 'd7400000-0000-4000-8000-000000000003';
 const LEAD_ID = 'd7400000-0000-4000-8000-000000000011';
 const OTHER_LEAD_ID = 'd7400000-0000-4000-8000-000000000012';
 const PERSONA_ID = 'd7400000-0000-4000-8000-000000000021';
@@ -53,6 +60,10 @@ const SECOND_PERSONA_AVATAR_KEY =
   'persona/d7400000-0000-4000-8000-000000000022/d7400000-0000-4000-8000-000000000042.jpg';
 const PROFILE_AVATAR_KEY =
   'persona/d7400000-0000-4000-8000-000000000001/d7400000-0000-4000-8000-000000000043.jpg';
+/** A well-formed avatar key of the assignee at a position. */
+function assigneeAvatarKeyAt(position: number): string {
+  return `persona/d7400000-0000-4000-8000-00000000010${position}/d7400000-0000-4000-8000-00000000020${position}.jpg`;
+}
 const API_BASE_URL = 'https://api.example.test';
 
 const ADMIN: LeadCaller = { userId: ADMIN_ID, role: UserRole.Admin };
@@ -136,8 +147,29 @@ function buildEntry(overrides: Partial<LeadEntry> = {}): LeadEntry {
     toStage: null,
     subprofileId: null,
     authorId: ADMIN_ID,
+    subjectUserId: null,
     createdAt: new Date('2026-06-03T09:00:00.000Z'),
     editedAt: null,
+    ...overrides,
+  };
+}
+
+/** A v4 uuid for the assignee at a position. */
+function assigneeIdAt(position: number): string {
+  return `d7400000-0000-4000-8000-${String(100 + position).padStart(12, '0')}`;
+}
+
+function buildAssigneeRow(
+  overrides: Partial<LeadAssigneeRow> = {},
+): LeadAssigneeRow {
+  return {
+    lead_id: LEAD_ID,
+    user_id: HOLDER_ID,
+    slug: 'hal-holder',
+    first_name: 'Hal',
+    last_name: 'Holder',
+    avatar_url: null,
+    photo_visible: true,
     ...overrides,
   };
 }
@@ -215,6 +247,8 @@ describe('LeadsService', () => {
   let pageRaw: Record<string, unknown>[];
   let stageCountRows: { stage: string; count: string; due_count: string }[];
   let dueCountValue: number;
+  let statsRows: Record<string, unknown>[];
+  let assigneeRows: LeadAssigneeRow[];
   let storedLead: Lead | null;
   let storedEntries: LeadEntry[];
   let storedProfiles: Profile[];
@@ -273,6 +307,8 @@ describe('LeadsService', () => {
     pageRaw = [];
     stageCountRows = [];
     dueCountValue = 0;
+    statsRows = [];
+    assigneeRows = [];
     storedLead = buildLead();
     storedEntries = [];
     storedProfiles = [];
@@ -310,7 +346,15 @@ describe('LeadsService', () => {
       ),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
-      query: jest.fn().mockResolvedValue([]),
+      // Answers by SQL text: the stats and assignee reads get their rows,
+      // every other statement (the table lock) gets an empty list.
+      query: jest.fn((sql: string) => {
+        if (sql === LEAD_ENTRY_STATS_SQL) return Promise.resolve(statsRows);
+        if (sql === LEAD_ASSIGNEE_ROWS_SQL) {
+          return Promise.resolve(assigneeRows);
+        }
+        return Promise.resolve([]);
+      }),
       getRepository: jest.fn(() => auditRepository),
       createQueryBuilder: jest.fn(() => {
         const builder = buildQueryBuilder();
@@ -338,7 +382,7 @@ describe('LeadsService', () => {
 
   describe('listLeads', () => {
     it('binds the Lisbon day and orders due follow-ups first', async () => {
-      await service.listLeads({}, new Date('2026-07-01T23:30:00Z'));
+      await service.listLeads({}, ADMIN, new Date('2026-07-01T23:30:00Z'));
 
       expect(manager.createQueryBuilder).toHaveBeenNthCalledWith(
         1,
@@ -384,6 +428,7 @@ describe('LeadsService', () => {
       buildPage(51);
       const fullPage = await service.listLeads(
         {},
+        ADMIN,
         new Date('2026-07-01T23:30:00Z'),
       );
 
@@ -400,6 +445,7 @@ describe('LeadsService', () => {
       buildPage(50);
       const lastPage = await service.listLeads(
         {},
+        ADMIN,
         new Date('2026-07-01T23:30:00Z'),
       );
 
@@ -416,7 +462,11 @@ describe('LeadsService', () => {
         leadId: OTHER_LEAD_ID,
       });
 
-      await service.listLeads({ cursor }, new Date('2026-07-02T08:00:00Z'));
+      await service.listLeads(
+        { cursor },
+        ADMIN,
+        new Date('2026-07-02T08:00:00Z'),
+      );
 
       const pageBuilder = builderAt(0);
       expect(pageBuilder.setParameter).toHaveBeenCalledWith(
@@ -432,11 +482,15 @@ describe('LeadsService', () => {
     });
 
     it('refuses bad filters before any query', async () => {
-      expect(await codeOf(service.listLeads({ stage: 'x' }))).toMatchObject({
+      expect(
+        await codeOf(service.listLeads({ stage: 'x' }, ADMIN)),
+      ).toMatchObject({
         code: 'LEAD_STAGE_INVALID',
         status: 400,
       });
-      expect(await codeOf(service.listLeads({ cursor: 'bad' }))).toMatchObject({
+      expect(
+        await codeOf(service.listLeads({ cursor: 'bad' }, ADMIN)),
+      ).toMatchObject({
         code: 'LEAD_CURSOR_INVALID',
         status: 400,
       });
@@ -444,34 +498,37 @@ describe('LeadsService', () => {
     });
 
     it('narrows to due leads only for due=true', async () => {
-      await service.listLeads({ due: 'true' });
+      await service.listLeads({ due: 'true' }, ADMIN);
 
       expect(builderAt(0).andWhere).toHaveBeenCalledWith(LEAD_IS_DUE_SQL);
       expect(builderAt(1).andWhere).not.toHaveBeenCalledWith(LEAD_IS_DUE_SQL);
 
       builders = [];
-      await service.listLeads({ due: 'TRUE' });
+      await service.listLeads({ due: 'TRUE' }, ADMIN);
 
       expect(builderAt(0).andWhere).not.toHaveBeenCalledWith(LEAD_IS_DUE_SQL);
     });
 
     it('searches name, email and link text with escaped wildcards', async () => {
-      await service.listLeads({ q: ' 50%_off\\ ' });
+      await service.listLeads({ q: ' 50%_off\\ ' }, ADMIN);
 
       expect(builderAt(0).andWhere).toHaveBeenCalledWith(LEAD_SEARCH_SQL, {
         term: '%50\\%\\_off\\\\%',
       });
     });
 
-    it('counts every stage for q and type only', async () => {
+    it('counts every stage for the q, type and assignedTo filters while ignoring stage and due', async () => {
       stageCountRows = [{ stage: 'contacted', count: '2', due_count: '1' }];
 
-      const page = await service.listLeads({
-        q: 'ana',
-        type: 'dj',
-        stage: 'contacted',
-        due: 'true',
-      });
+      const page = await service.listLeads(
+        {
+          q: 'ana',
+          type: 'dj',
+          stage: 'contacted',
+          due: 'true',
+        },
+        ADMIN,
+      );
 
       expect(builders).toHaveLength(2);
       const countBuilder = builderAt(1);
@@ -516,6 +573,7 @@ describe('LeadsService', () => {
 
       const page = await service.listLeads(
         { q: 'ana', type: 'dj' },
+        ADMIN,
         new Date('2026-07-01T23:30:00Z'),
       );
 
@@ -547,6 +605,7 @@ describe('LeadsService', () => {
 
       const page = await service.listLeads(
         { cursor, stage: 'in_talks', due: 'true' },
+        ADMIN,
         new Date('2026-07-02T08:00:00Z'),
       );
 
@@ -562,7 +621,7 @@ describe('LeadsService', () => {
     });
 
     it('answers dueCount 0 when no lead matches', async () => {
-      const page = await service.listLeads({});
+      const page = await service.listLeads({}, ADMIN);
 
       expect(page.dueCount).toBe(0);
       expect(page.totalCount).toBe(0);
@@ -579,13 +638,13 @@ describe('LeadsService', () => {
         { due_rank: 1, cursor_updated_at: '2026-06-02T09:00:00.000000Z' },
         { due_rank: 1, cursor_updated_at: '2026-06-02T09:00:00.000000Z' },
       ];
-      manager.query.mockResolvedValue([
+      statsRows = [
         {
           lead_id: LEAD_ID,
           note_count: 3,
           last_entry_at: new Date('2026-06-05T10:00:00.000Z'),
         },
-      ]);
+      ];
       leadPersonas.loadPersonaRecords.mockResolvedValue(
         new Map([
           [PERSONA_ID, buildPersonaRecord(PERSONA_ID, PERSONA_AVATAR_KEY)],
@@ -594,11 +653,15 @@ describe('LeadsService', () => {
 
       const page = await service.listLeads(
         {},
+        ADMIN,
         new Date('2026-07-01T10:00:00Z'),
       );
 
-      expect(manager.query).toHaveBeenCalledTimes(1);
+      expect(manager.query).toHaveBeenCalledTimes(2);
       expect(manager.query).toHaveBeenCalledWith(LEAD_ENTRY_STATS_SQL, [
+        [LEAD_ID, OTHER_LEAD_ID],
+      ]);
+      expect(manager.query).toHaveBeenCalledWith(LEAD_ASSIGNEE_ROWS_SQL, [
         [LEAD_ID, OTHER_LEAD_ID],
       ]);
       expect(leadPersonas.loadPersonaRecords).toHaveBeenCalledTimes(1);
@@ -626,6 +689,178 @@ describe('LeadsService', () => {
         linkedPersona: null,
       });
     });
+
+    it('narrows to the caller for assignedTo=me on the page and the counts', async () => {
+      await service.listLeads({ assignedTo: 'me' }, ADMIN);
+
+      expect(builders).toHaveLength(2);
+      for (const builder of builders) {
+        expect(builder.andWhere).toHaveBeenCalledWith(
+          LEAD_ASSIGNED_TO_CALLER_SQL,
+          { callerId: ADMIN_ID },
+        );
+      }
+    });
+
+    it('narrows to unassigned leads with no caller bound', async () => {
+      await service.listLeads({ assignedTo: 'unassigned' }, ADMIN);
+
+      expect(builders).toHaveLength(2);
+      for (const builder of builders) {
+        const unassignedCalls = builder.andWhere.mock.calls.filter(
+          (call: unknown[]) => call[0] === LEAD_UNASSIGNED_SQL,
+        );
+        expect(unassignedCalls).toEqual([[LEAD_UNASSIGNED_SQL]]);
+        for (const method of Object.values(builder) as jest.Mock[]) {
+          expect(JSON.stringify(method.mock.calls)).not.toContain('callerId');
+        }
+      }
+    });
+
+    it('narrows to mine or unassigned', async () => {
+      await service.listLeads({ assignedTo: 'me_or_unassigned' }, ADMIN);
+
+      expect(builders).toHaveLength(2);
+      for (const builder of builders) {
+        expect(builder.andWhere).toHaveBeenCalledWith(
+          LEAD_MINE_OR_UNASSIGNED_SQL,
+          { callerId: ADMIN_ID },
+        );
+      }
+    });
+
+    it('adds no In charge clause for everyone', async () => {
+      await service.listLeads({}, ADMIN);
+      await service.listLeads({ assignedTo: '' }, ADMIN);
+
+      expect(builders).toHaveLength(4);
+      for (const builder of builders) {
+        const assigneeClauses = builder.andWhere.mock.calls.filter(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' && call[0].includes('lead_assignees'),
+        );
+        expect(assigneeClauses).toEqual([]);
+      }
+    });
+
+    it('refuses an unknown view before any query', async () => {
+      expect(
+        await codeOf(service.listLeads({ assignedTo: 'mine' }, ADMIN)),
+      ).toMatchObject({ code: 'LEAD_ASSIGNED_TO_INVALID', status: 400 });
+      expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('counts the badge set exactly as the list counts it', async () => {
+      const now = new Date('2026-07-01T23:30:00Z');
+
+      await service.listLeads(
+        { assignedTo: 'me_or_unassigned' },
+        GRANT_HOLDER,
+        now,
+      );
+      await service.dueCount(GRANT_HOLDER, now);
+
+      const countBuilder = builderAt(1);
+      const badgeBuilder = builderAt(2);
+      expect(countBuilder.andWhere).toHaveBeenCalledWith(
+        LEAD_MINE_OR_UNASSIGNED_SQL,
+        { callerId: HOLDER_ID },
+      );
+      expect(badgeBuilder.where).toHaveBeenCalledWith(LEAD_IS_DUE_SQL);
+      expect(badgeBuilder.andWhere).toHaveBeenCalledWith(
+        LEAD_MINE_OR_UNASSIGNED_SQL,
+        { callerId: HOLDER_ID },
+      );
+      expect(countBuilder.setParameter).toHaveBeenCalledWith(
+        'today',
+        '2026-07-02',
+      );
+      expect(badgeBuilder.setParameter).toHaveBeenCalledWith(
+        'today',
+        '2026-07-02',
+      );
+      expect(LEAD_DUE_COUNT_SQL).toContain(LEAD_IS_DUE_SQL);
+    });
+
+    it('reads every assignee of the page in one query and shows the first three', async () => {
+      pageLeads = [
+        buildLead({ id: LEAD_ID, linkedSubprofileId: PERSONA_ID }),
+        buildLead({ id: OTHER_LEAD_ID }),
+      ];
+      pageRaw = [
+        { due_rank: 1, cursor_updated_at: '2026-06-02T09:00:00.000000Z' },
+        { due_rank: 1, cursor_updated_at: '2026-06-02T09:00:00.000000Z' },
+      ];
+      assigneeRows = [
+        buildAssigneeRow({
+          user_id: assigneeIdAt(1),
+          avatar_url: assigneeAvatarKeyAt(1),
+        }),
+        buildAssigneeRow({
+          user_id: assigneeIdAt(2),
+          slug: null,
+          first_name: null,
+          last_name: null,
+          avatar_url: null,
+          photo_visible: null,
+        }),
+        buildAssigneeRow({
+          user_id: assigneeIdAt(3),
+          avatar_url: assigneeAvatarKeyAt(3),
+        }),
+        buildAssigneeRow({
+          user_id: assigneeIdAt(4),
+          avatar_url: assigneeAvatarKeyAt(4),
+        }),
+        buildAssigneeRow({
+          user_id: assigneeIdAt(5),
+          avatar_url: assigneeAvatarKeyAt(5),
+        }),
+      ];
+      leadPersonas.loadPersonaRecords.mockResolvedValue(
+        new Map([
+          [PERSONA_ID, buildPersonaRecord(PERSONA_ID, PERSONA_AVATAR_KEY)],
+        ]),
+      );
+
+      const page = await service.listLeads({}, ADMIN);
+
+      const assigneeReads = manager.query.mock.calls.filter(
+        (call: unknown[]) => call[0] === LEAD_ASSIGNEE_ROWS_SQL,
+      );
+      expect(assigneeReads).toEqual([
+        [LEAD_ASSIGNEE_ROWS_SQL, [[LEAD_ID, OTHER_LEAD_ID]]],
+      ]);
+      const firstItem = elementAt(page.items, 0);
+      expect(firstItem.assignees.map((assignee) => assignee.id)).toEqual([
+        assigneeIdAt(1),
+        assigneeIdAt(2),
+        assigneeIdAt(3),
+      ]);
+      expect(firstItem.assigneeCount).toBe(5);
+      expect(elementAt(firstItem.assignees, 1)).toEqual({
+        id: assigneeIdAt(2),
+        slug: '',
+        displayName: '',
+        avatarUrl: null,
+        avatarCrop: null,
+      });
+      expect(elementAt(firstItem.assignees, 0)).toMatchObject({
+        slug: 'hal-holder',
+        displayName: 'Hal Holder',
+        avatarUrl: `${API_BASE_URL}/files/${assigneeAvatarKeyAt(1)}`,
+      });
+      expect(elementAt(page.items, 1)).toMatchObject({
+        assignees: [],
+        assigneeCount: 0,
+      });
+      expect(mediaCropService.getMany).toHaveBeenCalledTimes(1);
+      expect(mediaCropService.getMany).toHaveBeenCalledWith([
+        PERSONA_AVATAR_KEY,
+        assigneeAvatarKeyAt(1),
+        assigneeAvatarKeyAt(3),
+      ]);
+    });
   });
 
   describe('dueCount', () => {
@@ -633,9 +868,11 @@ describe('LeadsService', () => {
       dueCountValue = 4;
 
       const beforeMidnight = await service.dueCount(
+        ADMIN,
         new Date('2026-07-01T22:59:59Z'),
       );
       const afterMidnight = await service.dueCount(
+        ADMIN,
         new Date('2026-07-01T23:00:00Z'),
       );
 
@@ -648,6 +885,10 @@ describe('LeadsService', () => {
         '2026-07-02',
       );
       expect(builderAt(0).where).toHaveBeenCalledWith(LEAD_IS_DUE_SQL);
+      expect(builderAt(0).andWhere).toHaveBeenCalledWith(
+        LEAD_MINE_OR_UNASSIGNED_SQL,
+        { callerId: ADMIN_ID },
+      );
       expect(beforeMidnight).toEqual({ count: 4 });
       expect(afterMidnight).toEqual({ count: 4 });
     });
@@ -818,6 +1059,28 @@ describe('LeadsService', () => {
       ).rejects.toBe(serializationFailure);
       expect(manager.findOne).not.toHaveBeenCalled();
     });
+
+    it('starts a new lead with nobody in charge', async () => {
+      const lead = await service.createLead(ADMIN, { name: 'Ana', type: 'dj' });
+
+      expect(lead.assignees).toEqual([]);
+      expect(
+        manager.save.mock.calls.filter(
+          (call: unknown[]) => call[0] === LeadAssignee,
+        ),
+      ).toEqual([]);
+      expect(
+        manager.create.mock.calls.filter(
+          (call: unknown[]) => call[0] === LeadAssignee,
+        ),
+      ).toEqual([]);
+      const assigneeInserts = manager.query.mock.calls.filter(
+        (call: unknown[]) =>
+          typeof call[0] === 'string' &&
+          /insert into "lead_assignees"/i.test(call[0]),
+      );
+      expect(assigneeInserts).toEqual([]);
+    });
   });
 
   describe('getLead', () => {
@@ -877,9 +1140,11 @@ describe('LeadsService', () => {
           where: { userId: In([ADMIN_ID, HOLDER_ID]) },
           select: {
             userId: true,
+            slug: true,
             firstName: true,
             lastName: true,
             avatarUrl: true,
+            photoVisible: true,
           },
         },
       ]);
@@ -927,6 +1192,7 @@ describe('LeadsService', () => {
           firstName: 'Ada',
           lastName: 'Admin',
           avatarUrl: PROFILE_AVATAR_KEY,
+          photoVisible: true,
         } as Profile,
       ];
       leadPersonas.loadPersonaRecords.mockResolvedValue(
@@ -963,6 +1229,158 @@ describe('LeadsService', () => {
         'publicState',
       );
       expect(elementAt(lead.entries, 1).persona).toBeNull();
+    });
+
+    describe('assignees and subjects', () => {
+      const adminProfile = {
+        userId: ADMIN_ID,
+        slug: 'ada-admin',
+        firstName: 'Ada',
+        lastName: 'Admin',
+        avatarUrl: PROFILE_AVATAR_KEY,
+        photoVisible: true,
+      } as Profile;
+      const holderProfile = {
+        userId: HOLDER_ID,
+        slug: 'hal-holder',
+        firstName: 'Hal',
+        lastName: 'Holder',
+        avatarUrl: null,
+        photoVisible: true,
+      } as Profile;
+
+      it('answers every assignee in assignment order', async () => {
+        storedLead = buildLead({ linkedSubprofileId: PERSONA_ID });
+        storedEntries = [buildEntry({ id: ENTRY_ID, authorId: ADMIN_ID })];
+        storedProfiles = [adminProfile];
+        leadPersonas.loadPersonaRecords.mockResolvedValue(
+          new Map([
+            [PERSONA_ID, buildPersonaRecord(PERSONA_ID, PERSONA_AVATAR_KEY)],
+          ]),
+        );
+        assigneeRows = [
+          buildAssigneeRow({
+            user_id: assigneeIdAt(3),
+            avatar_url: assigneeAvatarKeyAt(3),
+          }),
+          buildAssigneeRow({
+            user_id: assigneeIdAt(1),
+            avatar_url: assigneeAvatarKeyAt(1),
+            photo_visible: false,
+          }),
+          buildAssigneeRow({ user_id: assigneeIdAt(2) }),
+        ];
+
+        const lead = await service.getLead(LEAD_ID, ADMIN);
+
+        const assigneeReads = manager.query.mock.calls.filter(
+          (call: unknown[]) => call[0] === LEAD_ASSIGNEE_ROWS_SQL,
+        );
+        expect(assigneeReads).toEqual([[LEAD_ASSIGNEE_ROWS_SQL, [[LEAD_ID]]]]);
+        expect(lead.assignees.map((assignee) => assignee.id)).toEqual([
+          assigneeIdAt(3),
+          assigneeIdAt(1),
+          assigneeIdAt(2),
+        ]);
+        expect(elementAt(lead.assignees, 0).avatarUrl).toBe(
+          `${API_BASE_URL}/files/${assigneeAvatarKeyAt(3)}`,
+        );
+        expect(elementAt(lead.assignees, 1)).toMatchObject({
+          avatarUrl: null,
+          avatarCrop: null,
+        });
+        expect(mediaCropService.getMany).toHaveBeenCalledTimes(1);
+        expect(mediaCropService.getMany).toHaveBeenCalledWith([
+          PERSONA_AVATAR_KEY,
+          PROFILE_AVATAR_KEY,
+          assigneeAvatarKeyAt(3),
+        ]);
+      });
+
+      it('names the subject of assignee entries from the same profile read', async () => {
+        storedEntries = [
+          buildEntry({
+            id: ENTRY_ID,
+            kind: 'assignee_added',
+            body: null,
+            authorId: ADMIN_ID,
+            subjectUserId: HOLDER_ID,
+          }),
+          buildEntry({
+            id: SECOND_ENTRY_ID,
+            kind: 'assignee_access_ended',
+            body: null,
+            authorId: null,
+            subjectUserId: SUBJECT_ID,
+          }),
+          buildEntry({
+            id: THIRD_ENTRY_ID,
+            kind: 'assignee_removed',
+            body: null,
+            authorId: HOLDER_ID,
+            subjectUserId: null,
+          }),
+        ];
+        // No profile for SUBJECT_ID.
+        storedProfiles = [adminProfile, holderProfile];
+
+        const lead = await service.getLead(LEAD_ID, ADMIN);
+
+        expect(findOptionsOf(Profile)).toEqual([
+          {
+            where: { userId: In([ADMIN_ID, HOLDER_ID, SUBJECT_ID]) },
+            select: {
+              userId: true,
+              slug: true,
+              firstName: true,
+              lastName: true,
+              avatarUrl: true,
+              photoVisible: true,
+            },
+          },
+        ]);
+        expect(lead.entries[0]?.subject).toMatchObject({
+          id: HOLDER_ID,
+          slug: 'hal-holder',
+          displayName: 'Hal Holder',
+        });
+        expect(lead.entries[1]?.subject).toEqual({
+          id: SUBJECT_ID,
+          slug: '',
+          displayName: '',
+          avatarUrl: null,
+          avatarCrop: null,
+        });
+        expect(lead.entries[1]?.author).toBeNull();
+        expect(lead.entries[2]?.subject).toBeNull();
+        expect(lead.entries.map((entry) => entry.canEdit)).toEqual([
+          false,
+          false,
+          false,
+        ]);
+      });
+
+      it('gives every other kind a null subject', async () => {
+        storedEntries = [
+          buildEntry({ id: ENTRY_ID, kind: 'note', authorId: ADMIN_ID }),
+          buildEntry({
+            id: SECOND_ENTRY_ID,
+            kind: 'stage_changed',
+            body: null,
+            fromStage: 'to_contact',
+            toStage: 'contacted',
+            authorId: ADMIN_ID,
+          }),
+        ];
+        storedProfiles = [adminProfile];
+
+        const lead = await service.getLead(LEAD_ID, ADMIN);
+
+        expect(lead.entries.map((entry) => entry.subject)).toEqual([
+          null,
+          null,
+        ]);
+      });
     });
   });
 

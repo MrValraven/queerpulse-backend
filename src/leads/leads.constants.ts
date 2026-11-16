@@ -44,8 +44,42 @@ export const LEAD_ENTRY_KINDS = [
   'persona_linked',
   'persona_unlinked',
   'created',
+  'assignee_added',
+  'assignee_removed',
+  'assignee_access_ended',
 ] as const;
 export type LeadEntryKind = (typeof LEAD_ENTRY_KINDS)[number];
+
+/** Most staff in charge of one lead. */
+export const LEAD_MAX_ASSIGNEES = 10;
+/** Picker rows for a blank search: the caller first, then by name. */
+export const LEAD_STAFF_PREVIEW_LIMIT = 5;
+/** Picker rows for a non-blank search. */
+export const LEAD_STAFF_SEARCH_LIMIT = 20;
+/** Assignee summaries on a list row; `assigneeCount` holds the rest. */
+export const LEAD_LIST_ASSIGNEES_SHOWN = 3;
+
+/** The "In charge" views of the list, in segmented-control order after
+ *  Everyone (Everyone is the absent value). `me_or_unassigned` is the nav
+ *  badge's set. */
+export const LEAD_ASSIGNED_TO_FILTERS = [
+  'me',
+  'me_or_unassigned',
+  'unassigned',
+] as const;
+export type LeadAssignedToFilter = (typeof LEAD_ASSIGNED_TO_FILTERS)[number];
+
+/** Why LEAD_ASSIGNEE_NOT_STAFF refused, in check order. */
+export const LEAD_ASSIGNEE_REFUSAL_REASONS = [
+  'no_access',
+  'suspended',
+  'deactivated',
+] as const;
+export type LeadAssigneeRefusalReason =
+  (typeof LEAD_ASSIGNEE_REFUSAL_REASONS)[number];
+
+/** The staff grant that opens Leads below the Admin tier. */
+export const LEAD_ACCESS_STAFF_ROLE = 'music_manager_producer';
 
 /** Longest trimmed lead name, in code points. */
 export const LEAD_NAME_MAX = 120;
@@ -89,6 +123,20 @@ export const LEAD_REVERT_REFUSAL_REASONS = [
 export type LeadRevertRefusalReason =
   (typeof LEAD_REVERT_REFUSAL_REASONS)[number];
 
+/** Whether a value is one of the revert refusal reasons. */
+export function isLeadRevertRefusalReason(
+  value: unknown,
+): value is LeadRevertRefusalReason {
+  return (LEAD_REVERT_REFUSAL_REASONS as readonly unknown[]).includes(value);
+}
+
+/** Whether a value is one of the assignee refusal reasons. */
+export function isLeadAssigneeRefusalReason(
+  value: unknown,
+): value is LeadAssigneeRefusalReason {
+  return (LEAD_ASSIGNEE_REFUSAL_REASONS as readonly unknown[]).includes(value);
+}
+
 /** The persona's public state, reused from the persona wall:
  *  'shown' | 'draft' | 'not_open' | 'removed' | 'taken_down'. */
 export type LeadPersonaPublicState = PersonaWallPublicState;
@@ -122,7 +170,11 @@ export type LeadRefusalCode =
   | 'LEAD_ENTRY_NOT_EDITABLE'
   | 'LEAD_ENTRY_NOT_FOUND'
   | 'LEAD_ENTRY_NOT_REVERTIBLE'
-  | 'LEAD_CURSOR_INVALID';
+  | 'LEAD_CURSOR_INVALID'
+  | 'LEAD_ASSIGNED_TO_INVALID'
+  | 'LEAD_ASSIGNEE_NOT_FOUND'
+  | 'LEAD_ASSIGNEE_NOT_STAFF'
+  | 'LEAD_TOO_MANY_ASSIGNEES';
 
 /** Status and fixed message of every refusal the leads routes answer with.
  *  No message interpolates a lead's name, email, phone, link or note text. */
@@ -235,6 +287,23 @@ export const LEAD_REFUSALS: Record<
     status: HttpStatus.BAD_REQUEST,
     message: 'The list cursor is malformed. Load the list again from the top.',
   },
+  LEAD_ASSIGNED_TO_INVALID: {
+    status: HttpStatus.BAD_REQUEST,
+    message:
+      'The assignedTo filter must be me, me_or_unassigned or unassigned.',
+  },
+  LEAD_ASSIGNEE_NOT_FOUND: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'No account has this id.',
+  },
+  LEAD_ASSIGNEE_NOT_STAFF: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'This person cannot be put in charge of a lead.',
+  },
+  LEAD_TOO_MANY_ASSIGNEES: {
+    status: HttpStatus.CONFLICT,
+    message: `A lead can have at most ${LEAD_MAX_ASSIGNEES} people in charge.`,
+  },
 };
 
 /** What LEAD_PERSONA_NOT_LISTED says for each state that hides a persona. */
@@ -263,6 +332,19 @@ export const LEAD_REVERT_REFUSAL_MESSAGES: Record<
   not_yours:
     'Only the person who changed the stage or an Admin can revert the change.',
   too_old: `A stage change can be reverted for ${LEAD_REVERT_WINDOW_MS / 60_000} minutes after it was made, and this one is older.`,
+};
+
+/** What LEAD_ASSIGNEE_NOT_STAFF says for each reason an assignee is refused. */
+export const LEAD_ASSIGNEE_NOT_STAFF_MESSAGES: Record<
+  LeadAssigneeRefusalReason,
+  string
+> = {
+  no_access:
+    'This person does not have Leads access, so they cannot be put in charge of a lead.',
+  suspended:
+    'This account is suspended, so it cannot be put in charge of a lead.',
+  deactivated:
+    'This account is deactivated, so it cannot be put in charge of a lead.',
 };
 
 /** A body field a refusal may carry beside `statusCode`, `message` and `code`. */
@@ -300,6 +382,10 @@ export const LEAD_REFUSAL_EXTRAS: Record<
   LEAD_ENTRY_NOT_FOUND: [],
   LEAD_ENTRY_NOT_REVERTIBLE: ['reason'],
   LEAD_CURSOR_INVALID: [],
+  LEAD_ASSIGNED_TO_INVALID: [],
+  LEAD_ASSIGNEE_NOT_FOUND: [],
+  LEAD_ASSIGNEE_NOT_STAFF: ['reason'],
+  LEAD_TOO_MANY_ASSIGNEES: [],
 };
 
 /** What a caller may hand `leadError`. `status` overrides the table's status
@@ -310,12 +396,14 @@ export interface LeadErrorOptions {
   leadName?: string;
   index?: number;
   publicState?: LeadPersonaHiddenState;
-  reason?: LeadRevertRefusalReason;
+  reason?: LeadRevertRefusalReason | LeadAssigneeRefusalReason;
 }
 
 /** The fixed message of a refusal: LEAD_PERSONA_NOT_LISTED names the hidden
- *  state and LEAD_ENTRY_NOT_REVERTIBLE names the reason when the option is
- *  given, and every other code answers the table's message. */
+ *  state, LEAD_ENTRY_NOT_REVERTIBLE names the revert reason and
+ *  LEAD_ASSIGNEE_NOT_STAFF names the assignee reason when the option is
+ *  given, and every other code answers the table's message. Each reason
+ *  table is read only for its own code. */
 function refusalMessageOf(
   code: LeadRefusalCode,
   options: LeadErrorOptions | undefined,
@@ -325,8 +413,17 @@ function refusalMessageOf(
     return LEAD_PERSONA_NOT_LISTED_MESSAGES[publicState];
   }
   const reason = options?.reason;
-  if (code === 'LEAD_ENTRY_NOT_REVERTIBLE' && reason !== undefined) {
+  if (
+    code === 'LEAD_ENTRY_NOT_REVERTIBLE' &&
+    isLeadRevertRefusalReason(reason)
+  ) {
     return LEAD_REVERT_REFUSAL_MESSAGES[reason];
+  }
+  if (
+    code === 'LEAD_ASSIGNEE_NOT_STAFF' &&
+    isLeadAssigneeRefusalReason(reason)
+  ) {
+    return LEAD_ASSIGNEE_NOT_STAFF_MESSAGES[reason];
   }
   return LEAD_REFUSALS[code].message;
 }
@@ -335,8 +432,9 @@ function refusalMessageOf(
  *  `{ statusCode, message, code }` plus each extra listed for the code in
  *  `LEAD_REFUSAL_EXTRAS` whose option is defined. LEAD_PERSONA_NOT_LISTED
  *  swaps in the message that names the state when `publicState` is given,
- *  and LEAD_ENTRY_NOT_REVERTIBLE the message that names the `reason`. The
- *  message is always a fixed sentence from the tables above. */
+ *  and LEAD_ENTRY_NOT_REVERTIBLE the message that names the `reason`.
+ *  LEAD_ASSIGNEE_NOT_STAFF swaps in the message that names its assignee
+ *  `reason` the same way. The message is always a fixed sentence from the tables above. */
 export function leadError(
   code: LeadRefusalCode,
   options?: LeadErrorOptions,

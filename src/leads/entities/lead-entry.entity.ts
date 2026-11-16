@@ -27,6 +27,11 @@ import { Lead } from './lead.entity';
  * express it. A deleted lead takes its entries with it;
  * a deleted account leaves its entries with no author. Migration
  * `1839300000000-AddLeads`.
+ *
+ * The three assignee kinds (`assignee_added`, `assignee_removed`,
+ * `assignee_access_ended`) carry `subject_user_id` (the staff member assigned
+ * or unassigned) until that account is deleted; `assignee_access_ended` has a
+ * null author. Migration `1840300000000-AddLeadAssignees`.
  */
 @Entity('lead_entries')
 @Index('IDX_lead_entries_lead_created_at', ['leadId', 'createdAt', 'id'])
@@ -36,9 +41,16 @@ import { Lead } from './lead.entity';
 @Index('IDX_lead_entries_author_id', ['authorId'], {
   where: '"author_id" IS NOT NULL',
 })
+@Index('IDX_lead_entries_subject_user_id', ['subjectUserId'], {
+  where: '"subject_user_id" IS NOT NULL',
+})
 @Check(
   'CHK_lead_entries_kind',
-  `"kind" IN ('note', 'stage_changed', 'persona_linked', 'persona_unlinked', 'created')`,
+  `"kind" IN ('note', 'stage_changed', 'persona_linked', 'persona_unlinked', 'created', 'assignee_added', 'assignee_removed', 'assignee_access_ended')`,
+)
+@Check(
+  'CHK_lead_entries_subject',
+  `"subject_user_id" IS NULL OR "kind" IN ('assignee_added', 'assignee_removed', 'assignee_access_ended')`,
 )
 @Check('CHK_lead_entries_note_body', `("kind" = 'note') = ("body" IS NOT NULL)`)
 @Check(
@@ -70,7 +82,7 @@ export class LeadEntry {
   })
   lead?: Lead;
 
-  @Column({ type: 'varchar', length: 20 })
+  @Column({ type: 'varchar', length: 32 })
   kind!: LeadEntryKind;
 
   @Column({ type: 'text', nullable: true })
@@ -105,6 +117,16 @@ export class LeadEntry {
     foreignKeyConstraintName: 'FK_lead_entries_author',
   })
   author?: User | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  subjectUserId!: string | null;
+
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({
+    name: 'subject_user_id',
+    foreignKeyConstraintName: 'FK_lead_entries_subject_user',
+  })
+  subjectUser?: User | null;
 
   @CreateDateColumn({
     type: 'timestamptz',

@@ -60,6 +60,12 @@ describe('staff roles registry: music_manager_producer', () => {
     const joinedGrants = STAFF_ROLES.music_manager_producer.grants.join('\n');
     expect(joinedGrants).toContain('admin/leads');
     expect(joinedGrants).toContain('link a lead to a persona');
+    expect(joinedGrants).toContain(
+      'put staff with Leads access in charge of a lead',
+    );
+    expect(STAFF_ROLES.music_manager_producer.grants).toContain(
+      'Keep the leads directory (admin/leads): add, edit and delete leads, their links, notes and follow-ups, link a lead to a persona, and put staff with Leads access in charge of a lead',
+    );
   });
 
   it('accepts the new id through isStaffRoleId and isBadgedStaffRoleId', () => {

@@ -13,10 +13,15 @@ import { ListingDraft } from './entities/listing-draft.entity';
  * messages route needs it.
  */
 
-/** A row in `GET /listing-drafts` — enough to render the "resume a draft" list. */
+/**
+ * A row in `GET /listing-drafts`: enough to render the "resume a draft" list,
+ * including the "Step N of 6" line. `step` is the zero-based wizard step
+ * reached; `0` when the stored payload has none or a malformed one.
+ */
 export interface ListingDraftSummaryDTO {
   id: string;
   name: string;
+  step: number;
   updatedAt: string;
 }
 
@@ -41,6 +46,20 @@ function readWizardState(
     return nested as Record<string, unknown>;
   }
   return payload ?? {};
+}
+
+/**
+ * The zero-based wizard step stored beside `draft`. Anything that is not a
+ * positive integer (absent, negative, fractional, a string) reads as `0`. No
+ * upper clamp here: the frontend owns `TOTAL_STEPS`.
+ */
+function readWizardStep(
+  payload: Record<string, unknown> | null | undefined,
+): number {
+  const rawStep = payload?.step;
+  return typeof rawStep === 'number' && Number.isInteger(rawStep) && rawStep > 0
+    ? rawStep
+    : 0;
 }
 
 function readTrimmedString(source: Record<string, unknown>, key: string) {
@@ -108,7 +127,6 @@ export function toAdminListingDraftDTO(
 ): AdminListingDraftDTO {
   const wizardState = readWizardState(draft.payload);
   const rawPath = readTrimmedString(wizardState, 'path');
-  const rawStep = draft.payload?.step;
   return {
     id: draft.id,
     name: readTrimmedString(wizardState, 'name'),
@@ -116,10 +134,7 @@ export function toAdminListingDraftDTO(
     path: (LISTING_DRAFT_PATHS as readonly string[]).includes(rawPath)
       ? (rawPath as ListingDraftPath)
       : '',
-    step:
-      typeof rawStep === 'number' && Number.isInteger(rawStep) && rawStep > 0
-        ? rawStep
-        : 0,
+    step: readWizardStep(draft.payload),
     owner: ownerRef ? { userId: draft.userId, ...ownerRef } : null,
     createdAt: draft.createdAt.toISOString(),
     updatedAt: draft.updatedAt.toISOString(),
@@ -223,6 +238,7 @@ export function toListingDraftSummaryDTO(
   return {
     id: draft.id,
     name: deriveListingDraftName(draft.payload),
+    step: readWizardStep(draft.payload),
     updatedAt: draft.updatedAt.toISOString(),
   };
 }

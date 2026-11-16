@@ -18,6 +18,7 @@ import type { LeadCursorPosition } from './lead-cursor';
 import { leadLinkKey } from './lead-link-key';
 import {
   DEFAULT_LEAD_STAGE,
+  LEAD_ASSIGNED_TO_FILTERS,
   LEAD_EMAIL_MAX,
   LEAD_FOLLOW_UP_MAX,
   LEAD_FOLLOW_UP_MIN,
@@ -34,6 +35,7 @@ import {
   leadError,
 } from './leads.constants';
 import type {
+  LeadAssignedToFilter,
   LeadRefusalCode,
   LeadStage,
   LeadType,
@@ -73,6 +75,8 @@ export interface LeadListFilters {
   term: string;
   stage: LeadStage | null;
   type: LeadType | null;
+  /** The "In charge" view; `null` is everyone. */
+  assignedTo: LeadAssignedToFilter | null;
   isDueOnly: boolean;
   cursor: LeadCursorPosition | null;
 }
@@ -114,6 +118,16 @@ export function isLeadStage(value: unknown): value is LeadStage {
   return (
     typeof value === 'string' &&
     (LEAD_STAGES as readonly string[]).includes(value)
+  );
+}
+
+/** Whether `value` is one of `LEAD_ASSIGNED_TO_FILTERS`. */
+export function isLeadAssignedToFilter(
+  value: unknown,
+): value is LeadAssignedToFilter {
+  return (
+    typeof value === 'string' &&
+    (LEAD_ASSIGNED_TO_FILTERS as readonly string[]).includes(value)
   );
 }
 
@@ -264,20 +278,22 @@ export function normalizeNoteBody(value: unknown): string {
   return body;
 }
 
-/** Checks the list query in the order stage, type, cursor. A blank or absent
- *  stage or type means every one. A blank or repeated `q` is no search and a
- *  long one is cut to 100 code points. Only the exact text `true` turns the
- *  due filter on. */
+/** Checks the list query in the order stage, type, assignedTo, cursor. A
+ *  blank or absent stage, type or assignedTo means every one. A blank or
+ *  repeated `q` is no search and a long one is cut to 100 code points. Only
+ *  the exact text `true` turns the due filter on. */
 export function normalizeLeadListFilters(
   query: ListLeadsQuery,
 ): LeadListFilters {
   const stage = normalizeStageFilter(query.stage);
   const type = normalizeTypeFilter(query.type);
+  const assignedTo = normalizeAssignedToFilter(query.assignedTo);
   const cursor = normalizeCursorFilter(query.cursor);
   return {
     term: normalizeSearchTerm(query.q),
     stage,
     type,
+    assignedTo,
     isDueOnly: query.due === 'true',
     cursor,
   };
@@ -407,6 +423,19 @@ function normalizeTypeFilter(value: unknown): LeadType | null {
   return normalizeLeadType(candidate);
 }
 
+// Trimmed first, so a blank view reads as everyone. A repeated, cased or
+// unknown view answers 400 `LEAD_ASSIGNED_TO_INVALID`.
+function normalizeAssignedToFilter(
+  value: unknown,
+): LeadAssignedToFilter | null {
+  const candidate = trimmedIfText(value);
+  if (candidate === undefined || candidate === '') return null;
+  if (!isLeadAssignedToFilter(candidate)) {
+    throw leadError('LEAD_ASSIGNED_TO_INVALID');
+  }
+  return candidate;
+}
+
 // A repeated `cursor` arrives as an array and answers `LEAD_CURSOR_INVALID`
 // like any other cursor that fails to decode.
 function normalizeCursorFilter(value: unknown): LeadCursorPosition | null {
@@ -417,7 +446,10 @@ function normalizeCursorFilter(value: unknown): LeadCursorPosition | null {
   return decodeLeadCursor(value);
 }
 
-function normalizeSearchTerm(value: unknown): string {
+/** A search text as the list and the staff picker read it: no string or
+ *  blank after trim gives `''`, a long one is cut to 100 code points, and
+ *  NUL and lone surrogates are cleaned first. */
+export function normalizeSearchTerm(value: unknown): string {
   if (typeof value !== 'string') return '';
   const trimmed = sanitizeLeadText(value).trim();
   if (!trimmed) return '';

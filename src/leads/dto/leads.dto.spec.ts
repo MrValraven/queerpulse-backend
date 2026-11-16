@@ -2,14 +2,17 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { VALIDATION_PIPE_OPTIONS } from '../../common/validation-pipe.options';
 import {
+  AssignLeadStaffDto,
   CreateLeadDto,
   LeadNoteDto,
   LeadPersonaSearchQuery,
+  LeadStaffSearchQuery,
   ListLeadsQuery,
   UpdateLeadDto,
 } from './leads.dto';
 
 const LEAD_ID = '6f1c2a40-8b3d-4e5f-9a10-1b2c3d4e5f60';
+const USER_ID = 'cf5a6b7c-8d9e-4f0a-9b1c-4d5e6f7a8b9c';
 
 /** Runs a plain value through the same transform and validation the global
  *  `ValidationPipe` applies, and answers the instance with its errors. */
@@ -88,5 +91,34 @@ describe('lead DTOs', () => {
     const note = await validated(LeadNoteDto, { body: 'a', extra: 1 });
     expect(note.errors).toHaveLength(1);
     expect(note.errors[0]?.property).toBe('extra');
+  });
+
+  it('lets every assignedTo value through', async () => {
+    const plain = { assignedTo: ['me', 'x'] };
+    const { instance, errors } = await validated(ListLeadsQuery, plain);
+    expect(errors).toHaveLength(0);
+    expect({ ...instance }).toEqual(plain);
+  });
+
+  it('lets every staff search and assign value through', async () => {
+    const search = await validated(LeadStaffSearchQuery, { q: ['a', 'b'] });
+    expect(search.errors).toHaveLength(0);
+    expect({ ...search.instance }).toEqual({ q: ['a', 'b'] });
+    for (const userId of [5, null]) {
+      const { instance, errors } = await validated(AssignLeadStaffDto, {
+        userId,
+      });
+      expect(errors).toHaveLength(0);
+      expect({ ...instance }).toEqual({ userId });
+    }
+  });
+
+  it('still refuses an undeclared property on the assign body', async () => {
+    const assign = await validated(AssignLeadStaffDto, {
+      userId: USER_ID,
+      leadId: LEAD_ID,
+    });
+    expect(assign.errors).toHaveLength(1);
+    expect(assign.errors[0]?.property).toBe('leadId');
   });
 });

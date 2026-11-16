@@ -45,6 +45,7 @@ import {
 } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { topLevelOnly } from '../communities/subcommunity-rules';
+import { dropLeadAssignmentsOfUser } from '../leads/lead-assignee-access';
 import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
@@ -916,6 +917,13 @@ export class AdminMembersService {
         }),
       );
 
+      // Leads: leaving the Admin tier ends Leads access unless the member
+      // holds the music_manager_producer grant (the hook re-checks), and
+      // every lead assignment goes with it in this transaction.
+      if (previousRole === UserRole.Admin && targetRole !== UserRole.Admin) {
+        await dropLeadAssignmentsOfUser(manager, targetUserId);
+      }
+
       // A moderator or admin can't sit as a co-host on a house Music event,
       // so a move up into either tier ends every such seat the member holds.
       const isPromotionIntoStaffTier =
@@ -1173,7 +1181,9 @@ export class AdminMembersService {
       const users = manager.getRepository(User);
       const targetUser = await users.findOne({
         where: { id: targetUserId },
-        select: ['id', 'isSystem'],
+        select: ['id', 'role', 'isSystem'],
+        // Waits out a concurrent demotion, so the Leads cleanup reads the committed role.
+        lock: { mode: 'pessimistic_read' },
       });
       if (!targetUser) {
         throw new NotFoundException('Member not found');
@@ -1203,6 +1213,16 @@ export class AdminMembersService {
             duration: null,
           }),
         );
+      }
+
+      // Leads: losing the music_manager_producer grant ends Leads access
+      // below the Admin tier, and every lead assignment goes with it in this
+      // transaction. Runs on a no-op revoke too; the hook re-checks access.
+      if (
+        role === 'music_manager_producer' &&
+        targetUser.role !== UserRole.Admin
+      ) {
+        await dropLeadAssignmentsOfUser(manager, targetUserId);
       }
 
       const holdings = await grants.find({

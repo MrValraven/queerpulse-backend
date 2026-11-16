@@ -1,6 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Allow } from 'class-validator';
-import { LEAD_STAGES, LEAD_TYPES } from '../leads.constants';
+import {
+  LEAD_ASSIGNED_TO_FILTERS,
+  LEAD_STAGES,
+  LEAD_TYPES,
+} from '../leads.constants';
 
 // Every field below is `@Allow()` and typed `unknown`: the decorator keeps the
 // property through `whitelist` and validates nothing, so the service owns each
@@ -8,9 +12,10 @@ import { LEAD_STAGES, LEAD_TYPES } from '../leads.constants';
 // class declares still gets the global `forbidNonWhitelisted` 400.
 
 /** Query of `GET /admin/leads`. The service answers `LEAD_STAGE_INVALID`,
- *  `LEAD_TYPE_INVALID` and `LEAD_CURSOR_INVALID`, in that order. A blank or
- *  repeated `q` reads as no search and any `due` other than the text `true`
- *  reads as false, so neither can answer a generic 400. */
+ *  `LEAD_TYPE_INVALID`, `LEAD_ASSIGNED_TO_INVALID` and `LEAD_CURSOR_INVALID`,
+ *  in that order. A blank or repeated `q` reads as no search and any `due`
+ *  other than the text `true` reads as false, so neither can answer a
+ *  generic 400. */
 export class ListLeadsQuery {
   @ApiPropertyOptional({
     description:
@@ -42,6 +47,14 @@ export class ListLeadsQuery {
   due?: unknown;
 
   @ApiPropertyOptional({
+    description:
+      'Only leads in this "In charge" view: me, me_or_unassigned or unassigned. Blank means everyone.',
+    enum: [...LEAD_ASSIGNED_TO_FILTERS],
+  })
+  @Allow()
+  assignedTo?: unknown;
+
+  @ApiPropertyOptional({
     description: 'The `nextCursor` of the previous page.',
     type: String,
   })
@@ -56,6 +69,19 @@ export class LeadPersonaSearchQuery {
   @ApiPropertyOptional({
     description:
       'Search text for the persona picker. A leading @ searches handles by prefix.',
+    type: String,
+  })
+  @Allow()
+  q?: unknown;
+}
+
+/** Query of `GET /admin/leads/staff`. The service trims `q` and cuts a long
+ *  one to 100 characters; a blank or repeated `q` previews five and answers
+ *  with no refusal code. */
+export class LeadStaffSearchQuery {
+  @ApiPropertyOptional({
+    description:
+      'Search text for the staff picker over first name, last name and slug.',
     type: String,
   })
   @Allow()
@@ -226,4 +252,16 @@ export class LeadNoteDto {
   })
   @Allow()
   body?: unknown;
+}
+
+/** Body of `POST /admin/leads/:id/assignees`. The service answers 400
+ *  `LEAD_ASSIGNEE_NOT_FOUND` for a missing or malformed id. */
+export class AssignLeadStaffDto {
+  @ApiProperty({
+    description: 'The user id of the staff member to put in charge.',
+    type: String,
+    format: 'uuid',
+  })
+  @Allow()
+  userId?: unknown;
 }

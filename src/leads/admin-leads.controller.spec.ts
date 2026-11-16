@@ -15,11 +15,14 @@ import { STAFF_ROLES_KEY } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { FEATURE_KEY } from '../common/feature.decorator';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminLeadsController } from './admin-leads.controller';
+import { LeadAssignee } from './entities/lead-assignee.entity';
 import { LeadEntry } from './entities/lead-entry.entity';
 import { Lead } from './entities/lead.entity';
+import { LeadAssigneesService } from './lead-assignees.service';
 import { LeadEntriesService } from './lead-entries.service';
 import { LeadPersonaService } from './lead-persona.service';
 import { LeadsModule } from './leads.module';
@@ -28,6 +31,7 @@ import { LeadsService } from './leads.service';
 const CALLER_ID = 'f9100000-0000-4000-8000-000000000001';
 const LEAD_ID = 'f9100000-0000-4000-8000-000000000011';
 const ENTRY_ID = 'f9100000-0000-4000-8000-000000000021';
+const TARGET_ID = 'f9100000-0000-4000-8000-000000000002';
 
 const CALLER = {
   userId: CALLER_ID,
@@ -35,11 +39,14 @@ const CALLER = {
   role: UserRole.Member,
 } as CurrentUserData;
 
+const USER = { userId: CALLER_ID, role: UserRole.Member } as CurrentUserData;
+
 /** Every handler, in the order the class declares them. */
 const HANDLER_NAMES = [
   'listLeads',
   'dueCount',
   'searchPersonas',
+  'searchStaff',
   'createLead',
   'getLead',
   'updateLead',
@@ -48,6 +55,8 @@ const HANDLER_NAMES = [
   'editNote',
   'deleteNote',
   'revertStageChange',
+  'assignStaff',
+  'unassignStaff',
 ] as const;
 
 type HandlerName = (typeof HANDLER_NAMES)[number];
@@ -162,6 +171,7 @@ describe('AdminLeadsController routes', () => {
       ['listLeads', RequestMethod.GET, '/'],
       ['dueCount', RequestMethod.GET, 'due-count'],
       ['searchPersonas', RequestMethod.GET, 'personas/search'],
+      ['searchStaff', RequestMethod.GET, 'staff'],
       ['createLead', RequestMethod.POST, '/'],
       ['getLead', RequestMethod.GET, ':id'],
       ['updateLead', RequestMethod.PATCH, ':id'],
@@ -170,12 +180,20 @@ describe('AdminLeadsController routes', () => {
       ['editNote', RequestMethod.PATCH, ':id/entries/:entryId'],
       ['deleteNote', RequestMethod.DELETE, ':id/entries/:entryId'],
       ['revertStageChange', RequestMethod.POST, ':id/entries/:entryId/revert'],
+      ['assignStaff', RequestMethod.POST, ':id/assignees'],
+      ['unassignStaff', RequestMethod.DELETE, ':id/assignees/:userId'],
     ]);
   });
 
   it('answers 200 on a revert', () => {
     expect(
       Reflect.getMetadata(HTTP_CODE_METADATA, handlerOf('revertStageChange')),
+    ).toBe(HttpStatus.OK);
+  });
+
+  it('answers 200 on an assign', () => {
+    expect(
+      Reflect.getMetadata(HTTP_CODE_METADATA, handlerOf('assignStaff')),
     ).toBe(HttpStatus.OK);
   });
 
@@ -191,13 +209,17 @@ describe('AdminLeadsController routes', () => {
     expect(declaredHandlers.indexOf('searchPersonas')).toBeLessThan(
       declaredHandlers.indexOf('getLead'),
     );
+    expect(declaredHandlers.indexOf('searchStaff')).toBeLessThan(
+      declaredHandlers.indexOf('getLead'),
+    );
   });
 
-  it('binds no pipe to :id or :entryId', () => {
+  it('binds no pipe to :id, :entryId or :userId', () => {
     for (const handlerName of [
       'getLead',
       'editNote',
       'revertStageChange',
+      'unassignStaff',
     ] as const) {
       const routeArguments = Object.values(
         Reflect.getMetadata(
@@ -208,7 +230,9 @@ describe('AdminLeadsController routes', () => {
       );
       const idArguments = routeArguments.filter(
         (routeArgument) =>
-          routeArgument.data === 'id' || routeArgument.data === 'entryId',
+          routeArgument.data === 'id' ||
+          routeArgument.data === 'entryId' ||
+          routeArgument.data === 'userId',
       );
 
       expect(idArguments).toHaveLength(handlerName === 'getLead' ? 1 : 2);
@@ -218,7 +242,7 @@ describe('AdminLeadsController routes', () => {
     }
   });
 
-  it('registers the controller and the three services in LeadsModule', () => {
+  it('registers the controller and the four services in LeadsModule', () => {
     const controllers = Reflect.getMetadata(
       'controllers',
       LeadsModule,
@@ -242,17 +266,20 @@ describe('AdminLeadsController routes', () => {
         LeadsService,
         LeadEntriesService,
         LeadPersonaService,
+        LeadAssigneesService,
       ]),
     );
-    expect(providers).toHaveLength(3);
+    expect(providers).toHaveLength(4);
     expect(exportedProviders ?? []).toEqual([]);
     expect(entityTokens).toEqual(
       expect.arrayContaining([
         getRepositoryToken(Lead),
         getRepositoryToken(LeadEntry),
+        getRepositoryToken(LeadAssignee),
         getRepositoryToken(UserStaffRole),
       ]),
     );
+    expect(importedModules).toContain(NotificationsModule);
   });
 });
 
@@ -273,6 +300,11 @@ describe('AdminLeadsController delegation', () => {
     revertStageChange: jest.Mock;
   };
   let leadPersonaService: { searchPersonas: jest.Mock };
+  let leadAssigneesService: {
+    searchStaff: jest.Mock;
+    assign: jest.Mock;
+    unassign: jest.Mock;
+  };
   let controller: AdminLeadsController;
 
   beforeEach(() => {
@@ -291,14 +323,20 @@ describe('AdminLeadsController delegation', () => {
       revertStageChange: jest.fn().mockResolvedValue(lead),
     };
     leadPersonaService = { searchPersonas: jest.fn() };
+    leadAssigneesService = {
+      searchStaff: jest.fn(),
+      assign: jest.fn().mockResolvedValue(lead),
+      unassign: jest.fn().mockResolvedValue(lead),
+    };
     controller = new AdminLeadsController(
       leadsService as unknown as LeadsService,
       leadEntriesService as unknown as LeadEntriesService,
       leadPersonaService as unknown as LeadPersonaService,
+      leadAssigneesService as unknown as LeadAssigneesService,
     );
   });
 
-  it('passes the query through on list', async () => {
+  it('passes the query and caller through on list', async () => {
     const page = {
       items: [],
       nextCursor: null,
@@ -309,18 +347,19 @@ describe('AdminLeadsController delegation', () => {
     leadsService.listLeads.mockResolvedValue(page);
     const query = { q: 'ana', stage: 'contacted', due: 'true' };
 
-    const result = await controller.listLeads(query);
+    const result = await controller.listLeads(query, USER);
 
-    expect(leadsService.listLeads).toHaveBeenCalledWith(query);
+    expect(leadsService.listLeads).toHaveBeenCalledWith(query, USER);
     expect(result).toBe(page);
   });
 
-  it('answers the due count unchanged', async () => {
+  it('passes the caller through on the due count', async () => {
     const dueCount = { count: 3 };
     leadsService.dueCount.mockResolvedValue(dueCount);
 
-    await expect(controller.dueCount()).resolves.toBe(dueCount);
+    await expect(controller.dueCount(USER)).resolves.toBe(dueCount);
     expect(leadsService.dueCount).toHaveBeenCalledTimes(1);
+    expect(leadsService.dueCount).toHaveBeenCalledWith(USER);
   });
 
   it('passes the id, caller and body through on every lead route', async () => {
@@ -407,5 +446,45 @@ describe('AdminLeadsController delegation', () => {
 
     expect(leadPersonaService.searchPersonas).toHaveBeenCalledWith('@ana');
     expect(result).toBe(searchResult);
+  });
+
+  it('passes q and the caller through on staff search', async () => {
+    const query = { q: 'ana' };
+    const searchResult = { items: [{ id: TARGET_ID }] };
+    leadAssigneesService.searchStaff.mockResolvedValue(searchResult);
+
+    const result = await controller.searchStaff(query, USER);
+
+    expect(leadAssigneesService.searchStaff).toHaveBeenCalledWith(
+      query.q,
+      USER,
+    );
+    expect(result).toBe(searchResult);
+  });
+
+  it('passes the id, caller and body through on assign', async () => {
+    const body = { userId: TARGET_ID };
+
+    const assigned = await controller.assignStaff(LEAD_ID, USER, body);
+
+    expect(leadAssigneesService.assign).toHaveBeenCalledTimes(1);
+    expect(leadAssigneesService.assign).toHaveBeenCalledWith(
+      LEAD_ID,
+      USER,
+      body,
+    );
+    expect(assigned).toBe(lead);
+  });
+
+  it('passes both ids and the caller through on unassign', async () => {
+    const unassigned = await controller.unassignStaff(LEAD_ID, TARGET_ID, USER);
+
+    expect(leadAssigneesService.unassign).toHaveBeenCalledTimes(1);
+    expect(leadAssigneesService.unassign).toHaveBeenCalledWith(
+      LEAD_ID,
+      TARGET_ID,
+      USER,
+    );
+    expect(unassigned).toBe(lead);
   });
 });

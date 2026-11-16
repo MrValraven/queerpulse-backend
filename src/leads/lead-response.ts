@@ -8,6 +8,7 @@ import type { LeadEntry } from './entities/lead-entry.entity';
 import type { Lead } from './entities/lead.entity';
 import { isLeadFollowUpDue } from './lead-input';
 import {
+  LEAD_LIST_ASSIGNEES_SHOWN,
   LEAD_LIST_LINKS_SHOWN,
   type LeadEntryKind,
   type LeadPersonaPublicState,
@@ -54,6 +55,10 @@ export interface LeadListItemDTO {
   /** The newest entry's `created_at` (the `created` entry always exists). */
   lastEntryAt: string;
   updatedAt: string;
+  /** The first 3 by `assigned_at ASC, user_id ASC`. */
+  assignees: LeadStaffSummaryDTO[];
+  /** Every assignee of the lead. */
+  assigneeCount: number;
 }
 
 /** One page of the leads list. */
@@ -67,8 +72,37 @@ export interface LeadListPageDTO {
   /** The sum of `stageCounts`. */
   totalCount: number;
   /** Leads in an open stage with `followUpOn` on or before the page's Lisbon
-   *  day, under the `q` and `type` filters only, like `stageCounts`. */
+   *  day, under the `q`, `type` and `assignedTo` filters only, like
+   *  `stageCounts`. */
   dueCount: number;
+}
+
+/** A staff member in charge of a lead, a picker row, or the subject of an
+ *  assignee history entry. Built field by field from `profiles`
+ *  (`slug`, `first_name`, `last_name`, `avatar_url`) and the user id, with
+ *  `photo_visible` read as well to gate the avatar: a hidden photo answers
+ *  no url and no crop. No other column is selected, so none can reach a
+ *  response. */
+export interface LeadStaffSummaryDTO {
+  /** The user id. */
+  id: string;
+  /** `profiles.slug`; `''` when the profile row is missing. */
+  slug: string;
+  /** `${firstName} ${lastName}`, trimmed; `''` when the profile row is
+   *  missing. */
+  displayName: string;
+  /** `toImageUrl(avatar_url)`, else `null`. `null` while the member hides
+   *  their photo. */
+  avatarUrl: string | null;
+  /** The stored crop for that avatar key. */
+  avatarCrop: CropRect | null;
+}
+
+/** The assignees of one list row: the summaries in order and how many the
+ *  lead has. The mapper cuts `shown` to `LEAD_LIST_ASSIGNEES_SHOWN`. */
+export interface LeadListAssignees {
+  shown: LeadStaffSummaryDTO[];
+  count: number;
 }
 
 /** The staff member who wrote an entry. */
@@ -101,6 +135,10 @@ export interface LeadEntryDTO {
   editedAt: string | null;
   /** Kind `note`, and the caller wrote it or the caller is an Admin. */
   canEdit: boolean;
+  /** The three assignee kinds while `subject_user_id` is set; `null` on
+   *  every other kind, and `null` on an assignee kind whose account is
+   *  gone. */
+  subject: LeadStaffSummaryDTO | null;
 }
 
 /** A whole lead with its history, newest entry first. */
@@ -121,6 +159,8 @@ export interface LeadDTO {
   updatedAt: string;
   /** Every entry, `created_at DESC, id DESC`. */
   entries: LeadEntryDTO[];
+  /** Every assignee, `assigned_at ASC, user_id ASC`. */
+  assignees: LeadStaffSummaryDTO[];
 }
 
 /** One row of the persona picker search. */
@@ -170,6 +210,18 @@ export interface LeadAuthorProfileRow {
   firstName: string;
   lastName: string;
   avatarUrl: string | null;
+  /** `profiles.photo_visible`: `false` shows no avatar. */
+  photoVisible: boolean;
+}
+
+/** The profile columns a staff summary comes from, the user id aside. */
+export interface LeadStaffProfileRow {
+  slug: string;
+  firstName: string;
+  lastName: string;
+  avatarUrl: string | null;
+  /** `profiles.photo_visible`: `false` shows no avatar. */
+  photoVisible: boolean;
 }
 
 /** An image URL and the crop stored for its key. The crop is read only when
@@ -183,6 +235,15 @@ function avatarOf(
     avatarUrl,
     avatarCrop: avatarUrl ? (cropFor(storedAvatar, crops) ?? null) : null,
   };
+}
+
+/** The avatar key a staff profile shows: its stored key while the member
+ *  shows their photo, else `null`, the same `photoVisible` gate every profile
+ *  surface applies. A `null` key resolves to no url and no crop. */
+function shownStaffAvatarKey(
+  profile: Pick<LeadStaffProfileRow, 'avatarUrl' | 'photoVisible'> | null,
+): string | null {
+  return profile?.photoVisible ? profile.avatarUrl : null;
 }
 
 /** Maps a persona row to the persona-only projection. The object is built
@@ -221,19 +282,40 @@ export function toLeadLinkedPersona(
 }
 
 /** Maps an entry author. A missing profile gives an empty name and no
- *  avatar. */
+ *  avatar; a hidden photo gives no avatar. */
 export function toLeadEntryAuthor(
   authorId: string,
   profile: LeadAuthorProfileRow | null,
   crops: Map<string, CropRect>,
 ): LeadEntryAuthorDTO {
-  const avatar = avatarOf(profile?.avatarUrl, crops);
+  const avatar = avatarOf(shownStaffAvatarKey(profile), crops);
   const displayName = profile
     ? `${profile.firstName} ${profile.lastName}`.trim()
     : '';
   return {
     id: authorId,
     displayName,
+    avatarUrl: avatar.avatarUrl,
+    avatarCrop: avatar.avatarCrop,
+  };
+}
+
+/** Maps a staff member to their summary, built field by field so no other
+ *  profile column reaches the answer. A missing profile gives an empty slug
+ *  and name and no avatar; a hidden photo gives no avatar. The name and the
+ *  avatar follow `toLeadEntryAuthor`. */
+export function toLeadStaffSummary(
+  userId: string,
+  profile: LeadStaffProfileRow | null,
+  crops: Map<string, CropRect>,
+): LeadStaffSummaryDTO {
+  const avatar = avatarOf(shownStaffAvatarKey(profile), crops);
+  return {
+    id: userId,
+    slug: profile ? profile.slug : '',
+    displayName: profile
+      ? `${profile.firstName} ${profile.lastName}`.trim()
+      : '',
     avatarUrl: avatar.avatarUrl,
     avatarCrop: avatar.avatarCrop,
   };
@@ -264,13 +346,14 @@ export function canRevertLeadEntry(
   return entry.authorId !== null && entry.authorId === caller.userId;
 }
 
-/** Maps one entry. The caller resolves the author, the persona and the edit
- *  right in batches and passes them in. */
+/** Maps one entry. The caller resolves the author, the persona, the edit
+ *  right and the assignee subject in batches and passes them in. */
 export function toLeadEntry(
   entry: LeadEntry,
   author: LeadEntryAuthorDTO | null,
   persona: LeadPersonaDTO | null,
   canEdit: boolean,
+  subject: LeadStaffSummaryDTO | null,
 ): LeadEntryDTO {
   return {
     id: entry.id,
@@ -283,15 +366,18 @@ export function toLeadEntry(
     createdAt: entry.createdAt.toISOString(),
     editedAt: entry.editedAt ? entry.editedAt.toISOString() : null,
     canEdit,
+    subject,
   };
 }
 
-/** Maps a lead to its list row. `today` is the Lisbon day the page reads. */
+/** Maps a lead to its list row. `today` is the Lisbon day the page reads;
+ *  `assignees` holds the lead's summaries in order and their count. */
 export function toLeadListItem(
   lead: Lead,
   stats: { noteCount: number; lastEntryAt: Date },
   linkedPersona: LeadLinkedPersonaDTO | null,
   today: string,
+  assignees: LeadListAssignees,
 ): LeadListItemDTO {
   return {
     id: lead.id,
@@ -307,16 +393,20 @@ export function toLeadListItem(
     noteCount: stats.noteCount,
     lastEntryAt: stats.lastEntryAt.toISOString(),
     updatedAt: lead.updatedAt.toISOString(),
+    assignees: assignees.shown.slice(0, LEAD_LIST_ASSIGNEES_SHOWN),
+    assigneeCount: assignees.count,
   };
 }
 
 /** Maps a whole lead. `entries` are already mapped and ordered newest
- *  first; `today` is the Lisbon day of the read. */
+ *  first; `today` is the Lisbon day of the read; `assignees` are every
+ *  summary, `assigned_at ASC, user_id ASC`. */
 export function toLead(
   lead: Lead,
   linkedPersona: LeadLinkedPersonaDTO | null,
   entries: LeadEntryDTO[],
   today: string,
+  assignees: LeadStaffSummaryDTO[],
 ): LeadDTO {
   return {
     id: lead.id,
@@ -333,5 +423,6 @@ export function toLead(
     createdAt: lead.createdAt.toISOString(),
     updatedAt: lead.updatedAt.toISOString(),
     entries,
+    assignees,
   };
 }

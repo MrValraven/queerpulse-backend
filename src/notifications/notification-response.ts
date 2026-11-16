@@ -194,6 +194,9 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.StudioPlaylistEditorInviteAccepted]: 'actorId',
   [NotificationType.StudioPlaylistEditorInviteDeclined]: 'actorId',
   [NotificationType.StudioPlaylistEditorAdded]: 'actorId',
+  // The staff member who made the assignment. The emit site passes no
+  // `actorId` argument to `create`, so a mute never silences it.
+  [NotificationType.LeadAssigned]: 'assignedById',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -1036,6 +1039,9 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // behind the console's own authentication. This is the same line
     // `ModerationQueueAlert` draws, for the same reason.
     [NotificationType.AdminQueueItem]: ['queue'],
+    // The deep link's lead id and nothing else. `assignedById` stays server
+    // side and travels as `actor`.
+    [NotificationType.LeadAssigned]: ['leadId'],
 
     // --- The four approval queues (LOC-19) ---------------------------------
     // Each carries the `decision` its copy branches on, the member's own

@@ -9,6 +9,7 @@ import {
 
 const LEAD_ID = '2f0c7e9e-0000-4000-8000-000000000001';
 const ENTRY_ID = '2f0c7e9e-0000-4000-8000-000000000002';
+const USER_ID = '2f0c7e9e-0000-4000-8000-000000000003';
 
 describe('isLeadsRequest', () => {
   it.each([
@@ -16,6 +17,9 @@ describe('isLeadsRequest', () => {
     '/admin/leads/',
     '/v1/admin/leads?q=ana',
     '/v1/admin/leads/due-count',
+    '/v1/admin/leads/staff?q=ana',
+    `/v1/admin/leads/${LEAD_ID}/assignees`,
+    `/v1/admin/leads/${LEAD_ID}/assignees/${USER_ID}`,
     `/v1/admin/leads/${LEAD_ID}/entries/${ENTRY_ID}`,
     `/v1/admin/leads/${LEAD_ID}/entries/${ENTRY_ID}/revert`,
     '/V1/ADMIN/LEADS',
@@ -109,6 +113,18 @@ describe('redactLeadsPath', () => {
     expect(redactLeadsPath('/v1/admin/leads')).toBe('/v1/admin/leads');
     expect(redactLeadsPath('/v1/events?q=a')).toBe('/v1/events?q=a');
     expect(redactLeadsPath(undefined)).toBeUndefined();
+  });
+
+  it('redacts the staff picker and assignee paths', () => {
+    expect(redactLeadsPath('/v1/admin/leads/staff?q=ana')).toBe(
+      `/v1/admin/leads/${REDACTED_LEADS_PATH}?${REDACTED_LEADS_QUERY}`,
+    );
+    expect(redactLeadsPath(`/v1/admin/leads/${LEAD_ID}/assignees`)).toBe(
+      `/v1/admin/leads/${REDACTED_LEADS_PATH}`,
+    );
+    expect(
+      redactLeadsPath(`/v1/admin/leads/${LEAD_ID}/assignees/${USER_ID}`),
+    ).toBe(`/v1/admin/leads/${REDACTED_LEADS_PATH}`);
   });
 
   it('writes the placeholders the contract names', () => {
