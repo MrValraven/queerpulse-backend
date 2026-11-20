@@ -12,6 +12,7 @@ import {
   DROP_LEAD_ASSIGNMENTS_SQL,
   LOCK_LEADS_OF_ASSIGNEE_SQL,
 } from '../leads/lead-assignee-access';
+import { dropCulturalTaskAssignmentsOfUser } from '../cultural-production/cultural-task-assignee-access';
 import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
@@ -31,6 +32,20 @@ import {
   ADMIN_MEMBERS_PAGE_SIZE,
 } from './admin-members.service';
 import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
+
+// The Cultural Production access hook is pinned by its own spec; here only
+// the call sites matter, so the hook is a mock answering no dropped task.
+jest.mock('../cultural-production/cultural-task-assignee-access', () => ({
+  ...jest.requireActual<
+    typeof import('../cultural-production/cultural-task-assignee-access')
+  >('../cultural-production/cultural-task-assignee-access'),
+  dropCulturalTaskAssignmentsOfUser: jest.fn().mockResolvedValue([]),
+}));
+
+/** The mocked Cultural Production access hook. */
+const dropCulturalTaskAssignmentsMock = jest.mocked(
+  dropCulturalTaskAssignmentsOfUser,
+);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_NOW = new Date('2026-07-21T12:00:00.000Z');
@@ -1299,6 +1314,97 @@ describe('AdminMembersService', () => {
         expect(dropCalls()).toEqual([]);
       });
     });
+
+    describe('cultural task assignments', () => {
+      /** Pins one hook call on the manager the transaction stub handed out. */
+      const expectCulturalDropInTransaction = () => {
+        expect(dropCulturalTaskAssignmentsMock).toHaveBeenCalledTimes(1);
+        expect(dropCulturalTaskAssignmentsMock).toHaveBeenCalledWith(
+          expect.objectContaining({ query: transactionQuery }),
+          'user-ines',
+        );
+        const transactionCallOrder =
+          dataSource.transaction.mock.invocationCallOrder[0] ?? 0;
+        const grantDeleteCallOrder =
+          transactionStaffRoles.delete.mock.invocationCallOrder[0] ?? 0;
+        const hookCallOrder =
+          dropCulturalTaskAssignmentsMock.mock.invocationCallOrder[0] ?? 0;
+        const holdingsReadCallOrder =
+          transactionStaffRoles.find.mock.invocationCallOrder[0] ?? 0;
+        expect(transactionCallOrder).toBeGreaterThan(0);
+        expect(grantDeleteCallOrder).toBeGreaterThan(transactionCallOrder);
+        expect(hookCallOrder).toBeGreaterThan(grantDeleteCallOrder);
+        expect(holdingsReadCallOrder).toBeGreaterThan(hookCallOrder);
+      };
+
+      beforeEach(() => {
+        dropCulturalTaskAssignmentsMock.mockClear();
+        dropCulturalTaskAssignmentsMock.mockResolvedValue([]);
+        profiles.findOne.mockResolvedValue(makeProfile());
+        transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+      });
+
+      it('drops them when the last cultural grant goes', async () => {
+        const culturalGrants = [
+          'cultural_producer',
+          'music_manager_producer',
+        ] as const;
+
+        for (const culturalGrant of culturalGrants) {
+          dropCulturalTaskAssignmentsMock.mockClear();
+          dataSource.transaction.mockClear();
+          transactionStaffRoles.find.mockClear();
+          transactionStaffRoles.delete.mockClear();
+          transactionUsers.findOne.mockResolvedValue({
+            id: 'user-ines',
+            role: UserRole.Member,
+            isSystem: false,
+          });
+
+          await service.revokeStaffRole(
+            'user-admin',
+            'ines-martins',
+            culturalGrant,
+          );
+
+          expectCulturalDropInTransaction();
+        }
+      });
+
+      it('skips the cultural hook for an unrelated grant', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Member,
+          isSystem: false,
+        });
+
+        await service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'magazine_editor',
+        );
+
+        expect(dataSource.transaction).toHaveBeenCalled();
+        expect(dropCulturalTaskAssignmentsMock).not.toHaveBeenCalled();
+      });
+
+      it('skips it on a revoke for a moderator', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Moderator,
+          isSystem: false,
+        });
+
+        await service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'cultural_producer',
+        );
+
+        expect(dataSource.transaction).toHaveBeenCalled();
+        expect(dropCulturalTaskAssignmentsMock).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('updateRole', () => {
@@ -1527,6 +1633,78 @@ describe('AdminMembersService', () => {
 
           expect(dropCalls()).toEqual([]);
         }
+      });
+    });
+
+    describe('cultural task assignments', () => {
+      /** Pins one hook call on the manager the transaction stub handed out,
+       *  after the role write and its audit row. */
+      const expectCulturalDropInTransaction = () => {
+        expect(dropCulturalTaskAssignmentsMock).toHaveBeenCalledTimes(1);
+        expect(dropCulturalTaskAssignmentsMock).toHaveBeenCalledWith(
+          expect.objectContaining({ query: transactionQuery }),
+          'user-ines',
+        );
+        const transactionCallOrder =
+          dataSource.transaction.mock.invocationCallOrder[0] ?? 0;
+        const roleWriteCallOrder =
+          transactionUsers.update.mock.invocationCallOrder[0] ?? 0;
+        const auditSaveCallOrder =
+          transactionAuditLogs.save.mock.invocationCallOrder[0] ?? 0;
+        const hookCallOrder =
+          dropCulturalTaskAssignmentsMock.mock.invocationCallOrder[0] ?? 0;
+        expect(transactionCallOrder).toBeGreaterThan(0);
+        expect(roleWriteCallOrder).toBeGreaterThan(transactionCallOrder);
+        expect(auditSaveCallOrder).toBeGreaterThan(roleWriteCallOrder);
+        expect(hookCallOrder).toBeGreaterThan(auditSaveCallOrder);
+      };
+
+      beforeEach(() => {
+        dropCulturalTaskAssignmentsMock.mockClear();
+        dropCulturalTaskAssignmentsMock.mockResolvedValue([]);
+        profiles.findOne.mockResolvedValue(makeProfile());
+      });
+
+      it('drops cultural task assignments when a moderator becomes a member', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Moderator,
+          isSystem: false,
+        });
+
+        await service.updateRole('user-admin', 'ines-martins', UserRole.Member);
+
+        expectCulturalDropInTransaction();
+      });
+
+      it('drops them when an admin becomes a member', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Admin,
+          isSystem: false,
+        });
+
+        await service.updateRole('user-admin', 'ines-martins', UserRole.Member);
+
+        expectCulturalDropInTransaction();
+      });
+
+      it('keeps them when an admin becomes a moderator', async () => {
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: UserRole.Admin,
+          isSystem: false,
+        });
+
+        await service.updateRole(
+          'user-admin',
+          'ines-martins',
+          UserRole.Moderator,
+        );
+
+        expect(dataSource.transaction).toHaveBeenCalled();
+        expect(transactionUsers.update).toHaveBeenCalled();
+        expect(dropCulturalTaskAssignmentsMock).not.toHaveBeenCalled();
       });
     });
   });

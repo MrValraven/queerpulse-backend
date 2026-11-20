@@ -27,6 +27,12 @@ import {
   isLeadsRequest,
 } from './leads/leads-request-log';
 // Also import-free, for the same reason.
+import {
+  dropCulturalProductionReferer,
+  dropCulturalProductionUrl,
+  isCulturalProductionRequest,
+} from './cultural-production/cultural-production-request-log';
+// Also import-free, for the same reason.
 import { dropVjReferer, dropVjUrl, isVjRequest } from './vj/vj-request-log';
 // Also import-free, for the same reason.
 import { dropLandingVisitRequest } from './landing/landing-visit-request-log';
@@ -113,6 +119,7 @@ export function scrubSensitiveQueryParameters(
   dropStudioListeningReferer(request);
   dropCreatorDraftReferer(request);
   dropLeadsReferer(request);
+  dropCulturalProductionReferer(request);
   dropVjReferer(request);
   // A referer that survives can still carry an invite code or a token.
   redactKeptReferer(request);
@@ -127,6 +134,8 @@ export function scrubSensitiveQueryParameters(
     !dropCreatorDraftUrl(request) &&
     // Lead names, emails and notes ride in leads bodies and query strings.
     !dropLeadsUrl(request) &&
+    // Idea text, task notes, comments and guide sections ride in Cultural Production bodies and query strings.
+    !dropCulturalProductionUrl(request) &&
     // Clip titles and pack names ride in VJ bodies.
     !dropVjUrl(request) &&
     // The landing visit beacon is an anonymous counter: no URL, body, headers or cookies.
@@ -163,6 +172,7 @@ export function scrubSensitiveQueryParameters(
     (breadcrumb) =>
       !isCreatorDraftBreadcrumb(breadcrumb) &&
       !isLeadsBreadcrumb(breadcrumb) &&
+      !isCulturalProductionBreadcrumb(breadcrumb) &&
       !isVjBreadcrumb(breadcrumb),
   );
   for (const breadcrumb of event.breadcrumbs ?? []) {
@@ -183,6 +193,13 @@ function isCreatorDraftBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {
 function isLeadsBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {
   const url: unknown = breadcrumb.data?.url;
   return typeof url === 'string' && isLeadsRequest(url);
+}
+
+function isCulturalProductionBreadcrumb(
+  breadcrumb: Sentry.Breadcrumb,
+): boolean {
+  const url: unknown = breadcrumb.data?.url;
+  return typeof url === 'string' && isCulturalProductionRequest(url);
 }
 
 function isVjBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {

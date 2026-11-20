@@ -93,3 +93,19 @@ describe('staff roles registry: vj_operator', () => {
     expect(joinedGrants).toContain('NOT any other admin surface');
   });
 });
+
+describe('staff roles registry: Cultural Production', () => {
+  it('names Cultural Production on both grants that open it', () => {
+    const grantLinePrefix = 'Plan QueerPulse events in Cultural Production';
+    const grantingRoleIds = [
+      'cultural_producer',
+      'music_manager_producer',
+    ] as const;
+    grantingRoleIds.forEach((staffRoleId) => {
+      const hasLine = STAFF_ROLES[staffRoleId].grants.some((grantLine) =>
+        grantLine.startsWith(grantLinePrefix),
+      );
+      expect(hasLine).toBe(true);
+    });
+  });
+});

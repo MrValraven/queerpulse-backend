@@ -46,6 +46,7 @@ import {
 import { Community } from '../communities/entities/community.entity';
 import { topLevelOnly } from '../communities/subcommunity-rules';
 import { dropLeadAssignmentsOfUser } from '../leads/lead-assignee-access';
+import { dropCulturalTaskAssignmentsOfUser } from '../cultural-production/cultural-task-assignee-access';
 import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
@@ -924,6 +925,13 @@ export class AdminMembersService {
         await dropLeadAssignmentsOfUser(manager, targetUserId);
       }
 
+      // Cultural Production: leaving the staff tier ends access unless the
+      // member holds one of its two grants (the hook re-checks), and every
+      // task assignment goes with it in this transaction.
+      if (previousRole !== UserRole.Member && targetRole === UserRole.Member) {
+        await dropCulturalTaskAssignmentsOfUser(manager, targetUserId);
+      }
+
       // A moderator or admin can't sit as a co-host on a house Music event,
       // so a move up into either tier ends every such seat the member holds.
       const isPromotionIntoStaffTier =
@@ -1223,6 +1231,16 @@ export class AdminMembersService {
         targetUser.role !== UserRole.Admin
       ) {
         await dropLeadAssignmentsOfUser(manager, targetUserId);
+      }
+
+      // Cultural Production: losing cultural_producer or music_manager_producer
+      // below the staff tier ends access unless the other grant remains (the
+      // hook re-checks), and every task assignment goes with it.
+      if (
+        (role === 'cultural_producer' || role === 'music_manager_producer') &&
+        targetUser.role === UserRole.Member
+      ) {
+        await dropCulturalTaskAssignmentsOfUser(manager, targetUserId);
       }
 
       const holdings = await grants.find({

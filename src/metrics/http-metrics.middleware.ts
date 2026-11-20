@@ -1,6 +1,7 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
 import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-log';
+import { isCulturalProductionRequest } from '../cultural-production/cultural-production-request-log';
 import { isLandingVisitBeacon } from '../landing/landing-visit-request-log';
 import { isLeadsRequest } from '../leads/leads-request-log';
 import { isStudioLandingPublicRequest } from '../studio/studio-landing-request-log';
@@ -23,7 +24,9 @@ import { MetricsService } from './metrics.service';
  * what a member plays, aggregate counts included. Creator draft requests are
  * left out too, so no metric pairs a draft with an admin. Leads requests are
  * left out as well, so no metric pairs a lead with a staff member. VJ requests
- * are left out too, so no metric pairs a clip or a pack with an admin.
+ * are left out too, so no metric pairs a clip or a pack with an admin. Cultural
+ * Production requests are left out as well, so no metric pairs an idea, a task
+ * or a guide with a staff member.
  */
 @Injectable()
 export class HttpMetricsMiddleware implements NestMiddleware {
@@ -35,6 +38,7 @@ export class HttpMetricsMiddleware implements NestMiddleware {
       isStudioListeningRequest(requestUrl, request.method) ||
       isCreatorDraftRequest(requestUrl) ||
       isLeadsRequest(requestUrl) ||
+      isCulturalProductionRequest(requestUrl) ||
       isVjRequest(requestUrl) ||
       isLandingVisitBeacon(requestUrl, request.method) ||
       // The Studio page reads are served to strangers and record nothing.

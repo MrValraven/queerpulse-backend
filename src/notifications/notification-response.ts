@@ -197,6 +197,10 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // The staff member who made the assignment. The emit site passes no
   // `actorId` argument to `create`, so a mute never silences it.
   [NotificationType.LeadAssigned]: 'assignedById',
+  // The staff member who assigned the task or the guide batch. The emit site
+  // passes no `actorId` argument to `create`, so a mute never silences either.
+  [NotificationType.CulturalTaskAssigned]: 'assignedById',
+  [NotificationType.CulturalTaskBatchAssigned]: 'assignedById',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -1042,6 +1046,14 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // The deep link's lead id and nothing else. `assignedById` stays server
     // side and travels as `actor`.
     [NotificationType.LeadAssigned]: ['leadId'],
+    // The deep link's ids and the title the row names, shown to staff only.
+    // `assignedById` stays server side and travels as `actor`.
+    [NotificationType.CulturalTaskAssigned]: ['taskId', 'taskTitle'],
+    [NotificationType.CulturalTaskBatchAssigned]: [
+      'guideId',
+      'guideTitle',
+      'taskCount',
+    ],
 
     // --- The four approval queues (LOC-19) ---------------------------------
     // Each carries the `decision` its copy branches on, the member's own

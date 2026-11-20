@@ -455,6 +455,13 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // member can never receive: a switch that silenced it would leave a lead
     // with nobody following it up. One per assignment.
     NotificationType.LeadAssigned,
+    // A Cultural Production task, or a guide batch of them, handed to this
+    // staff member by somebody else. Staff duty mail a member can never
+    // receive: a switch that silenced it would leave a task with nobody
+    // knowing it was theirs. One per assignment, or one per person for a guide
+    // batch.
+    NotificationType.CulturalTaskAssigned,
+    NotificationType.CulturalTaskBatchAssigned,
     // A community moderator handing platform staff a ban-evasion question
     // (PRD-31). Reaches platform `moderator`/`admin` accounts only (a member
     // can never receive one), and it is duty mail on a question somebody asked

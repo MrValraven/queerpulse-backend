@@ -2091,6 +2091,45 @@ export enum NotificationType {
    * See migration `AddLeadAssignees1840300000000`.
    */
   LeadAssigned = 'lead_assigned',
+
+  /**
+   * One Cultural Production task that somebody else assigned to a staff member
+   * (the assign route or creating a task with assignees).
+   *
+   * RECIPIENTS: each assignee other than the caller.
+   *
+   * ACTOR: `assignedById`, resolved for the bell. The emit site passes no
+   * `actorId` argument, so a mute never silences it while a block hides the
+   * row at read time.
+   *
+   * PAYLOAD: `{ taskId, taskTitle, assignedById }`; the bell forwards the task
+   * id and title only. The title is staff content shown to staff.
+   *
+   * UNBUNDLED and always delivered; in-app only, with no push and no email.
+   *
+   * See migration `AddCulturalProduction1840600000000`.
+   */
+  CulturalTaskAssigned = 'cultural_task_assigned',
+
+  /**
+   * A guide batch of Cultural Production tasks assigned to a staff member in
+   * one action.
+   *
+   * RECIPIENTS: each assignee of the batch other than the caller, one row per
+   * person however many tasks they received.
+   *
+   * ACTOR: `assignedById`, resolved for the bell. The emit site passes no
+   * `actorId` argument, so a mute never silences it while a block hides the
+   * row at read time.
+   *
+   * PAYLOAD: `{ guideId, guideTitle, taskCount, assignedById }`; the bell
+   * forwards the guide id, title and task count only.
+   *
+   * UNBUNDLED and always delivered; in-app only, with no push and no email.
+   *
+   * See migration `AddCulturalProduction1840600000000`.
+   */
+  CulturalTaskBatchAssigned = 'cultural_task_batch_assigned',
 }
 
 @Entity('notifications')

@@ -10,6 +10,7 @@ import { FEATURE_KEY } from '../common/feature.decorator';
 import { isCreatorDraftRequest } from '../creator-drafts/creator-draft-request-log';
 import { FeatureKey } from '../launchedFeatures';
 import { isLeadsRequest } from '../leads/leads-request-log';
+import { isCulturalProductionRequest } from '../cultural-production/cultural-production-request-log';
 import { isVjRequest } from '../vj/vj-request-log';
 import { isStudioLandingPublicRequest } from '../studio/studio-landing-request-log';
 import { isTrackedFeature } from './feature-depth';
@@ -81,6 +82,11 @@ export class FeatureUsageInterceptor implements NestInterceptor {
     // The `Admin` class prefix already keeps the leads controller out; this
     // explicit check keeps it out if the class is ever renamed or tagged.
     const isLeadsSurface = isLeadsRequest(request.originalUrl ?? request.url);
+    // The `Admin` class prefix already keeps the Cultural Production controllers
+    // out; this explicit check keeps them out if a class is ever renamed or tagged.
+    const isCulturalProductionSurface = isCulturalProductionRequest(
+      request.originalUrl ?? request.url,
+    );
     // The `Admin` class prefix already keeps the VJ controller out; this
     // explicit check keeps it out if the class is ever renamed or tagged.
     const isVjSurface = isVjRequest(request.originalUrl ?? request.url);
@@ -97,6 +103,7 @@ export class FeatureUsageInterceptor implements NestInterceptor {
       !isStaffSurface &&
       !isCreatorDraftSurface &&
       !isLeadsSurface &&
+      !isCulturalProductionSurface &&
       !isVjSurface &&
       !isProfileEventsSurface &&
       !isStudioLandingPublicSurface &&

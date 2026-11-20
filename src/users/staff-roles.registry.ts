@@ -89,8 +89,9 @@ export interface StaffRoleDef {
    *     not about the member who sent it: nothing it decides changes what that
    *     member may post or whether they stay.
    *   - `cultural_producer` keeps the platform's own public-face pages (the
-   *     landing slots and the press kit). It decides nothing about another
-   *     member's content or membership.
+   *     landing slots and the press kit) and plans the platform's own events in
+   *     Cultural Production. It decides nothing about another member's content
+   *     or membership.
    *   - `vj_operator` runs the platform's own visuals (the VJ library, the
    *     projector screen and the phone remote). Its clips, packs, scenes and
    *     set lists belong to the platform, so it decides nothing about another
@@ -215,6 +216,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       'Maintain the landing-page feature slots (admin/landing) and the press kit (admin/press-kit), alongside editorial',
       'NOT a member directory: the landing picker only lists members who set an Open profile AND explicitly consented to being featured',
       'NOT the editorial queues: story submissions, writer applications, commission interest and the film-club titles stay with editorial',
+      'Plan QueerPulse events in Cultural Production (admin/cultural-production): add, edit and assign ideas, tasks and event guides, turn a guide into the tasks for an event, and delete what they added',
     ],
   },
   music_manager_producer: {
@@ -229,6 +231,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       'Curate Studio home (admin/studio/curation, admin/studio/scenes, admin/studio/spotlight): the featured release, Staff picks, New this week, Local scenes, Artist of the month, New stars',
       'NOT the Studio page, founding artists, Waiting for Studio, or any Studio moderation queue',
       'Keep the leads directory (admin/leads): add, edit and delete leads, their links, notes and follow-ups, link a lead to a persona, and put staff with Leads access in charge of a lead',
+      'Plan QueerPulse events in Cultural Production (admin/cultural-production): add, edit and assign ideas, tasks and event guides, turn a guide into the tasks for an event, and delete what they added',
     ],
   },
   vj_operator: {

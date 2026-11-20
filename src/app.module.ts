@@ -51,6 +51,10 @@ import {
   redactCreatorDraftPath,
 } from './creator-drafts/creator-draft-request-log';
 import { isLeadsRequest, redactLeadsPath } from './leads/leads-request-log';
+import {
+  isCulturalProductionRequest,
+  redactCulturalProductionPath,
+} from './cultural-production/cultural-production-request-log';
 import { isVjRequest, redactVjPath } from './vj/vj-request-log';
 import { isLandingVisitBeacon } from './landing/landing-visit-request-log';
 import { isStudioLandingPublicRequest } from './studio/studio-landing-request-log';
@@ -68,6 +72,7 @@ import { AdminCommunitiesModule } from './admin-communities/admin-communities.mo
 import { AdminMembersModule } from './admin-members/admin-members.module';
 import { MusicEventsModule } from './music-events/music-events.module';
 import { LeadsModule } from './leads/leads.module';
+import { CulturalProductionModule } from './cultural-production/cultural-production.module';
 import { VjModule } from './vj/vj.module';
 import { AdminDsarModule } from './admin-dsar/admin-dsar.module';
 import { AdminStatusModule } from './admin-status/admin-status.module';
@@ -197,6 +202,8 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
               isCreatorDraftRequest(req.url) ||
               // Leads routes carry lead names, emails and notes.
               isLeadsRequest(req.url) ||
+              // Cultural Production routes carry idea, task and guide text.
+              isCulturalProductionRequest(req.url) ||
               // VJ routes carry clip titles and pack names.
               isVjRequest(req.url) ||
               // The landing visit beacon is an anonymous counter.
@@ -256,8 +263,10 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
               // a clip.
               url: redactSensitiveQueryParameters(
                 redactVjPath(
-                  redactLeadsPath(
-                    redactCreatorDraftPath(redactStudioPreviewToken(req.url)),
+                  redactCulturalProductionPath(
+                    redactLeadsPath(
+                      redactCreatorDraftPath(redactStudioPreviewToken(req.url)),
+                    ),
                   ),
                 ),
               ),
@@ -411,6 +420,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     AdminMembersModule,
     MusicEventsModule,
     LeadsModule,
+    CulturalProductionModule,
     VjModule,
     AdminInvitesModule,
     // A privacy-preserving signal that a new account may belong to someone

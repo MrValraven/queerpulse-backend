@@ -131,7 +131,7 @@ describe('touchesPrivateParameterTable', () => {
     ).toBe(false);
   });
 
-  it('names the draft, quiz show, sign-in code challenge, leads and VJ tables', () => {
+  it('names the draft, quiz show, sign-in code challenge, leads, Cultural Production and VJ tables', () => {
     expect([...PRIVATE_PARAMETER_TABLES]).toEqual([
       'creator_drafts',
       'listing_drafts',
@@ -148,6 +148,10 @@ describe('touchesPrivateParameterTable', () => {
       'quizshow_templates',
       'leads',
       'lead_entries',
+      'cultural_ideas',
+      'cultural_idea_comments',
+      'cultural_tasks',
+      'cultural_guides',
       'vj_clips',
       'vj_packs',
       'vj_scenes',
