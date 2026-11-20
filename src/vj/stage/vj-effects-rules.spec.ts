@@ -45,7 +45,7 @@ describe('vj effects rules', () => {
       failureCodeOf(
         ruleSetEffects(
           state,
-          { speed: 3, isBlackout: 'yes', settings: 'all' },
+          { speed: 5, isBlackout: 'yes', settings: 'all' },
           CONTEXT,
         ),
       ),
@@ -270,7 +270,7 @@ describe('vj effects rules', () => {
 
     expect(
       restoredVjEffects(
-        { speed: 3, isBlackout: 'yes', settings: [] },
+        { speed: 5, isBlackout: 'yes', settings: [] },
         state.effects,
       ),
     ).toEqual(state.effects);

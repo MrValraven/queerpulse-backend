@@ -1,6 +1,9 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
 import {
   VJ_LIMITS,
+  VJ_SPEED_DECIMALS,
+  VJ_SPEED_MAX,
+  VJ_SPEED_MIN,
   type VjAckFailure,
   type VjSocketErrorCode,
   type VjStageState,
@@ -451,7 +454,7 @@ export const VJ_SOCKET_ERROR_MESSAGES: Record<VjSocketErrorCode, string> = {
   vj_overlay_text_too_long: `The overlay text can be at most ${VJ_LIMITS.overlayTextMax} characters.`,
   vj_overlay_text_blank: 'The overlay needs text before it can show.',
   vj_overlay_style_invalid: 'The overlay style is outside the list.',
-  vj_speed_invalid: 'The speed must be 0.25, 0.5, 1, 1.5, 2 or 4.',
+  vj_speed_invalid: `The speed must be a number from ${VJ_SPEED_MIN} to ${VJ_SPEED_MAX} with at most ${VJ_SPEED_DECIMALS} decimals.`,
   vj_effect_flag_invalid: 'Each on and off switch must be true or false.',
   vj_shuffle_interval_invalid: `The shuffle interval must be ${VJ_LIMITS.shuffleSecondsMin} to ${VJ_LIMITS.shuffleSecondsMax} seconds, or 4, 8, 16 or 32 beats.`,
   vj_bpm_out_of_range: `The tempo must be from ${VJ_LIMITS.bpmMin} to ${VJ_LIMITS.bpmMax} BPM.`,

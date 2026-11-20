@@ -762,7 +762,7 @@ describe('VjStageService', () => {
 
     it('records the sequence of a refused command', () => {
       const clientId = randomUUID();
-      const payload = { speed: 3, clientId, commandSequence: 1 };
+      const payload = { speed: 5, clientId, commandSequence: 1 };
       expect(
         failureOf(
           service.applyRemoteCommand(

@@ -17,6 +17,9 @@ import {
   VJ_OVERLAY_SIZES,
   VJ_OVERLAY_STYLES,
   VJ_SPEEDS,
+  VJ_SPEED_DECIMALS,
+  VJ_SPEED_MAX,
+  VJ_SPEED_MIN,
   VJ_TRANSITION_BEAT_COUNTS,
   VJ_TRANSITION_IDS,
   VJ_TRANSITION_LENGTH_UNITS,
@@ -37,6 +40,7 @@ import type {
   VjOverlayStyle,
   VjSocketErrorCode,
   VjSpeed,
+  VjSpeedPreset,
   VjTransition,
   VjTransitionId,
   VjTransitionLength,
@@ -265,9 +269,25 @@ export function canonicalVjEffectSettings(
   return canonicalSettings;
 }
 
-/** Whether a value is one of `VJ_SPEEDS`. */
+/** Whether a value is a live stage speed: a finite number from
+ *  `VJ_SPEED_MIN` to `VJ_SPEED_MAX` with at most `VJ_SPEED_DECIMALS`
+ *  decimals. The tolerance absorbs float noise such as 0.85 * 100. */
 export function isVjSpeed(value: unknown): value is VjSpeed {
-  return isOneOf<VjSpeed>(VJ_SPEEDS, value);
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < VJ_SPEED_MIN ||
+    value > VJ_SPEED_MAX
+  ) {
+    return false;
+  }
+  const scale = 10 ** VJ_SPEED_DECIMALS;
+  return Math.abs(value * scale - Math.round(value * scale)) < 1e-9;
+}
+
+/** Whether a value is one of the preset speeds in `VJ_SPEEDS`. */
+export function isVjSpeedPreset(value: unknown): value is VjSpeedPreset {
+  return isOneOf<VjSpeedPreset>(VJ_SPEEDS, value);
 }
 
 /** A transition length: exactly `unit` and `value`; 'ms' an integer 0..4000,

@@ -344,7 +344,7 @@ describe('vjAckFailure', () => {
       'The transition mode is outside the catalog.',
     );
     expect(VJ_SOCKET_ERROR_MESSAGES.vj_speed_invalid).toBe(
-      'The speed must be 0.25, 0.5, 1, 1.5, 2 or 4.',
+      'The speed must be a number from 0.25 to 4 with at most 2 decimals.',
     );
   });
 

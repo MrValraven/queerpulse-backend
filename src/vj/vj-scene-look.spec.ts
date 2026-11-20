@@ -75,7 +75,7 @@ describe('vj-scene-look', () => {
     expect(
       lookFieldOf({
         ...validLook(),
-        effects: { speed: 3, settings: {} },
+        effects: { speed: 5, settings: {} },
         mix: { clipId: null, amount: -1, blendMode: 'normal' },
       }),
     ).toBe('effects.speed');

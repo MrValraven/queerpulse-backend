@@ -8,6 +8,7 @@ import {
   checkVjOverlayText,
   checkVjTransitionFields,
   isVjSpeed,
+  isVjSpeedPreset,
   mergeVjEffectSettings,
 } from './vj-field-checks';
 
@@ -221,8 +222,22 @@ describe('vj-field-checks', () => {
 
   it('reads speeds', () => {
     expect(isVjSpeed(0.25)).toBe(true);
-    expect(isVjSpeed(0.3)).toBe(false);
+    expect(isVjSpeed(4)).toBe(true);
+    expect(isVjSpeed(0.3)).toBe(true);
+    expect(isVjSpeed(0.85)).toBe(true);
+    expect(isVjSpeed(1.15)).toBe(true);
+    expect(isVjSpeed(0.855)).toBe(false);
+    expect(isVjSpeed(0.2)).toBe(false);
+    expect(isVjSpeed(4.01)).toBe(false);
+    expect(isVjSpeed(Number.NaN)).toBe(false);
+    expect(isVjSpeed(Number.POSITIVE_INFINITY)).toBe(false);
     expect(isVjSpeed('1')).toBe(false);
+  });
+
+  it('reads preset speeds', () => {
+    expect(isVjSpeedPreset(1.5)).toBe(true);
+    expect(isVjSpeedPreset(0.85)).toBe(false);
+    expect(isVjSpeedPreset('1')).toBe(false);
   });
 
   describe('transition', () => {

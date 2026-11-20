@@ -27,7 +27,7 @@ import {
   type VjLoopMode,
   type VjMediaKind,
   type VjSetlistItemKind,
-  type VjSpeed,
+  type VjSpeedPreset,
   type VjStepDuration,
 } from './vj.contract';
 
@@ -253,7 +253,7 @@ export interface NormalizedVjClipUpdate {
   title?: string;
   fitMode?: VjFitMode;
   isFavorite?: boolean;
-  defaultSpeed?: VjSpeed;
+  defaultSpeed?: VjSpeedPreset;
   loopMode?: VjLoopMode;
   loopInMs?: number | null;
   loopOutMs?: number | null;

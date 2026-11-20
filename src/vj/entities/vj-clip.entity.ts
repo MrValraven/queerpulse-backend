@@ -18,7 +18,7 @@ import {
   type VjFitMode,
   type VjLoopMode,
   type VjMediaKind,
-  type VjSpeed,
+  type VjSpeedPreset,
 } from '../vj.contract';
 import { VjPackClip } from './vj-pack-clip.entity';
 
@@ -123,7 +123,7 @@ export class VjClip {
 
   /** The playback speed a stage takes when this clip goes live. */
   @Column({ type: 'double precision', default: 1 })
-  defaultSpeed!: VjSpeed;
+  defaultSpeed!: VjSpeedPreset;
 
   /** Loop start in ms; null loops from 0. Always null for a GIF. */
   @Column({ type: 'integer', nullable: true })

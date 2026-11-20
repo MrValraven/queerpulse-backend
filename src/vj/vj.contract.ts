@@ -31,9 +31,24 @@ export type VjFitMode = (typeof VJ_FIT_MODES)[number];
 /** The fit mode a clip created with none starts with. */
 export const DEFAULT_VJ_FIT_MODE: VjFitMode = 'fill';
 
-/** Playback rates a remote may pick; GIFs ignore them. */
+/** The preset playback rates a remote offers as one-tap picks; GIFs ignore
+ *  them. A clip's default speed is always one of these (the `vj_clips`
+ *  check constraint holds it to this list). */
 export const VJ_SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4] as const;
-export type VjSpeed = (typeof VJ_SPEEDS)[number];
+export type VjSpeedPreset = (typeof VJ_SPEEDS)[number];
+
+/** The slowest live stage speed a remote or a scene look may set. */
+export const VJ_SPEED_MIN = 0.25;
+/** The fastest live stage speed a remote or a scene look may set. */
+export const VJ_SPEED_MAX = 4;
+/** The most decimal places a live stage speed may carry, so 0.85 and 1.15
+ *  are valid and 0.855 is refused. */
+export const VJ_SPEED_DECIMALS = 2;
+
+/** A live stage speed: any finite number from `VJ_SPEED_MIN` to
+ *  `VJ_SPEED_MAX` with at most `VJ_SPEED_DECIMALS` decimals. The presets in
+ *  `VJ_SPEEDS` are a subset. */
+export type VjSpeed = number;
 
 /** How the screens move from one source to the next. */
 export const VJ_TRANSITION_IDS = [

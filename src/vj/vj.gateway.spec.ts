@@ -1608,7 +1608,7 @@ describe('VjGateway', () => {
       const refusedPayload = {
         clientId: CLIENT_ID,
         commandSequence: 1,
-        speed: 3,
+        speed: 5,
       };
 
       const refused = await harness.gateway.handleSetEffects(
@@ -2731,7 +2731,7 @@ describe('VjGateway', () => {
           return subject.gateway.handleSetEffects(asClient(remote), {
             clientId: CLIENT_ID,
             commandSequence: 1,
-            speed: 3,
+            speed: 5,
           });
         },
       ],
