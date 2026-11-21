@@ -190,7 +190,9 @@ export class CommunitiesController {
       'creation-only and are rejected here rather than silently ignored. ' +
       '`isPubliclyListed: true` is refused unless the resulting access tier ' +
       'is `public` or `request`; moving the tier to `invite`/`private` ' +
-      'forces the community back to unlisted in the same update.',
+      'forces the community back to unlisted in the same update. ' +
+      '`setupChecklistDismissed: true` on a space answers code ' +
+      '`setup_checklist_unavailable_for_spaces`.',
   })
   @ApiForbiddenResponse({
     description:

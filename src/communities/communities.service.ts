@@ -84,6 +84,12 @@ import {
   toRosterEntry,
 } from './community-response';
 import {
+  CommunitySetupChecklistCounts,
+  isSetupChecklistViewer,
+  MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+  setupChecklistUnavailableForSpacesError,
+} from './community-setup-checklist';
+import {
   ACCOUNT_REMOVED,
   AccountRemovedEvent,
 } from '../ban-evasion/ban-evasion.events';
@@ -258,9 +264,11 @@ export interface CreateCommunityInput {
 // PATCH-time re-send semantics either. All three are omitted from the input
 // type AND from `UpdateCommunityDto`, so sending one is a 400 that names the
 // field rather than a silent drop the client reads as success (BE-COM-22).
+// `setupChecklistDismissed` is staff state handled outside the settings diff:
+// it writes through `MARK_SETUP_CHECKLIST_DISMISSED_SQL` and logs nothing.
 export type UpdateCommunityInput = Partial<
   Omit<CreateCommunityInput, 'handle' | 'stewards' | 'invites'>
->;
+> & { setupChecklistDismissed?: true };
 
 export type CommunityListFilter = 'discover' | 'mine';
 
@@ -1338,6 +1346,16 @@ export class CommunitiesService {
       );
     }
 
+    // Spaces never show the setup checklist, so a dismissal sent to one is
+    // refused with its reason code before anything in the patch is written.
+    if (dto.setupChecklistDismissed === true && community.parentId) {
+      throw setupChecklistUnavailableForSpacesError();
+    }
+    // Only the first dismissal writes; a repeat answers as dismissed.
+    const shouldDismissSetupChecklist =
+      dto.setupChecklistDismissed === true &&
+      community.setupChecklistDismissedAt == null;
+
     // Shared-upload backstop (see `assertNoForeignUploadIntroduced`): this
     // community is edited by every owner/moderator, so the interceptor exempts
     // it and lets a co-editor re-save the currently stored cover whoever
@@ -1500,6 +1518,13 @@ export class CommunitiesService {
         const savedCommunity = await manager
           .getRepository(Community)
           .save(community);
+        // The guarded UPDATE is the column's only writer, so a stale settings
+        // save from another staff member can never clear the dismissal.
+        if (shouldDismissSetupChecklist) {
+          await manager.query(MARK_SETUP_CHECKLIST_DISMISSED_SQL, [
+            community.id,
+          ]);
+        }
         const raisedSpaceTiers =
           shouldRaiseSpaceTiers && dto.accessTier !== undefined
             ? await this.subcommunityCascade.raiseSpaceTiers(
@@ -1529,6 +1554,11 @@ export class CommunitiesService {
         null,
         { from: raisedSpace.from, to: dto.accessTier, parentId: community.id },
       );
+    }
+    // The response reads only `isDismissed`; the stored stamp is the
+    // database's own `now()`.
+    if (shouldDismissSetupChecklist) {
+      saved.setupChecklistDismissedAt = new Date();
     }
     return this.buildDetail(saved, userId, actorRole);
   }
@@ -4199,11 +4229,19 @@ export class CommunitiesService {
       // One indexed COUNT on `community_giving_methods.community_id`.
       this.givingMethods.count({ where: { communityId: community.id } }),
     ]);
-    // A space itself never hosts spaces, so its own count is always 0
-    // without a query.
-    const subcommunityCount = community.parentId
-      ? 0
-      : await this.visibleSubcommunityCount(community.id, viewerId);
+    // The setup checklist counts load only for staff of a top-level
+    // community, the same rule `toCommunityDetail` gates the block on.
+    const shouldLoadSetupChecklist = isSetupChecklistViewer(role, community);
+    const [subcommunityCount, setupChecklistCounts] = await Promise.all([
+      // A space itself never hosts spaces, so its own count is always 0
+      // without a query.
+      community.parentId
+        ? 0
+        : this.visibleSubcommunityCount(community.id, viewerId),
+      shouldLoadSetupChecklist
+        ? this.setupChecklistCountsFor(community.id)
+        : Promise.resolve(null),
+    ]);
     const subcommunityContext: SubcommunityDetailContext = {
       parent,
       isParentMember: parentMembership != null,
@@ -4222,6 +4260,7 @@ export class CommunitiesService {
       invite?.createdAt ?? null,
       subcommunityContext,
       givingMethodCount,
+      setupChecklistCounts,
     );
   }
 
@@ -4262,6 +4301,23 @@ export class CommunitiesService {
   private async statsFor(communityId: string): Promise<CommunityStats> {
     const stats = await this.statsForMany([communityId]);
     return stats.get(communityId) ?? EMPTY_STATS;
+  }
+
+  /**
+   * The two numbers the setup checklist reads. The staff count includes the
+   * owner's own roster row. The post count covers Pulse and Discussion (one
+   * table) and skips tombstones. One indexed count each.
+   */
+  private async setupChecklistCountsFor(
+    communityId: string,
+  ): Promise<CommunitySetupChecklistCounts> {
+    const [staffCount, postCount] = await Promise.all([
+      this.members.count({
+        where: { communityId, role: In(CommunitiesService.STAFF_ROLES) },
+      }),
+      this.posts.count({ where: { communityId, deletedAt: IsNull() } }),
+    ]);
+    return { staffCount, postCount };
   }
 
   // Grouped-count pattern (mirrors `EventsService.summarize`): one query per

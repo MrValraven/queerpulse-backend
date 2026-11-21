@@ -11,7 +11,7 @@ import {
 } from '../common/image-url';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, In } from 'typeorm';
+import { DataSource, In, IsNull } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { ConnectionsService } from '../connections/connections.service';
@@ -28,6 +28,10 @@ import {
 } from './communities.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { COMMUNITY_MEMBERS_ONLY_CODE } from './community-gate';
+import {
+  MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+  SETUP_CHECKLIST_UNAVAILABLE_FOR_SPACES_CODE,
+} from './community-setup-checklist';
 import { COMMUNITY_MEMBER_LEFT } from './community.events';
 import { CommunityMembershipService } from './community-membership.service';
 import { SubcommunityCascadeService } from './subcommunity-cascade.service';
@@ -208,8 +212,9 @@ describe('CommunitiesService', () => {
     save: jest.Mock;
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
+    count: jest.Mock;
   };
-  let posts: { createQueryBuilder: jest.Mock };
+  let posts: { createQueryBuilder: jest.Mock; count: jest.Mock };
   let replies: { createQueryBuilder: jest.Mock };
   let joinRequests: {
     findOne: jest.Mock;
@@ -319,8 +324,16 @@ describe('CommunitiesService', () => {
       ),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => qbStub()),
+      // The setup checklist staff count for staff viewers. Default: a
+      // founder alone on the roster.
+      count: jest.fn().mockResolvedValue(1),
     };
-    posts = { createQueryBuilder: jest.fn(() => qbStub()) };
+    posts = {
+      createQueryBuilder: jest.fn(() => qbStub()),
+      // The setup checklist post count for staff viewers. Default: no posts
+      // yet.
+      count: jest.fn().mockResolvedValue(0),
+    };
     replies = { createQueryBuilder: jest.fn(() => qbStub()) };
     joinRequests = {
       findOne: jest.fn().mockResolvedValue(null),
@@ -609,6 +622,39 @@ describe('CommunitiesService', () => {
           },
         }),
       );
+    });
+
+    it('carries an open setup checklist on the detail create returns', async () => {
+      communities.save.mockImplementation(
+        (communityInput: Partial<Community>) => ({
+          ...communityInput,
+          id: 'c1',
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        }),
+      );
+      members.save.mockImplementation(
+        (memberInput: Partial<CommunityMember>) => memberInput,
+      );
+      const dto = {
+        name: 'Queer Devs',
+        handle: 'queer-devs',
+        type: 'professional',
+        accessTier: 'public',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        purpose: 'x',
+        whoFor: 'y',
+        tagline: 'z',
+      };
+
+      const created = await service.create('u1', dto as CreateCommunityInput);
+
+      expect(created.setupChecklist).toEqual({
+        isDismissed: false,
+        staffCount: 1,
+        postCount: 0,
+      });
     });
 
     // BE-COM-06: `stewards` used to be seeded straight into the roster as
@@ -959,6 +1005,105 @@ describe('CommunitiesService', () => {
       expect(givingMethods.count).toHaveBeenCalledWith({
         where: { communityId: 'c1' },
       });
+    });
+
+    // The public-community fixture of the giving methods test above, reused
+    // by the setup checklist specs below.
+    const setupChecklistCommunity = (
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      id: 'c1',
+      slug: 'p',
+      accessTier: AccessTier.Public,
+      ownerId: 'owner-1',
+      name: 'Pub',
+      type: CommunityType.Social,
+      tagline: 't',
+      ref: 'QP-C-0001',
+      purpose: 'purpose',
+      whoFor: 'who',
+      rosterVisible: true,
+      features: [],
+      rules: [],
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      ...overrides,
+    });
+
+    it('gives the owner of a top-level community the checklist with staff and post counts', async () => {
+      communities.findOne.mockResolvedValue(setupChecklistCommunity());
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+      members.count.mockResolvedValue(2);
+      posts.count.mockResolvedValue(5);
+
+      const detail = await service.getBySlug('p', 'owner-1');
+
+      expect(detail.setupChecklist).toEqual({
+        isDismissed: false,
+        staffCount: 2,
+        postCount: 5,
+      });
+      expect(members.count).toHaveBeenCalledTimes(1);
+      expect(members.count).toHaveBeenCalledWith({
+        where: {
+          communityId: 'c1',
+          role: In([RosterRole.Owner, RosterRole.CoOwner, RosterRole.Mod]),
+        },
+      });
+      expect(posts.count).toHaveBeenCalledTimes(1);
+      expect(posts.count).toHaveBeenCalledWith({
+        where: { communityId: 'c1', deletedAt: IsNull() },
+      });
+    });
+
+    it.each([RosterRole.CoOwner, RosterRole.Mod])(
+      'gives a %s the checklist',
+      async (role) => {
+        communities.findOne.mockResolvedValue(setupChecklistCommunity());
+        members.findOne.mockResolvedValue({ role });
+
+        const detail = await service.getBySlug('p', 'staff-1');
+
+        expect(detail.setupChecklist).toEqual({
+          isDismissed: false,
+          staffCount: 1,
+          postCount: 0,
+        });
+      },
+    );
+
+    it('reads a stamped dismissal as dismissed', async () => {
+      communities.findOne.mockResolvedValue(
+        setupChecklistCommunity({
+          setupChecklistDismissedAt: new Date('2026-11-20T10:00:00.000Z'),
+        }),
+      );
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+      const detail = await service.getBySlug('p', 'owner-1');
+
+      expect(detail.setupChecklist?.isDismissed).toBe(true);
+    });
+
+    it('leaves the key off for a plain member and runs no checklist count', async () => {
+      communities.findOne.mockResolvedValue(setupChecklistCommunity());
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+      const detail = await service.getBySlug('p', 'u2');
+
+      expect(Object.keys(detail)).not.toContain('setupChecklist');
+      expect(members.count).not.toHaveBeenCalled();
+      expect(posts.count).not.toHaveBeenCalled();
+    });
+
+    it('leaves the key off for a visitor with no role', async () => {
+      communities.findOne.mockResolvedValue(setupChecklistCommunity());
+      members.findOne.mockResolvedValue(null);
+
+      const detail = await service.getBySlug('p', 'visitor-1');
+
+      expect(Object.keys(detail)).not.toContain('setupChecklist');
+      expect(members.count).not.toHaveBeenCalled();
+      expect(posts.count).not.toHaveBeenCalled();
     });
 
     // The tier gate. A community that is not `public` is closed to anyone off
@@ -1782,6 +1927,130 @@ describe('CommunitiesService', () => {
         await expect(
           service.update('x', 'mod-1', { coverImageUrl: FOREIGN_COVER }),
         ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+    });
+
+    // The dismissal rides the settings PATCH but sits outside the settings
+    // diff: it writes through one guarded UPDATE and logs nothing.
+    describe('setup checklist dismissal', () => {
+      const dismissalCommunity = (overrides: Record<string, unknown> = {}) => ({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'u1',
+        name: 'Old',
+        purpose: 'p',
+        type: CommunityType.Social,
+        whoFor: 'w',
+        tagline: 't',
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        rulesVersion: 1,
+        ref: 'QP-C-0001',
+        archivedAt: null as Date | null,
+        setupChecklistDismissedAt: null as Date | null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        ...overrides,
+      });
+
+      it('stamps the dismissal through the guarded update for a mod', async () => {
+        communities.findOne.mockResolvedValue(dismissalCommunity());
+        members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+
+        const result = await service.update('x', 'mod-1', {
+          setupChecklistDismissed: true,
+        });
+
+        expect(manager.query).toHaveBeenCalledWith(
+          MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+          ['c1'],
+        );
+        expect(result.setupChecklist?.isDismissed).toBe(true);
+      });
+
+      it('writes no settings_changed entry and keeps rulesVersion for a dismissal alone', async () => {
+        communities.findOne.mockResolvedValue(dismissalCommunity());
+        members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+        const result = await service.update('x', 'u1', {
+          setupChecklistDismissed: true,
+        });
+
+        expect(governanceLog.log).not.toHaveBeenCalled();
+        expect(result.rulesVersion).toBe(1);
+      });
+
+      it('logs only the edited field when a dismissal rides with a name change', async () => {
+        communities.findOne.mockResolvedValue(dismissalCommunity());
+        members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+        await service.update('x', 'u1', {
+          name: 'New name',
+          setupChecklistDismissed: true,
+        });
+
+        expect(governanceLog.log).toHaveBeenCalledTimes(1);
+        expect(governanceLog.log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: GovernanceLogAction.SettingsChanged,
+            metadata: { changes: { name: { from: 'Old', to: 'New name' } } },
+          }),
+        );
+        expect(manager.query).toHaveBeenCalledWith(
+          MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+          ['c1'],
+        );
+      });
+
+      it('answers a repeat dismissal as dismissed and stamps nothing', async () => {
+        communities.findOne.mockResolvedValue(
+          dismissalCommunity({
+            setupChecklistDismissedAt: new Date('2026-11-19T09:00:00.000Z'),
+          }),
+        );
+        members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+        const result = await service.update('x', 'u1', {
+          setupChecklistDismissed: true,
+        });
+
+        expect(manager.query).not.toHaveBeenCalledWith(
+          MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+          expect.anything(),
+        );
+        expect(governanceLog.log).not.toHaveBeenCalled();
+        expect(result.setupChecklist?.isDismissed).toBe(true);
+      });
+
+      it('refuses a plain member with the existing forbidden response', async () => {
+        communities.findOne.mockResolvedValue(dismissalCommunity());
+        members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+        await expect(
+          service.update('x', 'u2', { setupChecklistDismissed: true }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(manager.query).not.toHaveBeenCalledWith(
+          MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+          expect.anything(),
+        );
+      });
+
+      it('refuses a dismissal on an archived community with the archived conflict', async () => {
+        communities.findOne.mockResolvedValue(
+          dismissalCommunity({
+            archivedAt: new Date('2026-11-01T00:00:00.000Z'),
+          }),
+        );
+        members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+        await expect(
+          service.update('x', 'u1', { setupChecklistDismissed: true }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(manager.query).not.toHaveBeenCalledWith(
+          MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+          expect.anything(),
+        );
       });
     });
   });
@@ -4501,6 +4770,25 @@ describe('CommunitiesService', () => {
     };
 
     describe('getBySlug', () => {
+      it('leaves the key off for a space owner and for parent staff in the space', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({
+          [SPACE_ID]: { 'space-owner': RosterRole.Owner },
+          [PARENT_ID]: { 'parent-owner': RosterRole.Owner },
+        });
+
+        const ownerDetail = await service.getBySlug('space', 'space-owner');
+        const parentStaffDetail = await service.getBySlug(
+          'space',
+          'parent-owner',
+        );
+
+        expect(Object.keys(ownerDetail)).not.toContain('setupChecklist');
+        expect(Object.keys(parentStaffDetail)).not.toContain('setupChecklist');
+        expect(members.count).not.toHaveBeenCalled();
+        expect(posts.count).not.toHaveBeenCalled();
+      });
+
       it('403s a parent member with no row in a request-tier space, with the members-only code', async () => {
         stageCommunities(spaceRow(), parentRow());
         stageRoster({ [PARENT_ID]: { 'member-1': RosterRole.Member } });
@@ -4869,6 +5157,33 @@ describe('CommunitiesService', () => {
         });
 
         expect(subcommunityCascade.raiseSpaceTiers).not.toHaveBeenCalled();
+      });
+
+      it('refuses a dismissal on a space with the space reason code and writes nothing', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({
+          [SPACE_ID]: { 'space-owner': RosterRole.Owner },
+          [PARENT_ID]: { 'space-owner': RosterRole.Member },
+        });
+
+        const error: unknown = await service
+          .update('space', 'space-owner', {
+            tagline: 'new tagline',
+            setupChecklistDismissed: true,
+          })
+          .catch((thrown: unknown) => thrown);
+
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).getResponse()).toEqual(
+          expect.objectContaining({
+            code: SETUP_CHECKLIST_UNAVAILABLE_FOR_SPACES_CODE,
+          }),
+        );
+        expect(communities.save).not.toHaveBeenCalled();
+        expect(manager.query).not.toHaveBeenCalledWith(
+          MARK_SETUP_CHECKLIST_DISMISSED_SQL,
+          expect.anything(),
+        );
       });
     });
 

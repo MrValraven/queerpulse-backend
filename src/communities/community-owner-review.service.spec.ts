@@ -60,6 +60,7 @@ describe('CommunityOwnerReviewService', () => {
     allowsSubcommunities: false,
     archivedWithParent: false,
     givingIntro: null,
+    setupChecklistDismissedAt: null,
     rulesVersion: 1,
     welcomeMessage: null,
     nowReading: null,

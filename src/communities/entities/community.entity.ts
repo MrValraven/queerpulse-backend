@@ -387,4 +387,15 @@ export class Community {
   // in both `save()` and `repository.update()`; inserts still write it.
   @Column({ type: 'varchar', length: 400, nullable: true, update: false })
   givingIntro!: string | null;
+
+  // When staff first dismissed the setup checklist card on the community
+  // page. NULL while the checklist is open. Paired migration
+  // `1840500000000-AddCommunitySetupChecklistDismissedAt`.
+  //
+  // `update: false`: the only writer is `MARK_SETUP_CHECKLIST_DISMISSED_SQL`
+  // in `community-setup-checklist.ts`. Every other path that loads a Community
+  // and later calls `save()` would otherwise write back a value read before a
+  // concurrent dismissal and bring the card back. Inserts still write it.
+  @Column({ type: 'timestamptz', nullable: true, update: false })
+  setupChecklistDismissedAt!: Date | null;
 }

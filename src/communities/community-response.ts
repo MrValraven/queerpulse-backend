@@ -21,6 +21,12 @@ import {
 import { CommunityPost, PostKind } from './entities/community-post.entity';
 import { ReactionKey } from './entities/community-post-reaction.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
+import {
+  CommunitySetupChecklistCounts,
+  CommunitySetupChecklistDTO,
+  isSetupChecklistViewer,
+  toCommunitySetupChecklist,
+} from './community-setup-checklist';
 
 /** The viewer, as the post/reply mappers need them: their user id plus their
  *  roster role in *this* community (null when they aren't a member — e.g. a
@@ -246,6 +252,9 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   // fetching the values. The values themselves are only served by
   // `GET /communities/:slug/giving`, behind the post board's read gate.
   givingMethodCount: number;
+  // The setup checklist card. Staff of a top-level community only: the key is
+  // absent for everyone else and on every space.
+  setupChecklist?: CommunitySetupChecklistDTO;
 }
 
 /**
@@ -329,6 +338,10 @@ export function toCommunityDetail(
   // Rows in `community_giving_methods` for this community, counted by
   // `CommunitiesService.buildDetail` in the same batch as the rest.
   givingMethodCount: number = 0,
+  // Staff and post counts for the setup checklist, loaded by
+  // `CommunitiesService.buildDetail` only for a checklist viewer. Null leaves
+  // the `setupChecklist` key off.
+  setupChecklistCounts: CommunitySetupChecklistCounts | null = null,
 ): CommunityDetailDTO {
   const { parent, isParentMember, subcommunityCount, isRosterMember } =
     subcommunityContext;
@@ -377,6 +390,9 @@ export function toCommunityDetail(
     subcommunityCount,
     isRosterMember,
     givingMethodCount,
+    ...(setupChecklistCounts && isSetupChecklistViewer(myRole, c)
+      ? { setupChecklist: toCommunitySetupChecklist(c, setupChecklistCounts) }
+      : {}),
   };
 }
 

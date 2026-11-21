@@ -63,6 +63,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     allowsSubcommunities: false,
     archivedWithParent: false,
     givingIntro: null,
+    setupChecklistDismissedAt: null,
     ...overrides,
   };
 }
@@ -405,5 +406,79 @@ describe('toCommunityDetail giving method count', () => {
 
     expect(defaultedDto.givingMethodCount).toBe(0);
     expect(countedDto.givingMethodCount).toBe(3);
+  });
+});
+
+describe('toCommunityDetail setup checklist', () => {
+  it('emits the setup checklist for a mod of a top-level community', () => {
+    const dto = toCommunityDetail(
+      makeCommunity({
+        setupChecklistDismissedAt: new Date('2026-11-20T10:00:00.000Z'),
+      }),
+      EMPTY_STATS,
+      RosterRole.Mod,
+      null,
+      null,
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      0,
+      { staffCount: 2, postCount: 0 },
+    );
+
+    expect(dto.setupChecklist).toEqual({
+      isDismissed: true,
+      staffCount: 2,
+      postCount: 0,
+    });
+  });
+
+  it('leaves the key off when no counts were loaded', () => {
+    const dto = toCommunityDetail(
+      makeCommunity(),
+      EMPTY_STATS,
+      RosterRole.Owner,
+      null,
+      null,
+    );
+
+    expect(Object.keys(dto)).not.toContain('setupChecklist');
+  });
+
+  it('leaves the key off for a member and for a space even when counts are passed', () => {
+    const counts = { staffCount: 1, postCount: 3 };
+    const memberDto = toCommunityDetail(
+      makeCommunity(),
+      EMPTY_STATS,
+      RosterRole.Member,
+      null,
+      null,
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      0,
+      counts,
+    );
+    const spaceDto = toCommunityDetail(
+      makeCommunity({ parentId: 'parent-1' }),
+      EMPTY_STATS,
+      RosterRole.Owner,
+      null,
+      null,
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      0,
+      counts,
+    );
+
+    expect(Object.keys(memberDto)).not.toContain('setupChecklist');
+    expect(Object.keys(spaceDto)).not.toContain('setupChecklist');
   });
 });

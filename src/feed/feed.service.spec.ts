@@ -313,6 +313,7 @@ const communityDefaults: Community = {
   allowsSubcommunities: false,
   archivedWithParent: false,
   givingIntro: null,
+  setupChecklistDismissedAt: null,
 };
 
 const baseCommunity = (overrides: Partial<Community> = {}): Community =>
