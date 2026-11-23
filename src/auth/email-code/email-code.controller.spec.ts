@@ -22,6 +22,8 @@ const NOW = new Date('2026-10-26T12:00:00.000Z');
 const EXPIRES_AT = new Date('2026-10-26T12:10:00.000Z');
 const RESEND_AT = new Date('2026-10-26T12:01:00.000Z');
 const WELL_FORMED_REQUESTER = 'A'.repeat(43);
+const TRUSTED_TOKEN = `1795000000.${'T'.repeat(43)}`;
+const TRUSTED_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const ACCESS_TTL_MS = 15 * 60 * 1000;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -73,6 +75,7 @@ function build() {
       .fn()
       .mockResolvedValue({ email: 'sam@example.com', userId: null }),
     consumeChallenge: jest.fn().mockResolvedValue(true),
+    mintTrustedRequesterToken: jest.fn().mockReturnValue(TRUSTED_TOKEN),
   };
   const authService = {
     signInWithVerifiedEmail: jest.fn().mockResolvedValue(user),
@@ -100,6 +103,15 @@ function requesterCookieCall(res: ReturnType<typeof makeRes>) {
   return res.cookie.mock.calls.find(
     (call: unknown[]) => call[0] === 'email_code_requester',
   ) as [string, string, Record<string, unknown>] | undefined;
+}
+
+function trustedCookieCall(res: ReturnType<typeof makeRes>) {
+  const calls = res.cookie.mock.calls as [
+    string,
+    string,
+    Record<string, unknown>,
+  ][];
+  return calls.find((call) => call[0] === 'email_code_trusted');
 }
 
 async function refusalOf(promise: Promise<unknown>): Promise<unknown> {
@@ -539,6 +551,113 @@ describe('EmailCodeController.verify', () => {
       ).not.toHaveBeenCalled();
     },
   );
+});
+
+// SEC-11: a browser that signs in with a correct code becomes a trusted
+// requester for that address.
+describe('EmailCodeController trusted-requester cookie', () => {
+  const verifyBody = { challengeId: 'c1', code: '123456' };
+
+  it('request passes the trusted cookie the browser holds to the service', async () => {
+    const { controller, emailCodes } = build();
+
+    await controller.request(
+      { email: 'sam@example.com', locale: 'en' },
+      makeReq({
+        email_code_requester: WELL_FORMED_REQUESTER,
+        email_code_trusted: TRUSTED_TOKEN,
+      }),
+      makeRes() as unknown as Response,
+    );
+
+    expect(emailCodes.issueSignInChallenge).toHaveBeenCalledWith(
+      expect.objectContaining({ trustedRequesterToken: TRUSTED_TOKEN }),
+    );
+  });
+
+  it('verify sets the trusted cookie for the verified address after the sign-in succeeds', async () => {
+    const { controller, emailCodes } = build();
+    const res = makeRes();
+
+    await controller.verify(
+      verifyBody,
+      makeReq({ email_code_requester: 'req-1' }),
+      res as unknown as Response,
+    );
+
+    expect(emailCodes.mintTrustedRequesterToken).toHaveBeenCalledWith(
+      'sam@example.com',
+    );
+    expect(callOrder(emailCodes.consumeChallenge)).toBeLessThan(
+      callOrder(emailCodes.mintTrustedRequesterToken),
+    );
+    const call = trustedCookieCall(res);
+    expect(call?.[1]).toBe(TRUSTED_TOKEN);
+    expect(call?.[1]).not.toContain('sam');
+    expect(call?.[2]).toMatchObject({
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/auth/email-code',
+      maxAge: TRUSTED_TTL_MS,
+    });
+  });
+
+  it.each<[string, (harness: ReturnType<typeof build>) => void]>([
+    [
+      'a wrong code',
+      ({ emailCodes }) => {
+        emailCodes.verifyChallenge.mockRejectedValue(
+          new EmailCodeRefusedError('code_incorrect', { attemptsLeft: 2 }),
+        );
+      },
+    ],
+    [
+      'a signup-gate refusal',
+      ({ authService }) => {
+        authService.signInWithVerifiedEmail.mockRejectedValue(
+          new SignupRejectedError('name_required'),
+        );
+      },
+    ],
+    [
+      'a code another verify already spent',
+      ({ emailCodes }) => {
+        emailCodes.consumeChallenge.mockResolvedValue(false);
+      },
+    ],
+  ])('verify sets no trusted cookie after %s', async (_label, arrange) => {
+    const harness = build();
+    arrange(harness);
+    const res = makeRes();
+
+    await expect(
+      harness.controller.verify(
+        verifyBody,
+        makeReq({ email_code_requester: 'req-1' }),
+        res as unknown as Response,
+      ),
+    ).rejects.toBeInstanceOf(EmailCodeRefusedError);
+
+    expect(harness.emailCodes.mintTrustedRequesterToken).not.toHaveBeenCalled();
+    expect(trustedCookieCall(res)).toBeUndefined();
+  });
+
+  it('verify renews the trusted cookie on every successful sign-in', async () => {
+    const { controller, emailCodes } = build();
+    const firstRes = makeRes();
+    const secondRes = makeRes();
+    const req = makeReq({
+      email_code_requester: 'req-1',
+      email_code_trusted: TRUSTED_TOKEN,
+    });
+
+    await controller.verify(verifyBody, req, firstRes as unknown as Response);
+    await controller.verify(verifyBody, req, secondRes as unknown as Response);
+
+    expect(emailCodes.mintTrustedRequesterToken).toHaveBeenCalledTimes(2);
+    expect(trustedCookieCall(firstRes)).toBeDefined();
+    expect(trustedCookieCall(secondRes)).toBeDefined();
+  });
 });
 
 describe('EmailCodeController reauth routes', () => {

@@ -1,3 +1,4 @@
+import { mediaReferenceVersion } from '../storage/media-reference-version';
 import { BadRequestException } from '@nestjs/common';
 import {
   resetImageUrlBaseForTesting,
@@ -226,8 +227,11 @@ describe('photoRowsByPost', () => {
 });
 
 describe('toPostPhotoViews — the legacy image lives alongside the rows', () => {
+  // The post's own author, who receives `/files/<key>` URLs (SEC-01).
+  const author = { userId: 'author-1', isModerator: false };
+
   it('renders a post that has only the legacy image as a one-photo gallery', () => {
-    const views = toPostPhotoViews(makePost({ image: KEY_ONE }), []);
+    const views = toPostPhotoViews(makePost({ image: KEY_ONE }), [], author);
     expect(views).toEqual([
       // `id` is null because there is no `forum_post_photo` row behind it —
       // that null IS the back-compat marker.
@@ -236,10 +240,14 @@ describe('toPostPhotoViews — the legacy image lives alongside the rows', () =>
   });
 
   it('prefers the rows when a post has them, in position order', () => {
-    const views = toPostPhotoViews(makePost({ image: KEY_ONE }), [
-      makeRow('photo-1', KEY_TWO, 0, 'the lease'),
-      makeRow('photo-2', KEY_THREE, 1),
-    ]);
+    const views = toPostPhotoViews(
+      makePost({ image: KEY_ONE }),
+      [
+        makeRow('photo-1', KEY_TWO, 0, 'the lease'),
+        makeRow('photo-2', KEY_THREE, 1),
+      ],
+      author,
+    );
     expect(views.map((view) => view.id)).toEqual(['photo-1', 'photo-2']);
     expect(views.map((view) => view.url)).toEqual([
       `https://api.test/files/${KEY_TWO}`,
@@ -249,7 +257,7 @@ describe('toPostPhotoViews — the legacy image lives alongside the rows', () =>
   });
 
   it('is empty for a post with neither', () => {
-    expect(toPostPhotoViews(makePost(), [])).toEqual([]);
+    expect(toPostPhotoViews(makePost(), [], author)).toEqual([]);
   });
 
   it('leaves out a photo whose stored value resolves to nothing', () => {
@@ -257,8 +265,59 @@ describe('toPostPhotoViews — the legacy image lives alongside the rows', () =>
     // is dropped by `toImageUrl`, and a dropped photo must not survive as a
     // null-url entry a client would try to render.
     expect(
-      toPostPhotoViews(makePost({ image: 'javascript:alert(1)' }), []),
+      toPostPhotoViews(makePost({ image: 'javascript:alert(1)' }), [], author),
     ).toEqual([]);
+  });
+});
+
+// SEC-01: every reader but the author and a moderator receives the post's
+// opaque reference, so no photo URL carries the author's user id.
+describe('toPostPhotoViews: readers get the opaque reference', () => {
+  const POST_UUID = 'dddddddd-4444-4444-8444-dddddddddddd';
+  const reader = { userId: 'reader-1', isModerator: false };
+
+  it('addresses each row by its place in the gallery', () => {
+    const views = toPostPhotoViews(
+      makePost({ id: POST_UUID }),
+      [makeRow('photo-1', KEY_TWO, 0), makeRow('photo-2', KEY_THREE, 1)],
+      reader,
+    );
+    expect(views.map((view) => view.url)).toEqual([
+      `https://api.test/files/forum-posts/${POST_UUID}/photos/0?v=${mediaReferenceVersion(KEY_TWO, `forum-posts/${POST_UUID}/photos/0`)}`,
+      `https://api.test/files/forum-posts/${POST_UUID}/photos/1?v=${mediaReferenceVersion(KEY_THREE, `forum-posts/${POST_UUID}/photos/1`)}`,
+    ]);
+    expect(JSON.stringify(views)).not.toContain(OWNER);
+  });
+
+  it('addresses the legacy image as photo 0', () => {
+    expect(
+      toPostPhotoViews(makePost({ id: POST_UUID, image: KEY_ONE }), [], reader),
+    ).toEqual([
+      {
+        id: null,
+        url: `https://api.test/files/forum-posts/${POST_UUID}/photos/0?v=${mediaReferenceVersion(KEY_ONE, `forum-posts/${POST_UUID}/photos/0`)}`,
+        alt: null,
+      },
+    ]);
+  });
+
+  it('gives a moderator the storage key URL', () => {
+    const views = toPostPhotoViews(
+      makePost({ id: POST_UUID, image: KEY_ONE }),
+      [],
+      { userId: 'mod-1', isModerator: true },
+    );
+    expect(views[0]?.url).toBe(`https://api.test/files/${KEY_ONE}`);
+  });
+
+  it('uses the reference when no viewer is named', () => {
+    const views = toPostPhotoViews(
+      makePost({ id: POST_UUID, image: KEY_ONE }),
+      [],
+    );
+    expect(views[0]?.url).toBe(
+      `https://api.test/files/forum-posts/${POST_UUID}/photos/0?v=${mediaReferenceVersion(KEY_ONE, `forum-posts/${POST_UUID}/photos/0`)}`,
+    );
   });
 });
 

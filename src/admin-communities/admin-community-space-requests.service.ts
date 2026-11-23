@@ -76,6 +76,7 @@ export class AdminCommunitySpaceRequestsService {
       isPlatformStaffReader
         ? [...new Set(rows.map((row) => row.requestedByUserId))]
         : [],
+      { inactive: 'include' },
     );
     return {
       items: rows.map((row) =>
@@ -189,6 +190,7 @@ export class AdminCommunitySpaceRequestsService {
   ): Promise<AdminCommunitySpaceRequestDTO> {
     const requesters = await new MemberLookup(this.profiles).byUserIds(
       isPlatformStaffReader ? [request.requestedByUserId] : [],
+      { inactive: 'include' },
     );
     return toAdminCommunitySpaceRequestDTO(
       request,

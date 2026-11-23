@@ -34,6 +34,10 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * revoked, before this runs (`cutTiesToNamedPersona`), so none of them
  * follows.
  *
+ * The persona row's own `created_at` and `updated_at` restart at the unlink
+ * as well: the wall's Newest fill and the directory's Recent sort order by
+ * them, and a kept position would match the two personas (SEC-07).
+ *
  * The items get fresh ids too, since every public persona read lists them by
  * id. Their `created_at` restarts at the unlink: the public item view shows
  * it as the item's first-published date (the rights footer reads it), and
@@ -125,10 +129,14 @@ export async function issueFreshPersonaId(
   onSalesForgotten?: (outcome: StudioSalesUnlinkOutcome) => void,
 ): Promise<string> {
   const freshSubprofileId = randomUUID();
-  await manager.query(`UPDATE "subprofiles" SET "id" = $1 WHERE "id" = $2`, [
-    freshSubprofileId,
-    previousSubprofileId,
-  ]);
+  // SEC-07: `created_at` restarts with the id. The wall's Newest fill sorts by
+  // it, so a kept timestamp held the slot the named persona had and matched
+  // the two for anyone who saw the wall before. `updated_at` restarts too,
+  // since the directory's Recent sort reads it.
+  await manager.query(
+    `UPDATE "subprofiles" SET "id" = $1, "created_at" = now(), "updated_at" = now() WHERE "id" = $2`,
+    [freshSubprofileId, previousSubprofileId],
+  );
   await manager.query(
     `UPDATE "subprofile_items"
         SET "id" = gen_random_uuid(), "created_at" = now()

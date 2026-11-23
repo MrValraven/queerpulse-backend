@@ -5,6 +5,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ACCOUNT_REINSTATED } from '../ban-evasion/ban-evasion.events';
 import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
+import { LiftRestrictionDto } from './dto/lift-restriction.dto';
+import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import { ModAuditService } from './mod-audit.service';
 import { ReportSubjectResolverService } from './report-subject-resolver.service';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
@@ -13,10 +15,16 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import {
   BanRatification,
   BanRatificationStatus,
 } from './entities/ban-ratification.entity';
+
+/** A suspension lift citing `other` with `note` as the member-facing text. */
+function liftSuspensionDto(note: string): LiftSuspensionDto {
+  return { reasonCode: 'other', note };
+}
 
 // TS-12's ban-ratification hold, and (new) whoever the admin-queue-notifications
 // task wires into its arrival: `restrictMember` is the direct admin entry point
@@ -39,7 +47,8 @@ describe('AccountEnforcementService', () => {
     findOne: jest.Mock;
     getRepository: jest.Mock;
   };
-  let dataSource: { transaction: jest.Mock };
+  let dataSource: { transaction: jest.Mock; getRepository: jest.Mock };
+  let deactivations: { findOne: jest.Mock };
   let emit: jest.Mock;
 
   const PROPOSING_MODERATOR_ID = 'mod-1';
@@ -90,10 +99,13 @@ describe('AccountEnforcementService', () => {
         }),
       getRepository: jest.fn(() => banRatifications),
     };
+    // The open deactivation row a suspended-then-deactivated member leaves.
+    deactivations = { findOne: jest.fn().mockResolvedValue(null) };
     dataSource = {
       transaction: jest.fn((callback: (m: unknown) => unknown) =>
         callback(manager),
       ),
+      getRepository: jest.fn(() => deactivations),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -282,10 +294,15 @@ describe('AccountEnforcementService', () => {
         status: UserStatus.Suspended,
       });
 
-      await service.liftSuspension(TARGET_MEMBER_ID, PROPOSING_MODERATOR_ID, {
+      const lift: LiftSuspensionDto = {
         reasonCode: 'other',
         note: 'Lifted after review.',
-      } as never);
+      };
+      await service.liftSuspension(
+        TARGET_MEMBER_ID,
+        PROPOSING_MODERATOR_ID,
+        lift,
+      );
 
       expect(writeAuditLog).toHaveBeenCalledWith(
         null,
@@ -309,10 +326,78 @@ describe('AccountEnforcementService', () => {
       );
     });
 
+    it('liftSuspension clears a suspension carried by a deactivated member and withdraws the hold', async () => {
+      users.findOne.mockResolvedValue({
+        id: TARGET_MEMBER_ID,
+        role: UserRole.Member,
+        isSystem: false,
+        status: UserStatus.Deactivated,
+        suspendedUntil: null,
+      });
+      deactivations.findOne.mockResolvedValue({
+        userId: TARGET_MEMBER_ID,
+        previousStatus: UserStatus.Suspended,
+      });
+
+      const result = await service.liftSuspension(
+        TARGET_MEMBER_ID,
+        PROPOSING_MODERATOR_ID,
+        liftSuspensionDto('Lifted after review.'),
+      );
+
+      expect(result.status).toBe(UserStatus.Deactivated);
+      // The member stays deactivated, but the suspension no longer waits for
+      // them: the clock is cleared and the open hold is withdrawn.
+      expect(manager.update).toHaveBeenCalledWith(
+        User,
+        { id: TARGET_MEMBER_ID },
+        { suspendedUntil: null },
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        AccountDeactivation,
+        { userId: TARGET_MEMBER_ID, reactivatedAt: expect.anything() },
+        { previousStatus: UserStatus.Active },
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        BanRatification,
+        {
+          targetUserId: TARGET_MEMBER_ID,
+          status: BanRatificationStatus.Pending,
+        },
+        expect.objectContaining({ status: BanRatificationStatus.Withdrawn }),
+      );
+      expect(writeAuditLog).toHaveBeenCalledTimes(1);
+    });
+
+    it('liftSuspension leaves a deactivated member with no suspension alone', async () => {
+      users.findOne.mockResolvedValue({
+        id: TARGET_MEMBER_ID,
+        role: UserRole.Member,
+        isSystem: false,
+        status: UserStatus.Deactivated,
+        suspendedUntil: null,
+      });
+      deactivations.findOne.mockResolvedValue({
+        userId: TARGET_MEMBER_ID,
+        previousStatus: UserStatus.Active,
+      });
+
+      const result = await service.liftSuspension(
+        TARGET_MEMBER_ID,
+        PROPOSING_MODERATOR_ID,
+        liftSuspensionDto('n'),
+      );
+
+      expect(result.status).toBe(UserStatus.Deactivated);
+      expect(writeAuditLog).not.toHaveBeenCalled();
+    });
+
     it('liftSuspension on a member who is not suspended writes nothing and emits nothing', async () => {
-      await service.liftSuspension(TARGET_MEMBER_ID, PROPOSING_MODERATOR_ID, {
-        reasonCode: 'other',
-      } as never);
+      await service.liftSuspension(
+        TARGET_MEMBER_ID,
+        PROPOSING_MODERATOR_ID,
+        liftSuspensionDto('n'),
+      );
 
       expect(writeAuditLog).not.toHaveBeenCalled();
       expect(emit).not.toHaveBeenCalled();
@@ -325,10 +410,15 @@ describe('AccountEnforcementService', () => {
         restrictedUntil: null,
       });
 
-      await service.liftRestriction(TARGET_MEMBER_ID, PROPOSING_MODERATOR_ID, {
+      const lift: LiftRestrictionDto = {
         reasonCode: 'other',
         note: 'Restriction no longer needed.',
-      } as never);
+      };
+      await service.liftRestriction(
+        TARGET_MEMBER_ID,
+        PROPOSING_MODERATOR_ID,
+        lift,
+      );
 
       expect(writeAuditLog).toHaveBeenCalledWith(
         null,

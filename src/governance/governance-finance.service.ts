@@ -403,7 +403,9 @@ export class GovernanceFinanceService {
           .filter((id): id is string => id !== null),
       ),
     ];
-    const actors = await new MemberLookup(this.profiles).byUserIds(actorIds);
+    const actors = await new MemberLookup(this.profiles).byUserIds(actorIds, {
+      inactive: 'include',
+    });
     return rows.map((row) =>
       toAdminFinanceChange(
         row,
@@ -417,7 +419,9 @@ export class GovernanceFinanceService {
     userId: string | null,
   ): Promise<MemberRef | null> {
     if (!userId) return null;
-    const map = await new MemberLookup(this.profiles).byUserIds([userId]);
+    const map = await new MemberLookup(this.profiles).byUserIds([userId], {
+      inactive: 'include',
+    });
     return map.get(userId) ?? null;
   }
 }

@@ -777,7 +777,11 @@ export class StudioSalesExportContributor implements DataExportContribution {
         referenceCode: sale.reference_code,
         payerName: sale.payer_name,
         buyer: sale.buyer_user_id
-          ? memberDisplayName(buyers.get(sale.buyer_user_id))
+          ? // An empty name is the anonymous stand-in for a paused or
+            // suspended buyer (PRD-507); the archive is plain text, so it
+            // spells the label out.
+            memberDisplayName(buyers.get(sale.buyer_user_id)) ||
+            'Deactivated member'
           : 'Deleted account',
         status: sale.status,
         declineReason: sale.decline_reason,

@@ -29,7 +29,6 @@ import {
 import { GeocodeService } from '../geocode/geocode.service';
 import { HousingListingsService } from './housing-listings.service';
 
-type RepoMock = Record<string, jest.Mock>;
 type QueryBuilderStub = Record<string, jest.Mock>;
 
 function makePaginatedBuilder(
@@ -125,8 +124,7 @@ const CREATE_DTO = {
 
 describe('HousingListingsService', () => {
   let service: HousingListingsService;
-  // Declared with the exact method shape (rather than the bare `RepoMock`
-  // index-signature alias) so `listings.findOne.mockResolvedValue(...)`-style
+  // Declared with the exact method shape (no index signature) so `listings.findOne.mockResolvedValue(...)`-style
   // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
   let listings: {
     findOne: jest.Mock;
@@ -138,7 +136,7 @@ describe('HousingListingsService', () => {
     update: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let profiles: RepoMock;
+  let profiles: { find: jest.Mock; exists: jest.Mock };
   let dataSource: { query: jest.Mock };
   let messaging: {
     deliverEnquiry: jest.Mock;
@@ -168,7 +166,10 @@ describe('HousingListingsService', () => {
       createQueryBuilder: jest.fn(() => makePaginatedBuilder([], 0)),
     };
     // buildDTO / mapRows hydrate the lister via MemberLookup(profiles).find.
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      exists: jest.fn().mockResolvedValue(true),
+    };
     dataSource = {
       query: jest.fn().mockResolvedValue([{ seq: '1' }]),
     };
@@ -928,6 +929,16 @@ describe('HousingListingsService', () => {
       expect(listings.findOne).toHaveBeenCalledWith({
         where: { ref: 'QPH-x', status: HousingListingStatus.Live },
       });
+    });
+
+    it('404s an enquiry on a home whose lister is no longer an active member', async () => {
+      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+      profiles.exists.mockResolvedValue(false);
+
+      await expect(
+        service.createEnquiry('QPH-2026-0001', 'sender', { body: 'hi' }),
+      ).rejects.toThrow(new NotFoundException('Housing listing not found'));
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
     it('rejects an enquiry from the listing owner on their own listing', async () => {

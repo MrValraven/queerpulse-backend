@@ -13,7 +13,12 @@ import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityMembershipService } from './community-membership.service';
-import { COMMUNITY_POST_CREATED } from './community.events';
+import {
+  COMMUNITY_POST_CREATED,
+  COMMUNITY_REPLY_CREATED,
+} from './community.events';
+import type { CommunityNameMarks } from '../community-badges/community-badge-response';
+import { CommunityNameMarksService } from '../community-badges/community-name-marks.service';
 import { CommunityPostsService } from './community-posts.service';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
@@ -200,6 +205,20 @@ const REPLY: CommunityPostReply = {
   deletedById: null,
 };
 
+// Marks for one flair wearer who also holds a recent gift.
+const FLAIR_MARKS: CommunityNameMarks = {
+  flair: { name: 'Regular', starterKey: null, iconKey: 'star', tint: 'coral' },
+  hasRecentGift: true,
+};
+
+const AUTHOR_PROFILE = {
+  userId: 'author-1',
+  slug: 'ash',
+  firstName: 'Ash',
+  lastName: 'R',
+  avatarUrl: null,
+};
+
 describe('CommunityPostsService', () => {
   let service: CommunityPostsService;
   let communities: { findOne: jest.Mock };
@@ -269,6 +288,9 @@ describe('CommunityPostsService', () => {
   // `COMMUNITY_POST_CREATED`, the profile-activity fire-and-forget the
   // excerpt-boundary spec below reads back.
   let eventEmitter: { emit: jest.Mock };
+  // Batched worn flair and recent-gift marks; empty by default so every
+  // author maps to no marks unless a test seeds some.
+  let nameMarks: { marksFor: jest.Mock; marksForPost: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -381,6 +403,10 @@ describe('CommunityPostsService', () => {
     eventPhotos = { find: jest.fn().mockResolvedValue([]) };
     events = { find: jest.fn().mockResolvedValue([]) };
     eventEmitter = { emit: jest.fn() };
+    nameMarks = {
+      marksFor: jest.fn().mockResolvedValue(new Map()),
+      marksForPost: jest.fn().mockResolvedValue(new Map()),
+    };
     communityMembership = {
       effectiveRole: jest.fn(
         async (community: { id: string }, userId: string) => {
@@ -426,6 +452,7 @@ describe('CommunityPostsService', () => {
           provide: CommunityMembershipService,
           useValue: communityMembership,
         },
+        { provide: CommunityNameMarksService, useValue: nameMarks },
       ],
     }).compile();
     service = module.get(CommunityPostsService);
@@ -566,6 +593,24 @@ describe('CommunityPostsService', () => {
       await expect(
         service.createPost('nope', 'u1', { body: 'x' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // SEC-41: an outsider writing to a private community hears the same 404
+    // an unknown slug answers, so a write probe cannot confirm it exists.
+    it('404s an outsider posting to a private community, the same as an unknown slug', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      const error: unknown = await service
+        .createPost('queer-devs', 'stranger', { body: 'hi' })
+        .catch((thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).getResponse()).toMatchObject({
+        message: 'Community not found',
+      });
+      expect(posts.save).not.toHaveBeenCalled();
     });
   });
 
@@ -1164,6 +1209,50 @@ describe('CommunityPostsService', () => {
         expect.objectContaining({ slug: 'jo', firstName: 'Jo' }),
       );
     });
+
+    it('emits the reply event after a nested reply saves', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      replies.save.mockResolvedValue({
+        ...REPLY,
+        id: 'reply-new',
+        authorId: 'u1',
+        text: 'see you there',
+      });
+
+      await service.addReply('queer-devs', 'p1', 'u1', 'see you there');
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(COMMUNITY_REPLY_CREATED, {
+        communityId: 'c1',
+        authorId: 'u1',
+        postId: 'p1',
+        replyId: 'reply-new',
+      });
+    });
+
+    it('emits no reply event when the reply is refused', async () => {
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.addReply('queer-devs', 'p1', 'stranger', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        COMMUNITY_REPLY_CREATED,
+        expect.anything(),
+      );
+    });
+
+    it('reads the author marks in the community of the post and returns them on the reply', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      profiles.find.mockResolvedValue([{ ...AUTHOR_PROFILE, userId: 'u1' }]);
+      nameMarks.marksFor.mockResolvedValue(new Map([['u1', FLAIR_MARKS]]));
+
+      const res = await service.addReply('queer-devs', 'p1', 'u1', 'hi!');
+
+      expect(nameMarks.marksFor).toHaveBeenCalledWith('c1', ['u1']);
+      expect(res.authorFlair).toEqual(FLAIR_MARKS.flair);
+      expect(res.authorHasRecentGift).toBe(true);
+    });
   });
 
   describe('updateReply / deleteReply / restoreReply / listReplyHistory', () => {
@@ -1226,6 +1315,17 @@ describe('CommunityPostsService', () => {
         service.deleteReply('queer-devs', 'p1', 'r1', 'stranger'),
       ).rejects.toBeInstanceOf(ForbiddenException);
       expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('reads marks by post for a reply mutation echo', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+
+      await service.deleteReply('queer-devs', 'p1', 'r1', 'author-1');
+
+      expect(nameMarks.marksForPost).toHaveBeenCalledWith('p1', ['author-1']);
     });
 
     it('deleteReply allows a community mod to tombstone another member reply', async () => {
@@ -1722,7 +1822,187 @@ describe('CommunityPostsService', () => {
     });
   });
 
+  // SEC-39: the flat edit and restore aliases skipped the roster, so an
+  // author a moderator removed or banned (a ban takes the roster row) kept
+  // rewriting and restoring their own posts through `/community-posts*`.
+  // They now run the nested routes' checks; staff moderation still passes.
+  describe('flat edit and restore: roster gate (SEC-39)', () => {
+    const ROSTER_REFUSAL = 'Only roster members can do that';
+
+    it('refuses a removed or banned author editing a post', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(
+        service.updateFlatPost('p1', 'author-1', { body: 'edited' }),
+      ).rejects.toThrow(ROSTER_REFUSAL);
+      expect(posts.save).not.toHaveBeenCalled();
+      expect(postEdits.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a removed or banned author editing a reply', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(
+        service.updateFlatReply('p1', 'r1', 'author-1', 'edited'),
+      ).rejects.toThrow(ROSTER_REFUSAL);
+      expect(replies.save).not.toHaveBeenCalled();
+      expect(replyEdits.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a removed or banned author restoring their own post', async () => {
+      members.findOne.mockResolvedValue(null);
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'author-1',
+      });
+      await expect(service.restoreFlatPost('p1', 'author-1')).rejects.toThrow(
+        ROSTER_REFUSAL,
+      );
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a removed or banned author restoring their own reply', async () => {
+      members.findOne.mockResolvedValue(null);
+      replies.findOne.mockResolvedValue({
+        ...REPLY,
+        deletedAt: new Date(),
+        deletedById: 'author-1',
+      });
+      await expect(
+        service.restoreFlatReply('p1', 'r1', 'author-1'),
+      ).rejects.toThrow(ROSTER_REFUSAL);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('lets an author still on the roster edit a post and a reply', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      const post = await service.updateFlatPost('p1', 'author-1', {
+        body: 'edited',
+      });
+      expect(post.body).toBe('edited');
+      await service.updateFlatReply('p1', 'r1', 'author-1', 'edited reply');
+      expect(replies.save).toHaveBeenCalledWith(
+        expect.objectContaining({ text: 'edited reply' }),
+      );
+    });
+
+    it('lets an author still on the roster restore a post they deleted', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'author-1',
+      });
+      const restored = await service.restoreFlatPost('p1', 'author-1');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null, deletedById: null }),
+      );
+      expect(restored.deleted).toBe(false);
+    });
+
+    it('lets a community mod restore a post and a reply a moderator removed', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-2',
+        role: RosterRole.Mod,
+      });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'mod-1',
+      });
+      replies.findOne.mockResolvedValue({
+        ...REPLY,
+        deletedAt: new Date(),
+        deletedById: 'mod-1',
+      });
+      await service.restoreFlatPost('p1', 'mod-2');
+      await service.restoreFlatReply('p1', 'r1', 'mod-2');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null, deletedById: null }),
+      );
+      expect(replies.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null, deletedById: null }),
+      );
+    });
+
+    it('still refuses a roster author lifting a moderator tombstone', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'mod-1',
+      });
+      await expect(
+        service.restoreFlatPost('p1', 'author-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('leaves a global post to its author with no roster to read', async () => {
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        communityId: null,
+        deletedAt: new Date(),
+        deletedById: 'author-1',
+      });
+      await service.restoreFlatPost('p1', 'author-1');
+      expect(communities.findOne).not.toHaveBeenCalled();
+      expect(members.findOne).not.toHaveBeenCalled();
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null, deletedById: null }),
+      );
+    });
+  });
+
   describe('listPosts', () => {
+    // One page, one community, one marks read for every post author and reply
+    // author together.
+    it('reads name marks once for a page of posts and replies', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([[{ ...POST }], 1]);
+      posts.createQueryBuilder.mockReturnValue(qb);
+      replies.manager.createQueryBuilder.mockReturnValue(
+        rawQbStub([{ ...REPLY, authorId: 'author-2' }]),
+      );
+
+      await service.listPosts('queer-devs', 'u1');
+
+      expect(nameMarks.marksFor).toHaveBeenCalledTimes(1);
+      const [communityId, authorIds] = nameMarks.marksFor.mock.calls[0] as [
+        string,
+        string[],
+      ];
+      expect(communityId).toBe('c1');
+      expect([...authorIds].sort()).toEqual(['author-1', 'author-2']);
+    });
+
+    it('carries the author flair on a listed post and its reply preview', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([[{ ...POST }], 1]);
+      posts.createQueryBuilder.mockReturnValue(qb);
+      replies.manager.createQueryBuilder.mockReturnValue(
+        rawQbStub([{ ...REPLY, authorId: 'author-1' }]),
+      );
+      profiles.find.mockResolvedValue([AUTHOR_PROFILE]);
+      nameMarks.marksFor.mockResolvedValue(
+        new Map([['author-1', FLAIR_MARKS]]),
+      );
+
+      const page = await service.listPosts('queer-devs', 'u1');
+
+      expect(page.items[0]!.authorFlair).toEqual(FLAIR_MARKS.flair);
+      expect(page.items[0]!.authorHasRecentGift).toBe(true);
+      expect(page.items[0]!.replies[0]!.authorFlair).toEqual(FLAIR_MARKS.flair);
+    });
+
     it('orders pinned first, then newest', async () => {
       const qb = qbStub();
       posts.createQueryBuilder.mockReturnValue(qb);
@@ -1966,6 +2246,22 @@ describe('CommunityPostsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
+    it('reads the reply author marks on a replies page', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([[{ ...REPLY }], 1]);
+      replies.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([AUTHOR_PROFILE]);
+      nameMarks.marksFor.mockResolvedValue(
+        new Map([['author-1', FLAIR_MARKS]]),
+      );
+
+      const page = await service.listReplies('queer-devs', 'p1', 'member-1');
+
+      expect(nameMarks.marksFor).toHaveBeenCalledWith('c1', ['author-1']);
+      expect(page.items[0]!.authorFlair).toEqual(FLAIR_MARKS.flair);
+    });
+
     it('serves replies to a member of a private community', async () => {
       communities.findOne.mockResolvedValue({
         ...COMMUNITY,
@@ -2046,6 +2342,24 @@ describe('CommunityPostsService', () => {
       await expect(
         service.createFlatPost('u1', { body: 'x', communitySlug: 'nope' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // SEC-41: the flat route answers an outsider of a private community with
+    // the unknown-slug 404 as well.
+    it('404s an outsider posting into a private community, the same as an unknown slug', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      const error: unknown = await service
+        .createFlatPost('stranger', { body: 'hi', communitySlug: 'queer-devs' })
+        .catch((thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).getResponse()).toMatchObject({
+        message: 'Community not found',
+      });
+      expect(posts.save).not.toHaveBeenCalled();
     });
 
     // BE-COM-02: the flat aliases used to run `assertMember` only, so a frozen
@@ -2175,6 +2489,30 @@ describe('CommunityPostsService', () => {
         expect.objectContaining({ postId: 'p1', authorId: 'u1', text: 'hi!' }),
       );
       expect(res).toEqual({ id: 'r1' });
+    });
+
+    it('emits the reply event for a flat reply in a community and stays quiet for a global post', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      replies.save.mockResolvedValue({ ...REPLY, id: 'reply-new' });
+
+      await service.addFlatReply('p1', 'u1', 'hi!');
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(COMMUNITY_REPLY_CREATED, {
+        communityId: 'c1',
+        authorId: 'u1',
+        postId: 'p1',
+        replyId: 'reply-new',
+      });
+
+      eventEmitter.emit.mockClear();
+      posts.findOne.mockResolvedValue({ ...POST, communityId: null });
+
+      await service.addFlatReply('p1', 'u1', 'hi!');
+
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        COMMUNITY_REPLY_CREATED,
+        expect.anything(),
+      );
     });
 
     it('lets any active member reply to a global post (no community roster to check)', async () => {

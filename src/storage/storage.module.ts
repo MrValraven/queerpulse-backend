@@ -11,6 +11,7 @@ import { StorageMaintenanceService } from './storage-maintenance.service';
 import { PersonaStorageKey } from './entities/persona-storage-key.entity';
 import { StudioAudioUpload } from './entities/studio-audio-upload.entity';
 import { PersonaImageKeysService } from './persona-image-keys.service';
+import { PresignByteQuotaService } from './presign-byte-quota.service';
 import { StorageService } from './storage.service';
 import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UploadsController } from './uploads.controller';
@@ -55,6 +56,8 @@ import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
     StorageMaintenanceService,
     UserPresignThrottlerGuard,
     OptionalJwtAuthGuard,
+    // SEC-44: the per-member daily presign byte allowance, in memory.
+    PresignByteQuotaService,
   ],
   exports: [StorageService, PersonaImageKeysService, StudioAudioUploadsService],
 })

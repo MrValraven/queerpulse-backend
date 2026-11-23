@@ -958,6 +958,8 @@ describe('QuizshowGateway', () => {
     });
 
     async function startedWheel(): Promise<FakeClient> {
+      // host:start refuses an empty lobby with quizshow_no_players.
+      await joinedPlayer(harness, 'socket-player', PLAYER_USER_ID);
       const hostRemote = await attachedHost(harness, 'socket-host');
       expect(
         await harness.gateway.handleHostStart(asClient(hostRemote), {

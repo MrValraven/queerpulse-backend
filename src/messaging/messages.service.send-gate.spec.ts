@@ -2,7 +2,13 @@ import { IdentityKind } from '../identities/entities/identity.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { ConversationKind } from './entities/conversation.entity';
-import { MessagesService } from './messages.service';
+import {
+  GROUP_MEMBERSHIP_ENDED_CODE,
+  MessagesService,
+  RECIPIENT_NOT_CONNECTED_CODE,
+  RECIPIENT_UNAVAILABLE_CODE,
+  SENDER_ACCOUNT_INACTIVE_CODE,
+} from './messages.service';
 import { MessagingCoreService } from './messaging-core.service';
 
 /**
@@ -101,9 +107,16 @@ describe('MessagesService.sendMessageWithOutcome, the ordinary one-to-one gate',
       isConnected: true,
     });
 
-    await expect(
-      service.sendMessageWithOutcome(CONVERSATION_ID, MEMBER_ID, 'Hi'),
-    ).rejects.toThrow('You cannot message this member');
+    const send = service.sendMessageWithOutcome(
+      CONVERSATION_ID,
+      MEMBER_ID,
+      'Hi',
+    );
+    await expect(send).rejects.toThrow('You cannot message this member');
+    // PRD-511: the code names the member as unavailable and never the block.
+    await expect(send).rejects.toMatchObject({
+      response: { code: RECIPIENT_UNAVAILABLE_CODE },
+    });
     expect(core.postMessage).not.toHaveBeenCalled();
   });
 
@@ -122,9 +135,95 @@ describe('MessagesService.sendMessageWithOutcome, the ordinary one-to-one gate',
   it('refuses the initiator of an unopened thread between members who are not connected', async () => {
     const { service, core } = buildService({ initiatorUserId: MEMBER_ID });
 
+    const send = service.sendMessageWithOutcome(
+      CONVERSATION_ID,
+      MEMBER_ID,
+      'Hi again',
+    );
+    await expect(send).rejects.toThrow(
+      'You can only message accepted connections',
+    );
+    await expect(send).rejects.toMatchObject({
+      response: { code: RECIPIENT_NOT_CONNECTED_CODE },
+    });
+    expect(core.postMessage).not.toHaveBeenCalled();
+  });
+
+  // PRD-511: a deactivated or suspended counterpart reads exactly like a
+  // block, so the code is never 1:1 with a block.
+  it('refuses a send to an inactive counterpart with the unavailable code', async () => {
+    const { service, core } = buildService({
+      initiatorUserId: MEMBER_ID,
+      openedAt: new Date('2026-01-01T00:00:00.000Z'),
+      isBlocked: false,
+      isConnected: true,
+    });
+    Object.assign(service, {
+      usersService: {
+        findById: jest.fn((userId: string) =>
+          Promise.resolve({
+            status:
+              userId === OTHER_MEMBER_ID
+                ? UserStatus.Suspended
+                : UserStatus.Active,
+          }),
+        ),
+        liftExpiredRestriction: jest.fn().mockResolvedValue(false),
+      },
+    });
+
+    const send = service.sendMessageWithOutcome(
+      CONVERSATION_ID,
+      MEMBER_ID,
+      'Hi',
+    );
+    await expect(send).rejects.toThrow('You cannot message this member');
+    await expect(send).rejects.toMatchObject({
+      response: { code: RECIPIENT_UNAVAILABLE_CODE },
+    });
+    expect(core.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('names an inactive sender account with its own code', async () => {
+    const { service } = buildService({ initiatorUserId: MEMBER_ID });
+    Object.assign(service, {
+      usersService: {
+        findById: jest.fn().mockResolvedValue({ status: UserStatus.Suspended }),
+        liftExpiredRestriction: jest.fn().mockResolvedValue(false),
+      },
+    });
+
     await expect(
-      service.sendMessageWithOutcome(CONVERSATION_ID, MEMBER_ID, 'Hi again'),
-    ).rejects.toThrow('You can only message accepted connections');
+      service.sendMessageWithOutcome(CONVERSATION_ID, MEMBER_ID, 'Hi'),
+    ).rejects.toMatchObject({
+      response: { code: SENDER_ACCOUNT_INACTIVE_CODE },
+    });
+  });
+
+  it('names a send into a group the sender left with its own code', async () => {
+    const { service, conversations, core } = buildService({
+      initiatorUserId: MEMBER_ID,
+    });
+    conversations.findOne.mockImplementation(() =>
+      Promise.resolve({
+        id: CONVERSATION_ID,
+        kind: ConversationKind.Group,
+        isOfficial: false,
+        initiatorUserId: null,
+        openedAt: null,
+      }),
+    );
+    const leftSeat: ConversationParticipant = {
+      ...seat(MEMBER_ID),
+      leftAt: new Date('2026-01-02T00:00:00.000Z'),
+    };
+    core.requireParticipant.mockResolvedValue(leftSeat);
+
+    await expect(
+      service.sendMessageWithOutcome(CONVERSATION_ID, MEMBER_ID, 'Hi'),
+    ).rejects.toMatchObject({
+      response: { code: GROUP_MEMBERSHIP_ENDED_CODE },
+    });
     expect(core.postMessage).not.toHaveBeenCalled();
   });
 

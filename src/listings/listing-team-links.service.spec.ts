@@ -41,6 +41,7 @@ interface PersonaFactsFixture {
   id: string;
   user_id: string;
   is_eligible: boolean;
+  link_visibility?: string;
 }
 
 /** Everything the fake database knows. Each test changes what it needs. */
@@ -441,6 +442,26 @@ describe('ListingTeamLinksService', () => {
       expect(harness.emit).not.toHaveBeenCalled();
     });
 
+    // SEC-02: an unlinked persona's request skips the owner pair, so the
+    // request lands the same whoever blocked whom.
+    it('skips the owner pair block for an unlinked persona', async () => {
+      const harness = buildHarness();
+      harness.world.personaFacts = {
+        ...harness.world.personaFacts!,
+        user_id: PERSONA_OWNER_ID,
+        link_visibility: 'unlinked',
+      };
+      harness.world.blockedPair = [LISTING_OWNER_ID, PERSONA_OWNER_ID];
+
+      await harness.service.request(SUBPROFILE_ID, USER_ID, requestBody);
+
+      const blockParameters = harness.manager.query.mock.calls
+        .filter(([sql]) => sql.includes('"is_blocked"'))
+        .map(([, parameters]) => parameters);
+      expect(blockParameters).toEqual([[USER_ID, LISTING_OWNER_ID]]);
+      expect(harness.log).toContain('insert');
+    });
+
     it('answers persona not found when the persona row is gone at the lock', async () => {
       const harness = buildHarness();
       harness.world.isPersonaRowPresent = false;
@@ -614,6 +635,22 @@ describe('ListingTeamLinksService', () => {
       expect(refusal.code).toBe('listing_team_link_not_found');
       expect(harness.manager.update).not.toHaveBeenCalled();
       expect(harness.emit).not.toHaveBeenCalled();
+    });
+
+    // SEC-02: an unlinked persona accepts an invite whoever blocked whom.
+    it('accepts for an unlinked persona across an owner pair block', async () => {
+      const harness = buildHarness();
+      harness.world.teamRows.set('member-1', invite());
+      harness.world.personaFacts = {
+        ...harness.world.personaFacts!,
+        user_id: PERSONA_OWNER_ID,
+        link_visibility: 'unlinked',
+      };
+      harness.world.blockedPair = [PERSONA_OWNER_ID, LISTING_OWNER_ID];
+
+      await harness.service.accept(SUBPROFILE_ID, USER_ID, 'member-1');
+
+      expect(harness.manager.update).toHaveBeenCalled();
     });
 
     it('answers persona not found when the persona row is gone at the lock', async () => {
@@ -815,9 +852,17 @@ describe('ListingTeamLinksService', () => {
   describe('listForPersona', () => {
     it('always carries the listing and flags a hidden one', async () => {
       const harness = buildHarness();
+      const photoGallery = [
+        { image: 'https://images.example.com/bar.jpg', alt: '', caption: '' },
+      ];
       harness.world.listings = [
-        makeListing(),
-        makeListing({ id: 'listing-hidden', slug: 'gone', name: 'Gone' }),
+        makeListing({ photoGallery }),
+        makeListing({
+          id: 'listing-hidden',
+          slug: 'gone',
+          name: 'Gone',
+          photoGallery,
+        }),
       ];
       harness.world.liveListingIds = [LISTING_ID];
       harness.world.accepted = [
@@ -845,6 +890,12 @@ describe('ListingTeamLinksService', () => {
       expect(hiddenRow?.listing.slug).toBe('gone');
       expect(hiddenRow?.isListingLive).toBe(false);
       expect(list.accepted[0]?.isListingLive).toBe(true);
+      // A hidden listing's cover reference would 404, so its card carries
+      // no cover and the client draws the tint and initials.
+      expect(hiddenRow?.listing.coverPhoto).toBeNull();
+      expect(list.accepted[0]?.listing.coverPhoto?.image).toBe(
+        'https://images.example.com/bar.jpg',
+      );
       const liveQuery = harness.manager.query.mock.calls.find(([sql]) =>
         sql.includes('= ANY($1::uuid[])'),
       );

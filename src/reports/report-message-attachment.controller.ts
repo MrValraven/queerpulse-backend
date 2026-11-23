@@ -37,6 +37,7 @@ import { StorageService } from '../storage/storage.service';
 import { UserRole } from '../users/entities/user.entity';
 import { Report, ReportSubjectType } from './entities/report.entity';
 import { messageSnapshotFrom } from './report-evidence';
+import { reportAboutActorRefusal } from '../moderation/report-about-actor';
 
 // `reports.subject_id` is a client-supplied `varchar`; `messages.id` is `uuid`.
 const UUID_RE =
@@ -99,7 +100,10 @@ export class ReportMessageAttachmentController {
     description: 'Redirect to a short-lived presigned GET URL for the file.',
   })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiForbiddenResponse({
+    description:
+      'Requires a moderator or admin role. SEC-31: `code: "REPORT_ABOUT_ACTOR"` when the caller sent the reported message.',
+  })
   @ApiNotFoundResponse({
     description:
       'No such report, not a message report, no platform-stored attachment, or the bytes have been purged.',
@@ -121,9 +125,19 @@ export class ReportMessageAttachmentController {
       ? await this.messages.findOne({
           where: { id: report.subjectId },
           withDeleted: true,
-          select: { id: true, attachment: true },
+          select: { id: true, attachment: true, senderId: true },
         })
       : null;
+    // SEC-31: the staff member who sent the reported message is its subject
+    // (the same author `ModerationService.isReportAboutActor` resolves for a
+    // `message`), so they get the queue's coded refusal and the file stays
+    // with colleagues. The live row names the sender; the filing-time
+    // snapshot answers when the row is gone.
+    const senderId =
+      message?.senderId ?? messageSnapshotFrom(report.evidence)?.senderId;
+    if (senderId && senderId === user.userId) {
+      throw reportAboutActorRefusal();
+    }
     const storageKey =
       primaryMessageAttachmentStorageKey(message?.attachment) ??
       messageSnapshotFrom(report.evidence)?.attachment?.storageKey ??

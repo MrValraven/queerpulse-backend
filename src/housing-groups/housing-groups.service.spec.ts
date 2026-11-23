@@ -77,12 +77,19 @@ function makeQueryBuilder(terminals: {
 
 describe('HousingGroupsService', () => {
   let service: HousingGroupsService;
-  let groups: { findOne: jest.Mock; delete: jest.Mock; update: jest.Mock };
+  let groups: {
+    findOne: jest.Mock;
+    delete: jest.Mock;
+    update: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+  };
   let listings: {
     create: jest.Mock;
     save: jest.Mock;
     find: jest.Mock;
     findOne: jest.Mock;
+    count: jest.Mock;
     createQueryBuilder: jest.Mock;
     // `listMyListings` reads report takedowns off `content_moderation`
     // through the repository's own manager.
@@ -135,6 +142,10 @@ describe('HousingGroupsService', () => {
       findOne: jest.fn().mockResolvedValue(publishedGroup),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       update: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn((row: object) => row),
+      save: jest.fn((row: object) =>
+        Promise.resolve({ id: 'group-9', ...row }),
+      ),
     };
     listings = {
       create: jest.fn((row: object) => row),
@@ -153,6 +164,7 @@ describe('HousingGroupsService', () => {
       ),
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
+      count: jest.fn().mockResolvedValue(0),
       createQueryBuilder: jest.fn(() => listingQuery),
       manager: { find: jest.fn().mockResolvedValue([]) },
     };
@@ -622,6 +634,22 @@ describe('HousingGroupsService', () => {
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
+    it('reads the room only while its poster is an active member', async () => {
+      listingQuery.getOne.mockResolvedValue(liveRoom);
+
+      await service.createListingEnquiry(
+        'sunset-house',
+        'group-listing-1',
+        'reader-1',
+        ENQUIRY,
+      );
+
+      expect(listingQuery.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"poster_user"."status" = :activePosterStatus'),
+        { activePosterStatus: 'active' },
+      );
+    });
+
     it('reads the room through the block and mute filter for the sender', async () => {
       listingQuery.getOne.mockResolvedValue(liveRoom);
 
@@ -832,9 +860,83 @@ describe('HousingGroupsService', () => {
     });
   });
 
+  describe('createGroup', () => {
+    it('records the acting staff member and the vetting setup in the audit trail', async () => {
+      groups.findOne.mockResolvedValue(null);
+
+      await service.createGroup(
+        {
+          slug: 'new-house',
+          name: 'New House',
+          city: 'Lisbon',
+          blurb: 'A vetted group',
+          isAccessGated: true,
+          published: false,
+        },
+        'moderator-1',
+      );
+
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'moderator-1',
+        'housing_group_create',
+        undefined,
+        expect.stringContaining('access gated true'),
+      );
+    });
+  });
+
+  describe('updateGroup', () => {
+    const storedGroup = {
+      id: 'group-1',
+      slug: 'sunset-house',
+      name: 'Sunset House',
+      nameEm: null,
+      city: 'Lisbon',
+      blurb: 'A vetted group',
+      isAccessGated: true,
+      norms: [],
+      screeningQuestions: [],
+      published: true,
+    };
+
+    it('names each field the update changed in the audit note', async () => {
+      groups.findOne.mockResolvedValue({ ...storedGroup });
+
+      await service.updateGroup(
+        'group-1',
+        { isAccessGated: false, name: 'Sunset House' },
+        'moderator-1',
+      );
+
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'moderator-1',
+        'housing_group_update',
+        undefined,
+        expect.stringContaining('isAccessGated true to false'),
+      );
+    });
+
+    it('writes no audit row when the group does not exist', async () => {
+      groups.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateGroup('missing', { published: false }, 'moderator-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    });
+  });
+
   describe('deleteGroup', () => {
-    it('records the acting staff member in the audit trail', async () => {
-      await service.deleteGroup('group-1', 'moderator-1');
+    const REASON = { reason: 'Duplicate of another vetted group' };
+
+    it('records the acting staff member, the reason and the cascade counts', async () => {
+      listings.count.mockResolvedValue(4);
+      joinRequests.count.mockResolvedValue(9);
+
+      await service.deleteGroup('group-1', 'moderator-1', REASON);
 
       expect(groups.delete).toHaveBeenCalledWith({ id: 'group-1' });
       expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
@@ -842,7 +944,9 @@ describe('HousingGroupsService', () => {
         'moderator-1',
         'housing_group_delete',
         undefined,
-        expect.stringContaining('group-1'),
+        expect.stringMatching(
+          /group-1.*4 listings and 9 join requests.*Duplicate of another/,
+        ),
       );
     });
 
@@ -850,7 +954,7 @@ describe('HousingGroupsService', () => {
       groups.findOne.mockResolvedValue(null);
 
       await expect(
-        service.deleteGroup('missing', 'moderator-1'),
+        service.deleteGroup('missing', 'moderator-1', REASON),
       ).rejects.toBeInstanceOf(NotFoundException);
 
       expect(groups.delete).not.toHaveBeenCalled();
@@ -861,7 +965,7 @@ describe('HousingGroupsService', () => {
       modAudit.writeAuditLog.mockRejectedValue(new Error('db down'));
 
       await expect(
-        service.deleteGroup('group-1', 'moderator-1'),
+        service.deleteGroup('group-1', 'moderator-1', REASON),
       ).resolves.toBeUndefined();
     });
   });

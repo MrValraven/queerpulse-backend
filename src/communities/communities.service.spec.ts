@@ -1,7 +1,9 @@
+import { mediaReferenceVersion } from '../storage/media-reference-version';
 import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -16,12 +18,13 @@ import { AdminQueueNotificationsService } from '../admin-queue-notifications/adm
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { ConnectionsService } from '../connections/connections.service';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { inactiveMemberRef, MemberLookup } from '../common/member-ref';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import {
   CommunitiesService,
   CreateCommunityInput,
@@ -44,6 +47,8 @@ import { CommunityBanRatificationService } from './community-ban-ratification.se
 import { COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS } from './community-ban-ratification-window';
 import { CommunityBanEvasionService } from '../ban-evasion/community-ban-evasion.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { COMMUNITY_BADGE_STARTER_INSERT_SQL } from '../community-badges/community-badge-starters';
+import { CommunityNameMarksService } from '../community-badges/community-name-marks.service';
 import { findLivePendingInvite } from './community-invite-liveness';
 import { assertCommunityInteriorReadable } from './community-read-gate';
 import { CommunityBan } from './entities/community-ban.entity';
@@ -72,6 +77,10 @@ import {
   CommunityTagRequestStatus,
 } from './entities/community-tag-request.entity';
 import { CommunityPost } from './entities/community-post.entity';
+import {
+  CommunityOwnershipOffer,
+  CommunityOwnershipOfferStatus,
+} from './entities/community-ownership-offer.entity';
 import {
   AccessTier,
   Community,
@@ -106,6 +115,20 @@ const liveInvite = (overrides: Partial<CommunityInvite> = {}) =>
     expiresAt: new Date('2026-03-04T00:00:00.000Z'),
     ...overrides,
   }) as CommunityInvite;
+
+// The reason `code` a refusal carries, or undefined when the call did not
+// throw an HTTP refusal at all.
+const refusalCode = async (pending: Promise<unknown>): Promise<unknown> => {
+  const error: unknown = await pending.then(
+    () => undefined,
+    (thrown: unknown) => thrown,
+  );
+  if (!(error instanceof HttpException)) return undefined;
+  const response = error.getResponse();
+  return typeof response === 'object' && 'code' in response
+    ? response.code
+    : undefined;
+};
 
 // A chainable query-builder stub whose terminal methods resolve to empty
 // results by default (mirrors `profiles.service.spec.ts`'s `qbStub`).
@@ -248,7 +271,7 @@ describe('CommunitiesService', () => {
     allAcceptedConnectionUserIds: jest.Mock;
     acceptedConnectionsAmong: jest.Mock;
   };
-  let autoFreeze: { openReportCount: jest.Mock };
+  let autoFreeze: { openMemberReportCount: jest.Mock };
   let bans: {
     exists: jest.Mock;
     findOne: jest.Mock;
@@ -277,7 +300,10 @@ describe('CommunitiesService', () => {
   // Decision 8. `roster` hands its query to `excludeBlocked` for a viewer
   // below staff. Default: the builder passes through untouched, so a roster
   // test that stages no blocks reads every row it staged.
-  let blockFilter: { excludeBlocked: jest.Mock };
+  // `offerOwnership` also asks `isBlockedEitherWay`. Default: no block.
+  let blockFilter: { excludeBlocked: jest.Mock; isBlockedEitherWay: jest.Mock };
+  // Flair and the recent-gift mark for roster rows. Default: no marks.
+  let nameMarks: { marksFor: jest.Mock; marksForPost: jest.Mock };
   // Effective roles. The stand-in resolves through `members.findOne` (own
   // row, then the parent row for a space) and `members.find` for the batched
   // form, so every pre-existing test that stages roster rows on those two
@@ -290,6 +316,16 @@ describe('CommunitiesService', () => {
     archiveSpaces: jest.Mock;
     unarchiveSpaces: jest.Mock;
     raiseSpaceTiers: jest.Mock;
+  };
+  // PRD-514. The ownership offer table, reached through the data source and
+  // the transaction manager alike. Default: no offer on file, and every
+  // conditional update lands.
+  let ownershipOffers: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    update: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
   };
   // The transaction manager `createWithUniqueRef` runs inside; `query` is the
   // raw `SELECT nextval('communities_ref_seq')` ref allocation.
@@ -384,7 +420,7 @@ describe('CommunitiesService', () => {
       acceptedConnectionsAmong: jest.fn().mockResolvedValue(new Set<string>()),
     };
     autoFreeze = {
-      openReportCount: jest.fn().mockResolvedValue(0),
+      openMemberReportCount: jest.fn().mockResolvedValue(0),
     };
     // `join` asks whether the applicant is barred (`exists`), and
     // `removeMember` writes the bar through an insert chain then READS IT BACK
@@ -422,6 +458,11 @@ describe('CommunitiesService', () => {
       excludeBlocked: jest.fn(
         (queryBuilder: Record<string, jest.Mock>) => queryBuilder,
       ),
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+    };
+    nameMarks = {
+      marksFor: jest.fn().mockResolvedValue(new Map()),
+      marksForPost: jest.fn().mockResolvedValue(new Map()),
     };
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
@@ -485,6 +526,13 @@ describe('CommunitiesService', () => {
     // `QP-C-####` ref with a raw `SELECT nextval(...)` through the transaction
     // manager instead of `COUNT(*) + 1`. Returns a string, like the pg driver
     // does for a bigint.
+    ownershipOffers = {
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      create: jest.fn((v: object) => v),
+      save: jest.fn((v: object) => Promise.resolve({ id: 'offer-new', ...v })),
+    };
     let nextCommunityRefNumber = 0;
     manager = {
       query: jest.fn(() => {
@@ -497,6 +545,7 @@ describe('CommunitiesService', () => {
         if (entity === CommunityJoinRequest) return joinRequests;
         if (entity === CommunityInvite) return invites;
         if (entity === Profile) return profiles;
+        if (entity === CommunityOwnershipOffer) return ownershipOffers;
         throw new Error(
           `unexpected entity in getRepository: ${String(entity)}`,
         );
@@ -505,6 +554,9 @@ describe('CommunitiesService', () => {
     const dataSource = {
       transaction: jest.fn(
         async (cb: (m: typeof manager) => Promise<unknown>) => cb(manager),
+      ),
+      getRepository: jest.fn((entity: unknown): unknown =>
+        manager.getRepository(entity),
       ),
     };
 
@@ -566,6 +618,7 @@ describe('CommunitiesService', () => {
           useValue: communityBanEvasion,
         },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: CommunityNameMarksService, useValue: nameMarks },
       ],
     }).compile();
     service = module.get(CommunitiesService);
@@ -579,6 +632,22 @@ describe('CommunitiesService', () => {
   afterEach(() => {
     resetImageUrlBaseForTesting();
   });
+
+  interface SavedRosterRow {
+    id: string;
+    role: RosterRole;
+  }
+
+  // Records each roster row as it is saved, role and all, so an assertion
+  // can read the order of a demotion and a promotion.
+  const captureSavedRosterRows = (): SavedRosterRow[] => {
+    const savedRows: SavedRosterRow[] = [];
+    members.save.mockImplementation((row: SavedRosterRow) => {
+      savedRows.push({ id: row.id, role: row.role });
+      return Promise.resolve(row);
+    });
+    return savedRows;
+  };
 
   describe('create', () => {
     it('creates a community: owner roster row, ref assigned, slug from handle', async () => {
@@ -621,6 +690,34 @@ describe('CommunitiesService', () => {
             archivedAt: expect.anything() as unknown,
           },
         }),
+      );
+    });
+
+    it('seeds the four starter badges inside the create transaction', async () => {
+      communities.save.mockImplementation((c: Partial<Community>) => ({
+        ...c,
+        id: 'c1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      }));
+      members.save.mockImplementation((m: Partial<CommunityMember>) => m);
+      const dto = {
+        name: 'Queer Devs',
+        handle: 'queer-devs',
+        type: 'professional',
+        accessTier: 'public',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        purpose: 'x',
+        whoFor: 'y',
+        tagline: 'z',
+      };
+
+      await service.create('u1', dto as CreateCommunityInput);
+
+      expect(manager.query).toHaveBeenCalledWith(
+        COMMUNITY_BADGE_STARTER_INSERT_SQL,
+        expect.arrayContaining(['c1']),
       );
     });
 
@@ -1005,6 +1102,94 @@ describe('CommunitiesService', () => {
       expect(givingMethods.count).toHaveBeenCalledWith({
         where: { communityId: 'c1' },
       });
+    });
+
+    // PRD-507. The owner card resolves through `MemberLookup`, so a paused
+    // owner shows as the anonymous stand-in with no name, slug or photo.
+    it('shows a paused owner on the owner card as the anonymous stand-in', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Public,
+        ownerId: 'owner-1',
+        name: 'Pub',
+        type: CommunityType.Social,
+        tagline: 't',
+        ref: 'QP-C-0001',
+        purpose: 'purpose',
+        whoFor: 'who',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'owner-1',
+          slug: 'paused-owner',
+          firstName: 'Paused',
+          lastName: 'Owner',
+          pronouns: null,
+          avatarUrl: null,
+          photoVisible: true,
+          user: { id: 'owner-1', status: UserStatus.Deactivated },
+        },
+      ]);
+
+      const detail = await service.getBySlug('p', 'u2');
+
+      expect(profiles.find).toHaveBeenCalledWith(
+        MemberLookup.findOptionsFor(['owner-1']),
+      );
+      expect(detail.owner).toEqual(inactiveMemberRef());
+      expect(JSON.stringify(detail.owner)).not.toContain('paused-owner');
+    });
+
+    // PRD-507 and PRD-508. The member count on the card follows the roster
+    // rule: active accounts only, and nobody inside a 24-hour self-hide.
+    it('counts only active, unhidden members in the community stats', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Public,
+        ownerId: 'owner-1',
+        name: 'Pub',
+        type: CommunityType.Social,
+        tagline: 't',
+        ref: 'QP-C-0001',
+        purpose: 'purpose',
+        whoFor: 'who',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      interface CountClause {
+        sql: unknown;
+        parameters: unknown;
+      }
+      const countClauses: CountClause[] = [];
+      const statsQb = qbStub();
+      statsQb.andWhere = jest.fn((sql: unknown, parameters: unknown) => {
+        countClauses.push({ sql, parameters });
+        return statsQb;
+      });
+      members.createQueryBuilder.mockReturnValue(statsQb);
+
+      await service.getBySlug('p', 'u2');
+
+      const activeClause = countClauses.find(
+        (clause) =>
+          typeof clause.sql === 'string' &&
+          clause.sql.includes('"count_user"."status" = :countActiveStatus'),
+      );
+      expect(activeClause?.parameters).toEqual({
+        countActiveStatus: UserStatus.Active,
+      });
+      const sql = typeof activeClause?.sql === 'string' ? activeClause.sql : '';
+      expect(sql).toContain('"count_profile"."hidden_until" <= now()');
     });
 
     // The public-community fixture of the giving methods test above, reused
@@ -2742,6 +2927,162 @@ describe('CommunitiesService', () => {
     // share one public roster: the viewer, someone the viewer blocked,
     // someone who blocked the viewer, and a bystander with no block either
     // way.
+    it('carries flair and the gift mark on each roster row from one batched read', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        parentId: null,
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      const rosterRows = ['u1', 'u2'].map((userId) => ({
+        communityId: 'c1',
+        userId,
+        role: RosterRole.Member,
+        joinedAt: new Date('2026-01-01T00:00:00.000Z'),
+      }));
+      profiles.find.mockResolvedValue(
+        rosterRows.map((row) => ({
+          userId: row.userId,
+          slug: row.userId,
+          firstName: row.userId,
+          lastName: 'L',
+          avatarUrl: null,
+        })),
+      );
+      const rosterQb = qbStub();
+      rosterQb.getManyAndCount!.mockResolvedValue([rosterRows, 2]);
+      members.createQueryBuilder.mockReturnValue(rosterQb);
+      nameMarks.marksFor.mockResolvedValue(
+        new Map([
+          [
+            'u2',
+            {
+              flair: {
+                name: 'Regular',
+                starterKey: 'regular',
+                iconKey: 'calendar',
+                tint: 'jade',
+              },
+              hasRecentGift: true,
+            },
+          ],
+        ]),
+      );
+
+      const page = await service.roster('x', 'u1');
+
+      expect(nameMarks.marksFor).toHaveBeenCalledTimes(1);
+      expect(nameMarks.marksFor).toHaveBeenCalledWith('c1', ['u1', 'u2']);
+      expect(page.items[1]).toEqual(
+        expect.objectContaining({
+          flair: expect.objectContaining({ name: 'Regular' }) as unknown,
+          hasRecentGift: true,
+        }),
+      );
+      expect(page.items[0]).toEqual(
+        expect.objectContaining({ flair: null, hasRecentGift: false }),
+      );
+    });
+
+    // PRD-507 and PRD-508. A paused, suspended or deletion-grace account and
+    // a member hiding for 24 hours leave the roster inside the query, for
+    // staff as much as for members, so the count never points at them.
+    describe('inactive and self-hidden members', () => {
+      const stageRoster = (viewerRole: RosterRole) => {
+        communities.findOne.mockResolvedValue({
+          id: 'c1',
+          slug: 'x',
+          parentId: null,
+          accessTier: AccessTier.Public,
+          rosterVisible: true,
+        });
+        members.findOne.mockResolvedValue({ role: viewerRole });
+        const rosterQb = qbStub();
+        rosterQb.andWhere = jest.fn((sql: unknown, parameters: unknown) => {
+          rosterClauses.push({ sql, parameters });
+          return rosterQb;
+        });
+        members.createQueryBuilder.mockReturnValue(rosterQb);
+        return rosterQb;
+      };
+
+      interface RosterClause {
+        sql: unknown;
+        parameters: unknown;
+      }
+      let rosterClauses: RosterClause[] = [];
+      beforeEach(() => {
+        rosterClauses = [];
+      });
+
+      const activeAndVisibleClause = (): RosterClause | undefined =>
+        rosterClauses.find(
+          (clause) =>
+            typeof clause.sql === 'string' &&
+            clause.sql.includes('"roster_user"."status"'),
+        );
+
+      it.each([RosterRole.Member, RosterRole.Mod, RosterRole.Owner])(
+        'filters the roster query to active, unhidden members for a %s viewer',
+        async (viewerRole) => {
+          stageRoster(viewerRole);
+
+          await service.roster('x', 'viewer');
+
+          const clause = activeAndVisibleClause();
+          expect(clause).toBeDefined();
+          const sql = typeof clause?.sql === 'string' ? clause.sql : '';
+          const parameters = clause?.parameters;
+          expect(sql).toContain('"roster_profile"."hidden_until" IS NULL');
+          expect(sql).toContain('"roster_profile"."hidden_until" <= now()');
+          // The member themself still sees their own row while hidden.
+          expect(sql).toContain('"roster_user"."id" = :rosterViewerId');
+          expect(parameters).toEqual({
+            rosterActiveStatus: UserStatus.Active,
+            rosterViewerId: 'viewer',
+          });
+        },
+      );
+
+      it('drops a member whose account went inactive between the page read and the profile read', async () => {
+        const rosterQb = stageRoster(RosterRole.Member);
+        const rosterRows = ['still-here', 'just-paused'].map((userId) => ({
+          communityId: 'c1',
+          userId,
+          role: RosterRole.Member,
+          joinedAt: new Date('2026-01-01T00:00:00.000Z'),
+        }));
+        rosterQb.getManyAndCount!.mockResolvedValue([rosterRows, 2]);
+        profiles.find.mockResolvedValue([
+          {
+            userId: 'still-here',
+            slug: 'still-here',
+            firstName: 'Still',
+            lastName: 'Here',
+            avatarUrl: null,
+            user: { id: 'still-here', status: UserStatus.Active },
+          },
+          {
+            userId: 'just-paused',
+            slug: 'just-paused',
+            firstName: 'Just',
+            lastName: 'Paused',
+            avatarUrl: null,
+            user: { id: 'just-paused', status: UserStatus.Deactivated },
+          },
+        ]);
+
+        const page = await service.roster('x', 'viewer');
+
+        expect(page.items.map((entry) => entry.member.slug)).toEqual([
+          'still-here',
+        ]);
+        expect(JSON.stringify(page.items)).not.toContain('just-paused');
+      });
+    });
+
     describe('block severance', () => {
       const blockRows = [
         { blockerId: 'viewer', blockedId: 'blocked-by-viewer' },
@@ -4211,6 +4552,38 @@ describe('CommunitiesService', () => {
       );
     });
 
+    // R4 #6: an automatic freeze waits on member-filed reports only, the
+    // reports SEC-32 lets start a freeze.
+    it('keeps an automatic freeze while a member-filed report is still open', async () => {
+      communities.findOne.mockResolvedValue({
+        ...community,
+        frozenReason: CommunityFrozenReason.EmergencyReport,
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+      autoFreeze.openMemberReportCount.mockResolvedValue(1);
+
+      await expect(service.unfreeze('x', 'owner-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    it('lifts an automatic freeze once only signed-out reports remain open', async () => {
+      communities.findOne.mockResolvedValue({
+        ...community,
+        frozenReason: CommunityFrozenReason.EmergencyReport,
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+      autoFreeze.openMemberReportCount.mockResolvedValue(0);
+
+      await service.unfreeze('x', 'owner-1');
+
+      expect(autoFreeze.openMemberReportCount).toHaveBeenCalledTimes(1);
+      expect(communities.save).toHaveBeenCalledWith(
+        expect.objectContaining({ frozenAt: null }),
+      );
+    });
+
     it('is idempotent: unfreezing a community that is not frozen is a no-op', async () => {
       communities.findOne.mockResolvedValue({ ...community, frozenAt: null });
       members.findOne.mockResolvedValue({ role: RosterRole.Owner });
@@ -4224,10 +4597,14 @@ describe('CommunitiesService', () => {
     });
   });
 
-  describe('transferOwnership', () => {
+  // PRD-514. Handing a community on is an offer the member accepts or
+  // declines. Nothing about ownership moves until they accept.
+  describe('ownership offers', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
     const community = {
       id: 'c1',
       slug: 'x',
+      name: 'X',
       ownerId: 'owner-1',
       createdAt: new Date('2026-01-01T00:00:00.000Z'),
     };
@@ -4238,163 +4615,732 @@ describe('CommunitiesService', () => {
       profiles.createQueryBuilder.mockReturnValue(qb);
     };
 
+    const openOfferRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'offer-1',
+      communityId: 'c1',
+      offereeId: 'target-1',
+      offeredByUserId: 'owner-1',
+      fromOwnerId: 'owner-1',
+      status: CommunityOwnershipOfferStatus.Offered,
+      offeredAt: new Date(Date.now() - DAY_MS),
+      expiresAt: new Date(Date.now() + 13 * DAY_MS),
+      respondedAt: null as Date | null,
+      ...overrides,
+    });
+
+    // Roster rows by user id, fresh objects on every read.
+    const stageRosterRows = (rolesByUserId: Record<string, RosterRole>) => {
+      members.findOne.mockImplementation(
+        ({ where }: { where: { userId: string } }) => {
+          const role = rolesByUserId[where.userId];
+          return Promise.resolve(
+            role
+              ? { id: `m-${where.userId}`, userId: where.userId, role }
+              : null,
+          );
+        },
+      );
+    };
+
     beforeEach(() => {
       communities.findOne.mockResolvedValue({ ...community });
     });
 
-    it('rejects a mod attempting a transfer (owner-only)', async () => {
-      resolveSlug('target-slug', 'target-1');
-      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
-      await expect(
-        service.transferOwnership('x', 'mod-1', 'target-slug'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(communities.save).not.toHaveBeenCalled();
-    });
+    describe('offerOwnership', () => {
+      it('rejects a mod making an offer (owner-only)', async () => {
+        resolveSlug('target-slug', 'target-1');
+        members.findOne.mockResolvedValue({ role: RosterRole.Mod });
 
-    // Existence-oracle fix: `assertOwner` runs first, before the target slug
-    // is even resolved, so a real `private` slug used to answer 403 for a
-    // non-member (confirming it exists) where an unknown slug answered 404.
-    it('404s a private community for a non-member, not 403', async () => {
-      communities.findOne.mockResolvedValue({
-        ...community,
-        accessTier: AccessTier.Private,
+        await expect(
+          service.offerOwnership('x', 'mod-1', 'target-slug'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(ownershipOffers.save).not.toHaveBeenCalled();
       });
-      members.findOne.mockResolvedValue(null);
 
-      const error: unknown = await service
-        .transferOwnership('x', 'stranger', 'target-slug')
-        .catch((thrown: unknown) => thrown);
-
-      expect(error).toBeInstanceOf(NotFoundException);
-      expect(error).not.toBeInstanceOf(ForbiddenException);
-      expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
-    });
-
-    it('leaves a public-tier community unaffected: a non-member still gets ForbiddenException', async () => {
-      communities.findOne.mockResolvedValue({
-        ...community,
-        accessTier: AccessTier.Public,
-      });
-      resolveSlug('target-slug', 'target-1');
-      members.findOne.mockResolvedValue(null);
-
-      await expect(
-        service.transferOwnership('x', 'stranger', 'target-slug'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
-    });
-
-    it('rejects self-transfer', async () => {
-      resolveSlug('owner-slug', 'owner-1');
-      await expect(
-        service.transferOwnership('x', 'owner-1', 'owner-slug'),
-      ).rejects.toBeInstanceOf(BadRequestException);
-    });
-
-    it('404s an unknown target member slug', async () => {
-      const emptyQb = qbStub();
-      profiles.createQueryBuilder.mockReturnValue(emptyQb);
-      await expect(
-        service.transferOwnership('x', 'owner-1', 'ghost'),
-      ).rejects.toBeInstanceOf(NotFoundException);
-    });
-
-    it('rejects a transfer to the house account', async () => {
-      resolveSlug('target-slug', 'target-1');
-      members.findOne.mockResolvedValue({
-        id: 'm2',
-        role: RosterRole.Member,
-        userId: 'target-1',
-      });
-      users.findOne.mockResolvedValue({ id: 'target-1', isSystem: true });
-      await expect(
-        service.transferOwnership('x', 'owner-1', 'target-slug'),
-      ).rejects.toBeInstanceOf(BadRequestException);
-      expect(communities.save).not.toHaveBeenCalled();
-    });
-
-    it('hands ownership to the target, demotes the outgoing owner to mod, logs governance, notifies both parties', async () => {
-      resolveSlug('target-slug', 'target-1');
-      members.findOne
-        // target's roster row (2nd lookup, after the self-transfer check)
-        .mockResolvedValueOnce({
-          id: 'm2',
-          role: RosterRole.Member,
-          userId: 'target-1',
-        })
-        // outgoing owner's roster row, re-read inside the transaction
-        .mockResolvedValueOnce({
-          id: 'm1',
-          role: RosterRole.Owner,
-          userId: 'owner-1',
+      // Existence oracle: a real `private` slug answers the same 404 an
+      // unknown slug does.
+      it('404s a private community for a non-member', async () => {
+        communities.findOne.mockResolvedValue({
+          ...community,
+          accessTier: AccessTier.Private,
         });
-      users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+        members.findOne.mockResolvedValue(null);
 
-      const detail = await service.transferOwnership(
-        'x',
-        'owner-1',
-        'target-slug',
-      );
+        const error: unknown = await service
+          .offerOwnership('x', 'stranger', 'target-slug')
+          .catch((thrown: unknown) => thrown);
 
-      // The actor is now a moderator of the community they handed off.
-      expect(detail.myRole).toBe(RosterRole.Mod);
-      expect(members.save).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'm2', role: RosterRole.Owner }),
-      );
-      expect(members.save).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'm1', role: RosterRole.Mod }),
-      );
-      expect(communities.save).toHaveBeenCalledWith(
-        expect.objectContaining({ ownerId: 'target-1' }),
-      );
-      expect(governanceLog.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          communityId: 'c1',
-          actorUserId: 'owner-1',
-          action: GovernanceLogAction.OwnershipTransferred,
-          targetUserId: 'target-1',
-        }),
-      );
-      // One notification to the new owner, one to the demoted former owner.
-      expect(notifications.create).toHaveBeenCalledWith(
-        'target-1',
-        NotificationType.CommunityOwnershipTransferred,
-        expect.objectContaining({ youAreNowOwner: true }),
-        'owner-1',
-      );
-      expect(notifications.create).toHaveBeenCalledWith(
-        'owner-1',
-        NotificationType.CommunityOwnershipTransferred,
-        expect.objectContaining({ youAreNowOwner: false }),
-        'owner-1',
-      );
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
+      });
+
+      it('refuses an offer to yourself with its own code', async () => {
+        resolveSlug('owner-slug', 'owner-1');
+
+        expect(
+          await refusalCode(
+            service.offerOwnership('x', 'owner-1', 'owner-slug'),
+          ),
+        ).toBe('OWNERSHIP_OFFER_SELF');
+      });
+
+      it('404s a member slug that resolves to nobody', async () => {
+        profiles.createQueryBuilder.mockReturnValue(qbStub());
+
+        expect(
+          await refusalCode(service.offerOwnership('x', 'owner-1', 'ghost')),
+        ).toBe('OWNERSHIP_OFFER_MEMBER_NOT_FOUND');
+      });
+
+      it('404s a member who is not on this roster', async () => {
+        resolveSlug('target-slug', 'target-1');
+        stageRosterRows({ 'owner-1': RosterRole.Owner });
+
+        expect(
+          await refusalCode(
+            service.offerOwnership('x', 'owner-1', 'target-slug'),
+          ),
+        ).toBe('OWNERSHIP_OFFER_MEMBER_NOT_FOUND');
+      });
+
+      // A block either way answers exactly like a member who is not on the
+      // roster, so the owner never learns that a block exists.
+      it('masks a block either way as a member who is not on the roster', async () => {
+        resolveSlug('target-slug', 'target-1');
+        stageRosterRows({ 'target-1': RosterRole.Member });
+        users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+        blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+        expect(
+          await refusalCode(
+            service.offerOwnership('x', 'owner-1', 'target-slug'),
+          ),
+        ).toBe('OWNERSHIP_OFFER_MEMBER_NOT_FOUND');
+        expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+          'owner-1',
+          'target-1',
+        );
+        expect(ownershipOffers.save).not.toHaveBeenCalled();
+        expect(notifications.create).not.toHaveBeenCalled();
+      });
+
+      it('refuses an offer to the house account', async () => {
+        resolveSlug('target-slug', 'target-1');
+        stageRosterRows({ 'target-1': RosterRole.Member });
+        users.findOne.mockResolvedValue({ id: 'target-1', isSystem: true });
+
+        expect(
+          await refusalCode(
+            service.offerOwnership('x', 'owner-1', 'target-slug'),
+          ),
+        ).toBe('OWNERSHIP_OFFER_HOUSE_ACCOUNT');
+        expect(ownershipOffers.save).not.toHaveBeenCalled();
+      });
+
+      it('records an open offer, moves nothing and notifies the member offered it', async () => {
+        resolveSlug('target-slug', 'target-1');
+        stageRosterRows({ 'target-1': RosterRole.Member });
+        users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+        let savedOffer: { offeredAt: Date; expiresAt: Date } | undefined;
+        ownershipOffers.save.mockImplementation(
+          (row: { offeredAt: Date; expiresAt: Date }) => {
+            savedOffer = row;
+            return Promise.resolve({ id: 'offer-new', ...row });
+          },
+        );
+
+        const offer = await service.offerOwnership(
+          'x',
+          'owner-1',
+          'target-slug',
+        );
+
+        expect(ownershipOffers.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            communityId: 'c1',
+            offereeId: 'target-1',
+            offeredByUserId: 'owner-1',
+            fromOwnerId: 'owner-1',
+            status: CommunityOwnershipOfferStatus.Offered,
+          }),
+        );
+        expect(
+          (savedOffer?.expiresAt.getTime() ?? 0) -
+            (savedOffer?.offeredAt.getTime() ?? 0),
+        ).toBe(14 * DAY_MS);
+        expect(offer.status).toBe(CommunityOwnershipOfferStatus.Offered);
+        expect(offer.communitySlug).toBe('x');
+        // Ownership is untouched until the member answers.
+        expect(communities.save).not.toHaveBeenCalled();
+        expect(members.save).not.toHaveBeenCalled();
+        expect(governanceLog.log).not.toHaveBeenCalled();
+        expect(notifications.create).toHaveBeenCalledWith(
+          'target-1',
+          NotificationType.CommunityOwnershipOffered,
+          expect.objectContaining({ communitySlug: 'x', communityName: 'X' }),
+          'owner-1',
+        );
+      });
+
+      it('refuses a second offer while one is open', async () => {
+        resolveSlug('target-slug', 'target-1');
+        stageRosterRows({ 'target-1': RosterRole.Member });
+        users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ offereeId: 'someone-else' }),
+        );
+
+        expect(
+          await refusalCode(
+            service.offerOwnership('x', 'owner-1', 'target-slug'),
+          ),
+        ).toBe('OWNERSHIP_OFFER_OPEN');
+        expect(ownershipOffers.save).not.toHaveBeenCalled();
+      });
+
+      it('closes a lapsed offer still holding the open slot, then records the new one', async () => {
+        resolveSlug('target-slug', 'target-1');
+        stageRosterRows({ 'target-1': RosterRole.Member });
+        users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({
+            id: 'lapsed-offer',
+            expiresAt: new Date(Date.now() - DAY_MS),
+          }),
+        );
+
+        await service.offerOwnership('x', 'owner-1', 'target-slug');
+
+        expect(ownershipOffers.update).toHaveBeenCalledWith(
+          {
+            id: 'lapsed-offer',
+            status: CommunityOwnershipOfferStatus.Offered,
+          },
+          { status: CommunityOwnershipOfferStatus.Expired },
+        );
+        expect(ownershipOffers.save).toHaveBeenCalledTimes(1);
+      });
+
+      it('answers a lost race for the open slot with the same 409', async () => {
+        resolveSlug('target-slug', 'target-1');
+        stageRosterRows({ 'target-1': RosterRole.Member });
+        users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+        ownershipOffers.save.mockRejectedValue({
+          code: '23505',
+          constraint: 'UQ_community_ownership_offers_open',
+        });
+
+        expect(
+          await refusalCode(
+            service.offerOwnership('x', 'owner-1', 'target-slug'),
+          ),
+        ).toBe('OWNERSHIP_OFFER_OPEN');
+      });
     });
 
-    it('does not demote the outgoing owner a second time if their roster row already moved (retry-safe)', async () => {
-      resolveSlug('target-slug', 'target-1');
-      members.findOne
-        .mockResolvedValueOnce({
-          id: 'm2',
-          role: RosterRole.Member,
-          userId: 'target-1',
-        })
-        // The outgoing owner's row is no longer 'owner' (already demoted by a
-        // prior attempt) — the guarded demote inside the transaction must
-        // not re-save it.
-        .mockResolvedValueOnce({
-          id: 'm1',
-          role: RosterRole.Mod,
-          userId: 'owner-1',
+    describe('cancelOwnershipOffer', () => {
+      it('withdraws the open offer only while it is still open, and tells nobody', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+
+        const offer = await service.cancelOwnershipOffer('x', 'owner-1');
+
+        expect(ownershipOffers.update).toHaveBeenCalledWith(
+          { id: 'offer-1', status: CommunityOwnershipOfferStatus.Offered },
+          expect.objectContaining({
+            status: CommunityOwnershipOfferStatus.Cancelled,
+          }),
+        );
+        expect(offer.status).toBe(CommunityOwnershipOfferStatus.Cancelled);
+        expect(notifications.create).not.toHaveBeenCalled();
+      });
+
+      it('404s with its own code when there is no open offer', async () => {
+        expect(
+          await refusalCode(service.cancelOwnershipOffer('x', 'owner-1')),
+        ).toBe('OWNERSHIP_OFFER_NOT_FOUND');
+      });
+
+      it('answers OWNERSHIP_OFFER_ANSWERED when the member declined in the meantime', async () => {
+        ownershipOffers.findOne
+          .mockResolvedValueOnce(openOfferRow())
+          .mockResolvedValueOnce(
+            openOfferRow({ status: CommunityOwnershipOfferStatus.Declined }),
+          );
+        ownershipOffers.update.mockResolvedValue({ affected: 0 });
+
+        const error: unknown = await service
+          .cancelOwnershipOffer('x', 'owner-1')
+          .catch((thrown: unknown) => thrown);
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toMatchObject({
+          code: 'OWNERSHIP_OFFER_ANSWERED',
         });
-      users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+      });
 
-      await service.transferOwnership('x', 'owner-1', 'target-slug');
+      it('keeps 404 when the race was lost to something other than an answer', async () => {
+        ownershipOffers.findOne
+          .mockResolvedValueOnce(openOfferRow())
+          .mockResolvedValueOnce(
+            openOfferRow({ status: CommunityOwnershipOfferStatus.Cancelled }),
+          );
+        ownershipOffers.update.mockResolvedValue({ affected: 0 });
 
-      expect(members.save).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'm2', role: RosterRole.Owner }),
-      );
-      expect(members.save).not.toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'm1' }),
-      );
+        expect(
+          await refusalCode(service.cancelOwnershipOffer('x', 'owner-1')),
+        ).toBe('OWNERSHIP_OFFER_NOT_FOUND');
+      });
+
+      // With nothing open, an old accepted or declined offer is history: the
+      // owner asked to cancel an offer that does not exist.
+      it('keeps 404 with nothing open, whatever older offers are on file', async () => {
+        ownershipOffers.findOne.mockImplementation(
+          ({ where }: { where: { status?: CommunityOwnershipOfferStatus } }) =>
+            Promise.resolve(
+              where.status === CommunityOwnershipOfferStatus.Offered
+                ? null
+                : openOfferRow({
+                    status: CommunityOwnershipOfferStatus.Declined,
+                  }),
+            ),
+        );
+
+        expect(
+          await refusalCode(service.cancelOwnershipOffer('x', 'owner-1')),
+        ).toBe('OWNERSHIP_OFFER_NOT_FOUND');
+        expect(ownershipOffers.update).not.toHaveBeenCalled();
+      });
+
+      // The member accepted, so ownership moved and the owner gate would
+      // refuse the former owner. The accepted offer is the real reason.
+      it('answers OWNERSHIP_OFFER_ANSWERED to the former owner once the member accepted', async () => {
+        communities.findOne.mockResolvedValue({
+          ...community,
+          ownerId: 'target-1',
+        });
+        members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ status: CommunityOwnershipOfferStatus.Accepted }),
+        );
+
+        expect(
+          await refusalCode(service.cancelOwnershipOffer('x', 'owner-1')),
+        ).toBe('OWNERSHIP_OFFER_ANSWERED');
+        expect(ownershipOffers.update).not.toHaveBeenCalled();
+      });
+
+      it('keeps the owner-only 403 for a mod who did not make the accepted offer', async () => {
+        communities.findOne.mockResolvedValue({
+          ...community,
+          ownerId: 'target-1',
+        });
+        members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ status: CommunityOwnershipOfferStatus.Accepted }),
+        );
+
+        await expect(
+          service.cancelOwnershipOffer('x', 'mod-1'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('rejects a mod cancelling the offer (owner-only)', async () => {
+        members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+
+        await expect(
+          service.cancelOwnershipOffer('x', 'mod-1'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(ownershipOffers.update).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('getOpenOwnershipOffer', () => {
+      it('answers null for an open offer past its expiry', async () => {
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ expiresAt: new Date(Date.now() - DAY_MS) }),
+        );
+
+        expect(await service.getOpenOwnershipOffer('x', 'owner-1')).toBeNull();
+      });
+
+      it('returns the live open offer to the owner', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+
+        const offer = await service.getOpenOwnershipOffer('x', 'owner-1');
+
+        expect(offer?.id).toBe('offer-1');
+        expect(offer?.status).toBe(CommunityOwnershipOfferStatus.Offered);
+      });
+    });
+
+    describe('respondToOwnershipOffer', () => {
+      it('on accept, hands the community over, demotes the outgoing owner first, logs it and tells the owner', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        stageRosterRows({
+          'owner-1': RosterRole.Owner,
+          'target-1': RosterRole.Member,
+        });
+        const savedRows = captureSavedRosterRows();
+
+        const offer = await service.respondToOwnershipOffer(
+          'offer-1',
+          'target-1',
+          true,
+        );
+
+        expect(ownershipOffers.findOne).toHaveBeenCalledWith({
+          where: { id: 'offer-1', offereeId: 'target-1' },
+        });
+        expect(ownershipOffers.update).toHaveBeenCalledWith(
+          { id: 'offer-1', status: CommunityOwnershipOfferStatus.Offered },
+          expect.objectContaining({
+            status: CommunityOwnershipOfferStatus.Accepted,
+          }),
+        );
+        expect(offer.status).toBe(CommunityOwnershipOfferStatus.Accepted);
+        expect(communities.save).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'c1', ownerId: 'target-1' }),
+        );
+        const demotionIndex = savedRows.findIndex(
+          (row) => row.id === 'm-owner-1' && row.role === RosterRole.Mod,
+        );
+        const promotionIndex = savedRows.findIndex(
+          (row) => row.id === 'm-target-1' && row.role === RosterRole.Owner,
+        );
+        expect(demotionIndex).toBeGreaterThanOrEqual(0);
+        expect(promotionIndex).toBeGreaterThan(demotionIndex);
+        expect(governanceLog.log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            communityId: 'c1',
+            actorUserId: 'owner-1',
+            action: GovernanceLogAction.OwnershipTransferred,
+            targetUserId: 'target-1',
+            metadata: { fromOwnerId: 'owner-1', ownershipOfferId: 'offer-1' },
+          }),
+        );
+        expect(notifications.create).toHaveBeenCalledTimes(1);
+        expect(notifications.create).toHaveBeenCalledWith(
+          'owner-1',
+          NotificationType.CommunityOwnershipTransferred,
+          expect.objectContaining({ youAreNowOwner: false }),
+          'target-1',
+        );
+      });
+
+      it('does not demote the outgoing owner a second time if their row already moved', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        stageRosterRows({
+          'owner-1': RosterRole.Mod,
+          'target-1': RosterRole.Member,
+        });
+
+        await service.respondToOwnershipOffer('offer-1', 'target-1', true);
+
+        expect(members.save).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'm-target-1', role: RosterRole.Owner }),
+        );
+        expect(members.save).not.toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'm-owner-1' }),
+        );
+      });
+
+      it('on decline, moves nothing and tells the owner who offered it', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        stageRosterRows({
+          'owner-1': RosterRole.Owner,
+          'target-1': RosterRole.Member,
+        });
+
+        const offer = await service.respondToOwnershipOffer(
+          'offer-1',
+          'target-1',
+          false,
+        );
+
+        expect(offer.status).toBe(CommunityOwnershipOfferStatus.Declined);
+        expect(communities.save).not.toHaveBeenCalled();
+        expect(members.save).not.toHaveBeenCalled();
+        expect(governanceLog.log).not.toHaveBeenCalled();
+        expect(notifications.create).toHaveBeenCalledWith(
+          'owner-1',
+          NotificationType.CommunityOwnershipOfferDeclined,
+          expect.objectContaining({ communitySlug: 'x' }),
+          'target-1',
+        );
+      });
+
+      it('404s an offer addressed to somebody else', async () => {
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'intruder', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_NOT_FOUND');
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        CommunityOwnershipOfferStatus.Accepted,
+        CommunityOwnershipOfferStatus.Declined,
+      ])('refuses an offer already %s as answered', async (status) => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow({ status }));
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_ANSWERED');
+      });
+
+      it('refuses an offer the owner withdrew with its own code', async () => {
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ status: CommunityOwnershipOfferStatus.Cancelled }),
+        );
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_CANCELLED');
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      // A newer offer closes a lapsed one to `expired` on the send path.
+      it('refuses an offer a newer offer closed as expired', async () => {
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ status: CommunityOwnershipOfferStatus.Expired }),
+        );
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_EXPIRED');
+      });
+
+      it('names the owner cancel that won a race with the accept', async () => {
+        ownershipOffers.findOne
+          .mockResolvedValueOnce(openOfferRow())
+          .mockResolvedValueOnce(
+            openOfferRow({ status: CommunityOwnershipOfferStatus.Cancelled }),
+          );
+        ownershipOffers.update.mockResolvedValue({ affected: 0 });
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_CANCELLED');
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses an offer past its expiry', async () => {
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ expiresAt: new Date(Date.now() - DAY_MS) }),
+        );
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_EXPIRED');
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses an accept once the community has changed hands', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        communities.findOne.mockResolvedValue({
+          ...community,
+          ownerId: 'someone-new',
+        });
+        stageRosterRows({ 'target-1': RosterRole.Member });
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_OWNER_CHANGED');
+        // The flip ran first under the lock; the refusal rolls it back with
+        // the transaction, and nothing about ownership moved.
+        expect(communities.save).not.toHaveBeenCalled();
+        expect(members.save).not.toHaveBeenCalled();
+      });
+
+      // R4 #4: `from_owner_id` is ON DELETE SET NULL, so an owner erased
+      // after making the offer leaves it null, and an ownerless community
+      // reads null as well. Null matching null must not hand the community
+      // over.
+      it('refuses an accept once the owner who made the offer was erased', async () => {
+        ownershipOffers.findOne.mockResolvedValue(
+          openOfferRow({ fromOwnerId: null }),
+        );
+        communities.findOne.mockResolvedValue({ ...community, ownerId: null });
+        stageRosterRows({ 'target-1': RosterRole.Member });
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_OWNER_CHANGED');
+        expect(communities.save).not.toHaveBeenCalled();
+        expect(members.save).not.toHaveBeenCalled();
+      });
+
+      it('clears an open owner-review flag when an accept hands the community over', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        communities.findOne.mockResolvedValue({
+          ...community,
+          needsOwnerReviewAt: new Date('2026-11-01T00:00:00.000Z'),
+        });
+        stageRosterRows({
+          'owner-1': RosterRole.Owner,
+          'target-1': RosterRole.Member,
+        });
+
+        await service.respondToOwnershipOffer('offer-1', 'target-1', true);
+
+        expect(communities.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            ownerId: 'target-1',
+            needsOwnerReviewAt: null,
+          }),
+        );
+      });
+
+      // Two simultaneous accepts: the second waits on the community lock,
+      // then finds the row already answered. The flip runs before the owner
+      // and roster checks, so it is the flip that turns the second one away.
+      it('turns the losing simultaneous accept away as already answered, ahead of the owner check', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        ownershipOffers.update.mockResolvedValue({ affected: 0 });
+        communities.findOne.mockResolvedValue({
+          ...community,
+          ownerId: 'target-1',
+        });
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_ANSWERED');
+        expect(members.findOne).not.toHaveBeenCalled();
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses an accept from a member who has left the roster', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        stageRosterRows({ 'owner-1': RosterRole.Owner });
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_RECIPIENT_NOT_MEMBER');
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it('lets a member decline an offer whose owner has since changed', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        communities.findOne.mockResolvedValue({
+          ...community,
+          ownerId: 'someone-new',
+        });
+
+        const offer = await service.respondToOwnershipOffer(
+          'offer-1',
+          'target-1',
+          false,
+        );
+
+        expect(offer.status).toBe(CommunityOwnershipOfferStatus.Declined);
+      });
+
+      it('loses a race with the owner cancelling and swaps nothing', async () => {
+        ownershipOffers.findOne.mockResolvedValue(openOfferRow());
+        ownershipOffers.update.mockResolvedValue({ affected: 0 });
+        stageRosterRows({
+          'owner-1': RosterRole.Owner,
+          'target-1': RosterRole.Member,
+        });
+
+        expect(
+          await refusalCode(
+            service.respondToOwnershipOffer('offer-1', 'target-1', true),
+          ),
+        ).toBe('OWNERSHIP_OFFER_ANSWERED');
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('listMyOwnershipOffers', () => {
+      it('reads only open, unexpired offers addressed to the caller', async () => {
+        ownershipOffers.find.mockResolvedValue([openOfferRow()]);
+        communities.find.mockResolvedValue([{ ...community }]);
+        members.find.mockResolvedValue([{ communityId: 'c1' }]);
+
+        const offers = await service.listMyOwnershipOffers('target-1');
+
+        expect(ownershipOffers.find).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              offereeId: 'target-1',
+              status: CommunityOwnershipOfferStatus.Offered,
+              expiresAt: expect.anything() as unknown,
+            }) as unknown,
+          }),
+        );
+        expect(offers).toEqual([
+          expect.objectContaining({
+            id: 'offer-1',
+            communitySlug: 'x',
+            communityName: 'X',
+          }),
+        ]);
+      });
+
+      it('skips an offer whose community no longer exists', async () => {
+        ownershipOffers.find.mockResolvedValue([openOfferRow()]);
+        communities.find.mockResolvedValue([]);
+
+        expect(await service.listMyOwnershipOffers('target-1')).toEqual([]);
+      });
+
+      // R4 #3: the list shows only offers an accept would still honour, so
+      // a reassignment, an orphan promotion, an erased owner, or the member
+      // leaving or being banned each take the offer off the list.
+      it('skips an offer whose community has changed hands since it was made', async () => {
+        ownershipOffers.find.mockResolvedValue([openOfferRow()]);
+        communities.find.mockResolvedValue([
+          { ...community, ownerId: 'someone-new' },
+        ]);
+        members.find.mockResolvedValue([{ communityId: 'c1' }]);
+
+        expect(await service.listMyOwnershipOffers('target-1')).toEqual([]);
+      });
+
+      it('skips an offer whose owner of record was erased', async () => {
+        ownershipOffers.find.mockResolvedValue([
+          openOfferRow({ fromOwnerId: null }),
+        ]);
+        communities.find.mockResolvedValue([{ ...community, ownerId: null }]);
+        members.find.mockResolvedValue([{ communityId: 'c1' }]);
+
+        expect(await service.listMyOwnershipOffers('target-1')).toEqual([]);
+      });
+
+      it('skips an offer once the member has left or been banned from the roster', async () => {
+        ownershipOffers.find.mockResolvedValue([openOfferRow()]);
+        communities.find.mockResolvedValue([{ ...community }]);
+        members.find.mockResolvedValue([]);
+
+        expect(await service.listMyOwnershipOffers('target-1')).toEqual([]);
+        expect(members.find).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              userId: 'target-1',
+            }) as unknown,
+          }),
+        );
+      });
     });
   });
 
@@ -4688,7 +5634,8 @@ describe('CommunitiesService', () => {
   // and a parent's leave, ban, freeze, archive and tier change cascade onto
   // its spaces through `SubcommunityCascadeService`.
   describe('spaces', () => {
-    const PARENT_ID = 'parent-1';
+    // A uuid, so the parent's avatar can be addressed by reference (SEC-04).
+    const PARENT_ID = 'eeeeeeee-1111-4111-8111-eeeeeeeeeeee';
     const SPACE_ID = 'space-1';
     const sharedFields = {
       type: CommunityType.Social,
@@ -4772,9 +5719,14 @@ describe('CommunitiesService', () => {
     describe('getBySlug', () => {
       it('leaves the key off for a space owner and for parent staff in the space', async () => {
         stageCommunities(spaceRow(), parentRow());
+        // A space's owner also sits on the parent's roster: a space grants
+        // no standing to anyone off the parent (`resolveEffectiveRole`).
         stageRoster({
           [SPACE_ID]: { 'space-owner': RosterRole.Owner },
-          [PARENT_ID]: { 'parent-owner': RosterRole.Owner },
+          [PARENT_ID]: {
+            'parent-owner': RosterRole.Owner,
+            'space-owner': RosterRole.Member,
+          },
         });
 
         const ownerDetail = await service.getBySlug('space', 'space-owner');
@@ -4783,6 +5735,7 @@ describe('CommunitiesService', () => {
           'parent-owner',
         );
 
+        expect(ownerDetail.myRole).toBe(RosterRole.Owner);
         expect(Object.keys(ownerDetail)).not.toContain('setupChecklist');
         expect(Object.keys(parentStaffDetail)).not.toContain('setupChecklist');
         expect(members.count).not.toHaveBeenCalled();
@@ -4845,8 +5798,9 @@ describe('CommunitiesService', () => {
         expect(detail.parent).toEqual({
           slug: 'parent',
           name: 'Parent Name',
-          avatarImageUrl:
-            'https://api.test/files/community-avatars/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg',
+          // SEC-04: the parent's avatar goes by the community's reference, so
+          // the uploader id in its key stays on the server.
+          avatarImageUrl: `https://api.test/files/communities/${PARENT_ID}/avatar?v=${mediaReferenceVersion('community-avatars/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg', `communities/${PARENT_ID}/avatar`)}`,
           isMember: true,
         });
         expect(detail.inheritedRules).toEqual({
@@ -5230,8 +6184,8 @@ describe('CommunitiesService', () => {
       });
     });
 
-    describe('transferOwnership', () => {
-      it("lets the parent's owner hand a space on, demoting the space's current owner first", async () => {
+    describe('ownership offers', () => {
+      it("lets the parent's owner offer a space, recording the space's current owner as the owner of record", async () => {
         stageCommunities(spaceRow(), parentRow());
         stageRoster({
           [SPACE_ID]: {
@@ -5246,17 +6200,45 @@ describe('CommunitiesService', () => {
         });
         stageMemberSlug('member-slug', 'member-1');
 
-        const detail = await service.transferOwnership(
-          'space',
-          'parent-owner',
-          'member-slug',
+        await service.offerOwnership('space', 'parent-owner', 'member-slug');
+
+        expect(ownershipOffers.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            communityId: SPACE_ID,
+            offereeId: 'member-1',
+            offeredByUserId: 'parent-owner',
+            fromOwnerId: 'space-owner',
+          }),
         );
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it("on accept, demotes the space's current owner before promoting the member and tells both owners", async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({
+          [SPACE_ID]: {
+            'space-owner': RosterRole.Owner,
+            'member-1': RosterRole.Member,
+          },
+          [PARENT_ID]: { 'parent-owner': RosterRole.Owner },
+        });
+        ownershipOffers.findOne.mockResolvedValue({
+          id: 'offer-1',
+          communityId: SPACE_ID,
+          offereeId: 'member-1',
+          offeredByUserId: 'parent-owner',
+          fromOwnerId: 'space-owner',
+          status: CommunityOwnershipOfferStatus.Offered,
+          offeredAt: new Date(Date.now() - 60_000),
+          expiresAt: new Date(Date.now() + 60_000),
+          respondedAt: null,
+        });
+        const savedRows = captureSavedRosterRows();
+
+        await service.respondToOwnershipOffer('offer-1', 'member-1', true);
 
         expect(communities.save).toHaveBeenCalledWith(
           expect.objectContaining({ id: SPACE_ID, ownerId: 'member-1' }),
-        );
-        const savedRows = members.save.mock.calls.map(
-          (call: unknown[]) => call[0] as { id: string; role: RosterRole },
         );
         const demotionIndex = savedRows.findIndex(
           (row) =>
@@ -5277,11 +6259,21 @@ describe('CommunitiesService', () => {
             actorUserId: 'parent-owner',
             action: GovernanceLogAction.OwnershipTransferred,
             targetUserId: 'member-1',
-            metadata: { fromOwnerId: 'space-owner' },
+            metadata: {
+              fromOwnerId: 'space-owner',
+              ownershipOfferId: 'offer-1',
+            },
           }),
         );
-        // The parent's owner keeps the co_owner role they inherit.
-        expect(detail.myRole).toBe(RosterRole.CoOwner);
+        expect(notifications.create).toHaveBeenCalledTimes(2);
+        for (const recipientId of ['space-owner', 'parent-owner']) {
+          expect(notifications.create).toHaveBeenCalledWith(
+            recipientId,
+            NotificationType.CommunityOwnershipTransferred,
+            expect.objectContaining({ youAreNowOwner: false }),
+            'member-1',
+          );
+        }
       });
 
       it("refuses the space's own mod", async () => {
@@ -5292,7 +6284,7 @@ describe('CommunitiesService', () => {
         });
 
         await expect(
-          service.transferOwnership('space', 'mod-1', 'member-slug'),
+          service.offerOwnership('space', 'mod-1', 'member-slug'),
         ).rejects.toBeInstanceOf(ForbiddenException);
       });
     });

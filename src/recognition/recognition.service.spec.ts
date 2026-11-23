@@ -21,7 +21,7 @@ describe('RecognitionService', () => {
   let perkClaimsRepo: { find: jest.Mock };
   let ledgerRepo: { find: jest.Mock };
   let profilesRepo: { findOne: jest.Mock };
-  let profilesService: { findBySlugOrThrow: jest.Mock };
+  let profilesService: { findBySlugOrThrow: jest.Mock; canViewFull: jest.Mock };
   let awardingService: { gatherSignalsForUser: jest.Mock };
   let usersRepo: { findOne: jest.Mock };
   let ambassadorStatus: { getInviteBonus: jest.Mock };
@@ -32,7 +32,12 @@ describe('RecognitionService', () => {
     perkClaimsRepo = { find: jest.fn().mockResolvedValue([]) };
     ledgerRepo = { find: jest.fn().mockResolvedValue([]) };
     profilesRepo = { findOne: jest.fn() };
-    profilesService = { findBySlugOrThrow: jest.fn() };
+    profilesService = {
+      findBySlugOrThrow: jest.fn(),
+      // The full profile is readable by default; the SEC-20 tests below
+      // switch it off.
+      canViewFull: jest.fn().mockResolvedValue(true),
+    };
     usersRepo = {
       findOne: jest
         .fn()
@@ -299,6 +304,24 @@ describe('RecognitionService', () => {
       expect(dto.perks).toEqual({ availableCount: 0, groups: [], ladder: [] });
       // Level/badges (public) are still returned in full.
       expect(dto.level.level).toBe(4);
+    });
+
+    it('(SEC-20) refuses with PROFILE_LIMITED and reads no recognition when the viewer is held to the limited card', async () => {
+      const limitedProfile = { userId: 'u3', slug: 'jamie' };
+      profilesService.findBySlugOrThrow.mockResolvedValue(limitedProfile);
+      profilesService.canViewFull.mockResolvedValue(false);
+
+      await expect(
+        service.getBySlug('jamie', 'viewer-1'),
+      ).rejects.toMatchObject({
+        response: { code: 'PROFILE_LIMITED' },
+      });
+      expect(profilesService.canViewFull).toHaveBeenCalledWith(
+        limitedProfile,
+        'viewer-1',
+      );
+      expect(statsRepo.findOne).not.toHaveBeenCalled();
+      expect(awardsRepo.find).not.toHaveBeenCalled();
     });
 
     it('(L10) propagates the 404 when the viewer cannot see the profile (blocked, hidden, taken down, or nonexistent)', async () => {

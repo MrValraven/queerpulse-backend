@@ -8,6 +8,7 @@ import {
   StudioReleaseStatus,
 } from './entities/studio-release.entity';
 import { listenablePersonaSql } from './studio-visibility';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 /** One row per member and release; a repeated "Notify me" changes nothing.
  *  The statement checks the release is still scheduled and takes a share
@@ -80,6 +81,7 @@ export class StudioReleaseRemindersService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     return queryBuilder.getExists();
   }

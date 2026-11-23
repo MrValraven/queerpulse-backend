@@ -10,7 +10,7 @@ import { In, IsNull, Not, Repository } from 'typeorm';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Event } from '../events/entities/event.entity';
 import { ReportSubjectType } from '../reports/entities/report.entity';
-import type { ReportDTO } from '../reports/report-response';
+import type { FiledReportDTO } from '../reports/reports.service';
 import { ReportsService } from '../reports/reports.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import type { BlockOptionsDto } from '../social/dto/block-options.dto';
@@ -90,7 +90,9 @@ function memberNotFound(): NotFoundException {
 /** A filed report as the group sheet gets it back: everything `POST
  *  /reports` answers except the subject, which here is the member's user id
  *  and never leaves the server. */
-export type GroupMemberReportResponse = Omit<ReportDTO, 'subjectId'>;
+// PRD-510: carries `filing`, so the reporter learns their details reached
+// their open report.
+export type GroupMemberReportResponse = Omit<FiledReportDTO, 'subjectId'>;
 
 /**
  * A formed group as its members see it: the card, check-in, leaving and
@@ -350,6 +352,7 @@ export class GoTogetherGroupService {
       createdAt: filed.createdAt,
       slaDueAt: filed.slaDueAt,
       acknowledgement: filed.acknowledgement,
+      filing: filed.filing,
     };
   }
 

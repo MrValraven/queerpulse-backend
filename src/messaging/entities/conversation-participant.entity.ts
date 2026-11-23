@@ -161,6 +161,28 @@ export class ConversationParticipant {
   @Column({ type: 'timestamptz', nullable: true })
   historyFloorAt!: Date | null;
 
+  /**
+   * SEC-25: the stretch of a GROUP this seat was away for, between leaving
+   * (or being removed) and taking the seat back. A message created after
+   * `absenceStartedAt` and at or before `absenceEndedAt` does not exist for
+   * this member: history, search, media, pins, stars, reactions, quotes,
+   * attachments and live frames all skip it (`insideAbsenceGapPredicate`,
+   * folded into the shared `leftAt` ceiling and join floor predicates).
+   * Written together by `reseatHistoryWindow` on every re-seat, both NULL
+   * on a seat that never came back.
+   *
+   * Known limit: a seat holds ONE gap. A second leave and return raises
+   * `clearedAt` to the end of the first gap and records the second one, so
+   * everything from before the first absence drops out of that member's
+   * view for good. That errs private, and it is the deliberate trade for
+   * two columns over a gap table.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  absenceStartedAt!: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  absenceEndedAt!: Date | null;
+
   @Column({ type: 'boolean', default: false })
   muted!: boolean;
 

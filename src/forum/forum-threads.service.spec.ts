@@ -1,3 +1,4 @@
+import { POST_AUTHOR_FILTER_COLUMN_SQL } from './forum-author-filter';
 import {
   BadRequestException,
   ConflictException,
@@ -44,6 +45,7 @@ import {
   forumOpNotTakenDownSql,
   forumThreadVisibleSql,
   isThreadPublished,
+  THREAD_AUTHOR_FILTER_COLUMN_SQL,
 } from './forum-threads.service';
 import {
   FORUM_POST_SEARCH_COLUMNS,
@@ -674,7 +676,7 @@ describe('ForumThreadsService', () => {
       expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
         qb,
         'viewer-1',
-        '"t"."author_id"',
+        THREAD_AUTHOR_FILTER_COLUMN_SQL,
       );
     });
 
@@ -782,6 +784,29 @@ describe('ForumThreadsService', () => {
       await service.loadOr404('hello-world');
 
       expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+    });
+
+    it('reaches an anonymous thread whose hidden author is blocked either way', async () => {
+      // Coordinator ruling (the SEC-02 class): a 404 here would confirm who
+      // wrote the thread, so the hidden author's block is not consulted.
+      threads.findOne.mockResolvedValue(baseThread({ isAnonymous: true }));
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      const thread = await service.loadOr404('hello-world', 'viewer-1');
+
+      expect(thread.slug).toBe('hello-world');
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+    });
+
+    it('still 404s an official thread whose author is blocked', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ isAnonymous: true, isOfficial: true }),
+      );
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(
+        service.loadOr404('hello-world', 'viewer-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('block check is skipped for a null thread author', async () => {
@@ -1620,7 +1645,7 @@ describe('ForumThreadsService', () => {
       expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
         qb,
         'viewer-1',
-        '"t"."author_id"',
+        THREAD_AUTHOR_FILTER_COLUMN_SQL,
       );
       expect(result).toEqual({ all: 6, general: 4, housing: 2 });
     });
@@ -1838,7 +1863,7 @@ describe('ForumThreadsService', () => {
       expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
         qb,
         'viewer-1',
-        '"t"."author_id"',
+        THREAD_AUTHOR_FILTER_COLUMN_SQL,
       );
       expect(qb.orderBy).toHaveBeenCalledWith('t.pinned_at', 'DESC');
       expect(qb.take).toHaveBeenCalledWith(3);
@@ -2258,7 +2283,7 @@ describe('ForumThreadsService', () => {
       expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
         qb,
         'viewer-1',
-        '"t"."author_id"',
+        THREAD_AUTHOR_FILTER_COLUMN_SQL,
       );
     });
 
@@ -2638,6 +2663,9 @@ describe('ForumThreadsService', () => {
       expect(sql).toContain('"p"."is_op" = false');
       expect(sql).toContain('"__unread_block"');
       expect(sql).toContain('"__unread_mute"');
+      // An anonymous thread's hidden author passes the block and mute
+      // filters, so the badge cannot reveal who wrote it.
+      expect(sql).toContain(POST_AUTHOR_FILTER_COLUMN_SQL);
     });
   });
 
@@ -3300,6 +3328,22 @@ describe('ForumThreadsService', () => {
         source: 'forum',
         threadSlug: 'hello-world',
       });
+    });
+
+    it('flags the mention payload as masked on an anonymous, non-official thread', async () => {
+      await openOwingThread({ isAnonymous: true });
+
+      // The flag drops the block and mute gate keyed on the hidden writer, so
+      // a mentioned member who blocked or muted them is still told.
+      expect(mentionPayload()).toMatchObject({ isActorMasked: true });
+      expect(mentionPayload()).not.toHaveProperty('actorId');
+    });
+
+    it('keeps the block and mute gate on an official thread', async () => {
+      await openOwingThread({ isOfficial: true, isAnonymous: true });
+
+      expect(mentionPayload()).not.toHaveProperty('isActorMasked');
+      expect(mentionPayload()).not.toHaveProperty('actorId');
     });
 
     it('omits the mention excerpt on a gated community thread', async () => {
@@ -4553,7 +4597,7 @@ describe('ForumThreadsService', () => {
       expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
         qb,
         'viewer-1',
-        '"t"."author_id"',
+        THREAD_AUTHOR_FILTER_COLUMN_SQL,
       );
       accessTierGateCall(qb);
       expect(andWhereSql(qb)).toEqual(

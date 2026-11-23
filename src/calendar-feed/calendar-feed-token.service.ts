@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
 import { Repository } from 'typeorm';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { CalendarFeedToken } from './entities/calendar-feed-token.entity';
 
 /** 32 random bytes, hex-encoded — 64 chars, matching the column width. */
@@ -38,6 +39,7 @@ export class CalendarFeedTokenService {
   constructor(
     @InjectRepository(CalendarFeedToken)
     private readonly tokens: Repository<CalendarFeedToken>,
+    @InjectRepository(User) private readonly users: Repository<User>,
   ) {}
 
   /** This member's live feed token, minting one on first use. */
@@ -62,8 +64,12 @@ export class CalendarFeedTokenService {
   }
 
   /**
-   * Returns the member's `userId` when `token` is a live stored token, or
-   * `null` when it is unknown, malformed, or has been revoked. Stamps
+   * Returns the member's `userId` when `token` is a live stored token of an
+   * active member, or `null` when it is unknown, malformed, revoked, or the
+   * account is suspended, paused or in its deletion grace period (SEC-18: a
+   * leaked URL must not keep publishing attendance once the member has
+   * stepped away). The token row stays, so reactivating the account makes the
+   * same URL work again. Stamps
    * `lastUsedAt` so a member (or an admin handling a report) can tell whether a
    * leaked URL is still being polled; the stamp is best-effort and never fails
    * the feed.
@@ -75,6 +81,13 @@ export class CalendarFeedTokenService {
     }
     const row = await this.tokens.findOne({ where: { token } });
     if (!row) {
+      return null;
+    }
+    const owner = await this.users.findOne({
+      where: { id: row.userId },
+      select: { id: true, status: true },
+    });
+    if (!owner || owner.status !== UserStatus.Active) {
       return null;
     }
     await this.tokens

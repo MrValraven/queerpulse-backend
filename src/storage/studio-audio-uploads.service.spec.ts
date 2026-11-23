@@ -179,4 +179,89 @@ describe('StudioAudioUploadsService', () => {
     await expect(presign()).rejects.toBeInstanceOf(PayloadTooLargeException);
     expect(uploads.insert).not.toHaveBeenCalled();
   });
+
+  // Open item A: who may confirm a Studio audio key is who may presign it,
+  // and each refusal names its own reason.
+  describe('confirmUploadRefusal', () => {
+    const CO_OWNER_ID = '6a000000-0000-4000-8000-000000000002';
+
+    function registered(): void {
+      uploads.findOne.mockResolvedValue({
+        storageKey: KEY,
+        subprofileId: PERSONA_ID,
+        uploadedById: USER_ID,
+      });
+    }
+
+    it('lets the uploader confirm while the presign checks still pass', async () => {
+      registered();
+      answerChecks({ has_grant: true, persona_kind: 'dj', is_member: true });
+      await expect(
+        service.confirmUploadRefusal(USER_ID, KEY),
+      ).resolves.toBeNull();
+      expect(uploads.findOne).toHaveBeenCalledWith({
+        where: { storageKey: KEY },
+      });
+      expect(uploads.query).toHaveBeenCalledWith(expect.any(String), [
+        USER_ID,
+        PERSONA_ID,
+      ]);
+    });
+
+    it('lets a co-owner of the persona confirm, checked against the registered persona', async () => {
+      registered();
+      answerChecks({
+        has_grant: true,
+        persona_kind: 'musician',
+        is_member: true,
+      });
+      await expect(
+        service.confirmUploadRefusal(CO_OWNER_ID, KEY),
+      ).resolves.toBeNull();
+      expect(uploads.query).toHaveBeenCalledWith(expect.any(String), [
+        CO_OWNER_ID,
+        PERSONA_ID,
+      ]);
+    });
+
+    it('names an ended Studio grant first, with or without a registry row', async () => {
+      answerChecks({ has_grant: false, persona_kind: null, is_member: false });
+      await expect(service.confirmUploadRefusal(USER_ID, KEY)).resolves.toBe(
+        'studio_access_required',
+      );
+      expect(uploads.query).toHaveBeenCalledWith(expect.any(String), [
+        USER_ID,
+        null,
+      ]);
+      registered();
+      answerChecks({ has_grant: false, persona_kind: 'dj', is_member: false });
+      await expect(service.confirmUploadRefusal(USER_ID, KEY)).resolves.toBe(
+        'studio_access_required',
+      );
+    });
+
+    it('answers a key with no registry row and a non-member alike', async () => {
+      answerChecks({ has_grant: true, persona_kind: null, is_member: false });
+      await expect(service.confirmUploadRefusal(USER_ID, KEY)).resolves.toBe(
+        'upload_not_yours',
+      );
+      registered();
+      answerChecks({ has_grant: true, persona_kind: 'dj', is_member: false });
+      await expect(
+        service.confirmUploadRefusal(CO_OWNER_ID, KEY),
+      ).resolves.toBe('upload_not_yours');
+    });
+
+    it('names a persona kind that can no longer upload audio', async () => {
+      registered();
+      answerChecks({
+        has_grant: true,
+        persona_kind: 'writer',
+        is_member: true,
+      });
+      await expect(service.confirmUploadRefusal(USER_ID, KEY)).resolves.toBe(
+        'studio_persona_kind_not_allowed',
+      );
+    });
+  });
 });

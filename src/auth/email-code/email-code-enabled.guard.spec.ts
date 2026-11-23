@@ -9,6 +9,7 @@ import { AuthService } from '../auth.service';
 import { EmailCodeEnabledGuard } from './email-code-enabled.guard';
 import { EmailCodeRefusedError } from './email-code-refusal';
 import {
+  EmailCodeJoinRequestDailyAddressThrottlerGuard,
   EmailCodeRequestAddressThrottlerGuard,
   EmailCodeRequestIpThrottlerGuard,
   EmailCodeVerifyIpThrottlerGuard,
@@ -94,6 +95,8 @@ describe('EmailCodeController routes with the feature switched off', () => {
       .overrideGuard(EmailCodeRequestIpThrottlerGuard)
       .useValue(throttlerPass)
       .overrideGuard(EmailCodeRequestAddressThrottlerGuard)
+      .useValue(throttlerPass)
+      .overrideGuard(EmailCodeJoinRequestDailyAddressThrottlerGuard)
       .useValue(throttlerPass)
       .overrideGuard(EmailCodeVerifyIpThrottlerGuard)
       .useValue(throttlerPass)

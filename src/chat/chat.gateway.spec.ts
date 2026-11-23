@@ -1139,6 +1139,10 @@ describe('ChatGateway', () => {
 
     it('relays a delivered receipt under the recipient key', async () => {
       seatInMatchedChat(true);
+      namespaceTo.mockReturnValue({
+        emit: roomEmit,
+        except: jest.fn().mockReturnValue({ emit: roomEmit }),
+      });
       const deliveredAt = new Date('2026-10-06T10:00:00.000Z');
 
       await gateway.handleMessageDelivered({
@@ -1156,6 +1160,10 @@ describe('ChatGateway', () => {
 
     it('relays a reaction under the reactor key', async () => {
       seatInMatchedChat(true);
+      namespaceTo.mockReturnValue({
+        emit: roomEmit,
+        except: jest.fn().mockReturnValue({ emit: roomEmit }),
+      });
       const reactions = [{ key: MessageReactionKey.Love, count: 1 }];
 
       await gateway.handleMessageReaction({
@@ -1171,6 +1179,112 @@ describe('ChatGateway', () => {
         userId: typistKey,
         reactions,
       });
+    });
+  });
+
+  // SEC-26: in a group, `read`, `message:delivered` and `reaction` skip every
+  // member blocked either way with the actor, as `typing` does.
+  describe('group receipt and reaction frames skip blocked members', () => {
+    const GROUP_ID = 'group-1';
+    let except: jest.Mock;
+
+    beforeEach(() => {
+      conversationParticipants.manager.findOne.mockResolvedValue({
+        id: GROUP_ID,
+        kind: ConversationKind.Group,
+        isOfficial: false,
+        isGoTogetherChat: false,
+        eventMatchGroupId: null,
+      });
+      conversationParticipants.find.mockResolvedValue([
+        { userId: 'actor', identityId: 'identity-actor', leftAt: null },
+        { userId: 'blocked', identityId: 'identity-blocked', leftAt: null },
+        { userId: 'friend', identityId: 'identity-friend', leftAt: null },
+      ]);
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['blocked']));
+      except = jest.fn().mockReturnValue({ emit: roomEmit });
+      namespaceTo.mockReturnValue({ emit: roomEmit, except });
+    });
+
+    function exceptedRooms(): string[] {
+      return except.mock.calls.flatMap(([rooms]: [string | string[]]) =>
+        Array.isArray(rooms) ? rooms : [rooms],
+      );
+    }
+
+    it('withholds a read receipt from a blocked member', async () => {
+      await gateway.handleMessageRead({
+        conversationId: GROUP_ID,
+        userId: 'actor',
+        lastReadAt: new Date('2026-11-01T10:00:00.000Z'),
+      });
+
+      expect(roomEmit).toHaveBeenCalledWith('read', expect.anything());
+      expect(exceptedRooms()).toContain('user:blocked');
+      expect(exceptedRooms()).not.toContain('user:friend');
+    });
+
+    it('withholds a delivered receipt from a blocked member', async () => {
+      await gateway.handleMessageDelivered({
+        conversationId: GROUP_ID,
+        userId: 'actor',
+        deliveredAt: new Date('2026-11-01T10:00:00.000Z'),
+      });
+
+      expect(roomEmit).toHaveBeenCalledWith(
+        'message:delivered',
+        expect.anything(),
+      );
+      expect(exceptedRooms()).toContain('user:blocked');
+      expect(exceptedRooms()).not.toContain('user:friend');
+    });
+
+    // SEC-25: a pin or delete frame about a message the thread never shows a
+    // member (their join floor or absence gap covers it) skips them.
+    it('withholds pin and delete frames from a member the message predates', async () => {
+      messagingCore.loadGroupJoinFlooredUserIds.mockResolvedValue(
+        new Set(['returner']),
+      );
+
+      await gateway.handleMessagePinned({
+        conversationId: GROUP_ID,
+        messageId: 'm1',
+        pinned: true,
+      });
+      await gateway.handleMessageDeleted({
+        conversationId: GROUP_ID,
+        messageId: 'm1',
+      });
+
+      expect(roomEmit).toHaveBeenCalledWith(
+        'message:pinned',
+        expect.anything(),
+      );
+      expect(roomEmit).toHaveBeenCalledWith(
+        'message:deleted',
+        expect.anything(),
+      );
+      expect(except).toHaveBeenCalledTimes(2);
+      expect(exceptedRooms()).toEqual(['user:returner', 'user:returner']);
+    });
+
+    it('withholds a reaction from a blocked member and from a member the message predates', async () => {
+      messagingCore.loadGroupJoinFlooredUserIds.mockResolvedValueOnce(
+        new Set(['returner']),
+      );
+
+      await gateway.handleMessageReaction({
+        conversationId: GROUP_ID,
+        messageId: 'm1',
+        userId: 'actor',
+        reactions: [{ key: MessageReactionKey.Love, count: 1 }],
+      });
+
+      expect(roomEmit).toHaveBeenCalledWith('reaction', expect.anything());
+      expect(exceptedRooms()).toEqual(
+        expect.arrayContaining(['user:blocked', 'user:returner']),
+      );
+      expect(exceptedRooms()).not.toContain('user:friend');
     });
   });
 

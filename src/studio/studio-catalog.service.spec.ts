@@ -271,6 +271,7 @@ describe('StudioCatalogService', () => {
         queryBuilder,
         VIEWER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -404,6 +405,7 @@ describe('StudioCatalogService', () => {
         queryBuilder,
         VIEWER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -456,6 +458,7 @@ describe('StudioCatalogService', () => {
         queryBuilder,
         VIEWER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
   });
@@ -730,6 +733,7 @@ describe('StudioCatalogService', () => {
         personaCheck,
         VIEWER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -856,6 +860,7 @@ describe('StudioCatalogService', () => {
         visibility,
         VIEWER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
       expect(response.tracks).toEqual([]);
       expect(response.trackCount).toBe(1);
@@ -1806,6 +1811,7 @@ describe('StudioCatalogService', () => {
         formats,
         VIEWER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
 

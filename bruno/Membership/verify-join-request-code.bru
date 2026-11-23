@@ -1,0 +1,35 @@
+meta {
+  name: Verify Join Request Code
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/auth/email-code/join-request/verify
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "challengeId": "REPLACE_WITH_CHALLENGE_ID",
+  "code": "123456",
+  "name": "Ada",
+  "message": "I'd love to join, a friend in the network told me about it.",
+  "heardFrom": "A friend",
+  "ageAttested": true,
+  "termsVersion": "1.0"
+}
+
+docs {
+  Step two (SEC-10): the form plus the code from "Request Join Request
+  Code", sent from the same client so the email_code_requester cookie rides
+  along. The request is filed under the address the code went to, so the body
+  carries no email. 201 returns { id, status, createdAt, statusToken } once.
+  A wrong code answers 400 code_incorrect; 403 REAPPLICATION_COOLDOWN and
+  409 JOIN_REQUEST_PENDING come only after a correct code.
+}

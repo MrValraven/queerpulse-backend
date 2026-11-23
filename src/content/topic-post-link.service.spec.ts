@@ -95,13 +95,15 @@ describe('TopicPostLinkService.linkThread', () => {
       authorName: 'Anonymous member',
       authorInitials: 'A',
       authorTone: 'plum',
-      // The real writer stays on the row for block and mute filtering.
-      authorId: AUTHOR_ID,
+      // The hidden writer is kept off the row, so no block or mute keyed on
+      // them can match it.
+      authorId: null,
     });
     expect(profiles.findOne).not.toHaveBeenCalled();
     expect(emittedEvent()).toMatchObject({
       authorId: AUTHOR_ID,
       isAuthorMasked: true,
+      isAuthorAnonymous: true,
     });
   });
 
@@ -118,6 +120,7 @@ describe('TopicPostLinkService.linkThread', () => {
       authorId: AUTHOR_ID,
     });
     expect(emittedEvent().isAuthorMasked).toBe(true);
+    expect(emittedEvent().isAuthorAnonymous).toBe(false);
   });
 
   it('linkThread stores the member byline for a plain thread', async () => {

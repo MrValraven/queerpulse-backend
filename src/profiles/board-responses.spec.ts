@@ -8,6 +8,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { ConnectionsService } from '../connections/connections.service';
+import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -49,6 +50,7 @@ import {
   BOARD_INSIGHTS_WINDOW_DAYS,
   BOARD_MATCHES_PER_POST,
 } from './board-insights';
+import { directoryTierClause } from './member-directory.query';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -780,6 +782,16 @@ describe('ProfilesService board responses', () => {
       );
       expect(rankedQb.andWhere).toHaveBeenCalledWith(
         '("profile"."hidden_until" IS NULL OR "profile"."hidden_until" <= now())',
+      );
+      // PRD-504: the directory's visibility tier on the `profile` alias, with
+      // the OWNER as the viewer, so a private member never surfaces as a
+      // match and a network member only to their direct connections.
+      expect(rankedQb.andWhere).toHaveBeenCalledWith(
+        directoryTierClause('profile'),
+        {
+          directoryViewerId: OWNER_ID,
+          directoryAcceptedStatus: ConnectionStatus.Accepted,
+        },
       );
     });
   });

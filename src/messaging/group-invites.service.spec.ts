@@ -287,6 +287,25 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       });
     });
 
+    it('hands the roster the members blocked either way with the caller (SEC-26)', async () => {
+      const blockedUserIds = new Set([INVITER_ID]);
+      blockFilter.blockedUserIds.mockResolvedValue(blockedUserIds);
+
+      await service.accept(INVITE_ID, INVITEE_ID);
+
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(INVITEE_ID, [
+        INVITER_ID,
+      ]);
+      expect(core.buildMemberSummaries).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.any(Map),
+        INVITEE_ID,
+        expect.any(Map),
+        blockedUserIds,
+        expect.anything(),
+      );
+    });
+
     it('stamps the actor profile identity on a member_joined pill', async () => {
       await service.accept(INVITE_ID, INVITEE_ID);
 
@@ -726,23 +745,76 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       );
     });
 
-    it('a returning member keeps the resume floor and gets no join floor', async () => {
+    // SEC-25 fix round 1: a member accepting an invite to come back a second
+    // time keeps the first absence hidden, so the seat load carries the gap.
+    it('accept raises the clear point past an earlier gap for a member returning a second time', async () => {
+      const firstGapStartedAt = new Date('2026-01-05T00:00:00.000Z');
+      const firstGapEndedAt = new Date('2026-01-10T00:00:00.000Z');
+      const leftAgainAt = new Date('2026-01-20T00:00:00.000Z');
+      participants.findOne.mockResolvedValue({
+        id: 'seat-1',
+        clearedAt: null,
+        leftAt: leftAgainAt,
+        absenceStartedAt: firstGapStartedAt,
+        absenceEndedAt: firstGapEndedAt,
+      });
+
+      await service.accept(INVITE_ID, INVITEE_ID);
+
+      expect(participants.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: {
+            id: true,
+            clearedAt: true,
+            leftAt: true,
+            absenceStartedAt: true,
+            absenceEndedAt: true,
+          },
+        }),
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        ConversationParticipant,
+        { id: 'seat-1' },
+        expect.objectContaining({
+          clearedAt: firstGapEndedAt,
+          absenceStartedAt: leftAgainAt,
+          absenceEndedAt: JOIN_FLOOR,
+          leftAt: null,
+        }),
+      );
+    });
+
+    it('a returning member keeps their history up to leaving, gets an absence gap and no join floor', async () => {
       const leftAt = new Date('2026-01-20T00:00:00.000Z');
       participants.findOne.mockResolvedValue({
         id: 'seat-1',
         clearedAt: null,
         leftAt,
         removedAt: null,
+        absenceStartedAt: null,
+        absenceEndedAt: null,
       });
 
       await service.joinByToken('tok123', INVITEE_ID);
 
-      expect(manager.query).not.toHaveBeenCalled();
       expect(manager.update).toHaveBeenCalledWith(
         ConversationParticipant,
         { id: 'seat-1' },
-        expect.objectContaining({ clearedAt: leftAt, leftAt: null }),
+        expect.objectContaining({
+          clearedAt: null,
+          absenceStartedAt: leftAt,
+          absenceEndedAt: JOIN_FLOOR,
+          leftAt: null,
+        }),
       );
+      const revivedWrite = (
+        manager.update.mock.calls as [
+          unknown,
+          unknown,
+          Record<string, unknown>,
+        ][]
+      ).find(([entity]) => entity === ConversationParticipant);
+      expect(revivedWrite?.[2]).not.toHaveProperty('historyFloorAt');
     });
 
     it('410s INVITE_LINK_EXPIRED previewing an expired link as a newcomer', async () => {

@@ -1,4 +1,5 @@
-import { ForbiddenException } from '@nestjs/common';
+import { FindOperator, IsNull } from 'typeorm';
+import { recipientNotAcceptingRequestsException } from '../connections/request-limits';
 import { MessageRequestsService } from './message-requests.service';
 
 /**
@@ -166,8 +167,14 @@ describe('MessageRequestsService.messageRequest connected branch (ENG-407)', () 
       connections as never,
       { isBlockedEitherWay: jest.fn().mockResolvedValue(false) } as never,
       {} as never, // IdentityMailboxSyncService, unused by this branch
-      {} as never, // users repository, unused by this branch
+      {
+        findOne: jest.fn().mockResolvedValue({ id: 'them', status: 'active' }),
+      } as never, // users repository: the recipient is an active member
       messagesService as never,
+      // SEC-19: the pair has no block, hide or takedown.
+      { exist: jest.fn().mockResolvedValue(false) } as never,
+      { isHiddenFrom: jest.fn().mockResolvedValue(false) } as never,
+      { statesFor: jest.fn().mockResolvedValue(new Map()) } as never,
     );
   });
 
@@ -251,6 +258,8 @@ describe('MessageRequestsService.messageRequest connected branch (ENG-407)', () 
 describe('MessageRequestsService enquiry block contract (LOC-F1)', () => {
   let service: MessageRequestsService;
   let blockFilter: { isBlockedEitherWay: jest.Mock };
+  // SEC-19: whether the sender placed the block themselves.
+  let blocks: { exist: jest.Mock };
   let connections: {
     areConnected: jest.Mock;
     assertRequestsNotPaused: jest.Mock;
@@ -259,6 +268,7 @@ describe('MessageRequestsService enquiry block contract (LOC-F1)', () => {
 
   beforeEach(() => {
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(true) };
+    blocks = { exist: jest.fn().mockResolvedValue(false) };
     connections = {
       areConnected: jest.fn().mockResolvedValue(false),
       assertRequestsNotPaused: jest.fn().mockResolvedValue(undefined),
@@ -275,6 +285,7 @@ describe('MessageRequestsService enquiry block contract (LOC-F1)', () => {
       {} as never, // IdentityMailboxSyncService, unused by these paths
       {} as never, // users repository, unused by these paths
       {} as never, // MessagesService, unused by these paths
+      blocks as never,
     );
   });
 
@@ -290,11 +301,394 @@ describe('MessageRequestsService enquiry block contract (LOC-F1)', () => {
     });
   });
 
-  it('keeps the 403 on deliverEnquiry for every other caller', async () => {
-    await expect(service.deliverEnquiry('me', 'them', 'hi')).rejects.toThrow(
-      new ForbiddenException('You cannot contact this member'),
-    );
+  it('answers deliverEnquiry with the profile read 404 for a block the recipient placed', async () => {
+    await expect(
+      service.deliverEnquiry('me', 'them', 'hi'),
+    ).rejects.toMatchObject({
+      status: 404,
+      response: { message: 'Member not found' },
+    });
+    expect(blocks.exist).toHaveBeenCalledWith({
+      where: {
+        blockerId: 'me',
+        blockedId: 'them',
+        matchedConversationId: IsNull(),
+      },
+    });
     expect(core.getOrCreateConversation).not.toHaveBeenCalled();
     expect(core.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('answers deliverEnquiry with the 404 for a sender block placed inside a matched chat', async () => {
+    // PRD-423: the read leaves matched chat blocks out, so a sender whose only
+    // block is a matched chat one reads no block of their own.
+    blocks.exist.mockImplementation(
+      (options: { where: { matchedConversationId?: unknown } }) =>
+        Promise.resolve(
+          !(options.where.matchedConversationId instanceof FindOperator),
+        ),
+    );
+
+    await expect(
+      service.deliverEnquiry('me', 'them', 'hi'),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(core.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("names the sender's own block on deliverEnquiry with its code", async () => {
+    blocks.exist.mockResolvedValue(true);
+
+    await expect(
+      service.deliverEnquiry('me', 'them', 'hi'),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: {
+        code: 'UNBLOCK_TO_CONTACT',
+        message: 'Unblock this member before sending a request',
+      },
+    });
+    expect(core.postMessage).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * SEC-02: an unlinked persona's mailbox answers a member who is blocked with
+ * every owner exactly as it answers anyone, so the mailbox cannot test who
+ * runs the pseudonym. The member's own block of the persona still refuses.
+ */
+describe('MessageRequestsService.identityEnquiryContactability on an unlinked persona (SEC-02)', () => {
+  interface StaffUserRow {
+    id: string;
+    isSystem: boolean;
+    status: string;
+  }
+  let service: MessageRequestsService;
+  let identityBlockKind: 'direct' | 'carried' | null;
+  let isUnlinkedPersonaMailbox: boolean;
+  let suspendedUserIds: string[];
+  let usersQuery: jest.Mock<Promise<unknown[]>, [string, unknown[]]>;
+  const staffUserIds = ['owner-user', 'coowner-user'];
+
+  beforeEach(() => {
+    identityBlockKind = null;
+    isUnlinkedPersonaMailbox = true;
+    suspendedUserIds = [];
+    usersQuery = jest.fn<Promise<unknown[]>, [string, unknown[]]>(() =>
+      Promise.resolve(isUnlinkedPersonaMailbox ? [{ matched: 1 }] : []),
+    );
+    const blockFilter = {
+      identityBlockKind: jest.fn(() => Promise.resolve(identityBlockKind)),
+      // The member is person-blocked with every owner.
+      blockedUserIds: jest.fn((_userId: string, candidates: string[]) =>
+        Promise.resolve(new Set(candidates)),
+      ),
+    };
+    const core = {
+      evaluateIdentityContact: jest.fn(() =>
+        Promise.resolve({ refusal: null, staffUserIds }),
+      ),
+      findIdentityConversation: jest.fn(() => Promise.resolve(null)),
+    };
+    const users = {
+      find: jest.fn((): Promise<StaffUserRow[]> =>
+        Promise.resolve(
+          staffUserIds.map((staffUserId) => ({
+            id: staffUserId,
+            isSystem: false,
+            status: suspendedUserIds.includes(staffUserId)
+              ? 'suspended'
+              : 'active',
+          })),
+        ),
+      ),
+      manager: { query: usersQuery },
+    };
+    service = new MessageRequestsService(
+      {} as never, // profiles repository, unused by this path
+      core as never,
+      {} as never, // ConnectionsService, unused by this path
+      blockFilter as never,
+      {} as never, // IdentityMailboxSyncService, unused by this path
+      users as never,
+      {} as never, // MessagesService, unused by this path
+    );
+  });
+
+  it('delivers to an unlinked persona whose every owner is blocked with the member', async () => {
+    await expect(
+      service.identityEnquiryContactability('member-user', 'persona-identity'),
+    ).resolves.toMatchObject({ canDeliver: true, blockedReason: null });
+    expect(usersQuery.mock.calls[0]?.[1]).toEqual([
+      'persona-identity',
+      'subprofile',
+      'unlinked',
+    ]);
+  });
+
+  it('still refuses the same mailbox as blocked when nobody can receive at all', async () => {
+    suspendedUserIds = [...staffUserIds];
+
+    await expect(
+      service.identityEnquiryContactability('member-user', 'persona-identity'),
+    ).resolves.toMatchObject({ canDeliver: false, blockedReason: 'blocked' });
+  });
+
+  it("keeps the member's own block of the persona as a refusal", async () => {
+    identityBlockKind = 'direct';
+
+    await expect(
+      service.identityEnquiryContactability('member-user', 'persona-identity'),
+    ).resolves.toMatchObject({ canDeliver: false, blockedReason: 'blocked' });
+    expect(usersQuery).not.toHaveBeenCalled();
+  });
+
+  it('keeps refusing any other mailbox whose every staff member is blocked', async () => {
+    isUnlinkedPersonaMailbox = false;
+
+    await expect(
+      service.identityEnquiryContactability('member-user', 'listing-identity'),
+    ).resolves.toMatchObject({ canDeliver: false, blockedReason: 'blocked' });
+  });
+});
+
+/**
+ * SEC-19: the first-contact refusals of `messageRequest` tell a requester
+ * nothing their profile page does not. The requester's own block is named
+ * first, with its code. Every recipient the profile read answers 404 for (an
+ * inactive account, a block the recipient placed, a hide from this
+ * requester, a live self-hide, a moderator takedown) answers the same 404,
+ * so a blocked requester reads a member who accepts nobody's requests the
+ * way an unknown handle reads, and every requester who can see them gets the
+ * gate's coded 403.
+ */
+describe('MessageRequestsService.messageRequest refusals (SEC-19)', () => {
+  interface RequestScenario {
+    recipientStatus: string;
+    hasRequesterBlocked: boolean;
+    // PRD-423: the requester's block was placed inside a matched chat.
+    isRequesterBlockMatched: boolean;
+    isBlockedEitherWay: boolean;
+    isHiddenFromRequester: boolean;
+    recipientHiddenUntil: Date | null;
+    takenDownSubjectId: string | null;
+  }
+  interface TakedownState {
+    hidden: boolean;
+    removed: boolean;
+  }
+  interface RequestDoubles {
+    connections: { areConnected: jest.Mock; requestConnection: jest.Mock };
+    blocks: { exist: jest.Mock };
+  }
+
+  interface BlockExistOptions {
+    where: { matchedConversationId?: unknown };
+  }
+
+  const RECIPIENT_USER_ID = 'them-user';
+  const RECIPIENT_SLUG = 'them';
+
+  /** Whether the requester's block row passes the read's filter: a matched
+   *  chat block passes only a read that leaves out its `IsNull` filter. */
+  function blockRowMatches(
+    state: RequestScenario,
+    options: BlockExistOptions,
+  ): boolean {
+    const filtersOutMatchedBlocks =
+      options.where.matchedConversationId instanceof FindOperator &&
+      options.where.matchedConversationId.type === 'isNull';
+    return (
+      state.hasRequesterBlocked &&
+      !(state.isRequesterBlockMatched && filtersOutMatchedBlocks)
+    );
+  }
+
+  function scenario(overrides: Partial<RequestScenario>): RequestScenario {
+    return {
+      recipientStatus: 'active',
+      hasRequesterBlocked: false,
+      isRequesterBlockMatched: false,
+      isBlockedEitherWay: false,
+      isHiddenFromRequester: false,
+      recipientHiddenUntil: null,
+      takenDownSubjectId: null,
+      ...overrides,
+    };
+  }
+
+  function buildService(state: RequestScenario): {
+    service: MessageRequestsService;
+    doubles: RequestDoubles;
+  } {
+    const takedownStates = new Map<string, TakedownState>();
+    if (state.takenDownSubjectId) {
+      takedownStates.set(state.takenDownSubjectId, {
+        hidden: true,
+        removed: false,
+      });
+    }
+    const doubles: RequestDoubles = {
+      connections: {
+        areConnected: jest.fn().mockResolvedValue(false),
+        requestConnection: jest.fn().mockResolvedValue({ id: 'conn-1' }),
+      },
+      blocks: {
+        exist: jest.fn((options: BlockExistOptions) =>
+          Promise.resolve(blockRowMatches(state, options)),
+        ),
+      },
+    };
+    const service = new MessageRequestsService(
+      {
+        findOne: jest.fn().mockResolvedValue({
+          userId: RECIPIENT_USER_ID,
+          slug: RECIPIENT_SLUG,
+          hiddenUntil: state.recipientHiddenUntil,
+        }),
+      } as never,
+      {} as never,
+      doubles.connections as never,
+      {
+        isBlockedEitherWay: jest
+          .fn()
+          .mockResolvedValue(
+            state.isBlockedEitherWay || state.hasRequesterBlocked,
+          ),
+      } as never,
+      {} as never,
+      {
+        findOne: jest.fn().mockResolvedValue({
+          id: RECIPIENT_USER_ID,
+          status: state.recipientStatus,
+        }),
+      } as never,
+      {} as never,
+      doubles.blocks as never,
+      {
+        isHiddenFrom: jest.fn().mockResolvedValue(state.isHiddenFromRequester),
+      } as never,
+      { statesFor: jest.fn().mockResolvedValue(takedownStates) } as never,
+    );
+    return { service, doubles };
+  }
+
+  it("names the requester's own block with its code", async () => {
+    const { service, doubles } = buildService(
+      scenario({ hasRequesterBlocked: true }),
+    );
+
+    await expect(
+      service.messageRequest('me', RECIPIENT_SLUG, 'hi'),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: {
+        code: 'UNBLOCK_TO_CONTACT',
+        message: 'Unblock this member before sending a request',
+      },
+    });
+    expect(doubles.blocks.exist).toHaveBeenCalledWith({
+      where: {
+        blockerId: 'me',
+        blockedId: RECIPIENT_USER_ID,
+        matchedConversationId: IsNull(),
+      },
+    });
+    expect(doubles.connections.requestConnection).not.toHaveBeenCalled();
+  });
+
+  it("names the requester's own block ahead of the recipient's account status", async () => {
+    const { service } = buildService(
+      scenario({ hasRequesterBlocked: true, recipientStatus: 'suspended' }),
+    );
+
+    await expect(
+      service.messageRequest('me', RECIPIENT_SLUG, 'hi'),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'UNBLOCK_TO_CONTACT' },
+    });
+  });
+
+  it("answers the requester's own block placed inside a matched chat with the profile read 404", async () => {
+    const { service, doubles } = buildService(
+      scenario({ hasRequesterBlocked: true, isRequesterBlockMatched: true }),
+    );
+
+    const refusal = service.messageRequest('me', RECIPIENT_SLUG, 'hi');
+
+    await expect(refusal).rejects.toMatchObject({
+      status: 404,
+      response: { message: 'Member not found' },
+    });
+    await expect(refusal).rejects.not.toMatchObject({
+      response: { code: 'UNBLOCK_TO_CONTACT' },
+    });
+    expect(doubles.connections.requestConnection).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Partial<RequestScenario>]>([
+    ['an account that is not active', { recipientStatus: 'suspended' }],
+    ['a block the recipient placed', { isBlockedEitherWay: true }],
+    ['a hide from this requester', { isHiddenFromRequester: true }],
+    [
+      'a live self-hide',
+      { recipientHiddenUntil: new Date(Date.now() + 60 * 60 * 1000) },
+    ],
+    ['a takedown filed under the slug', { takenDownSubjectId: RECIPIENT_SLUG }],
+    [
+      'a takedown filed under the user id',
+      { takenDownSubjectId: RECIPIENT_USER_ID },
+    ],
+  ])('answers %s with the profile read 404', async (_label, overrides) => {
+    const { service, doubles } = buildService(scenario(overrides));
+
+    await expect(
+      service.messageRequest('me', RECIPIENT_SLUG, 'hi'),
+    ).rejects.toMatchObject({
+      status: 404,
+      response: { message: 'Member not found' },
+    });
+    expect(doubles.connections.areConnected).not.toHaveBeenCalled();
+    expect(doubles.connections.requestConnection).not.toHaveBeenCalled();
+  });
+
+  it('lets a request through once a self-hide has expired', async () => {
+    const { service } = buildService(
+      scenario({ recipientHiddenUntil: new Date(Date.now() - 60 * 1000) }),
+    );
+
+    await expect(
+      service.messageRequest('me', RECIPIENT_SLUG, 'hi'),
+    ).resolves.toMatchObject({ connectionRequestId: 'conn-1' });
+  });
+
+  it('passes the recipient gate refusal through to a requester the recipient can be seen by', async () => {
+    const { service, doubles } = buildService(scenario({}));
+    doubles.connections.requestConnection.mockRejectedValue(
+      recipientNotAcceptingRequestsException(),
+    );
+
+    await expect(
+      service.messageRequest('me', RECIPIENT_SLUG, 'hi'),
+    ).rejects.toMatchObject({
+      status: 403,
+      response: { code: 'RECIPIENT_NOT_ACCEPTING_REQUESTS' },
+    });
+  });
+
+  it('answers a blocked requester the profile read 404 whatever the recipient gate says', async () => {
+    const { service, doubles } = buildService(
+      scenario({ isBlockedEitherWay: true }),
+    );
+    doubles.connections.requestConnection.mockRejectedValue(
+      recipientNotAcceptingRequestsException(),
+    );
+
+    const refusal = service.messageRequest('me', RECIPIENT_SLUG, 'hi');
+
+    await expect(refusal).rejects.toMatchObject({ status: 404 });
+    await expect(refusal).rejects.not.toMatchObject({
+      response: { message: 'A request is already pending' },
+    });
   });
 });

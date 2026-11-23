@@ -8,7 +8,10 @@ import { TopicFollowNotificationsListener } from './topic-follow-notifications.l
 
 const AUTHOR_ID = 'author-1';
 
-function linkedEvent(isAuthorMasked: boolean): TopicPostLinkedEvent {
+function linkedEvent(
+  isAuthorMasked: boolean,
+  isAuthorAnonymous = false,
+): TopicPostLinkedEvent {
   return {
     topicId: 'topic-1',
     topicSlug: 'healthcare',
@@ -18,6 +21,7 @@ function linkedEvent(isAuthorMasked: boolean): TopicPostLinkedEvent {
     threadTitle: 'Finding a GP',
     authorId: AUTHOR_ID,
     isAuthorMasked,
+    isAuthorAnonymous,
   };
 }
 
@@ -56,7 +60,7 @@ describe('TopicFollowNotificationsListener', () => {
     return firstCall;
   };
 
-  it('listener omits actorId for a masked author and still passes it for block filtering', async () => {
+  it('listener omits actorId for an official byline and still passes it for block filtering', async () => {
     await listener.onTopicPostLinked(linkedEvent(true));
 
     const [recipientIds, type, payload, blockFilterActorId] = onlyCall();
@@ -68,6 +72,17 @@ describe('TopicFollowNotificationsListener', () => {
       threadSlug: 'finding-a-gp',
     });
     expect(blockFilterActorId).toBe(AUTHOR_ID);
+  });
+
+  it('listener passes no actor at all for an anonymous, non-official thread', async () => {
+    await listener.onTopicPostLinked(linkedEvent(true, true));
+
+    const [recipientIds, , payload, blockFilterActorId] = onlyCall();
+    // The writer still skips their own follow.
+    expect(recipientIds).toEqual(['follower-1']);
+    expect(payload).not.toHaveProperty('actorId');
+    // No block or mute keyed on the hidden writer may drop a follower.
+    expect(blockFilterActorId).toBeUndefined();
   });
 
   it('listener names the author as actor when the byline is their own', async () => {

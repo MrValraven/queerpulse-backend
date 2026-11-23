@@ -75,7 +75,7 @@ describe('CommunityAutoFreezeService', () => {
   let replies: { findOne: jest.Mock };
   let eventPhotos: { findOne: jest.Mock };
   let gatherings: { findOne: jest.Mock };
-  let reports: { createQueryBuilder: jest.Mock };
+  let reports: { createQueryBuilder: jest.Mock; findOne: jest.Mock };
   let members: { find: jest.Mock };
   let governanceLog: { log: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
@@ -101,7 +101,14 @@ describe('CommunityAutoFreezeService', () => {
     replies = { findOne: jest.fn().mockResolvedValue(null) };
     eventPhotos = { findOne: jest.fn().mockResolvedValue(null) };
     gatherings = { findOne: jest.fn().mockResolvedValue(null) };
-    reports = { createQueryBuilder: jest.fn(() => scopedQbStub()) };
+    // SEC-32: the filed row is read back for its reporter. Default: a
+    // signed-in member filed it.
+    reports = {
+      createQueryBuilder: jest.fn(() => scopedQbStub()),
+      findOne: jest
+        .fn()
+        .mockResolvedValue({ id: 'rep-1', reporterId: 'member-1' }),
+    };
     members = { find: jest.fn().mockResolvedValue([]) };
     governanceLog = { log: jest.fn().mockResolvedValue(undefined) };
     notifications = {
@@ -248,6 +255,22 @@ describe('CommunityAutoFreezeService', () => {
     });
   });
 
+  // R4 #6: the unfreeze gate waits on member-filed reports only, the same
+  // reports SEC-32 lets start a freeze.
+  describe('openMemberReportCount', () => {
+    it('counts only open reports a signed-in member filed', async () => {
+      const queryBuilder = scopedQbStub();
+      queryBuilder.getCount!.mockResolvedValue(1);
+      reports.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await expect(service.openMemberReportCount(COMMUNITY)).resolves.toBe(1);
+
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        'report.reporter_id IS NOT NULL',
+      );
+    });
+  });
+
   // A space must never stay open under a parent held for review, so the
   // automatic freeze cascades inside the same transaction as its own write.
   describe('the space cascade', () => {
@@ -308,5 +331,100 @@ describe('CommunityAutoFreezeService', () => {
       expect(updateQueryBuilder.execute).toHaveBeenCalled();
       expect(subcommunityCascade.freezeSpaces).not.toHaveBeenCalled();
     });
+  });
+
+  // SEC-32. `POST /reports` takes signed-out filings, and one of those with an
+  // emergency reason used to freeze a community on its own, again every day
+  // from a fresh IP.
+  describe('a signed-out report', () => {
+    const SIGNED_OUT_EMERGENCY: ReportCreatedEvent = {
+      reportId: 'rep-anon',
+      subjectType: ReportSubjectType.Community,
+      subjectId: 'queer-devs',
+      severity: ReportSeverity.Emergency,
+      reasonCode: 'outing',
+    };
+
+    beforeEach(() => {
+      reports.findOne.mockResolvedValue({
+        id: 'rep-anon',
+        reporterId: null,
+      });
+    });
+
+    it('never fires the single-report emergency freeze', async () => {
+      await service.onReportCreated(SIGNED_OUT_EMERGENCY);
+
+      expect(reports.findOne).toHaveBeenCalledWith({
+        where: { id: 'rep-anon' },
+        select: { id: true, reporterId: true },
+      });
+      expect(communities.manager.transaction).not.toHaveBeenCalled();
+      expect(updateQueryBuilder.execute).not.toHaveBeenCalled();
+    });
+
+    it('falls through to the pile-up check', async () => {
+      await service.onReportCreated(SIGNED_OUT_EMERGENCY);
+
+      expect(reports.createQueryBuilder).toHaveBeenCalled();
+    });
+
+    it('freezes as a pile-up when three members already hold open reports', async () => {
+      const queryBuilder = scopedQbStub();
+      queryBuilder.getCount!.mockResolvedValue(10);
+      queryBuilder.getRawOne!.mockResolvedValue({ count: '3' });
+      reports.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.onReportCreated(SIGNED_OUT_EMERGENCY);
+
+      expect(updateQueryBuilder.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          frozenReason: CommunityFrozenReason.ReportPileup,
+        }),
+      );
+    });
+
+    it('never gets the emergency trigger when its row cannot be read back', async () => {
+      reports.findOne.mockResolvedValue(null);
+
+      await service.onReportCreated(SIGNED_OUT_EMERGENCY);
+
+      expect(updateQueryBuilder.execute).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('distinctOpenReporterCount', () => {
+    it('counts members only, leaving signed-out rows out', async () => {
+      const queryBuilder = scopedQbStub();
+      queryBuilder.getRawOne!.mockResolvedValue({ count: '2' });
+      reports.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await expect(service.distinctOpenReporterCount(COMMUNITY)).resolves.toBe(
+        2,
+      );
+
+      expect(queryBuilder.select).toHaveBeenCalledWith(
+        'COUNT(DISTINCT report.reporter_id)',
+        'count',
+      );
+    });
+  });
+
+  // Community badges: a gift report goes to platform moderation only, so even
+  // an emergency reason on one never freezes the community that sent it.
+  it('freezes nothing for a community_gift report', async () => {
+    await service.onReportCreated({
+      reportId: 'rep-3',
+      subjectType: ReportSubjectType.CommunityGift,
+      subjectId: '22222222-2222-4222-8222-222222222222',
+      severity: ReportSeverity.Emergency,
+      reasonCode: 'outing',
+    });
+
+    expect(communities.findOne).not.toHaveBeenCalled();
+    expect(reports.createQueryBuilder).not.toHaveBeenCalled();
+    expect(communities.manager.transaction).not.toHaveBeenCalled();
+    expect(updateQueryBuilder.execute).not.toHaveBeenCalled();
+    expect(governanceLog.log).not.toHaveBeenCalled();
   });
 });

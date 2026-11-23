@@ -1,7 +1,7 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, QueryFailedError, Repository } from 'typeorm';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Company } from '../companies/entities/company.entity';
 import { CompanyTeamMember } from '../companies/entities/company-team-member.entity';
@@ -9,7 +9,12 @@ import {
   ListingCoManager,
   ListingCoManagerStatus,
 } from '../listings/entities/listing-co-manager.entity';
-import { Listing } from '../listings/entities/listing.entity';
+import { Listing, ListingStatus } from '../listings/entities/listing.entity';
+import { publiclyVisibleListingSql } from '../listings/listing-team-visibility';
+import {
+  listingCoverPhotoReference,
+  listingGalleryPhotoReference,
+} from '../storage/public-media-reference';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import {
   Subprofile,
@@ -191,6 +196,40 @@ export class IdentitiesService {
   }
 
   /**
+   * The ids among `listingRows` whose listing the public can see (live, shown
+   * by its owner, under no takedown: `publiclyVisibleListingSql`, the rule the
+   * team reads and `DirectoryService.loadLiveOr404` apply) and that carry a
+   * photo to show. One query, and none at all when no row passes the cheap
+   * column checks or none has a photo, since a listing with no photo has no
+   * avatar either way.
+   */
+  private async publicListingIdsWithPhoto(
+    listingRows: Listing[],
+  ): Promise<Set<string>> {
+    const candidateIds = listingRows
+      .filter(
+        (listing) =>
+          listing.status === ListingStatus.Live &&
+          !listing.isHiddenByOwner &&
+          Boolean(
+            listing.coverPhoto?.image || listing.photoGallery?.[0]?.image,
+          ),
+      )
+      .map((listing) => listing.id);
+    if (candidateIds.length === 0) {
+      return new Set();
+    }
+    const visibleRows = await this.listings.query<{ id: string }[]>(
+      `SELECT "listing"."id"
+         FROM "listings" "listing"
+        WHERE "listing"."id" = ANY($1::uuid[])
+          AND ${publiclyVisibleListingSql('listing')}`,
+      [candidateIds],
+    );
+    return new Set(visibleRows.map((row) => row.id));
+  }
+
+  /**
    * The identity's own display name, handle and avatar, batched by kind: one
    * query to learn each identity's kind and owner row, then at most one
    * further query per kind actually present in `identityIds` (two for
@@ -208,7 +247,10 @@ export class IdentitiesService {
    *   uses).
    * - `Listing`: `name` for `displayName`, `slug` for `handle`, and the
    *   cover photo when the owner picked one, else `photoGallery[0].image`,
-   *   resolved through `toImageUrl`, for `avatarUrl`. The legacy
+   *   for `avatarUrl`, addressed by the listing's opaque reference
+   *   (`toImageUrlByReference`): the avatar reaches customers in messages,
+   *   gateway frames and exports, and a member storage key names its
+   *   uploader. The legacy
    *   `photos`/`alt` columns are explicitly documented on the entity as not
    *   the source of truth for "what photos does this listing have";
    *   `photoGallery` is.
@@ -328,6 +370,7 @@ export class IdentitiesService {
     }
 
     const listingById = new Map(listingRows.map((l) => [l.id, l]));
+    const publicListingIds = await this.publicListingIdsWithPhoto(listingRows);
     for (const identity of listingIdentities) {
       const listing = listingById.get(identity.listingId);
       if (!listing) {
@@ -336,9 +379,19 @@ export class IdentitiesService {
       result.set(identity.id, {
         displayName: listing.name,
         handle: listing.slug,
-        avatarUrl: toImageUrl(
-          listing.coverPhoto?.image || listing.photoGallery[0]?.image || null,
-        ),
+        // A listing the public cannot see gets no avatar: its photo
+        // reference answers 404 then, and the client draws the initials.
+        avatarUrl: !publicListingIds.has(listing.id)
+          ? null
+          : listing.coverPhoto?.image
+            ? toImageUrlByReference(
+                listing.coverPhoto.image,
+                listingCoverPhotoReference(listing.id),
+              )
+            : toImageUrlByReference(
+                listing.photoGallery?.[0]?.image || null,
+                listingGalleryPhotoReference(listing.id, 0),
+              ),
       });
     }
 

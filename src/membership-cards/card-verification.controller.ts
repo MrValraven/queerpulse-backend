@@ -10,7 +10,9 @@ import { CardVerificationService } from './card-verification.service';
  *
  * `ThrottlerGuard` is already bound globally as `APP_GUARD` (see
  * `app.module.ts`'s `HttpThrottlerGuard`), so no per-controller
- * `@UseGuards` is needed here — only a tighter-than-default `@Throttle`.
+ * `@UseGuards` is needed here, only a tighter-than-default `@Throttle`. That
+ * guard keys signed-in requests by member and anonymous ones by client IP, so
+ * a stranger checking a card at the door is counted per IP.
  * This is throttled harder than the platform default (120/60s), because an
  * unauthenticated endpoint that resolves a token to a person's name is
  * exactly the surface a scraper would target.

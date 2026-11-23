@@ -81,22 +81,32 @@ export async function loadCommunityOr404(
 }
 
 /**
- * The caller's roster row in a community, or a 403. Same posture as
- * `CommunityMembershipService.assertMemberBySlug`: a resolved-but-non-member
- * caller is refused rather than told anything about the community.
+ * The caller's own roster row in a community. Same posture as
+ * `CommunityMembershipService.assertMemberBySlug`: a caller with no row gets a
+ * 403 that tells them nothing about the community, and on a `private`
+ * community a caller with no effective role at all gets the same 404 an
+ * unknown slug produces (SEC-41, see `assert404IfPrivateOutsider`). Parent
+ * staff on a private space hold no row and still get the 403, because they
+ * already know the space exists.
  */
-export async function loadMembershipOr403(
+export async function loadMembershipOrRefuse(
   members: Repository<CommunityMember>,
-  communityId: string,
+  community: Pick<Community, 'id' | 'parentId' | 'accessTier'>,
   userId: string,
 ): Promise<CommunityMember> {
   const membership = await members.findOne({
-    where: { communityId, userId },
+    where: { communityId: community.id, userId },
   });
-  if (!membership) {
-    throw new ForbiddenException('Only roster members can do that');
+  if (membership) return membership;
+  if (community.accessTier === AccessTier.Private) {
+    // A top-level community has no inherited role, so the missing row already
+    // answers "no role"; only a space needs the parent read.
+    const role = community.parentId
+      ? await loadEffectiveCommunityRole(members, community, userId)
+      : null;
+    assert404IfPrivateOutsider(community, role);
   }
-  return membership;
+  throw new ForbiddenException('Only roster members can do that');
 }
 
 /**
@@ -143,10 +153,47 @@ async function loadEffectiveAccess(
 }
 
 /**
+ * The effective role `userId` holds in `community` (own roster row, or the
+ * role inherited from parent staff on a space), or null when they hold none.
+ * Same read the resolvers below make, for a service that needs the role of
+ * somebody other than the caller (`CommunityBansService` reads the rank of the
+ * member who placed a ban).
+ */
+export async function loadEffectiveCommunityRole(
+  members: Repository<CommunityMember>,
+  community: Pick<Community, 'id' | 'parentId'>,
+  userId: string,
+): Promise<RosterRole | null> {
+  const { role } = await loadEffectiveAccess(members, community, userId);
+  return role;
+}
+
+/**
+ * SEC-41. The existence-oracle guard every resolver here runs between reading
+ * the caller's effective role and refusing them: a `private` community plus NO
+ * effective role answers the same 404 an unknown slug produces, so a guessed
+ * slug can no longer confirm that a private community is there. Mirrors
+ * `CommunitiesService.assert404IfPrivateOutsider` and
+ * `CommunityMembershipService.assert404IfPrivateOutsiderOfCommunity`, with
+ * the same two limits: the test is "no role at all" (a plain member already
+ * knows the community exists and keeps their 403), and only the `private`
+ * tier is gated (a `request` or `invite` community is listed in discover).
+ */
+function assert404IfPrivateOutsider(
+  community: Pick<Community, 'accessTier'>,
+  role: RosterRole | null,
+): void {
+  if (role !== null) return;
+  if (community.accessTier !== AccessTier.Private) return;
+  throw new NotFoundException('Community not found');
+}
+
+/**
  * Resolve the community and assert the caller holds a staff role on it
  * (owner, co-owner or moderator), own or inherited from parent staff on a
- * space. 404 for an unknown or archived slug, 403 for anyone else, including
- * a plain member.
+ * space. 404 for an unknown or archived slug, and for a caller off the roster
+ * of a `private` community (SEC-41). 403 for anyone else, including a plain
+ * member.
  */
 export async function resolveStaffCommunity(
   communities: Repository<Community>,
@@ -160,6 +207,7 @@ export async function resolveStaffCommunity(
     community,
     userId,
   );
+  assert404IfPrivateOutsider(community, role);
   if (role === null) {
     throw new ForbiddenException('Only roster members can do that');
   }
@@ -182,6 +230,9 @@ export async function resolveStaffCommunity(
  * stays on `resolveStaffCommunity` or `loadActiveCommunityOr404`, which
  * still 404 an archived slug.
  *
+ * 404 for an unknown slug, and for a caller off the roster of a `private`
+ * community (SEC-41). 403 for a caller off the roster of any other tier.
+ *
  * Called directly only by `resolveMemberCommunityInterior` below, which adds
  * the takedown closure every real caller needs. Call that one for a member
  * read.
@@ -198,6 +249,7 @@ export async function resolveMemberCommunity(
     community,
     userId,
   );
+  assert404IfPrivateOutsider(community, role);
   if (role === null) {
     throw new ForbiddenException('Only roster members can do that');
   }
@@ -283,10 +335,8 @@ export async function resolveOwnerLevelCommunity(
     community,
     userId,
   );
+  assert404IfPrivateOutsider(community, role);
   if (role === null) {
-    if (community.accessTier === AccessTier.Private) {
-      throw new NotFoundException('Community not found');
-    }
     throw new ForbiddenException('Only roster members can do that');
   }
   if (!isCommunityOwnerLevelRole(role)) {

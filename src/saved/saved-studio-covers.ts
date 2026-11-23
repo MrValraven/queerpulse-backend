@@ -1,6 +1,6 @@
 import { EntityManager } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
-import { notBlockedEitherWaySql } from '../studio/studio-discovery-sql';
+import { notBlockedWithLinkedCreatorSql } from '../studio/studio-discovery-sql';
 import { playableTrackSql } from '../studio/studio-playlist-visibility';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { toSavedId } from './saved-ref.util';
@@ -36,7 +36,7 @@ export const SAVED_PLAYLIST_COVERS_SQL = `SELECT DISTINCT ON ("entry"."playlist_
  WHERE "entry"."playlist_id" = ANY($2::uuid[])
    AND "release"."cover_key" IS NOT NULL
    AND ${playableTrackSql('track', 'release', 'persona')}
-   AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'saved_cover_block')}
+   AND ${notBlockedWithLinkedCreatorSql('$1', 'persona', 'saved_cover_block')}
  ORDER BY "entry"."playlist_id", "entry"."position" ASC`;
 
 interface CoverRow {

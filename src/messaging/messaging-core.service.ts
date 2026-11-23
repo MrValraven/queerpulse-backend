@@ -59,6 +59,7 @@ import {
   withMessageAttachmentRoute,
 } from '../storage/message-attachment-route';
 import { StorageService } from '../storage/storage.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
 import { DOCUMENT_UPLOAD_TYPES } from '../storage/upload-content-types';
 import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
@@ -111,8 +112,8 @@ import {
   MESSAGE_SUBJECT_TYPE,
   notFromBlockedGroupMemberPredicate,
   notModeratedMessagePredicate,
-  notPastViewerLeftAtPredicate,
   withinLeftAtCeilingPredicate,
+  withinViewerMembershipPredicate,
 } from './message-visibility-predicates';
 import {
   applyUnreadConversationScope,
@@ -130,6 +131,11 @@ import {
 } from './viewer-render-classes';
 import { isEvidenceHoldActive } from './message-evidence-hold';
 import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
+import {
+  GIF_HOST_NOT_ALLOWED_CODE,
+  isAllowedGifMediaUrl,
+} from './gif-media-hosts';
+import { hasAbsenceGap, insideAbsenceGapPredicate } from './group-absence-gap';
 import { matchedChatMemberKey } from './matched-member-key';
 import { matchedChatMentionRendererFrom } from './matched-chat-mention-text';
 import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
@@ -216,7 +222,13 @@ export type MessageLike = Pick<
  * reads as full names.
  */
 export type ReactorView =
-  | { shape: 'individuals'; nameOptions?: MemberNameOptions }
+  | {
+      shape: 'individuals';
+      nameOptions?: MemberNameOptions;
+      // SEC-26: set on a group conversation, where the reactions of a member
+      // blocked either way with the reader are left out of the list.
+      isGroup?: boolean;
+    }
   | { shape: 'ownOnly' }
   | {
       shape: 'customerOfMailbox';
@@ -311,7 +323,29 @@ export class MessagingCoreService {
     // this service by position keeps compiling; the module always injects
     // it.
     private readonly storage?: StorageService,
+    // SEC-26: the blocked-either-way read behind `blockedEitherWayWith`,
+    // which keeps a blocked member's group reactions out of the REST
+    // reaction counts and the "who reacted" list. `SocialModule` is already
+    // imported by `MessagingModule`. Typed optional for the same
+    // positional-spec reason as `storage`; the module always injects it.
+    private readonly blockFilter?: BlockFilterService,
   ) {}
+
+  /**
+   * SEC-26: the subset of `userIds` blocked either way with `viewerId`, in
+   * one batched query (`BlockFilterService.blockedUserIds`). Reads as empty
+   * only in a spec that builds this service by position without a
+   * `BlockFilterService`.
+   */
+  async blockedEitherWayWith(
+    viewerId: string,
+    userIds: string[],
+  ): Promise<ReadonlySet<string>> {
+    if (!this.blockFilter) {
+      return new Set<string>();
+    }
+    return this.blockFilter.blockedUserIds(viewerId, userIds);
+  }
 
   /**
    * THE single source of a caller's participant row (and, on it, their
@@ -609,6 +643,7 @@ export class MessagingCoreService {
       return {
         shape: 'individuals',
         nameOptions: memberNameOptionsFor(conversation),
+        isGroup: true,
       };
     }
     const { threadSeats } = await this.loadDirectThreadSeats(
@@ -979,7 +1014,9 @@ export class MessagingCoreService {
       // the newest message posted while they belonged to it, the same
       // `leftAt` ceiling their history and unread count apply. Without it the
       // row kept showing each new message's sender and body after removal.
-      .andWhere(notPastViewerLeftAtPredicate('m', ':hiddenForUserId'))
+      // SEC-25: nor a message posted while a re-seated member was away. One
+      // probe of the viewer's seat answers both.
+      .andWhere(withinViewerMembershipPredicate('m', ':hiddenForUserId'))
       // ENG-402: PRD-354's group block filter, as the thread applies it. A
       // group message from someone blocked either way with the viewer is no
       // preview candidate, so the row falls back to the newest message the
@@ -1031,6 +1068,7 @@ export class MessagingCoreService {
       // those messages must not keep driving an unread badge they can never
       // clear (BE-MSG-08).
       .andWhere(withinLeftAtCeilingPredicate('m.created_at', 'p'))
+      .andWhere(`NOT ${insideAbsenceGapPredicate('m.created_at', 'p')}`)
       // A moderator-taken-down message never counts toward unread — the viewer
       // can no longer see it, so it must not drive a badge.
       .andWhere(this.notModeratedPredicate())
@@ -1157,6 +1195,7 @@ export class MessagingCoreService {
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
       .andWhere(withinLeftAtCeilingPredicate('m.created_at', 'p'))
+      .andWhere(`NOT ${insideAbsenceGapPredicate('m.created_at', 'p')}`)
       .andWhere(this.notModeratedPredicate())
       .andWhere(this.notHiddenForViewerPredicate())
       // ENG-402: a blocked group member's mention is hidden from the thread
@@ -1200,6 +1239,10 @@ export class MessagingCoreService {
    * shared by the "last message" preview built inline by `ConversationsService`
    * and by `toMessageResponses`, so all callers surface the same shape without
    * a per-message query.
+   *
+   * SEC-26: in a group, a reaction by a member blocked either way with the
+   * viewer is left out of these counts
+   * (`dropGroupReactionsFromBlockedReactors`).
    */
   async reactionSummariesByMessage(
     messageIds: string[],
@@ -1208,9 +1251,13 @@ export class MessagingCoreService {
     if (!messageIds.length) {
       return new Map();
     }
-    const allReactionRows = await this.reactions.find({
+    const storedReactionRows = await this.reactions.find({
       where: { messageId: In(messageIds) },
     });
+    const allReactionRows = await this.dropGroupReactionsFromBlockedReactors(
+      storedReactionRows,
+      viewerId,
+    );
     // Task 13e: a customer reading a business mailbox thread counts the
     // business once per key, whichever of its staff reacted, the same count
     // the live `reaction` frame and the "who reacted" list give.
@@ -1238,6 +1285,73 @@ export class MessagingCoreService {
       );
     }
     return summariesByMessage;
+  }
+
+  /**
+   * SEC-26: `reactionRows` without the group reactions of members blocked
+   * either way with `viewerId`. A direct or official thread keeps every row
+   * (a block already closes a direct thread). One block query when someone
+   * other than the viewer reacted, plus two batched reads of the affected
+   * messages' conversations only when one of those reactors is blocked.
+   */
+  private async dropGroupReactionsFromBlockedReactors(
+    reactionRows: MessageReaction[],
+    viewerId: string,
+  ): Promise<MessageReaction[]> {
+    const otherReactorIds = [
+      ...new Set(
+        reactionRows
+          .filter((row) => row.userId !== viewerId)
+          .map((row) => row.userId),
+      ),
+    ];
+    if (!otherReactorIds.length) {
+      return reactionRows;
+    }
+    const blockedReactorIds = await this.blockedEitherWayWith(
+      viewerId,
+      otherReactorIds,
+    );
+    if (!blockedReactorIds.size) {
+      return reactionRows;
+    }
+    const affectedMessages = await this.messages.find({
+      where: {
+        id: In([
+          ...new Set(
+            reactionRows
+              .filter((row) => blockedReactorIds.has(row.userId))
+              .map((row) => row.messageId),
+          ),
+        ]),
+      },
+      select: { id: true, conversationId: true },
+      withDeleted: true,
+    });
+    const groupConversations = await this.conversations.find({
+      where: {
+        id: In([
+          ...new Set(affectedMessages.map((message) => message.conversationId)),
+        ]),
+        kind: ConversationKind.Group,
+      },
+      select: { id: true },
+    });
+    const groupConversationIds = new Set(
+      groupConversations.map((conversation) => conversation.id),
+    );
+    const groupMessageIds = new Set(
+      affectedMessages
+        .filter((message) => groupConversationIds.has(message.conversationId))
+        .map((message) => message.id),
+    );
+    return reactionRows.filter(
+      (row) =>
+        !(
+          blockedReactorIds.has(row.userId) &&
+          groupMessageIds.has(row.messageId)
+        ),
+    );
   }
 
   /**
@@ -1494,12 +1608,21 @@ export class MessagingCoreService {
    *
    * PRD-423: `nameOptions` spells each member's name for this conversation,
    * first names only in a matched Go together chat.
+   *
+   * SEC-26: `blockedUserIds` holds every member blocked either way with the
+   * viewer (one caller-batched `BlockFilterService.blockedUserIds` read). A
+   * row for such a member keeps its name and role and carries all three
+   * watermarks (`lastReadAt`, `lastReadInstant`, `deliveredAt`) as null, so
+   * polling the roster tells neither side when the other last read or
+   * received anything. This matches the live receipt relay, which skips
+   * blocked pairs.
    */
   buildMemberSummaries(
     participants: ConversationParticipant[],
     profileByUser: Map<string, Profile>,
     viewerId: string,
     privacyByUser: Map<string, MessagingPrivacyDTO>,
+    blockedUserIds: ReadonlySet<string>,
     nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
   ): ConversationMemberSummary[] {
     const rank: Record<ConversationRole, number> = {
@@ -1519,9 +1642,13 @@ export class MessagingCoreService {
         const isViewerRow = participant.userId === viewerId;
         const subjectSharesReadReceipts =
           privacyByUser.get(participant.userId)?.shareReadReceipts ?? true;
+        const isBlockedEitherWay =
+          !isViewerRow && blockedUserIds.has(participant.userId);
         const withholdReadState =
           !isViewerRow &&
-          (!viewerSharesReadReceipts || !subjectSharesReadReceipts);
+          (isBlockedEitherWay ||
+            !viewerSharesReadReceipts ||
+            !subjectSharesReadReceipts);
         return {
           // PRD-423 (opaque member keys): the per-chat key in a matched chat.
           id: memberIdFor(participant.userId, nameOptions),
@@ -1535,7 +1662,11 @@ export class MessagingCoreService {
           lastReadAt: withholdReadState
             ? null
             : (participant.lastReadAt?.toISOString() ?? null),
-          deliveredAt: participant.deliveredAt?.toISOString() ?? null,
+          // SEC-26: delivery state is withheld for a blocked-either-way row
+          // only; PRD-364's read-receipt sharing leaves it untouched.
+          deliveredAt: isBlockedEitherWay
+            ? null
+            : (participant.deliveredAt?.toISOString() ?? null),
           // PRD-351: the real read INSTANT alongside the watermark above,
           // withheld under the identical `withholdReadState` gate. It is
           // just as much a read receipt as `lastReadAt` and must leak under
@@ -1902,8 +2033,13 @@ export class MessagingCoreService {
     // `mailboxStaffHistoryFloorCoversPredicate`, so a "clear chat" on any
     // seat, a staff seat included, keeps quoting as before. The query runs
     // only for a viewer with a history floor on a page that quotes something.
+    // SEC-25: a re-seated member's absence gap rides inside
+    // `groupJoinHistoryFloorCoversPredicate`, so a seat with a gap and no
+    // join floor runs the query too.
     const flooredParentIds =
-      viewerParticipant?.historyFloorAt && parents.length > 0
+      (viewerParticipant?.historyFloorAt || hasAbsenceGap(viewerParticipant)) &&
+      viewerParticipant &&
+      parents.length > 0
         ? new Set(
             (
               await this.messages
@@ -1970,11 +2106,26 @@ export class MessagingCoreService {
     // active staff member, and a newly seated colleague who has acked
     // nothing would turn every earlier message back to one tick, showing the
     // customer a change in the roster.
+    //
+    // SEC-26: in a group, a member blocked either way with the viewer is
+    // not counted as a recipient, since the live `message:delivered` relay
+    // never sends the viewer that member's tick. One batched read, made only
+    // for a group page holding a message the viewer sent (the only messages
+    // that carry a delivery tick).
     const viewerIdentityId = viewerParticipant?.identityId;
+    const isGroupPage = resolvedConversationKind === ConversationKind.Group;
+    const blockedRecipientUserIds =
+      isGroupPage && rows.some((row) => row.senderId === viewerId)
+        ? await this.blockedEitherWayWith(
+            viewerId,
+            otherParticipantRows.map((row) => row.userId),
+          )
+        : new Set<string>();
     const presentRecipients = otherParticipantRows.filter(
       (row) =>
         row.leftAt == null &&
-        (resolvedConversationKind === ConversationKind.Group ||
+        !blockedRecipientUserIds.has(row.userId) &&
+        (isGroupPage ||
           viewerIdentityId === undefined ||
           row.identityId !== viewerIdentityId),
     );
@@ -2417,15 +2568,25 @@ export class MessagingCoreService {
     let resolvedAttachment:
       GifAttachment | DocumentAttachment | StickerAttachment | null = null;
     if (kind === 'gif' && attachment) {
-      if (!/^https:\/\//.test(attachment.url)) {
-        throw new BadRequestException('A gif attachment must be an https URL');
-      }
       if (
         typeof attachment.previewUrl !== 'string' ||
         typeof attachment.width !== 'number' ||
         typeof attachment.height !== 'number'
       ) {
         throw new BadRequestException('Invalid gif attachment');
+      }
+      // SEC-24: both URLs render as `<img src>` for every participant, so
+      // each must sit on the GIF provider's own media hosts.
+      if (
+        !isAllowedGifMediaUrl(attachment.url) ||
+        !isAllowedGifMediaUrl(attachment.previewUrl)
+      ) {
+        throw new BadRequestException({
+          statusCode: 400,
+          error: 'Bad Request',
+          message: 'A GIF must come from the GIF picker',
+          code: GIF_HOST_NOT_ALLOWED_CODE,
+        });
       }
       resolvedAttachment = {
         url: attachment.url,

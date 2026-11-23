@@ -24,6 +24,7 @@ import {
 } from './studio-response';
 import { previewablePersonaSql } from './studio-visibility';
 import { studioError } from './studio.constants';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -186,6 +187,7 @@ export class StudioPreviewsService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     const release = await queryBuilder.getOne();
     if (!release || release.status === StudioReleaseStatus.TakenDown) {

@@ -20,6 +20,10 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -29,6 +33,7 @@ import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
 import { StorageService } from '../storage/storage.service';
 import { Report, ReportSubjectType } from './entities/report.entity';
 import { photoSnapshotFrom } from './report-evidence';
+import { reportAboutActorRefusal } from '../moderation/report-about-actor';
 
 /**
  * The bytes of ONE reported gathering photo, for the moderator reviewing that
@@ -87,13 +92,17 @@ export class ReportPhotoEvidenceController {
     description: 'Redirect to a short-lived presigned GET URL for the photo.',
   })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiForbiddenResponse({
+    description:
+      'Requires a moderator or admin role. SEC-31: `code: "REPORT_ABOUT_ACTOR"` when the caller uploaded the reported photo.',
+  })
   @ApiNotFoundResponse({
     description:
       'No such report, not a gathering-photo report, no snapshot on it, or the photo has since been deleted.',
   })
   async serve(
     @Param('reportId', new ParseUUIDPipe()) reportId: string,
+    @CurrentUser() user: CurrentUserData,
     @Res() response: Response,
   ): Promise<void> {
     const report = await this.reports.findOne({
@@ -112,6 +121,15 @@ export class ReportPhotoEvidenceController {
     const snapshot = photoSnapshotFrom(report.evidence);
     if (!snapshot) {
       throw new NotFoundException();
+    }
+
+    // SEC-31: the staff member who uploaded the reported photo is its subject
+    // (the same author `ModerationService.isReportAboutActor` resolves for an
+    // `event_photo`), so they get the queue's coded refusal and the image
+    // stays with colleagues. Read off the filing-time snapshot, which records
+    // the uploader the report was about.
+    if (snapshot.uploaderId !== null && snapshot.uploaderId === user.userId) {
+      throw reportAboutActorRefusal();
     }
 
     // The key came out of a `jsonb` column, so it is re-validated rather than

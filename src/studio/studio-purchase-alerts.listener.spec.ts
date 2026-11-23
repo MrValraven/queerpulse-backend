@@ -73,7 +73,7 @@ describe('StudioPurchaseAlertsListener', () => {
     warnSpy.mockRestore();
   });
 
-  it('tells every granted persona member about a claim with no actor', async () => {
+  it('tells every granted persona member the buyer has no block with about a claim, with no actor', async () => {
     await listener.handleClaimed({ purchaseId: PURCHASE_ID });
 
     expect(query).toHaveBeenCalledWith(PURCHASE_ALERT_SQL, [
@@ -82,6 +82,7 @@ describe('StudioPurchaseAlertsListener', () => {
     ]);
     expect(query).toHaveBeenCalledWith(PURCHASE_ALERT_RECIPIENTS_SQL, [
       PERSONA_ID,
+      BUYER_ID,
     ]);
     expect(notifications.createForRecipients).toHaveBeenCalledWith(
       ['member-1', 'member-2'],
@@ -149,6 +150,23 @@ describe('StudioPurchaseAlertsListener', () => {
     await listener.handleConfirmed({ purchaseId: PURCHASE_ID });
     await listener.handleExpired({ purchaseId: PURCHASE_ID });
     expect(notifications.createForRecipients).not.toHaveBeenCalled();
+  });
+
+  // SEC-02: a member blocked either way with the buyer never hears of the
+  // claim; a deleted buyer leaves nobody out.
+  it('leaves out members blocked either way with the buyer', async () => {
+    expect(PURCHASE_ALERT_RECIPIENTS_SQL).toContain(
+      '"claim_alert_block"."blocker_id" = "member"."user_id" AND "claim_alert_block"."blocked_id" = $2::uuid',
+    );
+    expect(PURCHASE_ALERT_RECIPIENTS_SQL).toContain(
+      '"claim_alert_block"."blocked_id" = "member"."user_id" AND "claim_alert_block"."blocker_id" = $2::uuid',
+    );
+    answerWith({ buyer_user_id: null });
+    await listener.handleClaimed({ purchaseId: PURCHASE_ID });
+    expect(query).toHaveBeenCalledWith(PURCHASE_ALERT_RECIPIENTS_SQL, [
+      PERSONA_ID,
+      null,
+    ]);
   });
 
   it('sends nothing for a claim whose persona is gone', async () => {

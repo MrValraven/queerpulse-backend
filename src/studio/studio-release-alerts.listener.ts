@@ -10,8 +10,16 @@ import {
   STUDIO_RELEASE_PUBLISHED,
   StudioReleasePublishedEvent,
 } from './studio.events';
-import { listenablePersonaSql } from './studio-visibility';
+import {
+  listenablePersonaSql,
+  listenablePersonaStateSql,
+} from './studio-visibility';
 import { STUDIO_LIMITS } from './studio.constants';
+import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
+import {
+  personaCreatorActiveSql,
+  unlinkedPersonaByIdSql,
+} from '../subprofiles/persona-creator-gates';
 
 /** The row the claim returns: everything the payload, the filter and the
  *  pre-save need. `reminder_user_ids` are the reminder rows the claim
@@ -24,6 +32,8 @@ export interface ClaimedReleaseRow {
   subprofile_name: string;
   subprofile_slug_or_handle: string;
   owner_user_id: string;
+  /** SEC-02: an unlinked persona's alerts consult no block with its owner. */
+  link_visibility: string;
   reminder_user_ids: string[];
 }
 
@@ -64,7 +74,8 @@ export const RELEASE_ALERT_CLAIM_SQL = `WITH "claimed" AS (
               "persona"."slug"
             ) AS "subprofile_name",
             COALESCE("persona"."handle", "persona"."slug") AS "subprofile_slug_or_handle",
-            "persona"."user_id" AS "owner_user_id"
+            "persona"."user_id" AS "owner_user_id",
+            "persona"."link_visibility"::text AS "link_visibility"
 ), "consumed_reminders" AS (
   DELETE FROM "studio_release_reminders" AS "reminder"
    USING "claimed"
@@ -79,13 +90,22 @@ SELECT "claimed".*,
  * Studio v3: runs only when neither the claim nor the later-drop consume
  * found the release, so it is unpublished or its persona is not listenable.
  * A published release's reminders then have nothing left to wait for; a
- * scheduled or draft release keeps them.
+ * scheduled or draft release keeps them. So does a release whose persona
+ * passes `listenablePersonaStateSql` and fails only because its creator's
+ * account is paused, suspended or pending erasure (SEC-33): that can end,
+ * and the Notify me reminders wait for it.
  */
 export const RELEASE_REMINDERS_DISCARD_SQL = `DELETE FROM "studio_release_reminders" AS "reminder"
  USING "studio_releases" AS "release"
  WHERE "reminder"."release_id" = $1
    AND "release"."id" = "reminder"."release_id"
-   AND "release"."status" = 'published'`;
+   AND "release"."status" = 'published'
+   AND NOT EXISTS (
+     SELECT 1 FROM "subprofiles" "discard_persona"
+      WHERE "discard_persona"."id" = "release"."subprofile_id"
+        AND ${listenablePersonaStateSql('discard_persona')}
+        AND NOT ${personaCreatorActiveSql('discard_persona')}
+   )`;
 
 /** A recipient is someone other than the creator (`creatorIdSql`, $2 by
  *  default) and the persona's co-owners (`personaIdSql`, $1 by default) who
@@ -109,16 +129,20 @@ function eligibleRecipientSql(
 
 /** Studio v3: a reminder holder blocked either way with the creator
  *  (`creatorIdSql`, $2 by default) is left out, read from the `blocks`
- *  table `BlockFilterService.excludeBlocked` reads. */
+ *  table `BlockFilterService.excludeBlocked` reads. SEC-02: only for a
+ *  LINKED persona (`personaIdSql`, $1 by default). An unlinked persona's
+ *  reminder holders hear like anyone else, so a missing pre-save cannot test
+ *  who runs it; no owner-side read is involved. */
 function notBlockedWithCreatorSql(
   userIdColumn: string,
   creatorIdSql = '$2',
+  personaIdSql = '$1',
 ): string {
-  return `NOT EXISTS (
+  return `(${unlinkedPersonaByIdSql(personaIdSql)} OR NOT EXISTS (
        SELECT 1 FROM "blocks" "creator_block"
         WHERE ("creator_block"."blocker_id" = ${creatorIdSql} AND "creator_block"."blocked_id" = ${userIdColumn})
            OR ("creator_block"."blocked_id" = ${creatorIdSql} AND "creator_block"."blocker_id" = ${userIdColumn})
-     )`;
+     ))`;
 }
 
 /**
@@ -129,7 +153,8 @@ function notBlockedWithCreatorSql(
  * the pre-save. A reminder holder blocked either way with the creator ($2)
  * is left out here (`notBlockedWithCreatorSql`), so they get no pre-save;
  * the alert itself is block-filtered inside
- * `NotificationsService.createForRecipients` for everyone.
+ * `NotificationsService.createForRecipients` against a linked persona's
+ * creator alone (`blockActorIdFor`).
  */
 export const RELEASE_ALERT_RECIPIENTS_SQL = `WITH "eligible_followers" AS (
   SELECT "follower"."follower_id" AS "user_id"
@@ -180,7 +205,8 @@ export const RELEASE_LATER_DROP_REMINDERS_SQL = `WITH "dropped" AS (
            "persona"."slug"
          ) AS "subprofile_name",
          COALESCE("persona"."handle", "persona"."slug") AS "subprofile_slug_or_handle",
-         "persona"."user_id" AS "owner_user_id"
+         "persona"."user_id" AS "owner_user_id",
+         "persona"."link_visibility"::text AS "link_visibility"
     FROM "studio_releases" "release"
     JOIN "subprofiles" "persona" ON "persona"."id" = "release"."subprofile_id"
    WHERE "release"."id" = $1
@@ -197,7 +223,7 @@ SELECT "dropped".*,
          SELECT "reminder_holder"."user_id"::text
            FROM "consumed" AS "reminder_holder"
           WHERE ${eligibleRecipientSql('"reminder_holder"."user_id"', '"dropped"."subprofile_id"', '"dropped"."owner_user_id"')}
-            AND ${notBlockedWithCreatorSql('"reminder_holder"."user_id"', '"dropped"."owner_user_id"')}
+            AND ${notBlockedWithCreatorSql('"reminder_holder"."user_id"', '"dropped"."owner_user_id"', '"dropped"."subprofile_id"')}
           ORDER BY "reminder_holder"."user_id"
           LIMIT $2
        ) AS "reminder_user_ids"
@@ -218,9 +244,10 @@ SELECT "dropped".*,
  * `NotificationsService.createForRecipients` (one multi-row insert each,
  * with the block, mute and `persona_follows` preference filters batched
  * inside it), three chunks in flight through `runWithConcurrency`, and push
- * riding each chunk's batch event. The persona owner's id goes to
- * `createForRecipients` for block and mute filtering only; the payload names
- * the persona.
+ * riding each chunk's batch event. For a LINKED persona the owner's id goes
+ * to `createForRecipients` for block and mute filtering only; an unlinked
+ * persona passes none (`blockActorIdFor`, SEC-02). The payload names the
+ * persona.
  *
  * Best effort and post-commit: the publish has already happened, so nothing
  * here throws back at it, and a failed fan-out still lets the pre-save run.
@@ -333,7 +360,7 @@ export class StudioReleaseAlertsListener {
           chunk,
           NotificationType.StudioReleasePublished,
           payload,
-          claimed.owner_user_id,
+          blockActorIdFor(claimed),
         ),
       );
     }
@@ -378,4 +405,19 @@ export class StudioReleaseAlertsListener {
       );
     }
   }
+}
+
+/**
+ * SEC-02: the owner id `createForRecipients` block-filters the alert against,
+ * for a LINKED persona alone. An unlinked persona's followers and reminder
+ * holders hear whoever they blocked, so a missing alert cannot test who runs
+ * it. The mute filter on that owner goes with it for the same reason; each
+ * member's own notification preferences still apply.
+ */
+export function blockActorIdFor(
+  claimed: Pick<ClaimedReleaseRow, 'link_visibility' | 'owner_user_id'>,
+): string | undefined {
+  return claimed.link_visibility === String(SubprofileLinkVisibility.Linked)
+    ? claimed.owner_user_id
+    : undefined;
 }

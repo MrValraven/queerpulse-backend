@@ -51,6 +51,11 @@ export interface SourceWindow {
   /** True for moderators: member-initiated rows are excluded in SQL. */
   staffRowsOnly: boolean;
   categories: readonly PlatformLogCategory[];
+  /**
+   * SEC-31: the staff member reading the log. A source over a table that can
+   * hold a case about them (`mod_audit_logs`) leaves those rows out.
+   */
+  viewerUserId?: string;
 }
 
 export interface PlatformLogSubject {

@@ -4,7 +4,7 @@ import { toImageUrl } from '../common/image-url';
 import { StudioRadioQuery } from './dto/studio-radio.query';
 import {
   artistRefFromColumns,
-  notBlockedEitherWaySql,
+  notBlockedWithLinkedCreatorSql,
   personaColumnsFromRow,
   personaColumnsSql,
 } from './studio-discovery-sql';
@@ -79,7 +79,7 @@ export function radioSql(filterColumn: 'genre' | 'mood'): string {
  WHERE ${filterPredicate}
    AND "release"."type" <> '${StudioReleaseType.Podcast}'
    AND ${playableTrackSql('track', 'release', 'persona')}
-   AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'radio_block')}
+   AND ${notBlockedWithLinkedCreatorSql('$1', 'persona', 'radio_block')}
  ORDER BY random()
  LIMIT $3`;
 }

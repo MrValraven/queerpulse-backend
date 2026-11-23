@@ -254,16 +254,29 @@ export const LISTING_TEAM_LISTING_COLUMNS: FindOptionsSelect<Listing> = {
   photoGallery: true,
 };
 
+/**
+ * The listing card every team surface shows. `isListingPublic` is false for a
+ * listing the public cannot see (paused, hidden by its owner, still in review,
+ * or under a takedown): its opaque cover reference answers 404 then, so the
+ * card carries a null cover and the client draws the tint and initials.
+ * Defaults to true for the callers that already read public listings only.
+ */
 export function toListingTeamListing(
   listing: Listing,
   crops: Map<string, CropRect>,
+  isListingPublic = true,
 ): ListingTeamListing {
   return {
     id: listing.id,
     slug: listing.slug,
     name: listing.name,
     cat: listing.cats[0] ?? '',
-    coverPhoto: toCoverPhoto(listing, crops),
+    // A persona's public page (signed out too) and the team pickers show this
+    // card, so the cover goes by the listing's opaque reference: a member
+    // storage key would name its uploader.
+    coverPhoto: isListingPublic
+      ? toCoverPhoto(listing, crops, 'opaque-reference')
+      : null,
     tint: tintForSlug(listing.slug),
     av: initialsForName(listing.name),
   };

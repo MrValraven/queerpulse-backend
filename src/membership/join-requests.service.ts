@@ -89,12 +89,9 @@ function hashStatusToken(statusToken: string): string {
  * Same shape as the `JOIN_REQUESTS_CLOSED` / `UNDER_18` rejections above it, so
  * the client has one way of reading a typed refusal on this route.
  *
- * THE DISCLOSURE HERE IS UNCHANGED, deliberately. This route already answered
- * 409 for an open request and 201 for a new one, and that difference is what an
- * enumeration attempt reads; adding a machine-readable label to the refusal
- * tells a caller nothing the status code did not. The recovery path this label
- * points at is the one that had to be built enumeration-proof, and it is:
- * proving control of the address is the entry condition, not a claim about it.
+ * SEC-10: only an applicant who has just typed the email code for this
+ * address can reach this answer (see `submit`), so it tells the person holding
+ * the inbox about their own request and tells a stranger nothing.
  */
 function duplicateJoinRequestBody(): {
   statusCode: number;
@@ -145,58 +142,84 @@ export class JoinRequestsService {
   ) {}
 
   /**
-   * PUBLIC submission — there is no user and no session behind this. Identity
-   * is just the email the applicant typed; it is not verified here, and it does
-   * not need to be, because approval only ever mints an invite BOUND to that
-   * address. An address the applicant does not control yields an invite they
-   * cannot redeem.
+   * The checks that depend on nothing but the platform switch and the form:
+   * the join-request kill switch and the 18+ date of birth. Neither reads the
+   * address, so `POST /auth/email-code/join-request/verify` runs them before
+   * the code is checked, and an applicant whose request would be refused for
+   * these reasons hears it before the code is weighed. `submit` runs them
+   * again.
    */
-  async submit(
-    dto: CreateMembershipJoinRequestDto,
-  ): Promise<SubmittedJoinRequestView> {
-    // Join-request kill switch. First statement in the method, before any
-    // query: this endpoint is the unauthenticated one, so it is where a spam
-    // flood lands, and a rejected submission should not still cost a
-    // duplicate-check round trip.
-    //
-    // 403 rather than the lockdown's 503 — the submission is genuinely
-    // refused, not deferred, and the applicant is not being asked to retry in
-    // a minute.
+  async assertSubmittable(dto: { dateOfBirth?: string }): Promise<void> {
+    await this.assertAcceptingRequests();
+    this.assertOfAge(dto.dateOfBirth);
+  }
+
+  /**
+   * The join-request kill switch, answered with its own 403 code. Also called
+   * by `POST /auth/email-code/join-request/request`, so no code goes out while
+   * requests are paused.
+   *
+   * 403 and the lockdown's 503 are different answers: the submission is
+   * genuinely refused, and the applicant is not being asked to retry in a
+   * minute.
+   */
+  async assertAcceptingRequests(): Promise<void> {
     const settings = await this.platformSettings.get();
     if (!settings.joinRequestsEnabled) {
       throw new ForbiddenException({
         statusCode: 403,
         error: 'Forbidden',
         code: 'JOIN_REQUESTS_CLOSED',
-        // `||`, not `??`: an admin who clears the message textarea sends `''`,
-        // and a blank rejection tells the applicant nothing.
+        // `||`: an admin who clears the message textarea sends `''`, and a
+        // blank rejection tells the applicant nothing.
         message:
           settings.registrationClosedMessage ||
           'We are not accepting new invite requests right now',
       });
     }
+  }
+
+  /**
+   * 18+ gate. The `ageAttested: true` checkbox is enforced by the DTO
+   * (@Equals(true)); a DOB, when the frontend collects one, is the stronger
+   * signal and is checked here.
+   */
+  private assertOfAge(dateOfBirth: string | undefined): void {
+    if (!dateOfBirth) return;
+    const age = ageInYears(dateOfBirth, new Date());
+    if (age === null || age < MIN_AGE_YEARS) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'UNDER_18',
+        message: 'You must be 18 or older to join',
+      });
+    }
+  }
+
+  /**
+   * Files a request for an address the applicant has PROVED they control (SEC-10).
+   *
+   * CALLER CONTRACT: `dto.email` must be the address a correct email code was
+   * just typed for. The one caller is `POST /auth/email-code/join-request/verify`,
+   * which checks the code first and passes the challenge's own address. A
+   * stranger who only knows an address therefore can neither file a request in
+   * its name nor learn from these answers whether it already applied: the
+   * cooldown 403 and the pending 409 below reach only the person holding the
+   * inbox.
+   */
+  async submit(
+    dto: CreateMembershipJoinRequestDto,
+  ): Promise<SubmittedJoinRequestView> {
+    // Kill switch first, before any query: a rejected submission should not
+    // still cost a duplicate-check round trip.
+    await this.assertAcceptingRequests();
 
     // Normalised once, here, so the stored value always matches what
     // `lower(email)` in UQ_join_requests_pending_email indexes.
     const email = dto.email.trim().toLowerCase();
 
-    // 18+ gate. The `ageAttested: true` checkbox is enforced by the DTO
-    // (@Equals(true)); a DOB, when the frontend collects one, is the stronger
-    // signal and is checked here. There is no pre-existing DOB logic anywhere
-    // in the codebase to mirror — `AuthService.validateOrCreateGoogleUser` and
-    // `AddAgeAttestation1782800690000` only ever model the attestation
-    // checkbox — so this implements the contract's rule directly.
-    if (dto.dateOfBirth) {
-      const age = ageInYears(dto.dateOfBirth, new Date());
-      if (age === null || age < MIN_AGE_YEARS) {
-        throw new ForbiddenException({
-          statusCode: 403,
-          error: 'Forbidden',
-          code: 'UNDER_18',
-          message: 'You must be 18 or older to join',
-        });
-      }
-    }
+    this.assertOfAge(dto.dateOfBirth);
 
     // Reapplication cooldown (E1/P6): a declined applicant can try again, but
     // not immediately — 30 days gives a reviewer's "no" real weight instead
@@ -871,8 +894,11 @@ export class JoinRequestsService {
       ...new Set(staffUserIds.filter((id): id is string => id !== null)),
     ];
     if (!ids.length) return new Map<string, MemberRef>();
+    // Staff tooling: reviewers see who holds and decided a row even after
+    // that account is paused.
     return new MemberLookup(this.dataSource.getRepository(Profile)).byUserIds(
       ids,
+      { inactive: 'include' },
     );
   }
 

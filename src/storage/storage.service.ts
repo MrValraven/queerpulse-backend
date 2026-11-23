@@ -44,6 +44,7 @@ import {
   isVjClipKey,
   parseStorageKey,
   storageKeyOwnerId,
+  studioAudioContentTypeForKey,
 } from './storage-key';
 import { STUDIO_PURCHASE_LIMITS } from '../studio/studio-purchase-rules';
 import { VJ_LIMITS, VjClipMimeType } from '../vj/vj.contract';
@@ -53,12 +54,29 @@ import {
   sanitizeDownloadFileName,
 } from './document-download-headers';
 import {
+  AUDIO_MAGIC_BYTE_PREFIX_LENGTH,
+  JPEG_METADATA_PREFIX_LENGTH,
   MAGIC_BYTE_PREFIX_LENGTH,
   attachmentContentDispositionForStorageKey,
   contentDispositionForStorageKey,
   contentTypeForStorageKey,
+  jpegCarriesGpsLocation,
   magicBytesMatchContentType,
 } from './served-object';
+
+/**
+ * What a read of a stored object's leading bytes found (SEC-43):
+ *  - `'valid'`             the signature matches the declared type and a JPEG
+ *                          carries no GPS block;
+ *  - `'mismatch'`          the signature does not match, or the extension is
+ *                          no served type;
+ *  - `'location_metadata'` a JPEG whose EXIF still carries a GPS block;
+ *  - `'missing'`           nothing is stored under the key;
+ *  - `'indeterminate'`     the read failed for another reason (a storage or
+ *                          network error), so trying again may succeed.
+ */
+export type StoredObjectVerdict =
+  'valid' | 'mismatch' | 'location_metadata' | 'missing' | 'indeterminate';
 
 export const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
 
@@ -783,41 +801,74 @@ export class StorageService {
 
   /**
    * Server-side backstop against content-type spoofing (security review M2):
-   * reads only the object's first {@link MAGIC_BYTE_PREFIX_LENGTH} bytes and
-   * checks their magic signature against the image type the key's extension
-   * declares. Because uploads go straight to the bucket via a presigned PUT (the
-   * backend never sees the bytes), this is the only place the actual bytes are
-   * inspected — a `.png` key whose body is really HTML/JS, or an untouched JPEG
-   * carrying GPS EXIF a real re-encode would have stripped, fails here.
+   * reads the object's leading bytes and checks their magic signature against
+   * the type the key's extension declares. Because uploads go straight to the
+   * bucket via a presigned PUT (the backend never sees the bytes), this is the
+   * only place the actual bytes are inspected: a `.png` key whose body is
+   * really HTML/JS fails here.
+   *
+   * SEC-43: a JPEG whose EXIF still carries a GPS block fails here too, since
+   * the server cannot strip it (see `jpegCarriesGpsLocation`). It answers
+   * `'mismatch'`, so every serve route refuses it with its ordinary 404;
+   * {@link inspectStoredObject} keeps the two causes apart for
+   * `POST /uploads/confirm`.
    *
    * Returns:
-   *  - `'valid'`      the first bytes match the declared image type;
-   *  - `'mismatch'`   the bytes do NOT match (or the extension is not a known
-   *                   image type) — the caller must refuse to serve the object;
+   *  - `'valid'`      the bytes match the declared type (and carry no GPS);
+   *  - `'mismatch'`   they do NOT match, carry GPS, or the extension is not a
+   *                   known type; the caller must refuse to serve the object;
    *  - `'indeterminate'` the check could not run (object missing, storage/read
    *                   error). The caller decides its own fail-open/closed posture
    *                   for this case; a transient bucket error must not permanently
    *                   blank every image.
-   *
-   * Ranged so it never pulls a whole multi-MB object; one small GET per key.
    */
   async validateImageMagicBytes(
     key: string,
   ): Promise<'valid' | 'mismatch' | 'indeterminate'> {
-    const contentType = contentTypeForStorageKey(key);
+    const verdict = await this.inspectStoredObject(key);
+    if (verdict === 'location_metadata') return 'mismatch';
+    // Serve routes keep their own posture for an unreadable object, missing
+    // or not, so the two read failures stay one answer here.
+    if (verdict === 'missing') return 'indeterminate';
+    return verdict;
+  }
+
+  /**
+   * The detailed verdict behind {@link validateImageMagicBytes}. Ranged so it
+   * never pulls a whole multi-MB object: the first
+   * {@link MAGIC_BYTE_PREFIX_LENGTH} bytes, for a JPEG the first
+   * {@link JPEG_METADATA_PREFIX_LENGTH} bytes, where its EXIF block lives,
+   * and for a Studio audio key the first
+   * {@link AUDIO_MAGIC_BYTE_PREFIX_LENGTH} bytes, where an MP3's first frame
+   * header may sit behind padding. One GET per key.
+   */
+  async inspectStoredObject(key: string): Promise<StoredObjectVerdict> {
+    // A Studio audio key (`.mp3`, `.m4a`) is outside the served-type table,
+    // so its type comes from the Studio audio table, for that key shape only.
+    const contentType =
+      contentTypeForStorageKey(key) ?? studioAudioContentTypeForKey(key);
     if (!contentType) {
-      // A key whose extension names none of the served content types
-      // (images, documents and VJ clips, `contentTypeForStorageKey`) can
-      // never be a legitimate object, so it is a definite mismatch.
+      // A key whose extension names none of the known content types
+      // (images, documents, VJ media and Studio audio) can never be a
+      // legitimate object, so it is a definite mismatch.
       return 'mismatch';
     }
+    const isJpeg = contentType === 'image/jpeg';
+    const isStudioAudio = isStudioAudioKey(key);
+    const signatureLength = isStudioAudio
+      ? AUDIO_MAGIC_BYTE_PREFIX_LENGTH
+      : MAGIC_BYTE_PREFIX_LENGTH;
     let prefixBytes: Uint8Array;
     try {
       const response = await this.storageClient().send(
         new GetObjectCommand({
           Bucket: this.requireConfig('storage.bucket'),
           Key: key,
-          Range: StorageService.MAGIC_BYTE_RANGE,
+          Range: isJpeg
+            ? StorageService.JPEG_METADATA_RANGE
+            : isStudioAudio
+              ? StorageService.AUDIO_MAGIC_BYTE_RANGE
+              : StorageService.MAGIC_BYTE_RANGE,
         }),
       );
       if (!response.Body) {
@@ -825,19 +876,36 @@ export class StorageService {
       }
       prefixBytes = await response.Body.transformToByteArray();
     } catch (error) {
+      if (StorageService.isMissingObjectError(error)) {
+        return 'missing';
+      }
       this.logger.warn(
         `Magic-byte read failed for ${key}: ${String(error)} (serving decision deferred to caller)`,
       );
       return 'indeterminate';
     }
-    return magicBytesMatchContentType(prefixBytes, contentType)
-      ? 'valid'
-      : 'mismatch';
+    if (
+      !magicBytesMatchContentType(
+        prefixBytes.subarray(0, signatureLength),
+        contentType,
+      )
+    ) {
+      return 'mismatch';
+    }
+    return isJpeg && jpegCarriesGpsLocation(prefixBytes)
+      ? 'location_metadata'
+      : 'valid';
   }
 
   // The ranged read both magic-byte checks share: the first
   // MAGIC_BYTE_PREFIX_LENGTH bytes of an object.
   private static readonly MAGIC_BYTE_RANGE = `bytes=0-${MAGIC_BYTE_PREFIX_LENGTH - 1}`;
+
+  // Studio audio: the read an MP3's frame header scan needs.
+  private static readonly AUDIO_MAGIC_BYTE_RANGE = `bytes=0-${AUDIO_MAGIC_BYTE_PREFIX_LENGTH - 1}`;
+
+  // SEC-43: a JPEG's read also covers its EXIF segment.
+  private static readonly JPEG_METADATA_RANGE = `bytes=0-${JPEG_METADATA_PREFIX_LENGTH - 1}`;
 
   /**
    * VJ (contract 5.3): the first {@link MAGIC_BYTE_PREFIX_LENGTH} bytes of an

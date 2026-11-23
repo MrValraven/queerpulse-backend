@@ -247,6 +247,8 @@ export class AdminDsarService {
           .filter((userId): userId is string => userId !== null),
       ),
     ];
-    return new MemberLookup(this.profiles).byUserIds(userIds);
+    return new MemberLookup(this.profiles).byUserIds(userIds, {
+      inactive: 'include',
+    });
   }
 }

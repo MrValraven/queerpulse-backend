@@ -196,7 +196,12 @@ export class ActivityListener {
    * community is loaded here to read its access tier and name, the same gate
    * `onCommunityPostCreated` gets handed on its event. A space is skipped
    * outright: "Joined X" on a profile names a community, and naming a space
-   * would show the exact space membership a profile must never reveal.
+   * would show the exact space membership a profile must never reveal. A
+   * community that hid its roster (`rosterVisible: false`) is skipped too
+   * (SEC-06): a "Joined X" row on every member's profile would rebuild the
+   * roster the community chose to keep to itself. The read half
+   * (`ActivityVisibilityService`) applies the same gate to rows written before
+   * the roster was hidden.
    */
   @OnEvent(COMMUNITY_MEMBER_JOINED)
   async onCommunityMemberJoined(
@@ -209,7 +214,8 @@ export class ActivityListener {
       !community ||
       community.accessTier !== AccessTier.Public ||
       community.archivedAt ||
-      community.parentId !== null
+      community.parentId !== null ||
+      !community.rosterVisible
     ) {
       return;
     }

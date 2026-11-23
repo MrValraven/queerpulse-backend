@@ -75,8 +75,10 @@ import {
   readListingFacts,
   readMemberFacts,
   readPersonaFacts,
+  type TeamPersonaFacts,
 } from './listing-team-write-rules';
 import { ListingsService } from './listings.service';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 /** The persona columns every team read selects, in snake case. The owner
  *  name parts come from `OWNER_PROFILE_JOIN_SQL` and are null for an unlinked
@@ -136,14 +138,19 @@ const OWNER_PROFILE_JOIN_SQL = `LEFT JOIN "profiles" "owner_profile"
     ON "owner_profile"."user_id" = "persona"."user_id"
    AND "persona"."link_visibility" = '${SubprofileLinkVisibility.Linked}'`;
 
-/** `$1` the persona ids, `$2` the caller. Keeps eligible personas whose owner
- *  has no block either way with the caller. */
+/** An unlinked persona, exempt from every block check on its creator. */
+const UNLINKED_TEAM_PERSONA_SQL = unlinkedPersonaSql('persona');
+
+/** `$1` the persona ids, `$2` the caller. Keeps eligible personas, a linked
+ *  one only when its owner has no block either way with the caller. An
+ *  unlinked persona answers every caller alike, so a block cannot test who
+ *  runs it (SEC-02). */
 const VISIBLE_TEAM_PERSONAS_SQL = `SELECT ${PERSONA_COLUMNS_SQL}
   FROM "subprofiles" "persona"
   ${OWNER_PROFILE_JOIN_SQL}
  WHERE "persona"."id" = ANY($1::uuid[])
    AND ${eligiblePersonaSql('persona')}
-   AND ${notBlockedEitherWaySql('$2', '"persona"."user_id"')}`;
+   AND (${UNLINKED_TEAM_PERSONA_SQL} OR ${notBlockedEitherWaySql('$2', '"persona"."user_id"')})`;
 
 /** `$1` the member user ids, `$2` the caller. Keeps eligible members with no
  *  block either way with the caller who did not hide their profile from the
@@ -160,8 +167,8 @@ const VISIBLE_TEAM_MEMBERS_SQL = `SELECT "member_profile"."user_id", "member_pro
 /** `$1` the listing, `$2` the escaped contains pattern for the name, `$3` the
  *  raw term for the exact handle match, `$4` the caller, `$5` the escaped
  *  prefix pattern for the handle, `$6` the listing's owner. Leaves out a
- *  persona whose owner has a block either way with the caller or with the
- *  listing's owner. A null owner matches no block row, so its term always
+ *  linked persona whose owner has a block either way with the caller or with
+ *  the listing's owner; an unlinked one stays whoever blocked whom (SEC-02). A null owner matches no block row, so its term always
  *  holds. */
 const PERSONA_CANDIDATES_SQL = `SELECT ${PERSONA_COLUMNS_SQL}, "member"."status" AS "team_status"
   FROM "subprofiles" "persona"
@@ -172,8 +179,8 @@ const PERSONA_CANDIDATES_SQL = `SELECT ${PERSONA_COLUMNS_SQL}, "member"."status"
    AND "member"."status" IN (${LIVE_STATUS_LIST_SQL})
  WHERE ${eligiblePersonaSql('persona')}
    AND ("persona"."display_name" ILIKE $2 ESCAPE '\\' OR "persona"."handle" ILIKE $5 ESCAPE '\\')
-   AND ${notBlockedEitherWaySql('$4', '"persona"."user_id"')}
-   AND ${notBlockedEitherWaySql('$6', '"persona"."user_id"')}
+   AND (${UNLINKED_TEAM_PERSONA_SQL} OR (${notBlockedEitherWaySql('$4', '"persona"."user_id"')}
+     AND ${notBlockedEitherWaySql('$6', '"persona"."user_id"')}))
  ORDER BY lower("persona"."handle") = lower($3) DESC, lower("persona"."display_name") ASC, "persona"."id" ASC
  LIMIT ${LISTING_TEAM_SEARCH.resultsMax}`;
 
@@ -346,7 +353,7 @@ export class ListingTeamService {
             manager,
             userId,
             listingFacts.ownerUserId,
-            personaFacts.ownerUserId,
+            personaFacts,
           ))
         ) {
           throw listingTeamError('listing_team_persona_not_found');
@@ -505,7 +512,7 @@ export class ListingTeamService {
           manager,
           userId,
           listingFacts.ownerUserId,
-          personaFacts.ownerUserId,
+          personaFacts,
         ))
       ) {
         throw listingTeamError('listing_team_link_not_found');
@@ -673,14 +680,21 @@ export class ListingTeamService {
   /**
    * True when the persona's owner has a block either way with the acting
    * manager or with the listing's owner. The owner pair is read only when the
-   * listing's owner is someone other than the acting manager.
+   * listing's owner is someone other than the acting manager. An unlinked
+   * persona is never refused on a block with its owner (SEC-02): the team
+   * reads show it whoever blocked whom, and a refusal here would test who
+   * runs it.
    */
   private async hasBlockAcrossTheLink(
     manager: EntityManager,
     actingUserId: string,
     listingOwnerUserId: string | null,
-    personaOwnerUserId: string,
+    persona: TeamPersonaFacts,
   ): Promise<boolean> {
+    if (persona.isUnlinked) {
+      return false;
+    }
+    const personaOwnerUserId = persona.ownerUserId;
     if (await hasBlockEitherWay(manager, actingUserId, personaOwnerUserId)) {
       return true;
     }

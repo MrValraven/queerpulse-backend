@@ -344,6 +344,7 @@ describe('PRD-423: matched Go together chats show first names only', () => {
         PROFILE_BY_USER,
         BEA_ID,
         privacyByUser,
+        new Set<string>(),
         MATCHED_NAMES,
       );
       const preview = core.buildMemberPreview(
@@ -362,6 +363,7 @@ describe('PRD-423: matched Go together chats show first names only', () => {
         PROFILE_BY_USER,
         BEA_ID,
         privacyByUser,
+        new Set<string>(),
         NORMAL_GROUP_NAMES,
       );
       const preview = core.buildMemberPreview(SEATS, PROFILE_BY_USER);
@@ -463,6 +465,7 @@ describe('PRD-423: matched Go together chats show first names only', () => {
         PROFILE_BY_USER,
         BEA_ID,
         new Map<string, MessagingPrivacyDTO>(),
+        new Set<string>(),
         MATCHED_CHAT_NAMES,
       );
       const preview = core.buildMemberPreview(
@@ -489,6 +492,7 @@ describe('PRD-423: matched Go together chats show first names only', () => {
         PROFILE_BY_USER,
         BEA_ID,
         new Map<string, MessagingPrivacyDTO>(),
+        new Set<string>(),
         NORMAL_GROUP_NAMES,
       );
 

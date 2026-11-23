@@ -41,15 +41,25 @@ describe('ForumCoAuthorBlockListener', () => {
       blockedId: 'bea-1',
     });
 
-    expect(threads.update).toHaveBeenCalledTimes(2);
+    expect(threads.update).toHaveBeenCalledTimes(4);
     expect(threads.update).toHaveBeenNthCalledWith(
       1,
-      { authorId: 'author-1', coAuthorId: 'bea-1' },
+      { authorId: 'author-1', coAuthorId: 'bea-1', isAnonymous: false },
       { coAuthorId: null },
     );
     expect(threads.update).toHaveBeenNthCalledWith(
       2,
-      { authorId: 'bea-1', coAuthorId: 'author-1' },
+      { authorId: 'author-1', coAuthorId: 'bea-1', isOfficial: true },
+      { coAuthorId: null },
+    );
+    expect(threads.update).toHaveBeenNthCalledWith(
+      3,
+      { authorId: 'bea-1', coAuthorId: 'author-1', isAnonymous: false },
+      { coAuthorId: null },
+    );
+    expect(threads.update).toHaveBeenNthCalledWith(
+      4,
+      { authorId: 'bea-1', coAuthorId: 'author-1', isOfficial: true },
       { coAuthorId: null },
     );
     for (const [criteria] of threads.update.mock.calls as [unknown][]) {
@@ -64,15 +74,31 @@ describe('ForumCoAuthorBlockListener', () => {
     });
 
     expect(threads.update).toHaveBeenCalledWith(
-      { authorId: 'author-1', coAuthorId: 'bea-1' },
+      { authorId: 'author-1', coAuthorId: 'bea-1', isAnonymous: false },
       { coAuthorId: null },
     );
   });
 
+  it('leaves the credit on an anonymous, non-official thread', async () => {
+    await listener.handleMemberBlocked({
+      blockerId: 'bea-1',
+      blockedId: 'author-1',
+    });
+
+    // Every update is scoped to a named thread or an official one, so no
+    // criteria can match a thread that is anonymous and not official.
+    expect(threads.update).toHaveBeenCalled();
+    for (const [criteria] of threads.update.mock.calls as [
+      Record<string, unknown>,
+    ][]) {
+      const isScopedAwayFromHiddenAuthor =
+        criteria.isAnonymous === false || criteria.isOfficial === true;
+      expect(isScopedAwayFromHiddenAuthor).toBe(true);
+    }
+  });
+
   it('logs a failed direction and still runs the other one', async () => {
-    threads.update
-      .mockRejectedValueOnce(new Error('connection reset'))
-      .mockResolvedValueOnce({ affected: 1 });
+    threads.update.mockRejectedValueOnce(new Error('connection reset'));
 
     await expect(
       listener.handleMemberBlocked({
@@ -81,7 +107,8 @@ describe('ForumCoAuthorBlockListener', () => {
       }),
     ).resolves.toBeUndefined();
 
-    expect(threads.update).toHaveBeenCalledTimes(2);
+    // The failed direction stops at its first update; the other runs both.
+    expect(threads.update).toHaveBeenCalledTimes(3);
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('connection reset'),

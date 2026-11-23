@@ -1,6 +1,7 @@
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
 import type { CropRect } from '../media-crops/crop-rect';
 import { cropFor } from '../media-crops/crop-response';
+import { listingShopItemPhotoReference } from '../storage/public-media-reference';
 import { normalizeOnlineListingUrl } from './listing-online-details';
 import type { ListingGalleryPhoto } from './listing-photo-gallery';
 import type { ListingGalleryPhotoView } from './listing-response';
@@ -100,18 +101,32 @@ export function shopItemImageReferences(raw: unknown): string[] {
  * The response shape. `crops` is the caller's one batched
  * `MediaCropService.getMany` result (see `listingPhotoKeys`), so this stays
  * synchronous.
+ *
+ * SEC-04: a public read passes `referenceListingId`, and each member-uploaded
+ * photo is then rendered by the listing's opaque reference
+ * (`listings/<id>/shop-items/<index>/photo`, the item's place in this same
+ * normalized list), so the uploader id in its key stays on the server. The
+ * owner and editor wire passes nothing and keeps the `/files/<key>` URL its
+ * form re-sends.
  */
 export function toListingShopItemViews(
   raw: unknown,
   crops: Map<string, CropRect> = new Map(),
+  referenceListingId?: string,
 ): ListingShopItemView[] {
-  return normalizeListingShopItems(raw).map((item) => {
+  return normalizeListingShopItems(raw).map((item, itemIndex) => {
     if (item.photo === null) return { ...item, photo: null };
     const crop = cropFor(item.photo.image, crops);
     return {
       ...item,
       photo: {
-        image: toImageUrl(item.photo.image),
+        image:
+          referenceListingId === undefined
+            ? toImageUrl(item.photo.image)
+            : toImageUrlByReference(
+                item.photo.image,
+                listingShopItemPhotoReference(referenceListingId, itemIndex),
+              ),
         alt: item.photo.alt,
         caption: item.photo.caption,
         ...(crop ? { crop } : {}),

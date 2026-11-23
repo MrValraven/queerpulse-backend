@@ -220,6 +220,56 @@ describe('listing team response mappers', () => {
     expect(summary.av).toBe(card.av);
   });
 
+  it('addresses the listing summary cover by the opaque reference (C2)', () => {
+    // A persona's public page and the team pickers show this card, so the
+    // uploader id in a member storage key must stay off it.
+    const uploaderId = '11111111-1111-4111-8111-111111111111';
+    const listingId = '44444444-4444-4444-8444-444444444444';
+    const coverKey = `listing-photos/${uploaderId}/55555555-5555-4555-8555-555555555555.jpg`;
+    const galleryKey = `listing-photos/${uploaderId}/66666666-6666-4666-8666-666666666666.jpg`;
+    const withCover: Listing = {
+      ...makeListing(),
+      id: listingId,
+      coverPhoto: { image: coverKey, alt: 'Front door' },
+    };
+    const galleryOnly: Listing = {
+      ...makeListing(),
+      id: listingId,
+      coverPhoto: null,
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+    };
+
+    const coverSummary = toListingTeamListing(withCover, new Map());
+    const gallerySummary = toListingTeamListing(galleryOnly, new Map());
+
+    expect(coverSummary.coverPhoto?.image).toMatch(
+      new RegExp(`^https://api\\.test/files/listings/${listingId}/cover\\?v=`),
+    );
+    expect(gallerySummary.coverPhoto?.image).toMatch(
+      new RegExp(
+        `^https://api\\.test/files/listings/${listingId}/photos/0\\?v=`,
+      ),
+    );
+    expect(JSON.stringify([coverSummary, gallerySummary])).not.toContain(
+      uploaderId,
+    );
+  });
+
+  it('drops the cover of a listing the public cannot see', () => {
+    const listing: Listing = {
+      ...makeListing(),
+      photoGallery: [
+        { image: 'https://images.example.com/bar.jpg', alt: '', caption: '' },
+      ],
+    };
+    expect(toListingTeamListing(listing, new Map(), false).coverPhoto).toBe(
+      null,
+    );
+    expect(toListingTeamListing(listing, new Map()).coverPhoto?.image).toBe(
+      'https://images.example.com/bar.jpg',
+    );
+  });
+
   it('selects exactly the columns the listing summary reads', () => {
     expect(Object.keys(LISTING_TEAM_LISTING_COLUMNS).sort()).toEqual([
       'cats',

@@ -212,6 +212,20 @@ describe('StudioCreditsInboxService', () => {
     expect(INBOX_PENDING_COUNT_SQL).toContain(`"credit"."status" = 'pending'`);
   });
 
+  // SEC-02: the requester block binds a linked requesting persona alone, in
+  // the list, the badge and accept alike.
+  it('exempts an unlinked requesting persona from the requester block', () => {
+    for (const sql of [
+      INBOX_REQUESTS_SQL,
+      INBOX_PENDING_COUNT_SQL,
+      INBOX_CREDIT_VISIBLE_SQL,
+    ]) {
+      expect(sql).toContain(
+        `("requesting"."link_visibility" = 'unlinked' OR NOT EXISTS`,
+      );
+    }
+  });
+
   describe('accept', () => {
     it('accepts a pending credit, stamps the answer and tells the listener after the commit', async () => {
       const row = await service.accept(VIEWER_ID, CREDIT_ID);

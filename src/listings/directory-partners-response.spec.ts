@@ -43,7 +43,8 @@ describe('toAdminDirectoryPartner', () => {
       note: 'Members get 10% off',
       position: 2,
       publicState: 'moderated',
-      coverImage: toCoverPhoto(listing)?.image ?? null,
+      coverImage:
+        toCoverPhoto(listing, undefined, 'storage-key')?.image ?? null,
     });
   });
 
@@ -54,10 +55,12 @@ describe('toAdminDirectoryPartner', () => {
     const pick = { id: PICK_ID, note: null, position: 1 };
     expect(
       toAdminDirectoryPartner(pick, withOwnCover, 'showing').coverImage,
-    ).toBe(toCoverPhoto(withOwnCover)?.image ?? null);
+    ).toBe(toCoverPhoto(withOwnCover, undefined, 'storage-key')?.image ?? null);
     expect(
       toAdminDirectoryPartner(pick, withGalleryOnly, 'showing').coverImage,
-    ).toBe(toCoverPhoto(withGalleryOnly)?.image ?? null);
+    ).toBe(
+      toCoverPhoto(withGalleryOnly, undefined, 'storage-key')?.image ?? null,
+    );
     expect(
       toAdminDirectoryPartner(pick, withNoPhotos, 'showing').coverImage,
     ).toBeNull();

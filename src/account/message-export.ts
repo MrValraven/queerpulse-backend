@@ -1,4 +1,4 @@
-import { EntityManager, In, SelectQueryBuilder } from 'typeorm';
+import { EntityManager, In, IsNull, Not, SelectQueryBuilder } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import type { IdentityKind } from '../identities/entities/identity.entity';
 import type {
@@ -10,6 +10,10 @@ import {
   type SenderIdentityContext,
 } from '../messaging/author-summary';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import {
+  andOutsideAbsenceGap,
+  isInsideAbsenceGap,
+} from '../messaging/group-absence-gap';
 import {
   Conversation,
   ConversationKind,
@@ -606,6 +610,66 @@ async function loadConversationContexts(
   return contexts;
 }
 
+/**
+ * SEC-25: the reply parents among `rows` that sit inside the member's own
+ * absence gap in their conversation (`isInsideAbsenceGap`), so the export
+ * names them as no parent at all, as the thread renders them. Two queries
+ * whatever the row count: the member's seats that carry a gap, then the
+ * creation time of each parent in one of those conversations. A member with
+ * no gap anywhere costs the first query alone.
+ */
+async function loadGapCoveredReplyParentIds(
+  manager: EntityManager,
+  userId: string,
+  rows: MessagePageRow[],
+): Promise<Set<string>> {
+  const replyingRows = rows.filter((row) => row.replyToId);
+  if (replyingRows.length === 0) return new Set();
+  const gapSeats = await manager.getRepository(ConversationParticipant).find({
+    where: {
+      userId,
+      conversationId: In([
+        ...new Set(replyingRows.map((row) => row.conversationId)),
+      ]),
+      absenceStartedAt: Not(IsNull()),
+    },
+    select: {
+      id: true,
+      conversationId: true,
+      absenceStartedAt: true,
+      absenceEndedAt: true,
+    },
+  });
+  if (gapSeats.length === 0) return new Set();
+  const gapSeatByConversation = new Map(
+    gapSeats.map((seat) => [seat.conversationId, seat]),
+  );
+  const parentIds = [
+    ...new Set(
+      replyingRows
+        .filter((row) => gapSeatByConversation.has(row.conversationId))
+        .map((row) => row.replyToId)
+        .filter((parentId): parentId is string => parentId !== null),
+    ),
+  ];
+  if (parentIds.length === 0) return new Set();
+  const parents = await manager.getRepository(Message).find({
+    where: { id: In(parentIds) },
+    select: { id: true, conversationId: true, createdAt: true },
+    withDeleted: true,
+  });
+  return new Set(
+    parents
+      .filter((parent) =>
+        isInsideAbsenceGap(
+          parent.createdAt,
+          gapSeatByConversation.get(parent.conversationId),
+        ),
+      )
+      .map((parent) => parent.id),
+  );
+}
+
 /** `messages`: the member's own messages, newest 50,000, oldest-first. */
 export async function buildOwnMessagesExport(
   manager: EntityManager,
@@ -623,12 +687,15 @@ export async function buildOwnMessagesExport(
     },
     OWN_MESSAGES_EXPORT_CAP,
   );
-  const contexts = await loadConversationContexts(
-    manager,
-    userId,
-    [...new Set(rows.map((row) => row.conversationId))],
-    identities,
-  );
+  const [contexts, gapCoveredReplyParentIds] = await Promise.all([
+    loadConversationContexts(
+      manager,
+      userId,
+      [...new Set(rows.map((row) => row.conversationId))],
+      identities,
+    ),
+    loadGapCoveredReplyParentIds(manager, userId, rows),
+  ]);
   const exported = rows.map((row): ExportedOwnMessage => {
     const facts = describeAttachment(row.kind, row.attachment);
     const attachment: ExportedOwnMessageAttachment | null = facts
@@ -652,7 +719,12 @@ export async function buildOwnMessagesExport(
       kind: row.kind,
       body: row.body,
       attachment,
-      replyToId: row.replyToId,
+      // SEC-25: a parent posted while the member was away from the group
+      // does not exist for them, so the export names no parent.
+      replyToId:
+        row.replyToId && !gapCoveredReplyParentIds.has(row.replyToId)
+          ? row.replyToId
+          : null,
       isForwarded: Boolean(row.forwarded),
       sentAt: toIsoString(row.createdAt),
       editedAt: row.editedAt ? toIsoString(row.editedAt) : null,
@@ -822,7 +894,14 @@ export async function buildReportedConversationsExport(
     loadConversationContexts(manager, userId, conversationIds, identities),
     manager.getRepository(ConversationParticipant).find({
       where: { conversationId: In(conversationIds), userId },
-      select: { id: true, conversationId: true, clearedAt: true, leftAt: true },
+      select: {
+        id: true,
+        conversationId: true,
+        clearedAt: true,
+        leftAt: true,
+        absenceStartedAt: true,
+        absenceEndedAt: true,
+      },
     }),
   ]);
   const ownParticipantByConversation = new Map(
@@ -880,6 +959,9 @@ export async function buildReportedConversationsExport(
             leftAt: ownParticipant.leftAt.toISOString(),
           });
         }
+        // SEC-25: nothing posted while a re-seated member was away, as the
+        // thread itself shows them.
+        andOutsideAbsenceGap(queryBuilder, 'm.created_at', ownParticipant);
       },
       perConversationCap,
     );

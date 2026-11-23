@@ -32,6 +32,7 @@ import {
   isStudioCreditRole,
   studioError,
 } from './studio.constants';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 const INBOX_COLUMNS_SQL = `"credit"."id" AS "id",
        "credit"."role" AS "role",
@@ -70,11 +71,13 @@ const INBOX_PUBLIC_SQL = `"release"."status" <> 'taken_down'
    AND ${listenablePersonaSql('requesting')}`;
 
 /** `INBOX_PUBLIC_SQL` with the requesting member clear of blocks either way
- *  with the viewer. Pending requests, the badge and accept share it. The
- *  accepted section reads `INBOX_PUBLIC_SQL` alone, so the credited side can
- *  still find and remove an accepted credit after a block. */
+ *  with the viewer, for a LINKED requesting persona. An unlinked one answers
+ *  every credited owner alike, so a request that vanished on a block cannot
+ *  test who runs it (SEC-02). Pending requests, the badge and accept share
+ *  it. The accepted section reads `INBOX_PUBLIC_SQL` alone, so the credited
+ *  side can still find and remove an accepted credit after a block. */
 const INBOX_VISIBLE_SQL = `${INBOX_PUBLIC_SQL}
-   AND ${notBlockedEitherWaySql('$1', '"credit"."requested_by_user_id"', 'requester_block')}`;
+   AND (${unlinkedPersonaSql('requesting')} OR ${notBlockedEitherWaySql('$1', '"credit"."requested_by_user_id"', 'requester_block')})`;
 
 /** `$1` the viewer, `$2` the limit. Pending, newest first. */
 export const INBOX_REQUESTS_SQL = `SELECT ${INBOX_COLUMNS_SQL}

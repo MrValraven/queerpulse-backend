@@ -211,7 +211,10 @@ interface MessageQueryBuilderStub {
   getRawMany: jest.Mock;
 }
 
-function makeMessagesRepo(rowBatchQueue: unknown[][]) {
+function makeMessagesRepo(
+  rowBatchQueue: unknown[][],
+  replyParents: Partial<Message>[] = [],
+) {
   const queue = [...rowBatchQueue];
   const createQueryBuilder = jest.fn((): MessageQueryBuilderStub => {
     const builder = {} as MessageQueryBuilderStub;
@@ -227,7 +230,9 @@ function makeMessagesRepo(rowBatchQueue: unknown[][]) {
     builder.getRawMany = jest.fn(() => Promise.resolve(queue.shift() ?? []));
     return builder;
   });
-  return { createQueryBuilder };
+  // SEC-25: the own-messages export reads reply parents' creation times.
+  const find = jest.fn().mockResolvedValue(replyParents);
+  return { createQueryBuilder, find };
 }
 
 interface FakeManagerOptions {
@@ -239,6 +244,7 @@ interface FakeManagerOptions {
   ownParticipants?: Partial<ConversationParticipant>[];
   profiles?: Partial<Profile>[];
   messageRowBatches?: unknown[][];
+  replyParents?: Partial<Message>[];
 }
 
 function buildFakeManager(options: FakeManagerOptions) {
@@ -261,7 +267,10 @@ function buildFakeManager(options: FakeManagerOptions) {
   const profilesRepo = {
     find: jest.fn().mockResolvedValue(options.profiles ?? []),
   };
-  const messagesRepo = makeMessagesRepo(options.messageRowBatches ?? []);
+  const messagesRepo = makeMessagesRepo(
+    options.messageRowBatches ?? [],
+    options.replyParents ?? [],
+  );
   const query = jest
     .fn()
     .mockResolvedValue(options.reportedConversationIdRows ?? []);
@@ -515,6 +524,131 @@ describe('buildReportedConversationsExport (Task 13f, fix round 1)', () => {
     for (const needle of STAFF_LEAK_NEEDLES) {
       expect(serialized).not.toContain(needle);
     }
+  });
+});
+
+// SEC-25: a member who left a group and took the seat back exports what the
+// thread shows them, so nothing posted while they were away.
+describe('buildOwnMessagesExport, a re-seated member (SEC-25)', () => {
+  it('names no reply parent that sits inside the member absence gap', async () => {
+    const absenceStartedAt = new Date('2026-01-01T00:00:00.000Z');
+    const absenceEndedAt = new Date('2026-01-05T00:00:00.000Z');
+    const ownRow = (id: string, replyToId: string) => ({
+      id,
+      conversationId: 'conversation-group',
+      senderId: 'member-1',
+      senderIdentityId: null,
+      body: 'reply',
+      kind: MessageKind.User,
+      attachment: null,
+      replyToId,
+      forwarded: false,
+      createdAt: new Date('2026-01-06T00:00:00.000Z'),
+      editedAt: null,
+      exactCreatedAt: '2026-01-06T00:00:00.000000Z',
+    });
+    const manager = buildFakeManager({
+      conversations: [
+        {
+          id: 'conversation-group',
+          isOfficial: false,
+          kind: 'group' as never,
+          title: 'Book club',
+        },
+      ],
+      ownParticipants: [
+        {
+          id: 'own-participant',
+          conversationId: 'conversation-group',
+          absenceStartedAt,
+          absenceEndedAt,
+        },
+      ],
+      messageRowBatches: [
+        [
+          ownRow('message-2', 'parent-before'),
+          ownRow('message-1', 'parent-in-gap'),
+        ],
+      ],
+      replyParents: [
+        {
+          id: 'parent-in-gap',
+          conversationId: 'conversation-group',
+          createdAt: new Date('2026-01-03T00:00:00.000Z'),
+        },
+        {
+          id: 'parent-before',
+          conversationId: 'conversation-group',
+          createdAt: new Date('2025-12-30T00:00:00.000Z'),
+        },
+      ],
+    });
+
+    const exported = await buildOwnMessagesExport(
+      manager,
+      'member-1',
+      buildFakeIdentities([], new Map()),
+    );
+
+    const replyToIdByMessage = new Map(
+      exported.map((message) => [message.id, message.replyToId]),
+    );
+    expect(replyToIdByMessage.get('message-1')).toBeNull();
+    expect(replyToIdByMessage.get('message-2')).toBe('parent-before');
+  });
+});
+
+describe('buildReportedConversationsExport, a re-seated member (SEC-25)', () => {
+  it("skips the seat's absence gap in the message read", async () => {
+    const absenceStartedAt = new Date('2026-01-01T00:00:00.000Z');
+    const absenceEndedAt = new Date('2026-01-05T00:00:00.000Z');
+    const manager = buildFakeManager({
+      reportedConversationIdRows: [{ conversationId: 'conversation-group' }],
+      conversations: [
+        {
+          id: 'conversation-group',
+          isOfficial: false,
+          kind: 'group' as never,
+          title: 'Book club',
+        },
+      ],
+      ownParticipants: [
+        {
+          id: 'own-participant',
+          conversationId: 'conversation-group',
+          clearedAt: null,
+          leftAt: null,
+          absenceStartedAt,
+          absenceEndedAt,
+        },
+      ],
+      messageRowBatches: [[]],
+    });
+
+    await buildReportedConversationsExport(
+      manager,
+      'member-1',
+      buildFakeIdentities([], new Map()),
+    );
+
+    const messagesRepo = manager.getRepository(Message) as unknown as {
+      createQueryBuilder: jest.Mock<MessageQueryBuilderStub, []>;
+    };
+    const builders = messagesRepo.createQueryBuilder.mock.results.flatMap(
+      (result): MessageQueryBuilderStub[] =>
+        result.type === 'return' ? [result.value] : [],
+    );
+    expect(
+      builders.some((builder) =>
+        builder.andWhere.mock.calls.some(
+          ([clause, parameters]: [string, Record<string, string>?]) =>
+            clause ===
+              'NOT (m.created_at > :absenceStartedAt AND m.created_at <= :absenceEndedAt)' &&
+            parameters?.absenceStartedAt === absenceStartedAt.toISOString() &&
+            parameters?.absenceEndedAt === absenceEndedAt.toISOString(),
+        ),
+      ),
+    ).toBe(true);
   });
 });
 

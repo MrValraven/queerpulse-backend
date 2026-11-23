@@ -14,6 +14,7 @@ import {
   EntityManager,
   FindOptionsWhere,
   In,
+  IsNull,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
@@ -41,14 +42,17 @@ import {
   REQUEST_PAUSE_DISTINCT_REPORTERS,
   REQUEST_PAUSE_REPORT_WINDOW_DAYS,
 } from './request-limits';
+import { unblockToContactException } from './unblock-to-contact';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
   CONNECTION_REQUESTED,
   ConnectionRequestedEvent,
 } from './connection.events';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Block } from '../social/entities/block.entity';
+import { HiddenFromService } from '../social/hidden-from.service';
 import {
   MEMBER_BLOCKED,
   MEMBER_UNBLOCKED,
@@ -142,6 +146,12 @@ const DECLINE_REQUEST_CAP = 3;
 
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/**
+ * The `content_moderation.subject_type` a member takedown is filed under, the
+ * same value `ProfilesService` reads for its profile-read takedown gate.
+ */
+const MEMBER_TAKEDOWN_SUBJECT_TYPE = 'member';
+
 /** The relationship for a member the viewer shares nothing with (yet). */
 const NO_RELATIONSHIP: ConnectionRelationship = {
   mutuals: 0,
@@ -180,6 +190,13 @@ export class ConnectionsService {
     private readonly eventEmitter: EventEmitter2,
     private readonly blockFilter: BlockFilterService,
     private readonly dataSource: DataSource,
+    // SEC-19: read-only, to tell a block the requester placed (named, since
+    // they can lift it) from one the other member placed (masked).
+    @InjectRepository(Block) private readonly blocks: Repository<Block>,
+    // SEC-19: the hidden-from and moderator-takedown gates of the profile
+    // read, so a request answers 404 exactly where the profile page does.
+    private readonly hiddenFrom: HiddenFromService,
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   async requestConnection(
@@ -200,28 +217,50 @@ export class ConnectionsService {
     if (addresseeId === requesterId) {
       throw new BadRequestException('You cannot connect to yourself');
     }
-    // A block either way severs the possibility of a new request (spec §2).
-    if (await this.blockFilter.isBlockedEitherWay(requesterId, addresseeId)) {
-      throw new ForbiddenException('You cannot connect with this member');
+    // SEC-19. A block the requester placed is named first, with the coded
+    // 409, because they can lift it (`MessageRequestsService.messageRequest`
+    // runs the same check in the same place). Only a plain block counts. A
+    // block placed from inside a matched Go together chat stays unnamed, the
+    // way `SocialService.getBlockStatus` reads it (PRD-423), so a guessed
+    // slug cannot be tested against the members the requester blocked by
+    // first name. That block still answers the either-way 404 below, the
+    // same 404 the profile read gives for any block.
+    const hasBlockedThem = await this.blocks.exist({
+      where: {
+        blockerId: requesterId,
+        blockedId: addresseeId,
+        matchedConversationId: IsNull(),
+      },
+    });
+    if (hasBlockedThem) {
+      throw unblockToContactException();
     }
-    // Only active members can receive connection requests (spec §8).
+    // SEC-19. A deactivated or suspended member answers 404, the same as the
+    // profile read, so this endpoint tells a requester nothing the profile
+    // page does not.
     if (!target.user || target.user.status !== UserStatus.Active) {
-      throw new ForbiddenException('This member is not accepting connections');
+      throw new NotFoundException('Member not found');
     }
+    // A block either way severs the possibility of a new request (spec §2).
+    // SEC-19. Any block still standing here (one the other member placed, or
+    // the requester's own matched-chat block) answers the profile read's
+    // 404, so the member reads as absent, exactly as on their profile page.
+    if (await this.blockFilter.isBlockedEitherWay(requesterId, addresseeId)) {
+      throw new NotFoundException('Member not found');
+    }
+    await this.assertTargetVisibleOrNotFound(requesterId, target);
 
     const existing = await this.findPair(requesterId, addresseeId);
     if (existing) {
       switch (existing.status) {
         case ConnectionStatus.Blocked:
-          // Don't disclose that the *other* member blocked you — return the
-          // same 409 as a pending request so a block is indistinguishable. Only
-          // your own block is surfaced (you placed it; you can unblock).
+          // SEC-19. A legacy pair row at `blocked`. Only your own block is
+          // surfaced (you placed it, you can unblock). A block the other
+          // member placed answers the same 404 as the block check above.
           if (existing.blockedBy === requesterId) {
-            throw new ConflictException(
-              'Unblock this member before sending a request',
-            );
+            throw unblockToContactException();
           }
-          throw new ConflictException('A request is already pending');
+          throw new NotFoundException('Member not found');
         case ConnectionStatus.Accepted:
           throw new ConflictException('You are already connected');
         case ConnectionStatus.Pending:
@@ -234,10 +273,9 @@ export class ConnectionsService {
           // nothing: this member is the addressee of that request, so it is
           // already in their bell and on their connections page.
           //
-          // The masked cases stay masked. A block by the other party (above)
-          // and a decline hold (below) both keep throwing the unchanged
-          // 'A request is already pending', which is what makes them
-          // indistinguishable from one another.
+          // The masked case stays masked. A decline hold (below) keeps
+          // throwing the unchanged 'A request is already pending', which is
+          // what makes it indistinguishable from a request still waiting.
           if (existing.addresseeId === requesterId) {
             throw new ConflictException(
               'This member has already asked to connect with you',
@@ -376,14 +414,13 @@ export class ConnectionsService {
   //  - open     → allowed, no introducer, not flagged.
   //  - network  → existing connections re-open freely; a stranger must name an
   //               introducer connected to BOTH parties, else 403.
-  //  - private  → allowed but flagged for later moderation.
+  //  - private  → refused with 403 RECIPIENT_NOT_ACCEPTING_REQUESTS (PRD-506).
   //
   // PRD-366: the recipient's "who can message me" preference is layered on top
   // of visibility, and the stricter of the two wins:
   //  - 'everyone'    → the visibility rules above, unchanged.
   //  - 'introduced'  → a mutual-connection introducer is required whatever the
-  //                    visibility (the same rule `network` applies); a
-  //                    `private` target is still flagged.
+  //                    visibility (the same rule `network` applies).
   //  - 'connections' → every new request is refused with 403
   //                    RECIPIENT_NOT_ACCEPTING_REQUESTS.
   // Enquiries about the recipient's own listing never pass through here
@@ -399,15 +436,20 @@ export class ConnectionsService {
     if (whoCanMessage === 'connections') {
       throw recipientNotAcceptingRequestsException();
     }
-    const flagged = target.visibility === ProfileVisibility.Private;
+    // PRD-506. A private member chose to reach out when ready, so a new
+    // request to them is refused with the same coded 403 the "connections
+    // only" preference uses. Requests already pending stay untouched.
+    if (target.visibility === ProfileVisibility.Private) {
+      throw recipientNotAcceptingRequestsException();
+    }
     const requiresIntroduction =
       target.visibility === ProfileVisibility.Network ||
       whoCanMessage === 'introduced';
     if (!requiresIntroduction) {
-      return { introducedBy: null, flagged }; // open, or private (flagged)
+      return { introducedBy: null, flagged: false }; // open
     }
     if (existing?.status === ConnectionStatus.Accepted) {
-      return { introducedBy: null, flagged };
+      return { introducedBy: null, flagged: false };
     }
     if (!introducerSlug) {
       throw new ForbiddenException(
@@ -431,7 +473,41 @@ export class ConnectionsService {
     if (!knowsRequester || !knowsTarget) {
       throw new ForbiddenException('Introducer must be a mutual connection');
     }
-    return { introducedBy: introducerId, flagged };
+    return { introducedBy: introducerId, flagged: false };
+  }
+
+  /**
+   * SEC-19. The profile read's remaining "may this viewer know this member
+   * exists?" gates (`ProfilesService.assertVisibleOrNotFound`), applied to a
+   * connection request so it answers the same 404 the profile page does: the
+   * target hid their profile from the requester, is inside a live "Hide me
+   * for 24 hours", or was taken down by a moderator. The account-status and
+   * block gates run in `requestConnection` itself. Re-derived here from the
+   * shared services because `ProfilesService` imports this service, so
+   * injecting it back would close a dependency cycle.
+   */
+  private async assertTargetVisibleOrNotFound(
+    requesterId: string,
+    target: Profile,
+  ): Promise<void> {
+    if (await this.hiddenFrom.isHiddenFrom(target.userId, requesterId)) {
+      throw new NotFoundException('Member not found');
+    }
+    if (target.hiddenUntil && target.hiddenUntil > new Date()) {
+      throw new NotFoundException('Member not found');
+    }
+    const subjectIds = [target.slug, target.userId];
+    const states = await this.contentModeration.statesFor(
+      MEMBER_TAKEDOWN_SUBJECT_TYPE,
+      subjectIds,
+    );
+    const isTakenDown = subjectIds.some((subjectId) => {
+      const state = states.get(subjectId);
+      return !!state && (state.hidden || state.removed);
+    });
+    if (isTakenDown) {
+      throw new NotFoundException('Member not found');
+    }
   }
 
   /**
@@ -440,9 +516,9 @@ export class ConnectionsService {
    * has declined this requester {@link DECLINE_REQUEST_CAP} times.
    *
    * THE REFUSAL IS SILENT ON PURPOSE. Both branches throw the exact
-   * `'A request is already pending'` conflict the file already uses for "the
-   * other member blocked you", so a cooldown, a cap and a block are one
-   * indistinguishable answer. Saying "you have been declined twice" would hand
+   * `'A request is already pending'` conflict a request still waiting gives,
+   * so a cooldown, a cap and a pending request are one indistinguishable
+   * answer. Saying "you have been declined twice" would hand
    * the requester a running report of a decision the decliner never chose to
    * share: today a decline reveals only that the outgoing request quietly went
    * away, and that is exactly as much as this keeps revealing.

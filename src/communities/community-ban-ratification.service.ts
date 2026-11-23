@@ -553,7 +553,7 @@ export class CommunityBanRatificationService {
     ];
     const refByUserId: Map<string, MemberRef> = await new MemberLookup(
       this.profiles,
-    ).byUserIds(referencedUserIds);
+    ).byUserIds(referencedUserIds, { inactive: 'include' });
 
     const targetUserIds = [...new Set(rows.map((row) => row.targetUserId))];
     const currentBans = await this.bans.find({

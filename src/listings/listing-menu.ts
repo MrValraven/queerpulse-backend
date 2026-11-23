@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
 import { toBareKey } from '../storage/bare-key';
+import { listingMenuFileReference } from '../storage/public-media-reference';
 import { contentTypeForStorageKey } from '../storage/served-object';
 import { parseStorageKey } from '../storage/storage-key';
 import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
@@ -327,12 +328,25 @@ export function normalizeListingMenu(
  * The response shape: the full menu with the file key resolved to its
  * served URL. Heals a null or partial stored value, and drops a file whose
  * key no longer resolves, and answers EUR for a menu saved before currencies.
+ *
+ * SEC-04: a public read passes `referenceListingId`, and a member-uploaded
+ * file is then rendered by the listing's opaque reference
+ * (`listings/<id>/menu`), so the uploader id in its key stays on the server.
+ * The owner and editor wire passes nothing and keeps the `/files/<key>` URL.
  */
 export function toListingMenuView(
   menu: Partial<ListingMenu> | null | undefined,
+  referenceListingId?: string,
 ): ListingMenuView {
   const file = menu?.file ?? null;
-  const fileUrl = file ? toImageUrl(file.url) : null;
+  const fileUrl = !file
+    ? null
+    : referenceListingId === undefined
+      ? toImageUrl(file.url)
+      : toImageUrlByReference(
+          file.url,
+          listingMenuFileReference(referenceListingId),
+        );
   return {
     sections: healStoredMenuSections(menu?.sections ?? []),
     file: file && fileUrl ? { ...file, url: fileUrl } : null,

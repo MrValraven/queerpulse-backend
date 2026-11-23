@@ -75,6 +75,7 @@ export class HiddenFromController {
     const rows = await this.hiddenFrom.list(user.userId);
     const members = await this.memberLookup.byUserIds(
       rows.map((row) => row.hiddenFromUserId),
+      { inactive: 'include' },
     );
     // A row whose target profile no longer exists (deleted account) has
     // nothing to look up — drop it rather than surface a half-populated

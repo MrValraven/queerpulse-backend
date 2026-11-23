@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   HttpException,
   HttpStatus,
@@ -33,6 +34,7 @@ import {
 } from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
 import { groupJoinHistoryFloorCoversPredicate } from '../messaging/group-join-history-floor';
+import { hasAbsenceGap } from '../messaging/group-absence-gap';
 import { isCoveredByMailboxStaffFloor } from '../messaging/mailbox-seats';
 import { isEvidenceHoldActive } from '../messaging/message-evidence-hold';
 import { MESSAGE_SUBJECT_TYPE } from '../messaging/message-visibility-predicates';
@@ -43,6 +45,8 @@ import {
 } from '../studio/entities/studio-release.entity';
 import { captureQuizshowAnswerForReport } from '../quizshow/quizshow-answer-report';
 import { captureQuizshowGameForReport } from '../quizshow/quizshow-game-report';
+import { captureCommunityGiftForReport } from '../community-badges/community-gift-report';
+import { communityBadgeError } from '../community-badges/community-badges.constants';
 import type {
   QuizshowAnswerSnapshotEvidence,
   QuizshowGameSnapshotEvidence,
@@ -88,6 +92,12 @@ import {
   ReasonOption,
   SYSTEM_REASON_CODES,
 } from './reason-catalogue';
+import {
+  FOLLOW_UP_HEADING_PATTERN,
+  REPEATED_ACCOUNT_SQL,
+  followUpHeading,
+  isRepeatedAccount,
+} from './report-follow-up-detail';
 import { deriveSeverity, slaDueAtFor } from './report-severity';
 import { ReportDTO, toReportDTO } from './report-response';
 import { REPORT_CREATED, ReportCreatedEvent } from './report.events';
@@ -99,6 +109,7 @@ import {
   UNLINKED_SUBJECT_TYPES,
 } from './unlinked-subject';
 import {
+  CommunityGiftSnapshotEvidence,
   GROUP_LISTING_SNAPSHOT_TYPE,
   GroupListingSnapshotEvidence,
   GroupSnapshotEvidence,
@@ -149,6 +160,70 @@ export const REPORT_REASON_NOT_OFFERED_CODE = 'REPORT_REASON_NOT_OFFERED';
  */
 export const REPORT_UNLINKED_SUBJECT_INVALID_CODE =
   'REPORT_UNLINKED_SUBJECT_INVALID';
+
+/**
+ * PRD-510: a repeat filing would add details to the reporter's open report
+ * past what one report holds (see {@link MAX_REPORT_DETAIL_WITH_FOLLOW_UPS}
+ * and {@link MAX_REPORT_CLIENT_EVIDENCE_WITH_FOLLOW_UPS}). A 409, because the
+ * open report already on record is what the new filing collides with.
+ */
+export const REPORT_FOLLOW_UP_LIMIT_CODE = 'REPORT_FOLLOW_UP_LIMIT';
+
+/**
+ * PRD-510: the longest `detail` one report reaches once follow-ups are
+ * appended to it. Five full-length filings (the DTO caps one at 4000), which
+ * is far past any account of one incident and still a bounded row. A repeat
+ * filing goes through the dedupe ahead of the flood caps, so without this
+ * only the burst throttle would bound how large one report can grow.
+ */
+const MAX_REPORT_DETAIL_WITH_FOLLOW_UPS = 20_000;
+
+/**
+ * PRD-510: the most reporter-attached evidence entries (links and
+ * screenshots) one report holds across its follow-ups. Four full filings'
+ * worth (the DTO caps one at 10). Server snapshots do not count against it.
+ */
+const MAX_REPORT_CLIENT_EVIDENCE_WITH_FOLLOW_UPS = 40;
+
+/**
+ * PRD-510: what a filing did, so the reporter is told the truth about it.
+ *
+ *  - `filed`: a new report reached the queue.
+ *  - `details_added`: the reporter already had an open report about this
+ *    subject for this reason, and the new account or evidence was added to
+ *    it, where the moderator reading it will see it.
+ *  - `already_open`: the same open report, with nothing new to add (a
+ *    double-tapped submit or a retry). Nothing changed.
+ */
+export type ReportFilingOutcome = 'filed' | 'details_added' | 'already_open';
+
+/** `ReportDTO` plus the {@link ReportFilingOutcome} of this one filing. */
+export interface FiledReportDTO extends ReportDTO {
+  filing: ReportFilingOutcome;
+}
+
+function toFiledReportDTO(
+  report: Report,
+  filing: ReportFilingOutcome,
+): FiledReportDTO {
+  return { ...toReportDTO(report), filing };
+}
+
+/** The reporter-attached entries (`url` / `screenshot`) in a report's evidence. */
+function isClientEvidenceEntry(entry: unknown): boolean {
+  if (typeof entry !== 'object' || entry === null) return false;
+  const type: unknown = Reflect.get(entry, 'type');
+  return type === 'url' || type === 'screenshot';
+}
+
+/** One stable key per client evidence entry, so a resent link is not stored twice. */
+function clientEvidenceKey(entry: unknown): string {
+  if (typeof entry !== 'object' || entry === null) return '';
+  const type: unknown = Reflect.get(entry, 'type');
+  const value: unknown = Reflect.get(entry, 'value');
+  const uploadId: unknown = Reflect.get(entry, 'uploadId');
+  return JSON.stringify([type, value ?? null, uploadId ?? null]);
+}
 
 // PRD-356: the most active-member ids a `GroupSnapshotEvidence` entry ever
 // stores, the same number as `MAX_GROUP_MEMBERS`, a group's own hard ceiling
@@ -394,12 +469,16 @@ export class ReportsService {
    * Optional and defaulting to null so the server-side callers that file
    * through this pipeline (`ListingsService`'s dispute and owner-notify tasks)
    * need no change: they always carry a real `reporterId` and no request.
+   *
+   * PRD-510: the answer carries `filing`, which says whether this filing
+   * opened a report, added its details to the reporter's open one, or found
+   * that open one with nothing new to add.
    */
   async create(
     reporterId: string | null,
     input: CreateReportInput,
     clientIp: string | null = null,
-  ): Promise<ReportDTO> {
+  ): Promise<FiledReportDTO> {
     // ENG-483: a filing that names no record gets its own subject id per
     // incident, so it runs first and every check below (dedupe, both sets of
     // flood caps, the insert) keys on the id it settles on.
@@ -498,6 +577,29 @@ export class ReportsService {
         throw new NotFoundException('Game not found');
       }
       input = { ...input, subjectId: sessionId };
+    }
+
+    // Community badges: a gift report names one gift by its uuid and keeps a
+    // snapshot of it (see `captureCommunityGiftForReport`). Only the gift's
+    // recipient may file; anyone else, a signed-out filer and a malformed id
+    // all get `gift_not_found`, and a malformed id never reaches the database.
+    let reportedCommunityGiftSnapshot: CommunityGiftSnapshotEvidence | null =
+      null;
+    if (input.subjectType === ReportSubjectType.CommunityGift) {
+      if (reporterId === null || !UUID_RE.test(input.subjectId)) {
+        throw communityBadgeError('gift_not_found');
+      }
+      const giftId = input.subjectId.toLowerCase();
+      reportedCommunityGiftSnapshot = await captureCommunityGiftForReport(
+        this.reports.manager,
+        giftId,
+        reporterId,
+        new Date(),
+      );
+      if (!reportedCommunityGiftSnapshot) {
+        throw communityBadgeError('gift_not_found');
+      }
+      input = { ...input, subjectId: giftId };
     }
 
     // A member can't report their own message — mirrors the DTO's `canReport`
@@ -705,10 +807,19 @@ export class ReportsService {
     // The price is that the anonymous path has no idempotency: a double-tapped
     // submit or a retry after a dropped connection writes two rows.
     // `REPORT_ANONYMOUS_PER_SUBJECT_LIMIT` is sized to absorb exactly that.
+    //
+    // PRD-510: a repeat filing used to hand the open report back and drop
+    // whatever the member had just written, so someone adding details of an
+    // escalating situation saw success while moderators never got them. The
+    // new account and evidence are now appended to the open report
+    // (`addFollowUpToOpenReport`), and the answer says so. When the open
+    // report closed between the read and the append, the filing carries on
+    // below and opens a fresh report.
     const existing =
       reporterId === null ? null : await this.findOpenReport(reporterId, input);
     if (existing) {
-      return toReportDTO(existing);
+      const followedUp = await this.addFollowUpToOpenReport(existing, input);
+      if (followedUp) return followedUp;
     }
 
     // Derived BEFORE the flood caps run, because the caps need it: an
@@ -782,6 +893,7 @@ export class ReportsService {
             reportedIdentitySnapshot,
             reportedQuizshowAnswerSnapshot,
             reportedQuizshowGameSnapshot,
+            reportedCommunityGiftSnapshot,
           ),
           severity,
           slaDueAt: slaDueAtFor(severity, now),
@@ -799,7 +911,7 @@ export class ReportsService {
         severity: saved.severity,
         reasonCode: saved.reasonCode,
       } satisfies ReportCreatedEvent);
-      return toReportDTO(saved);
+      return toFiledReportDTO(saved, 'filed');
     } catch (error) {
       // Lost the insert race against a concurrent identical filing — the
       // partial unique index rejected the duplicate open report. Converge on
@@ -818,7 +930,12 @@ export class ReportsService {
       ) {
         const winner = await this.findOpenReport(reporterId, input);
         if (winner) {
-          return toReportDTO(winner);
+          // PRD-510: the same follow-up rule as the fast-path. A double-tap
+          // carries nothing new and comes back `already_open`.
+          return (
+            (await this.addFollowUpToOpenReport(winner, input)) ??
+            toFiledReportDTO(winner, 'already_open')
+          );
         }
       }
       throw error;
@@ -1590,6 +1707,165 @@ export class ReportsService {
     );
   }
 
+  /**
+   * PRD-510: adds a repeat filing's new account and evidence to the reporter's
+   * OPEN report on the same subject for the same reason, so the moderator
+   * reading that report sees them.
+   *
+   *  - The new `detail` is appended under a dated line naming it as added by
+   *    the reporter, unless it equals the first account or one added account
+   *    as a whole (a retry, `isRepeatedAccount`). A short follow-up that only
+   *    appears inside a longer account is new and is kept. The original
+   *    account is never rewritten.
+   *  - New `url` / `screenshot` evidence is appended to `evidence`, skipping
+   *    an entry already on the report. Server snapshots are not re-taken: the
+   *    open report already holds the one captured when it was filed.
+   *  - Anonymity only ever goes UP. A follow-up asking for anonymity makes
+   *    the open report anonymous from here on; a follow-up filed by name never
+   *    reveals a reporter who asked to stay anonymous the first time.
+   *
+   * The append is one UPDATE guarded on `status = 'open'`, with the text and
+   * the jsonb concatenated in SQL, so two follow-ups landing together both
+   * keep their text. Answers `null` when the guard misses (a moderator closed
+   * or escalated the report in between), and `create` then files a fresh
+   * report, which is the same thing it does for a closed report today.
+   *
+   * Refused with {@link REPORT_FOLLOW_UP_LIMIT_CODE} when the report would
+   * grow past {@link MAX_REPORT_DETAIL_WITH_FOLLOW_UPS} characters or
+   * {@link MAX_REPORT_CLIENT_EVIDENCE_WITH_FOLLOW_UPS} attached entries.
+   */
+  private async addFollowUpToOpenReport(
+    openReport: Report,
+    input: CreateReportInput,
+  ): Promise<FiledReportDTO | null> {
+    const existingDetail = openReport.detail ?? '';
+    const newDetail = input.detail?.trim() ?? '';
+    const hasNewDetail =
+      newDetail.length > 0 && !isRepeatedAccount(existingDetail, newDetail);
+
+    const existingEvidence = openReport.evidence ?? [];
+    const existingEvidenceKeys = new Set(
+      existingEvidence.filter(isClientEvidenceEntry).map(clientEvidenceKey),
+    );
+    const newEvidence: ReportEvidenceInput[] = [];
+    for (const entry of input.evidence ?? []) {
+      const key = clientEvidenceKey(entry);
+      if (existingEvidenceKeys.has(key)) continue;
+      existingEvidenceKeys.add(key);
+      newEvidence.push(entry);
+    }
+
+    const isAnonymityRaised = input.anonymous === true && !openReport.anonymous;
+
+    if (!hasNewDetail && !newEvidence.length && !isAnonymityRaised) {
+      return toFiledReportDTO(openReport, 'already_open');
+    }
+
+    const followUpText = hasNewDetail
+      ? `${followUpHeading(new Date())}\n${newDetail}`
+      : '';
+    const followUpBlock = `\n\n${followUpText}`;
+    const addedDetailLength = hasNewDetail ? followUpBlock.length : 0;
+    const clientEvidenceCount = existingEvidence.filter(
+      isClientEvidenceEntry,
+    ).length;
+    if (
+      existingDetail.length + addedDetailLength >
+        MAX_REPORT_DETAIL_WITH_FOLLOW_UPS ||
+      clientEvidenceCount + newEvidence.length >
+        MAX_REPORT_CLIENT_EVIDENCE_WITH_FOLLOW_UPS
+    ) {
+      throw new ConflictException({
+        code: REPORT_FOLLOW_UP_LIMIT_CODE,
+        message:
+          'Your open report about this already holds as much as one report can, and a moderator has all of it. If something new and urgent has happened, use the Contact page.',
+      });
+    }
+
+    // Two identical taps can both pass the in-memory checks above, so the
+    // same checks run again inside the UPDATE, against the row as it stands:
+    // the detail is appended only when no account on the open report equals
+    // it (`REPEATED_ACCOUNT_SQL`), and only the evidence entries it does not already hold
+    // are added. The WHERE also requires that at least one of those (or the
+    // anonymity raise) still changes something, so an UPDATE that would
+    // change nothing touches no row, and the answer below reads
+    // `already_open`.
+    const updateQuery = this.reports
+      .createQueryBuilder()
+      .update(Report)
+      .set({
+        detail: () =>
+          hasNewDetail
+            ? `CASE
+                 WHEN ${REPEATED_ACCOUNT_SQL} THEN detail
+                 WHEN detail IS NULL OR detail = '' THEN :followUpText
+                 ELSE detail || :followUpBlock
+               END`
+            : 'detail',
+        evidence: () =>
+          newEvidence.length
+            ? `COALESCE(evidence, '[]'::jsonb) || COALESCE((
+                 SELECT jsonb_agg(added_entry)
+                   FROM jsonb_array_elements(CAST(:followUpEvidence AS jsonb)) AS added_entry
+                  WHERE NOT COALESCE(evidence, '[]'::jsonb) @> jsonb_build_array(added_entry)
+               ), '[]'::jsonb)`
+            : 'evidence',
+        anonymous: () => (isAnonymityRaised ? 'TRUE' : 'anonymous'),
+      })
+      .where('id = :id', { id: openReport.id })
+      .andWhere('status = :openStatus', { openStatus: ReportStatus.Open });
+    const stillChangesSomething: string[] = [];
+    if (hasNewDetail) {
+      stillChangesSomething.push(`NOT (${REPEATED_ACCOUNT_SQL})`);
+    }
+    if (newEvidence.length) {
+      stillChangesSomething.push(
+        `EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements(CAST(:followUpEvidence AS jsonb)) AS pending_entry
+            WHERE NOT COALESCE(evidence, '[]'::jsonb) @> jsonb_build_array(pending_entry)
+         )`,
+      );
+    }
+    if (isAnonymityRaised) {
+      stillChangesSomething.push('anonymous = FALSE');
+    }
+    updateQuery.andWhere(`(${stillChangesSomething.join(' OR ')})`);
+    const result = await updateQuery
+      .setParameters({
+        newDetail,
+        followUpHeadingPattern: FOLLOW_UP_HEADING_PATTERN,
+        followUpText,
+        followUpBlock,
+        followUpEvidence: JSON.stringify(newEvidence),
+      })
+      .execute();
+
+    const updatedReport = await this.reports.findOne({
+      where: { id: openReport.id },
+    });
+    if (!result.affected) {
+      // Still open: a concurrent identical tap already added this text.
+      // Closed or escalated: `create` files a fresh report.
+      return updatedReport?.status === ReportStatus.Open
+        ? toFiledReportDTO(updatedReport, 'already_open')
+        : null;
+    }
+    // The row did change, but perhaps only its anonymity (a concurrent tap
+    // having added the same text or entries first). Compared against the
+    // report as this filing found it: unchanged account and evidence is
+    // `already_open`.
+    const hasAddedDetails =
+      updatedReport !== null &&
+      (updatedReport.detail !== openReport.detail ||
+        JSON.stringify(updatedReport.evidence ?? []) !==
+          JSON.stringify(openReport.evidence ?? []));
+    return toFiledReportDTO(
+      updatedReport ?? openReport,
+      hasAddedDetails ? 'details_added' : 'already_open',
+    );
+  }
+
   private findOpenReport(
     reporterId: string,
     input: CreateReportInput,
@@ -1635,6 +1911,10 @@ export class ReportsService {
           leftAt: true,
           historyFloorAt: true,
           identityId: true,
+          // SEC-25: a re-seated group member's away stretch, which
+          // `isBehindSeatHistoryFloor` refuses like a join floor.
+          absenceStartedAt: true,
+          absenceEndedAt: true,
         },
       });
       const wasPresentWhenSent =
@@ -1674,19 +1954,28 @@ export class ReportsService {
    *    joiner's history shows; SQL compares the full microseconds, exactly
    *    as every read path does.
    *
-   * The lookups run only for a seat that has a floor at all
-   * (`history_floor_at` set), so an ordinary filing costs no extra query.
+   *  - SEC-25, a GROUP seat that left and came back: a message posted while
+   *    it was away (`absenceStartedAt` to `absenceEndedAt`) does not exist
+   *    for that member, so it is refused too. The same SQL predicate covers
+   *    it, through `insideAbsenceGapPredicate`.
+   *
+   * The lookups run only for a seat that has a floor or an absence gap at
+   * all, so an ordinary filing costs no extra query.
    * A personal "clear chat" moves `clearedAt` alone, so it leaves every
    * report its seat could file as it was.
    */
   private async isBehindSeatHistoryFloor(
     participant: Pick<
       ConversationParticipant,
-      'id' | 'historyFloorAt' | 'identityId'
+      | 'id'
+      | 'historyFloorAt'
+      | 'identityId'
+      | 'absenceStartedAt'
+      | 'absenceEndedAt'
     >,
     message: Message,
   ): Promise<boolean> {
-    if (!participant.historyFloorAt) {
+    if (!participant.historyFloorAt && !hasAbsenceGap(participant)) {
       return false;
     }
     const conversation = await this.conversations.findOne({
@@ -1914,6 +2203,7 @@ export class ReportsService {
     reportedIdentitySnapshot: MailboxIdentitySnapshotEvidence | null,
     reportedQuizshowAnswerSnapshot: QuizshowAnswerSnapshotEvidence | null,
     reportedQuizshowGameSnapshot: QuizshowGameSnapshotEvidence | null,
+    reportedCommunityGiftSnapshot: CommunityGiftSnapshotEvidence | null,
   ): unknown[] | null {
     const evidence: unknown[] = clientEvidence ? [...clientEvidence] : [];
     if (reportedMessage) {
@@ -2001,6 +2291,11 @@ export class ReportsService {
     // Pulse Live game snapshot: the shown questions, kept past a game delete.
     if (reportedQuizshowGameSnapshot) {
       evidence.push(reportedQuizshowGameSnapshot);
+    }
+    // Community gift snapshot: the note as the recipient read it, kept past a
+    // takedown or a removal by the sender.
+    if (reportedCommunityGiftSnapshot) {
+      evidence.push(reportedCommunityGiftSnapshot);
     }
     return evidence.length ? evidence : null;
   }

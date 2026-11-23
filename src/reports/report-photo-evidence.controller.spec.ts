@@ -1,12 +1,20 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import type { Response } from 'express';
 import { StorageService } from '../storage/storage.service';
 import { Report, ReportSubjectType } from './entities/report.entity';
 import { ReportPhotoEvidenceController } from './report-photo-evidence.controller';
+import { REPORT_ABOUT_ACTOR_CODE } from '../moderation/report-about-actor';
 
 const REPORT_ID = '3d2f8a10-9c4b-4d6e-8f01-2a3b4c5d6e7f';
+const UPLOADER_ID = '11111111-2222-4333-8444-555555555555';
+const MODERATOR = {
+  userId: '99999999-8888-4777-8666-555555555555',
+  email: 'mod@example.com',
+  status: 'active',
+  role: 'moderator',
+};
 const PHOTO_KEY =
   'gathering-photos/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg';
 
@@ -55,8 +63,8 @@ describe('ReportPhotoEvidenceController', () => {
     controller = module.get(ReportPhotoEvidenceController);
   });
 
-  const serve = () =>
-    controller.serve(REPORT_ID, response as unknown as Response);
+  const serve = (viewer: typeof MODERATOR = MODERATOR) =>
+    controller.serve(REPORT_ID, viewer, response as unknown as Response);
 
   it('redirects a moderator to a short-lived presigned URL for the reported photo', async () => {
     reports.findOne.mockResolvedValue({
@@ -145,5 +153,27 @@ describe('ReportPhotoEvidenceController', () => {
     reports.findOne.mockResolvedValue(null);
 
     await expect(serve()).rejects.toThrow(NotFoundException);
+  });
+
+  // SEC-31: the staff member who uploaded the reported photo is its subject.
+  it('refuses the uploader with the coded report-about-you refusal', async () => {
+    reports.findOne.mockResolvedValue({
+      id: REPORT_ID,
+      subjectType: ReportSubjectType.EventPhoto,
+      evidence: [photoSnapshot()],
+    });
+
+    const outcome = await serve({ ...MODERATOR, userId: UPLOADER_ID }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(outcome).toBeInstanceOf(ForbiddenException);
+    if (outcome instanceof ForbiddenException) {
+      expect(outcome.getResponse()).toMatchObject({
+        code: REPORT_ABOUT_ACTOR_CODE,
+      });
+    }
+    expect(storage.createPresignedDownload).not.toHaveBeenCalled();
   });
 });

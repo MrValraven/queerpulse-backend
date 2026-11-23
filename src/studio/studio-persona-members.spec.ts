@@ -1,6 +1,9 @@
+import { personaCreatorActiveSql } from '../subprofiles/persona-creator-gates';
 import {
+  blockedWithAnyLinkedPersonaMemberSql,
   blockedWithAnyPersonaMemberSql,
   chosenPersonaShowableSql,
+  chosenPersonaShownToOthersSql,
   personaIdentityBlockedBySql,
   personaMemberUserIdsSql,
 } from './studio-persona-members';
@@ -43,6 +46,36 @@ describe('Studio persona members', () => {
     expect(sql).toContain(`"chosen_persona"."removed_at" IS NULL`);
     expect(sql).toContain(
       `"chosen_persona_moderation"."subject_type" = 'subprofile'`,
+    );
+  });
+
+  // SEC-33: lists other people read also need the chosen persona's creator
+  // active; the buyer's own reads keep the plain rule.
+  it('adds an active creator to the chosen persona rule for lists other people read', () => {
+    const shown = chosenPersonaShownToOthersSql(
+      '"purchase"."shown_as_subprofile_id"',
+    );
+    expect(shown).toContain(
+      chosenPersonaShowableSql('"purchase"."shown_as_subprofile_id"'),
+    );
+    expect(shown).toContain(
+      `"shown_persona_creator_gate"."id" = "purchase"."shown_as_subprofile_id"`,
+    );
+    expect(shown).toContain(
+      personaCreatorActiveSql('shown_persona_creator_gate'),
+    );
+    expect(
+      chosenPersonaShowableSql('"purchase"."shown_as_subprofile_id"'),
+    ).not.toContain('"users"');
+  });
+
+  // SEC-02: a listener-facing read exempts an unlinked persona from the block.
+  it('reads a member block only for a linked persona on listener-facing reads', () => {
+    const sql = blockedWithAnyLinkedPersonaMemberSql('$2', '"artist"."id"');
+    expect(sql).toContain(`"unlinked_persona"."id" = "artist"."id"`);
+    expect(sql).toContain(`"unlinked_persona"."link_visibility" = 'unlinked'`);
+    expect(sql).toContain(
+      blockedWithAnyPersonaMemberSql('$2', '"artist"."id"'),
     );
   });
 });

@@ -73,6 +73,12 @@ import {
   StudioPlaylistRole,
   studioError,
 } from './studio.constants';
+import {
+  isCreatorBlockConsulted,
+  unlinkedPersonaByIdSql,
+  unlinkedPersonaSql,
+} from '../subprofiles/persona-creator-gates';
+import { unlinkedPersonaCreditStandsSql } from './studio-discovery-sql';
 
 interface PlaylistStatsRow {
   playlist_id: string;
@@ -117,6 +123,17 @@ function roleForEditorStatus(
   }
   return null;
 }
+
+/** What a persona credit adds to a non-owner's direct-link decision. */
+interface PersonaCreditBlockFacts {
+  isPersonaUnlinked: boolean;
+  isBlockedWithCreator: boolean;
+}
+
+const NO_PERSONA_CREDIT_BLOCK: PersonaCreditBlockFacts = {
+  isPersonaUnlinked: false,
+  isBlockedWithCreator: false,
+};
 
 /**
  * Studio v2: every playlist read. The matrix lives in
@@ -241,10 +258,13 @@ export class StudioPlaylistReadsService {
         creditSubprofileId: subprofileId,
       })
       .andWhere(publiclyListedPlaylistSql('playlist'));
+    // SEC-02: a playlist credited to an unlinked persona is exempt from the
+    // block with its owner (`unlinkedPersonaCreditStandsSql`).
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"playlist"."user_id"',
+      { unless: unlinkedPersonaCreditStandsSql('playlist') },
     );
     this.excludeBlockedPersonaCreator(queryBuilder, viewerId);
     return this.pageOfCards(viewerId, queryBuilder, cursor);
@@ -363,10 +383,13 @@ export class StudioPlaylistReadsService {
         { entryTrackId: trackId },
       )
       .andWhere(publiclyListedPlaylistSql('playlist'));
+    // SEC-02: a playlist credited to an unlinked persona is exempt from the
+    // block with its owner (`unlinkedPersonaCreditStandsSql`).
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"playlist"."user_id"',
+      { unless: unlinkedPersonaCreditStandsSql('playlist') },
     );
     this.excludeBlockedPersonaCreator(queryBuilder, viewerId);
     const rows = await queryBuilder
@@ -418,10 +441,13 @@ export class StudioPlaylistReadsService {
         { playlistSearchPattern: searchPattern },
       )
       .andWhere(publiclyListedPlaylistSql('playlist'));
+    // SEC-02: a playlist credited to an unlinked persona is exempt from the
+    // block with its owner (`unlinkedPersonaCreditStandsSql`).
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"playlist"."user_id"',
+      { unless: unlinkedPersonaCreditStandsSql('playlist') },
     );
     this.excludeBlockedPersonaCreator(queryBuilder, viewerId);
     queryBuilder
@@ -687,22 +713,22 @@ export class StudioPlaylistReadsService {
     const creditSubprofileId = playlist.isCreditedToPersona
       ? playlist.creditSubprofileId
       : null;
-    const [
-      hasAccess,
-      isOwnerActive,
-      isBlockedWithOwner,
-      isBlockedWithPersonaCreator,
-    ] = await Promise.all([
-      this.access.hasAccess(playlist.userId),
-      this.isOwnerActive(playlist),
-      this.blockFilter.isBlockedEitherWay(viewerId, playlist.userId),
-      creditSubprofileId
-        ? this.isBlockedWithPersonaCreator(viewerId, creditSubprofileId)
-        : Promise.resolve(false),
-    ]);
+    const [hasAccess, isOwnerActive, isBlockedWithOwner, personaCreditBlock] =
+      await Promise.all([
+        this.access.hasAccess(playlist.userId),
+        this.isOwnerActive(playlist),
+        this.blockFilter.isBlockedEitherWay(viewerId, playlist.userId),
+        creditSubprofileId
+          ? this.personaCreditBlockFacts(viewerId, creditSubprofileId)
+          : Promise.resolve(NO_PERSONA_CREDIT_BLOCK),
+      ]);
     const hasOwnerGrant = hasAccess && isOwnerActive;
+    // SEC-02: the credit stands here (a broken one answered private above),
+    // so a playlist credited to an unlinked persona skips the block with its
+    // owner, who runs that persona.
     const isBlockedEitherWay =
-      isBlockedWithOwner || isBlockedWithPersonaCreator;
+      (isBlockedWithOwner && !personaCreditBlock.isPersonaUnlinked) ||
+      personaCreditBlock.isBlockedWithCreator;
     const shouldAskConnection =
       visibility === StudioPlaylistVisibility.Connections &&
       hasOwnerGrant &&
@@ -726,17 +752,31 @@ export class StudioPlaylistReadsService {
     });
   }
 
-  private async isBlockedWithPersonaCreator(
+  // The credited persona's link state, and for a LINKED persona whether the
+  // viewer and its creator are blocked either way. An unlinked persona is
+  // never withheld on a block with its creator (SEC-02,
+  // `isCreatorBlockConsulted`).
+  private async personaCreditBlockFacts(
     viewerId: string,
     subprofileId: string,
-  ): Promise<boolean> {
+  ): Promise<PersonaCreditBlockFacts> {
     const persona = await this.subprofiles.findOne({
       where: { id: subprofileId },
-      select: { id: true, userId: true },
+      select: { id: true, userId: true, linkVisibility: true },
     });
-    return persona
-      ? this.blockFilter.isBlockedEitherWay(viewerId, persona.userId)
-      : false;
+    if (!persona) {
+      return NO_PERSONA_CREDIT_BLOCK;
+    }
+    if (!isCreatorBlockConsulted(persona)) {
+      return { isPersonaUnlinked: true, isBlockedWithCreator: false };
+    }
+    return {
+      isPersonaUnlinked: false,
+      isBlockedWithCreator: await this.blockFilter.isBlockedEitherWay(
+        viewerId,
+        persona.userId,
+      ),
+    };
   }
 
   // A co-owned persona: a playlist credited to it stays out of a list when
@@ -753,7 +793,7 @@ export class StudioPlaylistReadsService {
       viewerId,
       creditPersonaCreatorIdSql('playlist'),
       {
-        unless: personaCreatorBlockExemptSql('playlist', 'blockFilterActorId'),
+        unless: `(${personaCreatorBlockExemptSql('playlist', 'blockFilterActorId')} OR ${unlinkedPersonaByIdSql('"playlist"."credit_subprofile_id"')})`,
       },
     );
   }
@@ -966,6 +1006,7 @@ export class StudioPlaylistReadsService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     return queryBuilder;
   }
@@ -1108,6 +1149,7 @@ export class StudioPlaylistReadsService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     const playableTracks = await queryBuilder.getMany();
     return new Map(playableTracks.map((track) => [track.id, track]));
@@ -1136,6 +1178,7 @@ export class StudioPlaylistReadsService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     const rows = await queryBuilder.getRawMany<{ track_id: string }>();
     return new Set(rows.map((row) => row.track_id));

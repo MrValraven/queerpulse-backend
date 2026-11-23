@@ -6,6 +6,7 @@ import { SubprofileFollower } from '../subprofiles/entities/subprofile-follower.
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import {
   Subprofile,
+  SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
 } from '../subprofiles/entities/subprofile.entity';
@@ -42,6 +43,7 @@ describe('PersonaPostAlertsService', () => {
       displayName: 'Night Shift',
       status: SubprofileStatus.Published,
       visibility: SubprofileVisibility.Open,
+      linkVisibility: SubprofileLinkVisibility.Linked,
       removedAt: null,
     } as Subprofile;
     post = {
@@ -88,6 +90,17 @@ describe('PersonaPostAlertsService', () => {
     expect(recipientIds).not.toContain(CO_OWNER_ID);
     expect(type).toBe(NotificationType.PersonaPost);
     expect(actorId).toBe(OWNER_ID);
+  });
+
+  // SEC-02: an unlinked persona's followers hear whoever they blocked or
+  // muted, so a missing alert cannot test who runs it.
+  it('sends an unlinked persona alert with no owner to filter against', async () => {
+    persona = { ...persona, linkVisibility: SubprofileLinkVisibility.Unlinked };
+
+    await service.alertFollowers(persona, post);
+
+    expect(createForRecipients).toHaveBeenCalledTimes(1);
+    expect(createForRecipients.mock.calls[0]?.[3]).toBeUndefined();
   });
 
   it('puts the persona and the post on the payload and no member id', async () => {

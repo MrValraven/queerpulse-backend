@@ -99,6 +99,8 @@ describe('CommunityMembershipService', () => {
     rulesAcceptedAt: null,
     rulesVersionAccepted: null,
     welcomeSeenAt: null,
+    wornBadgeId: null,
+    eventsAttendedCount: 0,
   };
 
   /**

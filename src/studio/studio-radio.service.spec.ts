@@ -110,6 +110,10 @@ describe('StudioRadioService', () => {
     expect(sql).toContain('"track"."duration_seconds" IS NOT NULL');
     expect(sql).toContain('content_moderation');
     expect(sql).toContain('FROM "blocks" "radio_block"');
+    // SEC-02: the creator block binds a linked persona alone.
+    expect(sql).toContain(
+      `("persona"."link_visibility" = 'unlinked' OR NOT EXISTS`,
+    );
     expect(sql).toContain('ORDER BY random()');
     expect(sql).toContain('LIMIT $3');
     expect(sql).not.toContain('"persona"."user_id" AS');

@@ -280,6 +280,18 @@ describe('StudioPurchasesService', () => {
     );
   });
 
+  // SEC-02: a member block refuses a sale for a linked persona alone, so a
+  // refusal cannot test who runs an unlinked one.
+  it('reads the member block only for a linked persona', () => {
+    expect(OFFER_FACTS_SQL).toContain(
+      '"unlinked_persona"."id" = "release"."subprofile_id"',
+    );
+    expect(OFFER_FACTS_SQL).toContain(
+      `"unlinked_persona"."link_visibility" = 'unlinked'`,
+    );
+    expect(OFFER_FACTS_SQL).toContain('"persona_member_block"');
+  });
+
   it('answers studio_purchase_item_not_found for a release the caller cannot read', async () => {
     releaseRows = [];
     trackRows = [];

@@ -3,7 +3,10 @@ import { AccessTier } from '../communities/entities/community.entity';
 import { MemberLookup } from '../common/member-ref';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumFundingService } from './forum-funding.service';
-import { ForumPostsService } from './forum-posts.service';
+import {
+  ForumPostsService,
+  POST_AUTHOR_FILTER_COLUMN_SQL,
+} from './forum-posts.service';
 import { forumThreadVisibleSql } from './forum-threads.service';
 
 const GRINNING_FACE = '\u{1F600}';
@@ -574,7 +577,7 @@ describe('ForumPostsService.searchByText visibility', () => {
     expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
       queryBuilder,
       'viewer-1',
-      '"p"."author_id"',
+      POST_AUTHOR_FILTER_COLUMN_SQL,
     );
   });
 
@@ -883,6 +886,9 @@ function buildListPosts(options: {
   role?: string;
   // ENG-494: null is a thread whose author erased their account.
   threadAuthorId?: string | null;
+  // The thread's byline flags (anonymous author masking).
+  isAnonymous?: boolean;
+  isOfficial?: boolean;
 }) {
   const makeRow = (row: Record<string, unknown>): Record<string, unknown> => ({
     id: 'post-1',
@@ -959,6 +965,8 @@ function buildListPosts(options: {
     id: 't1',
     slug: 'hello',
     acceptedPostId: options.acceptedPostId ?? null,
+    isAnonymous: options.isAnonymous ?? false,
+    isOfficial: options.isOfficial ?? false,
     ...('threadAuthorId' in options
       ? { authorId: options.threadAuthorId }
       : {}),
@@ -984,7 +992,7 @@ function buildListPosts(options: {
     status: 'active',
     role: options.role ?? 'member',
   };
-  return { service, viewer, posts, queryBuilder };
+  return { service, viewer, posts, queryBuilder, blockFilter };
 }
 
 describe('ForumPostsService.listPosts opening post', () => {
@@ -1157,7 +1165,10 @@ describe('ForumPostsService.listPosts reply tree', () => {
 // `forum_thread.author_id` is `ON DELETE SET NULL`, so a thread outlives its
 // author. A reply there has no thread author to notify or to count as already
 // notified.
-function buildReply(threadAuthorId: string | null) {
+function buildReply(
+  threadAuthorId: string | null,
+  threadFlags: { isAnonymous?: boolean; isOfficial?: boolean } = {},
+) {
   const manager = {
     create: jest
       .fn()
@@ -1191,6 +1202,8 @@ function buildReply(threadAuthorId: string | null) {
       isLocked: false,
       closesAt: null,
       acceptedPostId: null,
+      isAnonymous: threadFlags.isAnonymous ?? false,
+      isOfficial: threadFlags.isOfficial ?? false,
     }),
     assertCanReplyInThread: jest.fn().mockResolvedValue(undefined),
     markActivity: jest.fn().mockResolvedValue(undefined),
@@ -1313,5 +1326,144 @@ describe('ForumPostsService.reply follower fan-out holds to the thread audience'
 
     expect(mentions.forumThreadAudience).not.toHaveBeenCalled();
     expect(mentions.notifyThreadReply).not.toHaveBeenCalled();
+  });
+});
+
+// SEC-05: a reply the author of an anonymous thread writes inside it wears
+// the masked byline, so none of its notifications may carry the actor.
+describe('ForumPostsService.reply notifications on an anonymous thread', () => {
+  interface NotifyMocks {
+    notify: jest.Mock;
+    notifyThreadReply: jest.Mock;
+  }
+
+  // Every payload the reply handed to the notification paths.
+  function payloadsOf(mentions: NotifyMocks): Record<string, unknown>[] {
+    const notifyPayloads = (
+      mentions.notify.mock.calls as Array<[string, string, object]>
+    ).map((call) => call[2] as Record<string, unknown>);
+    const threadReplyPayloads = (
+      mentions.notifyThreadReply.mock.calls as Array<[string, string, object]>
+    ).map((call) => call[2] as Record<string, unknown>);
+    return [...notifyPayloads, ...threadReplyPayloads];
+  }
+
+  it("leaves the actor off every notification of the author's own reply", async () => {
+    const { service, mentions, replier } = buildReply('replier-1', {
+      isAnonymous: true,
+    });
+
+    await service.reply('hello', replier, 'thanks, that helps @ava');
+
+    const payloads = payloadsOf(mentions);
+    expect(payloads.length).toBeGreaterThan(0);
+    for (const payload of payloads) {
+      expect(payload).not.toHaveProperty('actorId');
+      // The flag that keeps the hidden author's blocks and mutes from
+      // deciding who hears about the reply.
+      expect(payload).toEqual(
+        expect.objectContaining({ source: 'forum', isActorMasked: true }),
+      );
+    }
+    // The real replier still rides along for the block and mute gate.
+    expect(mentions.notify).toHaveBeenCalledWith(
+      'thanks, that helps @ava',
+      'replier-1',
+      expect.any(Object),
+    );
+  });
+
+  it('still names another member replying in the anonymous thread', async () => {
+    const { service, mentions, replier } = buildReply('author-1', {
+      isAnonymous: true,
+    });
+
+    await service.reply('hello', replier, 'here is what worked for me');
+
+    for (const payload of payloadsOf(mentions)) {
+      expect(payload).toEqual(
+        expect.objectContaining({ actorId: 'replier-1' }),
+      );
+    }
+  });
+
+  it('still names the author of an official thread on their own reply', async () => {
+    const { service, mentions, replier } = buildReply('replier-1', {
+      isAnonymous: true,
+      isOfficial: true,
+    });
+
+    await service.reply('hello', replier, 'an update');
+
+    for (const payload of payloadsOf(mentions)) {
+      expect(payload).toEqual(
+        expect.objectContaining({ actorId: 'replier-1' }),
+      );
+    }
+  });
+});
+
+// Coordinator ruling (the SEC-02 class): a viewer's block or mute of the
+// hidden author of an anonymous thread must not change what they see.
+describe('ForumPostsService.listPosts on an anonymous thread', () => {
+  it('keeps the OP available to a viewer who muted its hidden author', async () => {
+    const { service, viewer, blockFilter } = buildListPosts({
+      hiddenAuthorIds: ['author-1'],
+      threadAuthorId: 'author-1',
+      isAnonymous: true,
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(true);
+    expect(page.data[0]?.id).toBe('op-1');
+    expect(blockFilter.hiddenUserIds).not.toHaveBeenCalled();
+    // The reply streams compare against the masked author column.
+    expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+      expect.anything(),
+      'viewer-1',
+      POST_AUTHOR_FILTER_COLUMN_SQL,
+    );
+  });
+
+  it('still hides the OP of a named thread whose author the viewer muted', async () => {
+    const { service, viewer } = buildListPosts({
+      hiddenAuthorIds: ['author-1'],
+      threadAuthorId: 'author-1',
+      isAnonymous: false,
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(false);
+  });
+
+  it('keeps the OP available to a moderator who muted its hidden author', async () => {
+    const { service, viewer, blockFilter } = buildListPosts({
+      hiddenAuthorIds: ['author-1'],
+      threadAuthorId: 'author-1',
+      isAnonymous: true,
+      role: 'moderator',
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    // The same anonymous rule as the reply streams, for every viewer.
+    expect(page.opAvailable).toBe(true);
+    expect(blockFilter.hiddenUserIds).not.toHaveBeenCalled();
+  });
+});
+
+describe('the masked author filter column', () => {
+  it('passes only the hidden author of an anonymous, non-official thread', () => {
+    expect(POST_AUTHOR_FILTER_COLUMN_SQL).toContain(
+      '"masked_thread"."is_anonymous"',
+    );
+    expect(POST_AUTHOR_FILTER_COLUMN_SQL).toContain(
+      'NOT "masked_thread"."is_official"',
+    );
+    expect(POST_AUTHOR_FILTER_COLUMN_SQL).toContain(
+      '"masked_thread"."author_id" = "p"."author_id"',
+    );
   });
 });

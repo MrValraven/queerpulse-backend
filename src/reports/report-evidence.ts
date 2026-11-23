@@ -332,6 +332,28 @@ export interface MailboxIdentitySnapshotEvidence {
   reporterIdentityKind?: 'profile' | 'subprofile' | 'company';
 }
 
+/** The discriminant of a reported community gift's snapshot entry. */
+export const COMMUNITY_GIFT_SNAPSHOT_TYPE = 'community-gift-snapshot';
+
+/**
+ * A reported community gift (`ReportSubjectType.CommunityGift`) as it stood
+ * when its recipient filed the report. Captured because the sender or the
+ * community staff can remove the gift between the filing and the review, and
+ * the moderator still needs the note the recipient complained about.
+ */
+export interface CommunityGiftSnapshotEvidence {
+  type: typeof COMMUNITY_GIFT_SNAPSHOT_TYPE;
+  giftId: string;
+  communityId: string;
+  giftKey: string;
+  /** The sender's short note, or null when the gift carried none. */
+  note: string | null;
+  /** Null once the sender has erased their account (`ON DELETE SET NULL`). */
+  senderId: string | null;
+  sentAt: string;
+  snapshotAt: string;
+}
+
 export type ReportEvidenceEntry =
   | UrlEvidence
   | ScreenshotEvidence
@@ -342,7 +364,8 @@ export type ReportEvidenceEntry =
   | GroupSnapshotEvidence
   | MailboxIdentitySnapshotEvidence
   | QuizshowAnswerSnapshotEvidence
-  | QuizshowGameSnapshotEvidence;
+  | QuizshowGameSnapshotEvidence
+  | CommunityGiftSnapshotEvidence;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

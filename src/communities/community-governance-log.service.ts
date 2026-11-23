@@ -75,6 +75,32 @@ export interface LogGovernanceActionInput {
 }
 
 /**
+ * Create and save one `community_governance_log` row through the given
+ * repository. `CommunityGovernanceLogService.log()` calls this, and so does
+ * the gift takedown hook, which writes inside the moderation transaction with
+ * `manager.getRepository(CommunityGovernanceLog)`.
+ */
+export async function writeGovernanceLogEntry(
+  repository: Repository<CommunityGovernanceLog>,
+  input: LogGovernanceActionInput,
+): Promise<void> {
+  // `.save(repository.create(...))` over `.insert(...)`: `insert`'s
+  // `QueryDeepPartialEntity` mapped type rejects a plain `Record<string,
+  // unknown>` for lacking an index signature it can recurse into (same
+  // class of issue noted on `Report.evidence`). `create`+`save` takes the
+  // concrete entity shape instead and has no such trouble.
+  await repository.save(
+    repository.create({
+      communityId: input.communityId,
+      actorUserId: input.actorUserId,
+      action: input.action,
+      targetUserId: input.targetUserId ?? null,
+      metadata: input.metadata ?? null,
+    }),
+  );
+}
+
+/**
  * The single write path into `community_governance_log`
  * (`src/communities/entities/community-governance-log.entity.ts`). Nothing
  * else should `INSERT` into that table directly — every governance action
@@ -86,6 +112,9 @@ export interface LogGovernanceActionInput {
  * unfreeze) and `CommunityOwnerOrphanService` (automatic owner→mod
  * promotion on owner erasure) call this after their own action has already
  * committed.
+ *
+ * The gift takedown hook writes through the same `writeGovernanceLogEntry`
+ * function, inside the moderation transaction.
  *
  * `entriesForCommunity()` is the matching read path — the table was
  * write-only until BE-COM-15, so "who removed me?"/"who unfroze this?" could
@@ -118,22 +147,11 @@ export class CommunityGovernanceLogService {
     input: LogGovernanceActionInput,
     manager?: EntityManager,
   ): Promise<void> {
-    const repository = manager
-      ? manager.getRepository(CommunityGovernanceLog)
-      : this.governanceLogs;
-    // `.save(repository.create(...))` over `.insert(...)`: `insert`'s
-    // `QueryDeepPartialEntity` mapped type rejects a plain `Record<string,
-    // unknown>` for lacking an index signature it can recurse into (same
-    // class of issue noted on `Report.evidence`). `create`+`save` takes the
-    // concrete entity shape instead and has no such trouble.
-    await repository.save(
-      repository.create({
-        communityId: input.communityId,
-        actorUserId: input.actorUserId,
-        action: input.action,
-        targetUserId: input.targetUserId ?? null,
-        metadata: input.metadata ?? null,
-      }),
+    await writeGovernanceLogEntry(
+      manager
+        ? manager.getRepository(CommunityGovernanceLog)
+        : this.governanceLogs,
+      input,
     );
   }
 

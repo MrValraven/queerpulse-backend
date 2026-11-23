@@ -36,6 +36,7 @@ import { EmailCodeController } from './email-code/email-code.controller';
 import { EmailCodeMailer } from './email-code/email-code.mailer';
 import { EmailCodeService } from './email-code/email-code.service';
 import {
+  EmailCodeJoinRequestDailyAddressThrottlerGuard,
   EmailCodeRequestAddressThrottlerGuard,
   EmailCodeRequestIpThrottlerGuard,
   EmailCodeVerifyIpThrottlerGuard,
@@ -154,6 +155,7 @@ import { EmailSignInChallenge } from './email-code/email-sign-in-challenge.entit
     // `/auth/email-code` routes (`EmailCodeController`).
     EmailCodeRequestIpThrottlerGuard,
     EmailCodeRequestAddressThrottlerGuard,
+    EmailCodeJoinRequestDailyAddressThrottlerGuard,
     EmailCodeVerifyIpThrottlerGuard,
     // A `useValue` provider, deliberately, rather than the usual
     // `useClass`/bare-class shorthand: this MUST resolve to the same

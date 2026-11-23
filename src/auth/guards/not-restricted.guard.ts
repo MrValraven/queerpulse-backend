@@ -40,6 +40,9 @@ export const ACCOUNT_RESTRICTED_CODE = 'ACCOUNT_RESTRICTED';
  *   open: taking something down is the direction a restriction wants.
  * - Votes, reactions and ratings stay open, following the forum precedent
  *   where thread and reply creation are bound and `POST posts/:id/vote` is not.
+ *   The exception is a DM or group message reaction (SEC-27): it goes out live
+ *   to every participant like a message, so adding one is bound, together
+ *   with editing a message. Removing one's own reaction stays open.
  */
 @Injectable()
 export class NotRestrictedGuard implements CanActivate {

@@ -1,15 +1,20 @@
 import {
+  BadRequestException,
   CallHandler,
   ExecutionContext,
   ForbiddenException,
 } from '@nestjs/common';
-import { of } from 'rxjs';
+import { firstValueFrom, of } from 'rxjs';
+import { DataSource } from 'typeorm';
 import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
 import { assertNoForeignUploadIntroduced } from './assert-no-foreign-upload';
-import { StorageKeyOwnershipInterceptor } from './storage-key-ownership.interceptor';
+import {
+  MAX_PUBLIC_MEDIA_REFERENCES_PER_BODY,
+  StorageKeyOwnershipInterceptor,
+} from './storage-key-ownership.interceptor';
 
 const OWN_USER_ID = '11111111-2222-3333-4444-555555555555';
 const OTHER_USER_ID = '99999999-8888-7777-6666-555555555555';
@@ -626,6 +631,282 @@ describe('StorageKeyOwnershipInterceptor', () => {
           nextHandler(),
         ),
       ).toThrow(ForbiddenException);
+    });
+  });
+
+  // Open item A: `POST /uploads/confirm` may carry VJ keys (its handler
+  // checks VJ access) and Studio audio keys (its handler checks the registry
+  // row), while every other key keeps the strict rule.
+  describe('upload confirm', () => {
+    const confirmRoute = { controller: 'UploadsController', method: 'confirm' };
+    const confirmBody = (key: string) => ({ key });
+
+    it.each([
+      `vj-clips/${FILE_SEGMENT}/${FILE_SEGMENT}.mp4`,
+      `studio-audio/${FILE_SEGMENT}/${FILE_SEGMENT}.mp3`,
+      OWN_KEY,
+    ])('passes %s through to the handler', (key) => {
+      const body = confirmBody(key);
+      interceptor.intercept(
+        httpContext('POST', body, { userId: OWN_USER_ID }, confirmRoute),
+        nextHandler(),
+      );
+      expect(body.key).toBe(key);
+    });
+
+    it.each([
+      ['a foreign member key', OTHER_USER_KEY],
+      ['a persona-scoped key', `persona/${FILE_SEGMENT}/${FILE_SEGMENT}.jpg`],
+    ])('still refuses %s with UPLOAD_NOT_YOURS', (_label, key) => {
+      let refusal: unknown;
+      try {
+        interceptor.intercept(
+          httpContext(
+            'POST',
+            confirmBody(key),
+            { userId: OWN_USER_ID },
+            confirmRoute,
+          ),
+          nextHandler(),
+        );
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(ForbiddenException);
+      expect((refusal as ForbiddenException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'UPLOAD_NOT_YOURS' }),
+      );
+    });
+  });
+
+  // SEC-01 / SEC-04: a body carrying a public media reference (an edit form
+  // seeded from a public read) has it looked up and rewritten to the stored
+  // key, which then meets the strict ownership rule as a bare key.
+  describe('public media references', () => {
+    const REVIEW_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+    const REVIEW_REFERENCE_URL = `https://api.test/files/listing-reviews/${REVIEW_ID}/photo`;
+    const OWN_LISTING_KEY = `listing-photos/${OWN_USER_ID}/${FILE_SEGMENT}.jpg`;
+    const OTHER_LISTING_KEY = `listing-photos/${OTHER_USER_ID}/${FILE_SEGMENT}.jpg`;
+    let query: jest.Mock;
+
+    beforeEach(() => {
+      setImageUrlBase('https://api.test');
+      query = jest.fn();
+      interceptor = new StorageKeyOwnershipInterceptor({
+        query,
+      } as unknown as DataSource);
+    });
+
+    afterEach(() => {
+      resetImageUrlBaseForTesting();
+    });
+
+    it("rewrites the reviewer's own photo reference to its key", async () => {
+      query.mockResolvedValue([{ id: REVIEW_ID, photo: OWN_LISTING_KEY }]);
+      const body = { stars: 5, text: 'Lovely', photo: REVIEW_REFERENCE_URL };
+      const ctx = httpContext('PATCH', body, { userId: OWN_USER_ID });
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).resolves.toBe(RESULT);
+      expect(body.photo).toBe(OWN_LISTING_KEY);
+      // One batched read for the table, keyed `id = ANY($1)`.
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('= ANY($1::uuid[])'),
+        [[REVIEW_ID]],
+      );
+    });
+
+    it("refuses a reference to somebody else's photo on a single-editor route", async () => {
+      query.mockResolvedValue([{ id: REVIEW_ID, photo: OTHER_LISTING_KEY }]);
+      const ctx = httpContext(
+        'PATCH',
+        { photo: REVIEW_REFERENCE_URL },
+        { userId: OWN_USER_ID },
+      );
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('refuses a reference that names nothing', async () => {
+      query.mockResolvedValue([]);
+      const ctx = httpContext(
+        'PATCH',
+        { photo: REVIEW_REFERENCE_URL },
+        { userId: OWN_USER_ID },
+      );
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('refuses a signed-out caller before any lookup', () => {
+      const ctx = httpContext(
+        'PATCH',
+        { photo: REVIEW_REFERENCE_URL },
+        undefined,
+      );
+      expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
+        ForbiddenException,
+      );
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('refuses a body past the reference cap with its code', () => {
+      const photos = Array.from(
+        { length: MAX_PUBLIC_MEDIA_REFERENCES_PER_BODY + 1 },
+        (_unused, index) =>
+          `https://api.test/files/listings/${REVIEW_ID}/photos/${index}`,
+      );
+      const ctx = httpContext('PATCH', { photos }, { userId: OWN_USER_ID });
+      let refusal: unknown;
+      try {
+        interceptor.intercept(ctx, nextHandler());
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(BadRequestException);
+      expect((refusal as BadRequestException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'UPLOAD_TOO_MANY_REFERENCES' }),
+      );
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('resolves every reference of one table in a single query', async () => {
+      const listingId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+      query.mockResolvedValue([
+        {
+          id: listingId,
+          photoGallery: [{ image: OWN_LISTING_KEY }, { image: OWN_KEY }],
+          coverPhoto: null,
+        },
+      ]);
+      const body = {
+        photoGallery: [
+          { image: `https://api.test/files/listings/${listingId}/photos/0` },
+          { image: `https://api.test/files/listings/${listingId}/photos/1` },
+        ],
+        note: 'listings/not-a-reference',
+      };
+      const ctx = httpContext('PATCH', body, { userId: OWN_USER_ID });
+      await firstValueFrom(interceptor.intercept(ctx, nextHandler()));
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(body.photoGallery.map((photo) => photo.image)).toEqual([
+        OWN_LISTING_KEY,
+        OWN_KEY,
+      ]);
+      expect(body.note).toBe('listings/not-a-reference');
+    });
+
+    it('lets a co-manager reposition a photo the owner uploaded', async () => {
+      const listingId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+      query.mockResolvedValue([
+        {
+          id: listingId,
+          photoGallery: [{ image: OTHER_LISTING_KEY }],
+          coverPhoto: null,
+        },
+      ]);
+      const body = {
+        photos: [
+          {
+            image: `https://api.test/files/listings/${listingId}/photos/0?v=abc123`,
+            framing: { focusX: 0.5, focusY: 0.5, zoom: 1 },
+          },
+        ],
+      };
+      const ctx = httpContext(
+        'PATCH',
+        body,
+        { userId: OWN_USER_ID },
+        { controller: 'ListingsController', method: 'updatePhotoFraming' },
+      );
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).resolves.toBe(RESULT);
+      // The service then matches the bare key against the stored gallery.
+      expect(body.photos[0]?.image).toBe(OTHER_LISTING_KEY);
+    });
+
+    it("refuses a conversation draft that is somebody else's forum reference", async () => {
+      const postId = 'cccccccc-3333-4333-8333-cccccccccccc';
+      const authorForumKey = `work/${OTHER_USER_ID}/${FILE_SEGMENT}.jpg`;
+      query.mockResolvedValue([
+        { id: postId, image: authorForumKey, photoKeys: [] },
+      ]);
+      const ctx = httpContext(
+        'PATCH',
+        { draft: `https://api.test/files/forum-posts/${postId}/photos/0` },
+        { userId: OWN_USER_ID },
+        { controller: 'ConversationsController', method: 'updateDraft' },
+      );
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('keeps the strict rule for a forum reference on a framing route', async () => {
+      const postId = 'cccccccc-3333-4333-8333-cccccccccccc';
+      query.mockResolvedValue([
+        {
+          id: postId,
+          image: `work/${OTHER_USER_ID}/${FILE_SEGMENT}.jpg`,
+          photoKeys: [],
+        },
+      ]);
+      const ctx = httpContext(
+        'PATCH',
+        { photos: [{ image: `forum-posts/${postId}/photos/0` }] },
+        { userId: OWN_USER_ID },
+        { controller: 'ListingsController', method: 'updatePhotoFraming' },
+      );
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('keeps the strict rule for a listing reference on another shared route', async () => {
+      const listingId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+      query.mockResolvedValue([
+        {
+          id: listingId,
+          photoGallery: [{ image: OTHER_LISTING_KEY }],
+          coverPhoto: null,
+        },
+      ]);
+      const ctx = httpContext(
+        'PATCH',
+        { note: `https://api.test/files/listings/${listingId}/photos/0` },
+        { userId: OWN_USER_ID },
+        { controller: 'ListingsController', method: 'update' },
+      );
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('leaves a free-text field that merely contains a reference untouched', async () => {
+      const text = `see https://api.test/files/forum-posts/${'cccccccc-3333-4333-8333-cccccccccccc'}/photos/0 please`;
+      const body = { body: text };
+      const ctx = httpContext('PATCH', body, { userId: OWN_USER_ID });
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).resolves.toBe(RESULT);
+      expect(body.body).toBe(text);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('runs no query for a body with no reference', async () => {
+      const ctx = httpContext(
+        'PATCH',
+        { avatarUrl: OWN_KEY },
+        { userId: OWN_USER_ID },
+      );
+      await expect(
+        firstValueFrom(interceptor.intercept(ctx, nextHandler())),
+      ).resolves.toBe(RESULT);
+      expect(query).not.toHaveBeenCalled();
     });
   });
 });

@@ -71,8 +71,8 @@ export class ModerationController {
   @ApiOkResponse({ description: "One report's immutable audit trail." })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
-  audit(@Query() query: AuditLogQuery) {
-    return this.moderationService.auditTrail(query.reportId);
+  audit(@CurrentUser() user: CurrentUserData, @Query() query: AuditLogQuery) {
+    return this.moderationService.auditTrail(query.reportId, user.userId);
   }
 
   @Get('reports/:id')
@@ -81,8 +81,11 @@ export class ModerationController {
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   @ApiNotFoundResponse({ description: 'The report does not exist.' })
-  getReport(@Param('id', ParseUUIDPipe) id: string) {
-    return this.moderationService.getById(id);
+  getReport(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.moderationService.getById(id, user.userId);
   }
 
   // Global, cross-report moderation audit feed for the admin governance
@@ -96,8 +99,12 @@ export class ModerationController {
   @ApiOkResponse({ description: 'The platform-wide moderation audit feed.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
-  auditFeed(@Query() query: AuditFeedQuery) {
-    return this.moderationService.auditFeed(query);
+  auditFeed(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: AuditFeedQuery,
+  ) {
+    // SEC-31: rows tied to a report about the viewer stay out of their feed.
+    return this.moderationService.auditFeed(query, user.userId);
   }
 
   // Download the filtered audit feed as CSV (P3-8) for the governance "Audit"
@@ -115,8 +122,11 @@ export class ModerationController {
   })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
-  auditFeedCsv(@Query() query: AuditFeedQuery) {
-    return this.moderationService.auditFeedCsv(query);
+  auditFeedCsv(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: AuditFeedQuery,
+  ) {
+    return this.moderationService.auditFeedCsv(query, user.userId);
   }
 
   // PATCH (not POST): this updates existing report resources. API CONTRACT
@@ -310,8 +320,12 @@ export class ModerationController {
   })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
-  listAppeals(@Query() query: ListAppealsQuery) {
-    return this.moderationService.listAppeals(query);
+  listAppeals(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListAppealsQuery,
+  ) {
+    // SEC-31: the viewer's own appeals stay out of their queue.
+    return this.moderationService.listAppeals(query, user.userId);
   }
 
   @Patch('appeals/:id')

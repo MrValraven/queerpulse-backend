@@ -82,6 +82,8 @@ describe('community-staff-access', () => {
     rulesAcceptedAt: null,
     rulesVersionAccepted: null,
     welcomeSeenAt: null,
+    wornBadgeId: null,
+    eventsAttendedCount: 0,
   };
 
   beforeEach(() => {
@@ -136,6 +138,42 @@ describe('community-staff-access', () => {
           'user-1',
         ),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // SEC-41: a 403 here used to confirm that a guessed private slug exists.
+    it('answers a non-member of a private community with the unknown-slug 404', async () => {
+      communities.findOne.mockResolvedValue({
+        ...LIVE_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const refusal = resolveMemberCommunity(
+        communities as never,
+        members as never,
+        'queer-devs',
+        'stranger-1',
+      );
+
+      await expect(refusal).rejects.toBeInstanceOf(NotFoundException);
+      await expect(refusal).rejects.toThrow('Community not found');
+    });
+
+    it('still admits a roster member of a private community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...LIVE_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(MEMBERSHIP);
+
+      const access = await resolveMemberCommunity(
+        communities as never,
+        members as never,
+        'queer-devs',
+        'user-1',
+      );
+
+      expect(access.role).toBe(RosterRole.Member);
     });
   });
 
@@ -233,6 +271,55 @@ describe('community-staff-access', () => {
         where: { slug: 'queer-devs', archivedAt: IsNull() },
       });
       expect(members.findOne).not.toHaveBeenCalled();
+    });
+
+    const resolveStaffAs = (userId: string) =>
+      resolveStaffCommunity(
+        communities as never,
+        members as never,
+        'queer-devs',
+        userId,
+      );
+
+    // SEC-41: the same answer an unknown slug gets, so probing a guessed slug
+    // learns nothing about a private community.
+    it('answers a non-member of a private community with the unknown-slug 404', async () => {
+      communities.findOne.mockResolvedValue({
+        ...LIVE_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const refusal = resolveStaffAs('stranger-1');
+
+      await expect(refusal).rejects.toBeInstanceOf(NotFoundException);
+      await expect(refusal).rejects.toThrow('Community not found');
+    });
+
+    it('refuses a non-member of a public community with 403', async () => {
+      communities.findOne.mockResolvedValue(LIVE_COMMUNITY);
+      members.findOne.mockResolvedValue(null);
+
+      const refusal = resolveStaffAs('stranger-1');
+
+      await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(refusal).rejects.toThrow('Only roster members can do that');
+    });
+
+    // A member already knows the community exists, so they keep the 403.
+    it('refuses a plain member of a private community with 403', async () => {
+      communities.findOne.mockResolvedValue({
+        ...LIVE_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(MEMBERSHIP);
+
+      const refusal = resolveStaffAs('user-1');
+
+      await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(refusal).rejects.toThrow(
+        'Only the community owner, a co-owner or a moderator can do that',
+      );
     });
   });
 

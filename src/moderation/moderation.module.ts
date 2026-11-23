@@ -145,9 +145,12 @@ import { StudioTakedownReportService } from './studio-takedown-report.service';
   // "QueerPulse Official" byline toggle) land in the same global audit feed as
   // every other moderator action instead of mutating state with no trail
   // (BE-COM-19). No cycle: `ForumModule` is not in this module's import graph.
-  // `ModerationService`/`AccountEnforcementService`/
-  // `AdminMemberModerationService` stay unexported — nothing outside consumes
+  // `ModerationService` is exported for `PlatformLogModule` (SEC-31): the
+  // platform log reads `mod_audit_logs` too and needs the audit feed's viewer
+  // rule (`auditFeedViewer`). No cycle: nothing in this module's import graph
+  // reaches `PlatformLogModule`. `AccountEnforcementService`/
+  // `AdminMemberModerationService` stay unexported; nothing outside consumes
   // them.
-  exports: [ModAuditService, StudioTakedownReportService],
+  exports: [ModAuditService, ModerationService, StudioTakedownReportService],
 })
 export class ModerationModule {}

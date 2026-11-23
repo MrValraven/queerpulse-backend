@@ -19,7 +19,7 @@ import {
 } from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
 import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -27,6 +27,10 @@ import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { HiddenFromService } from '../social/hidden-from.service';
+import {
+  communityAvatarPhotoReference,
+  communityCoverPhotoReference,
+} from '../storage/public-media-reference';
 import { StorageService } from '../storage/storage.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
@@ -57,8 +61,10 @@ import { normalizeOpenTo } from './open-to';
 import { closenessFor, type RelatedCloseness } from './related-closeness';
 import { hasUnlistedWork, reconcileDisciplineProfession } from './professions';
 import {
+  HOOD_VISIBLE_CLAUSE,
   applyDirectoryFilters,
   countDirectoryFacets,
+  directoryTierClause,
   memberSearchIds,
   memberSearchRank,
   memberSearchTextMatch,
@@ -711,9 +717,10 @@ export class ProfilesService {
    * for them", one of "you know them", and one of "visible to this viewer"
    * for both the count and the roster.
    *
-   * Returns `null` rather than a number in the two cases documented on
+   * Returns `null` in the cases documented on
    * {@link MutualVoucherCount}: the viewer is the member, or the member has
-   * hidden their voucher roster. The roster gate is the important one. A
+   * hidden their voucher roster (`vouchersVisible` off, or `privateNetwork`
+   * on). The roster gate is the important one. A
    * viewer-relative count is a partial roster to anyone who knows their own
    * connection list, which every viewer does, so `vouchersVisible: false` has
    * to suppress it. The plain `vouchCount` beside it is unaffected, matching
@@ -722,7 +729,7 @@ export class ProfilesService {
    *
    * Frontend dependency: `profileToMember` (queerpulse
    * members.adapters.ts) reads a non-owner's null here as "roster hidden",
-   * since `vouchersVisible` is owner-only; keep null reserved for these two
+   * since `vouchersVisible` is owner-only; keep null reserved for these
    * cases (pinned in members.adapters.test.ts).
    *
    * The viewer can never be counted in their own answer: nobody is an accepted
@@ -736,7 +743,10 @@ export class ProfilesService {
     if (profile.userId === viewerUserId) {
       return null;
     }
-    if (!profile.vouchersVisible) {
+    // "Keep my trust network private" (`privateNetwork`, SEC-17) answers like
+    // a hidden roster: the count would name who vouched one connection at a
+    // time, the exact thing the member asked to keep to themself.
+    if (!profile.vouchersVisible || profile.privateNetwork) {
       return null;
     }
     const voucherIds = await this.vouchService.getNamedVoucherIds(
@@ -866,8 +876,17 @@ export class ProfilesService {
         countLabel: `${memberCount} members`,
         role: r.role,
         tags: r.tags ?? [],
-        coverImageUrl: toImageUrl(r.coverImageUrl),
-        avatarImageUrl: toImageUrl(r.avatarImageUrl),
+        // An uploaded cover or avatar is served by its opaque reference
+        // (keyed by the community's row id, already selected as
+        // `communityId`), so the URL never carries the uploader's user id.
+        coverImageUrl: toImageUrlByReference(
+          r.coverImageUrl,
+          communityCoverPhotoReference(r.communityId),
+        ),
+        avatarImageUrl: toImageUrlByReference(
+          r.avatarImageUrl,
+          communityAvatarPhotoReference(r.communityId),
+        ),
         activeThisWeek: Number(r.activeThisWeek ?? 0),
       };
     });
@@ -883,7 +902,16 @@ export class ProfilesService {
     viewerUserId: string,
   ): Promise<RelatedCard[]> {
     const hasTags = profile.tags.length > 0;
-    const hasLocation = !!profile.location;
+    // SEC-08: the owner's location joins the match only when this viewer can
+    // already read it on the profile header (the same `gateLocation` the full
+    // profile renders it with). A related card matched on a hidden location
+    // would tell the viewer where the owner lives the moment it showed a
+    // neighbourhood and no shared tag.
+    const ownerLocation = gateLocation(
+      profile,
+      profile.userId === viewerUserId,
+    );
+    const hasLocation = !!ownerLocation;
     if (!hasTags && !hasLocation) {
       return [];
     }
@@ -898,6 +926,13 @@ export class ProfilesService {
     // any other: someone who blocked the viewer, hid from them, or turned on
     // "Hide me for 24 hours" must not appear here either.
     this.applyMemberVisibilityGates(qb, viewerUserId);
+    // PRD-504: the directory's visibility tier. A related card names a
+    // member to whoever opens the owner's page, so a `private` member never
+    // shows here and a `network` member only to their direct connections.
+    qb.andWhere(directoryTierClause(), {
+      directoryViewerId: viewerUserId,
+      directoryAcceptedStatus: ConnectionStatus.Accepted,
+    });
     const conds: string[] = [];
     const params: Record<string, unknown> = {};
     if (hasTags) {
@@ -905,8 +940,11 @@ export class ProfilesService {
       params.tags = profile.tags;
     }
     if (hasLocation) {
-      conds.push('p.location = :loc');
-      params.loc = profile.location;
+      // The candidate side carries the directory's own location gate
+      // (`HOOD_VISIBLE_CLAUSE`: `open` AND `hoodVisible`), so a member who hid
+      // their neighbourhood is never sorted next to the owner by it either.
+      conds.push(`(${HOOD_VISIBLE_CLAUSE} AND p.location = :loc)`);
+      params.loc = ownerLocation;
     }
     qb.andWhere(`(${conds.join(' OR ')})`, params)
       // `firstName` alone ties constantly across a member base, and a tie under
@@ -987,6 +1025,8 @@ export class ProfilesService {
       const closeness = closenessFor({
         ownerVouchersVisible: owner.vouchersVisible,
         theirVouchersVisible: row.vouchersVisible,
+        ownerNetworkPrivate: owner.privateNetwork,
+        theirNetworkPrivate: row.privateNetwork,
         theyVouchedForOwner: directions.vouchedForYou.has(row.userId),
         ownerVouchedForThem: directions.youVouched.has(row.userId),
         sharedCommunity: communities.get(row.userId) ?? null,
@@ -1877,6 +1917,13 @@ export class ProfilesService {
           // query's `Profile` join is aliased `profile`, not the directory's
           // `p`.
           this.applyMemberVisibilityGates(inner, userId, 'profile');
+          // PRD-504: the directory's visibility tier, with the insights owner
+          // as the viewer. A match names a member, so a `private` member never
+          // surfaces and a `network` member only to their direct connections.
+          inner.andWhere(directoryTierClause('profile'), {
+            directoryViewerId: userId,
+            directoryAcceptedStatus: ConnectionStatus.Accepted,
+          });
           return inner;
         }, 'ranked')
         // Read a wider pool than we render: the fourth gate (moderator
@@ -2075,6 +2122,13 @@ export class ProfilesService {
     // total and facet counts, so a post-fetch `dropTakenDown` would under-fill
     // pages, skip the row past each dropped one and leave the counts wrong.
     this.excludeTakenDownMembers(qb);
+    // PRD-504: the owner's visibility tier. A `private` member leaves the
+    // directory and search for everyone but themself, and a `network` member
+    // shows only to their direct accepted connections.
+    qb.andWhere(directoryTierClause(), {
+      directoryViewerId: viewerUserId,
+      directoryAcceptedStatus: ConnectionStatus.Accepted,
+    });
     applyDirectoryFilters(qb, q, skip);
     return qb;
   }

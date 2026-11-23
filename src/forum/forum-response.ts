@@ -1,6 +1,7 @@
 import { toPlainTextExcerpt } from '../communities/community-plain-text';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
+import { forumPostPhotoReference } from '../storage/public-media-reference';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumPostPhoto } from './entities/forum-post-photo.entity';
 import { ForumThread } from './entities/forum-thread.entity';
@@ -42,12 +43,27 @@ export interface AuthorSummary {
   // Absent/`undefined` everywhere else (post/reply authors, edit-history
   // editors), so it's never mistaken for a general-purpose author field.
   official?: boolean;
+  // The author's account is deactivated, suspended or in its deletion grace
+  // period (`MemberRef.isInactiveMember`). `handle` stays empty so no profile
+  // link is built, and the client labels the byline "[deactivated member]"
+  // from this flag. Absent on every active author.
+  isInactiveMember?: true;
 }
 
 const UNKNOWN_AUTHOR: AuthorSummary = {
   handle: '',
   displayName: 'Member',
   avatarUrl: null,
+};
+
+// An author whose account is inactive (see `AuthorSummary.isInactiveMember`).
+// `displayName` is a readable English fallback for a client that predates the
+// flag, so the byline is never blank.
+const INACTIVE_AUTHOR: AuthorSummary = {
+  handle: '',
+  displayName: 'Deactivated member',
+  avatarUrl: null,
+  isInactiveMember: true,
 };
 
 // The displayed author for a thread with `isOfficial: true` — swapped in by
@@ -89,6 +105,10 @@ const ANONYMOUS_AUTHOR: AuthorSummary = {
 export interface ThreadByline {
   isOfficial: boolean;
   isAnonymous: boolean;
+  // SEC-05: the thread's author, so a reply they write inside their own
+  // anonymous thread wears the same masked byline as the opening post. NULL
+  // once the author erased their account (ENG-494).
+  authorId: string | null;
 }
 
 /**
@@ -140,6 +160,9 @@ export function toAuthorSummary(
   ref: MemberRef | null | undefined,
 ): AuthorSummary {
   if (!ref) return UNKNOWN_AUTHOR;
+  // `MemberLookup` hands back a placeholder with empty names for an inactive
+  // account; carry the flag through so the byline is labelled.
+  if (ref.isInactiveMember) return { ...INACTIVE_AUTHOR };
   return {
     handle: ref.slug,
     displayName: `${ref.firstName} ${ref.lastName}`.trim(),
@@ -171,6 +194,37 @@ export interface ForumPostPhotoView {
 }
 
 /**
+ * Who a post's photos are resolved for. Structurally both `ForumThreadViewer`
+ * and `ForumPostViewer`.
+ */
+export interface PhotoViewer {
+  userId: string;
+  isModerator: boolean;
+}
+
+/**
+ * SEC-01: a photo's URL for a reader who is neither the post's author nor a
+ * moderator. A member storage key names its uploader
+ * (`forum-photos/<authorUserId>/<uuid>`), the same id the author's avatar URL
+ * carries, so it would name the writer of an anonymous thread. Such a key is
+ * rendered as the post's opaque reference
+ * (`forum-posts/<postId>/photos/<index>`, see
+ * `storage/public-media-reference.ts`), which `GET /files/*` resolves
+ * server-side. An external URL or a key that names nobody passes through
+ * `toImageUrl` unchanged, since it identifies no one.
+ */
+function toPhotoUrlForReader(
+  postId: string,
+  storedValue: string | null,
+  photoIndex: number,
+): string | null {
+  return toImageUrlByReference(
+    storedValue,
+    forumPostPhotoReference(postId, photoIndex),
+  );
+}
+
+/**
  * THE one place `forum_post.image` and `forum_post_photo` are reconciled, for
  * the opening post and every reply alike.
  *
@@ -188,20 +242,34 @@ export interface ForumPostPhotoView {
  * create carrying both spellings is a 400 (`assertSinglePhotoSpelling`), and
  * any edit that sets `photos` clears `image` in the same transaction. The
  * fallback below is therefore a statement about OLD rows, not a tie-break.
+ *
+ * SEC-01: the post's author and a moderator receive `/files/<key>` URLs (the
+ * author's edit form re-sends them, and the author knows their own id);
+ * every other reader, and a caller that names no viewer, receives the
+ * opaque reference (`toPhotoUrlForReader`). The reference's index is the
+ * photo's place in this same reconciled gallery, which is how the serve
+ * route finds it again.
  */
 export function toPostPhotoViews(
-  post: Pick<ForumPost, 'image'>,
+  post: Pick<ForumPost, 'id' | 'image' | 'authorId'>,
   rows: ForumPostPhoto[],
+  viewer?: PhotoViewer,
 ): ForumPostPhotoView[] {
+  const viewsStorageKeys =
+    viewer != null && (viewer.isModerator || viewer.userId === post.authorId);
+  const resolve = (storedValue: string | null, photoIndex: number) =>
+    viewsStorageKeys
+      ? toImageUrl(storedValue)
+      : toPhotoUrlForReader(post.id, storedValue, photoIndex);
   const views: ForumPostPhotoView[] = [];
   if (rows.length) {
-    for (const row of rows) {
-      const url = toImageUrl(row.storageKey);
+    rows.forEach((row, photoIndex) => {
+      const url = resolve(row.storageKey, photoIndex);
       if (url) views.push({ id: row.id, url, alt: row.alt });
-    }
+    });
     return views;
   }
-  const legacyUrl = toImageUrl(post.image);
+  const legacyUrl = resolve(post.image, 0);
   // `alt: null` rather than an invented string: `forum_post.image` never had an
   // alt field, so "undescribed" is the honest answer and a placeholder would be
   // worse for a screen reader than none (see `ForumPostPhoto.alt`).
@@ -721,7 +789,7 @@ export function toForumThreadResponse(
     opPhotos:
       opPost == null || isOpBlanked
         ? []
-        : toPostPhotoViews(opPost, opPhotoRows),
+        : toPostPhotoViews(opPost, opPhotoRows, viewer),
     // Gated on `isOpBlanked` like the excerpt and the photos: a takedown of the
     // opening post also takes down the donate or application link it carried.
     // A fundraiser whose opening post is gone altogether (it cascades with an
@@ -805,6 +873,12 @@ export interface ForumPostResponse {
   // client notice. This flag, plus `opAvailable` on the posts envelope, is what
   // lets it: a page whose first post is not `isOp` has no OP in it.
   isOp: boolean;
+  // SEC-05: whether the thread's author wrote this post, the reply's "OP"
+  // marker. The client used to infer it by matching the reply's handle to
+  // the opening post's, which an anonymous thread's masked byline (an empty
+  // handle) cannot do. False on a blanked post, and false when the mapper had
+  // no thread to compare against.
+  isByThreadAuthor: boolean;
 }
 
 /**
@@ -822,6 +896,12 @@ export interface ForumPostResponse {
  * mapper hands the page's one thread down, and the per-post branch inside here
  * decides which single row it applies to. Callers that map a reply, or that have
  * no thread in hand, pass nothing and get exactly today's behaviour.
+ *
+ * SEC-05: the same byline also covers every reply the thread's author writes
+ * inside their own thread. On an anonymous thread such a reply reads
+ * "Anonymous member" to every reader but a moderator, with the OP marker
+ * (`isByThreadAuthor`), so "thanks, that helps" no longer names the person
+ * behind the opening post.
  */
 export function toForumPostResponse(
   post: ForumPost,
@@ -846,15 +926,34 @@ export function toForumPostResponse(
   // Resolved ONCE and read twice below, so `image` can never disagree with the
   // head of `photos` — they are the same photo described at two ages of the
   // contract.
-  const photos = blanked ? [] : toPostPhotoViews(post, photoRows);
+  const photos = blanked ? [] : toPostPhotoViews(post, photoRows, viewer);
+  // An official thread's byline is the platform's, so the OP marker on its
+  // author's replies would name the admin behind it to an ordinary reader;
+  // only a moderator sees it there.
+  const isByThreadAuthor =
+    threadByline?.authorId != null &&
+    post.authorId === threadByline.authorId &&
+    (!threadByline.isOfficial || viewer.isModerator);
+  // The thread's byline, when this post wears it: always on the opening
+  // post, and on a reply the author of an anonymous thread wrote inside it
+  // (SEC-05). An official thread's author keeps their own name on a reply,
+  // as before.
+  const wornThreadByline =
+    threadByline != null &&
+    (post.isOp ||
+      (isByThreadAuthor &&
+        threadByline.isAnonymous &&
+        !threadByline.isOfficial))
+      ? threadByline
+      : null;
   return {
     id: post.id,
     threadId: post.threadId,
     parentPostId: post.parentPostId ?? null,
     author: blanked
       ? DELETED_AUTHOR
-      : post.isOp && threadByline
-        ? toThreadBylineAuthor(threadByline, author, viewer.isModerator)
+      : wornThreadByline
+        ? toThreadBylineAuthor(wornThreadByline, author, viewer.isModerator)
         : toAuthorSummary(author),
     body: blanked ? '' : post.body,
     voteCount: post.voteCount,
@@ -891,6 +990,7 @@ export function toForumPostResponse(
     // rendering it in the OP slot as a tombstone rather than promoting a reply
     // into that slot behind it.
     isOp: post.isOp,
+    isByThreadAuthor: !blanked && isByThreadAuthor,
   };
 }
 

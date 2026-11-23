@@ -60,7 +60,8 @@ export function toAdminDirectoryPartner(
     name: listing.name,
     cat: listing.cats[0] ?? '',
     hood: listing.hood,
-    coverImage: toCoverPhoto(listing)?.image ?? null,
+    // The admin partner list is a staff wire, which reads the key as stored.
+    coverImage: toCoverPhoto(listing, undefined, 'storage-key')?.image ?? null,
     tint: tintForSlug(listing.slug),
     av: initialsForName(listing.name),
     note: pick.note,

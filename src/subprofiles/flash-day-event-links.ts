@@ -1,4 +1,5 @@
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import { eventCoverPhotoReference } from '../storage/public-media-reference';
 import {
   Event,
   EventStatus,
@@ -20,13 +21,14 @@ export interface FlashDayEventRef {
   venue: string | null;
   neighbourhood: string | null;
   isOnline: boolean;
-  // `event.coverImageUrl` resolved through `toImageUrl`.
+  // `event.coverImageUrl` resolved through `toImageUrlByReference`.
   imageUrl: string | null;
 }
 
 export function toFlashDayEventRef(
   event: Pick<
     Event,
+    | 'id'
     | 'slug'
     | 'title'
     | 'startAt'
@@ -45,7 +47,11 @@ export function toFlashDayEventRef(
     venue: event.venue ?? null,
     neighbourhood: event.neighbourhood ?? null,
     isOnline: event.isOnline,
-    imageUrl: toImageUrl(event.coverImageUrl),
+    // SEC-04: the cover's key names its uploader; render by reference.
+    imageUrl: toImageUrlByReference(
+      event.coverImageUrl,
+      eventCoverPhotoReference(event.id),
+    ),
   };
 }
 

@@ -18,6 +18,7 @@ import { MessageHide } from './entities/message-hide.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { Message, MessageKind } from './entities/message.entity';
+import { hasAbsenceGap } from './group-absence-gap';
 import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
 import { mailboxStaffHistoryFloorCoversPredicate } from './mailbox-seats';
 import type { MessageLike } from './messaging-core.service';
@@ -351,10 +352,12 @@ export async function loadViewerRenderInputs(
   // covers a group seat's JOIN floor beside the mailbox staff floor, so a
   // member who joined a group later gets the unavailable quote for a
   // pre-join parent here exactly as their own REST read renders it.
+  // SEC-25: the predicate also covers a re-seated member's absence gap, so a
+  // seat with a gap and no join floor is asked too.
   const flooredSeatIds = viewerIds
     .map((viewerId) => firstSeatByUserId.get(viewerId))
     .filter((seat): seat is ConversationParticipant =>
-      Boolean(seat?.historyFloorAt),
+      Boolean(seat?.historyFloorAt || hasAbsenceGap(seat)),
     )
     .map((seat) => seat.id);
   const flooredParentRows =

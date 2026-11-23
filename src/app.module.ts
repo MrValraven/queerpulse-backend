@@ -59,6 +59,7 @@ import { isVjRequest, redactVjPath } from './vj/vj-request-log';
 import { isLandingVisitBeacon } from './landing/landing-visit-request-log';
 import { isStudioLandingPublicRequest } from './studio/studio-landing-request-log';
 import { CommunitiesModule } from './communities/communities.module';
+import { CommunityBadgesModule } from './community-badges/community-badges.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
 import { CompaniesModule } from './companies/companies.module';
@@ -310,6 +311,11 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     // on POST /auth/refresh, which is the only abuse control on that endpoint.
     // Scaling out requires a shared store (e.g. @nest-lab/throttler-storage-redis)
     // here AND a socket.io Redis adapter — see the note in ChatGateway.
+    //
+    // The bucket is per member for a request with a validly signed access
+    // token and per client IP for anonymous traffic (PRD-501); the keying
+    // lives in `HttpThrottlerGuard.getTracker`. The 120 per minute default and
+    // every route's own `@Throttle` limit apply to whichever key matched.
     ThrottlerModule.forRoot({
       throttlers: [{ name: 'default', ttl: seconds(60), limit: 120 }],
     }),
@@ -342,6 +348,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     GoTogetherModule,
     CalendarFeedModule,
     CommunitiesModule,
+    CommunityBadgesModule,
     CompaniesModule,
     // Task 18: persona and company contact, registered after both domain
     // modules so their own routes are matched first.

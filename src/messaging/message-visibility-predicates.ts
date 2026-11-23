@@ -7,6 +7,7 @@
 
 import { ConversationKind } from './entities/conversation.entity';
 import { MessageKind } from './entities/message.entity';
+import { insideAbsenceGapPredicate } from './group-absence-gap';
 
 /** `content_moderation.subject_type` for a message takedown row. */
 export const MESSAGE_SUBJECT_TYPE = 'message';
@@ -35,6 +36,8 @@ export function notModeratedMessagePredicate(messageAlias: string): string {
  * them (history, inbox preview and sort, unread counts, the nav badge,
  * attachment downloads) applies this one rule. `MessagesService.getMessages`
  * applies the same ceiling from the loaded seat as `m.created_at <= :leftAt`.
+ * SEC-25: a re-seated member's absence gap is a separate clause
+ * (`insideAbsenceGapPredicate`), composed beside this one.
  */
 export function withinLeftAtCeilingPredicate(
   messageCreatedAtColumn: string,
@@ -44,24 +47,31 @@ export function withinLeftAtCeilingPredicate(
 }
 
 /**
- * ENG-401: {@link withinLeftAtCeilingPredicate} for a builder with no seat
- * join (the inbox preview's `DISTINCT ON` pass). A correlated `NOT EXISTS`
- * over the viewer's own seat, answered by the unique
- * `(conversation_id, user_id)` index, so it stays one set-based query for a
- * whole inbox page. A viewer with no seat in the conversation has no ceiling
- * to apply. `viewerParameter` is the already-prefixed bound parameter that
- * holds the viewer's user id (e.g. `':hiddenForUserId'`).
+ * ENG-401 and SEC-25 in ONE correlated probe of the viewer's own seat, for a
+ * builder with no seat join (the inbox preview's `DISTINCT ON` pass), the
+ * twin of {@link withinLeftAtCeilingPredicate} plus the absence gap. TRUE
+ * when the message aliased `messageAlias` sits inside the viewer's
+ * membership: at or before their `leftAt` when they left, and outside the
+ * absence gap of a seat they took back (`insideAbsenceGapPredicate`).
+ * Answered by the unique `(conversation_id, user_id)` index, so it stays one
+ * set-based query for a whole inbox page. A viewer with no seat in the
+ * conversation has nothing to apply. `viewerParameter` is the
+ * already-prefixed bound parameter that holds the viewer's user id (e.g.
+ * `':hiddenForUserId'`).
  */
-export function notPastViewerLeftAtPredicate(
+export function withinViewerMembershipPredicate(
   messageAlias: string,
   viewerParameter: string,
 ): string {
   return `NOT EXISTS (
-      SELECT 1 FROM "conversation_participants" "left_seat"
-      WHERE "left_seat"."conversation_id" = ${messageAlias}.conversation_id
-        AND "left_seat"."user_id" = ${viewerParameter}
-        AND "left_seat"."left_at" IS NOT NULL
-        AND ${messageAlias}.created_at > "left_seat"."left_at"
+      SELECT 1 FROM "conversation_participants" "viewer_seat"
+      WHERE "viewer_seat"."conversation_id" = ${messageAlias}.conversation_id
+        AND "viewer_seat"."user_id" = ${viewerParameter}
+        AND (
+          ("viewer_seat"."left_at" IS NOT NULL
+            AND ${messageAlias}.created_at > "viewer_seat"."left_at")
+          OR ${insideAbsenceGapPredicate(`${messageAlias}.created_at`, '"viewer_seat"')}
+        )
     )`;
 }
 

@@ -102,6 +102,8 @@ export class AdminCommunitiesController {
     return this.adminCommunities.getCommunity(
       slug,
       isPlatformStaffTier(currentUser.role),
+      // SEC-31: reports about the viewer stay out of their copy of the queue.
+      currentUser.userId,
     );
   }
 

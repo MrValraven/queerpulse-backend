@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Brackets, ObjectLiteral, WhereExpressionBuilder } from 'typeorm';
 import {
   PushService,
   READ_DISMISS_TAG_PREFIX,
@@ -37,13 +38,66 @@ jest.mock('web-push', () => ({
   },
 }));
 
+/** The read `sendToUsers` builds: every recipient's rows in one query. */
+interface DeliveryReadBuilder {
+  select: jest.Mock;
+  addSelect: jest.Mock;
+  where: jest.Mock;
+  getRawMany: jest.Mock;
+}
+
+/** The best-effort delete of ended-session rows. */
+interface EndedSessionDeleteBuilder {
+  delete: jest.Mock;
+  from: jest.Mock;
+  where: jest.Mock;
+  andWhere: jest.Mock;
+  execute: jest.Mock;
+}
+
+function makeDeliveryReadBuilder(rows: unknown[]): DeliveryReadBuilder {
+  const builder: DeliveryReadBuilder = {
+    select: jest.fn(),
+    addSelect: jest.fn(),
+    where: jest.fn(),
+    getRawMany: jest.fn().mockResolvedValue(rows),
+  };
+  builder.select.mockReturnValue(builder);
+  builder.addSelect.mockReturnValue(builder);
+  builder.where.mockReturnValue(builder);
+  return builder;
+}
+
+function makeEndedSessionDeleteBuilder(): EndedSessionDeleteBuilder {
+  const builder: EndedSessionDeleteBuilder = {
+    delete: jest.fn(),
+    from: jest.fn(),
+    where: jest.fn(),
+    andWhere: jest.fn(),
+    execute: jest.fn().mockResolvedValue({ affected: 0 }),
+  };
+  builder.delete.mockReturnValue(builder);
+  builder.from.mockReturnValue(builder);
+  builder.where.mockReturnValue(builder);
+  builder.andWhere.mockReturnValue(builder);
+  return builder;
+}
+
 function makeRepo(rows: unknown[] = []) {
+  const readBuilder = makeDeliveryReadBuilder(rows);
+  const endedSessionDeleteBuilder = makeEndedSessionDeleteBuilder();
   return {
     find: jest.fn().mockResolvedValue(rows),
     findOne: jest.fn().mockResolvedValue(null),
     update: jest.fn().mockResolvedValue(undefined),
     delete: jest.fn().mockResolvedValue(undefined),
     upsert: jest.fn().mockResolvedValue(undefined),
+    readBuilder,
+    endedSessionDeleteBuilder,
+    // The read names an alias; the ended-session delete names none.
+    createQueryBuilder: jest.fn((alias?: string) =>
+      alias ? readBuilder : endedSessionDeleteBuilder,
+    ),
   };
 }
 
@@ -80,7 +134,9 @@ it('sends a notification to each of the user’s subscriptions', async () => {
   await service.sendToUser('user-1', payload);
 
   expect(sendNotification).toHaveBeenCalledTimes(2);
-  expect(repo.update).toHaveBeenCalledTimes(2); // last_used_at bumped
+  // SEC-12: a delivery leaves `last_used_at` alone. Only the device's own
+  // re-subscribe moves the retention clock.
+  expect(repo.update).not.toHaveBeenCalled();
 });
 
 it('prunes a subscription when the push service returns 410 Gone', async () => {
@@ -94,6 +150,103 @@ it('prunes a subscription when the push service returns 410 Gone', async () => {
   await service.sendToUser('user-1', payload);
 
   expect(repo.delete).toHaveBeenCalledWith('s1');
+});
+
+describe('sendToUsers and rows whose session ended', () => {
+  const ENDED_SESSION_CHECK =
+    'push_subscriptions.session_family_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM refresh_tokens WHERE refresh_tokens.user_id = push_subscriptions.user_id AND refresh_tokens.family_id = push_subscriptions.session_family_id AND refresh_tokens.revoked_at IS NULL AND refresh_tokens.expires_at > now())';
+
+  it('reads every recipient’s rows in one query that flags a linked row with no live refresh row', async () => {
+    const repo = makeRepo([]);
+    const service = new PushService(repo as never, config);
+    service.onModuleInit();
+
+    await service.sendToUsers(['user-1', 'user-2'], payload);
+
+    expect(repo.createQueryBuilder).toHaveBeenCalledWith('push_subscriptions');
+    expect(repo.readBuilder.addSelect).toHaveBeenCalledWith(
+      `(${ENDED_SESSION_CHECK})`,
+      'is_session_ended',
+    );
+    expect(repo.readBuilder.where).toHaveBeenCalledWith(
+      'push_subscriptions.user_id IN (:...userIds)',
+      { userIds: ['user-1', 'user-2'] },
+    );
+    expect(repo.endedSessionDeleteBuilder.execute).not.toHaveBeenCalled();
+  });
+
+  it('skips a row whose session ended, deletes it under the same check, and still sends to the live rows', async () => {
+    const repo = makeRepo([
+      {
+        id: 's-live',
+        endpoint: 'https://8.8.8.8/live',
+        p256dh: 'k1',
+        auth: 'a1',
+        is_session_ended: false,
+      },
+      {
+        id: 's-ended',
+        endpoint: 'https://8.8.8.8/ended',
+        p256dh: 'k2',
+        auth: 'a2',
+        is_session_ended: true,
+      },
+    ]);
+    const service = new PushService(repo as never, config);
+    service.onModuleInit();
+    sendNotification.mockResolvedValue(undefined);
+
+    await service.sendToUsers(['user-1'], payload);
+
+    expect(sendNotification).toHaveBeenCalledTimes(1);
+    const [subscription] = sendNotification.mock.calls[0] as [
+      { endpoint: string },
+    ];
+    expect(subscription.endpoint).toBe('https://8.8.8.8/live');
+    const deleteBuilder = repo.endedSessionDeleteBuilder;
+    expect(deleteBuilder.delete).toHaveBeenCalled();
+    expect(deleteBuilder.where).toHaveBeenCalledWith('id IN (:...rowIds)', {
+      rowIds: ['s-ended'],
+    });
+    // Checked again inside the delete, so a device that re-subscribed under a
+    // live session in between keeps its row.
+    expect(deleteBuilder.andWhere).toHaveBeenCalledWith(ENDED_SESSION_CHECK);
+    expect(deleteBuilder.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps sending to the live rows when the delete fails, and logs it', async () => {
+    const repo = makeRepo([
+      {
+        id: 's-live',
+        endpoint: 'https://8.8.8.8/live',
+        p256dh: 'k1',
+        auth: 'a1',
+        is_session_ended: false,
+      },
+      {
+        id: 's-ended',
+        endpoint: 'https://8.8.8.8/ended',
+        p256dh: 'k2',
+        auth: 'a2',
+        is_session_ended: true,
+      },
+    ]);
+    repo.endedSessionDeleteBuilder.execute.mockRejectedValueOnce(
+      new Error('db down'),
+    );
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const service = new PushService(repo as never, config);
+    service.onModuleInit();
+    sendNotification.mockResolvedValue(undefined);
+
+    await service.sendToUsers(['user-1'], payload);
+
+    expect(sendNotification).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('whose session ended'),
+    );
+    warn.mockRestore();
+  });
 });
 
 describe('saveSubscription', () => {
@@ -113,6 +266,35 @@ describe('saveSubscription', () => {
     );
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it('links the row to the caller’s session and stamps the client-seen time', async () => {
+    const repo = makeRepo();
+    const service = new PushService(repo as never, config);
+
+    await service.saveSubscription('user-1', input, 'agent', 'family-1');
+
+    expect(repo.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        endpoint: 'e1',
+        sessionFamilyId: 'family-1',
+        lastUsedAt: expect.any(Date) as unknown,
+      }),
+      ['endpoint'],
+    );
+  });
+
+  it('writes an explicit NULL link when the caller names no session', async () => {
+    const repo = makeRepo();
+    const service = new PushService(repo as never, config);
+
+    await service.saveSubscription('user-1', input);
+
+    expect(repo.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionFamilyId: null }),
+      ['endpoint'],
+    );
   });
 
   it('logs a warning when an endpoint is reassigned across accounts', async () => {
@@ -285,7 +467,7 @@ describe('deliverToSubscription failure handling', () => {
     warn.mockRestore();
   });
 
-  it('retries once after a 503 and records the delivery when it lands', async () => {
+  it('retries once after a 503 and keeps the row when the retry lands', async () => {
     const repo = oneRow();
     const service = new PushService(repo as never, config);
     service.onModuleInit();
@@ -296,12 +478,7 @@ describe('deliverToSubscription failure handling', () => {
     await service.sendToUser('user-1', payload);
 
     expect(sendNotification).toHaveBeenCalledTimes(2);
-    const [updatedId, updatedFields] = repo.update.mock.calls[0] as [
-      string,
-      { lastUsedAt: unknown },
-    ];
-    expect(updatedId).toBe('s1');
-    expect(updatedFields.lastUsedAt).toBeInstanceOf(Date);
+    expect(repo.update).not.toHaveBeenCalled();
     expect(repo.delete).not.toHaveBeenCalled();
   });
 
@@ -355,6 +532,74 @@ describe('deliverToSubscription failure handling', () => {
 });
 
 describe('handleSessionRevoked', () => {
+  interface RecordedGuard {
+    joiner: 'where' | 'orWhere';
+    sql: string;
+    parameters: Record<string, unknown>;
+  }
+
+  /** Records each branch of the bracket, the way a real query builder takes it. */
+  class GuardRecorder implements WhereExpressionBuilder {
+    readonly recorded: RecordedGuard[] = [];
+
+    where(condition: unknown, parameters?: ObjectLiteral): this {
+      return this.record('where', condition, parameters);
+    }
+
+    andWhere(condition: unknown, parameters?: ObjectLiteral): this {
+      return this.record('where', condition, parameters);
+    }
+
+    orWhere(condition: unknown, parameters?: ObjectLiteral): this {
+      return this.record('orWhere', condition, parameters);
+    }
+
+    whereInIds(): this {
+      throw new Error('The session guard never filters by id');
+    }
+
+    andWhereInIds(): this {
+      throw new Error('The session guard never filters by id');
+    }
+
+    orWhereInIds(): this {
+      throw new Error('The session guard never filters by id');
+    }
+
+    private record(
+      joiner: RecordedGuard['joiner'],
+      condition: unknown,
+      parameters: ObjectLiteral = {},
+    ): this {
+      if (typeof condition !== 'string') {
+        throw new Error('Expected each guard branch to be raw SQL');
+      }
+      this.recorded.push({ joiner, sql: condition, parameters });
+      return this;
+    }
+  }
+
+  /**
+   * The delete's guard is one bracketed `A OR B`. Replays the bracket's factory
+   * against a recorder so each branch's SQL can be asserted on its own:
+   * the unlinked-row branch first, then the linked-row branch.
+   */
+  function readGuards(builder: {
+    andWhere: jest.Mock<unknown, unknown[]>;
+  }): [RecordedGuard, RecordedGuard] {
+    const bracket: unknown = builder.andWhere.mock.calls[0]?.[0];
+    if (!(bracket instanceof Brackets)) {
+      throw new Error('Expected the delete guard to be one Brackets group');
+    }
+    const recorder = new GuardRecorder();
+    bracket.whereFactory(recorder);
+    const [unlinkedGuard, linkedGuard] = recorder.recorded;
+    if (!unlinkedGuard || !linkedGuard) {
+      throw new Error('Expected two guard branches');
+    }
+    return [unlinkedGuard, linkedGuard];
+  }
+
   function makeDeleteBuilder(execute: jest.Mock) {
     const builder = {
       delete: jest.fn(),
@@ -386,17 +631,46 @@ describe('handleSessionRevoked', () => {
     expect(builder.where).toHaveBeenCalledWith('user_id = :userId', {
       userId: 'user-1',
     });
-    // The guard lives in the same statement, so a single-device logout that
-    // leaves another session alive keeps every row.
-    const [guardSql, guardParameters] = builder.andWhere.mock.calls[0] as [
-      string,
-      Record<string, unknown>,
-    ];
-    expect(guardSql).toContain('NOT EXISTS');
-    expect(guardSql).toContain('refresh_tokens.revoked_at IS NULL');
-    expect(guardSql).toContain('refresh_tokens.expires_at > now()');
-    expect(guardParameters).toEqual({ userId: 'user-1' });
+    // Both guards live in the same statement as the delete.
+    const [unlinkedGuard, linkedGuard] = readGuards(builder);
+    // An unlinked row goes only once the member has no live session at all,
+    // so a single-device logout that leaves another session alive keeps it.
+    expect(unlinkedGuard.sql).toContain('NOT EXISTS');
+    expect(unlinkedGuard.sql).toContain('refresh_tokens.user_id = :userId');
+    expect(unlinkedGuard.sql).toContain('refresh_tokens.revoked_at IS NULL');
+    expect(unlinkedGuard.sql).toContain('refresh_tokens.expires_at > now()');
+    expect(unlinkedGuard.sql).not.toContain('session_family_id');
+    expect(unlinkedGuard.parameters).toEqual({ userId: 'user-1' });
     expect(builder.execute).toHaveBeenCalledTimes(1);
+    expect(linkedGuard.parameters).toEqual({ userId: 'user-1' });
+  });
+
+  it('deletes a linked row once its own session has no live row (SEC-12)', async () => {
+    const builder = makeDeleteBuilder(
+      jest.fn().mockResolvedValue({ affected: 1 }),
+    );
+    const repo = {
+      ...makeRepo(),
+      createQueryBuilder: jest.fn().mockReturnValue(builder),
+    };
+    const service = new PushService(repo as never, config);
+
+    // "Sign out this device" emits for a member who keeps other sessions.
+    await service.handleSessionRevoked({
+      userId: 'user-1',
+      sessionId: 'family-1',
+    });
+
+    const [, linkedGuard] = readGuards(builder);
+    expect(linkedGuard.joiner).toBe('orWhere');
+    expect(linkedGuard.sql).toContain(
+      'push_subscriptions.session_family_id IS NOT NULL',
+    );
+    expect(linkedGuard.sql).toContain(
+      'refresh_tokens.family_id = push_subscriptions.session_family_id',
+    );
+    expect(linkedGuard.sql).toContain('refresh_tokens.revoked_at IS NULL');
+    expect(linkedGuard.sql).toContain('refresh_tokens.expires_at > now()');
   });
 
   it('logs and swallows a failure instead of throwing from the listener', async () => {
@@ -438,13 +712,10 @@ describe('handleMessageRead (PRD-335)', () => {
     // Looked up by the READER's own userId only; see the handler's own doc
     // for why "every device except the reading one" cannot be computed from
     // `MessageReadEvent` alone (no device/session/endpoint id on the event).
-    const findCalls = repo.find.mock.calls as [
-      { where: { userId: { value: string[] } } },
-    ][];
-    const [[findCall]] = findCalls as [
-      [{ where: { userId: { value: string[] } } }],
-    ];
-    expect(findCall.where.userId.value).toEqual(['user-1']);
+    expect(repo.readBuilder.where).toHaveBeenCalledWith(
+      'push_subscriptions.user_id IN (:...userIds)',
+      { userIds: ['user-1'] },
+    );
 
     // Every one of the reader's subscriptions receives it.
     expect(sendNotification).toHaveBeenCalledTimes(2);
@@ -513,7 +784,7 @@ describe('handleMessageRead (PRD-335)', () => {
 
   it('logs and swallows a failure instead of throwing from the listener', async () => {
     const repo = makeRepo();
-    repo.find.mockRejectedValueOnce(new Error('db down'));
+    repo.readBuilder.getRawMany.mockRejectedValueOnce(new Error('db down'));
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
     const service = new PushService(repo as never, config);
     service.onModuleInit();

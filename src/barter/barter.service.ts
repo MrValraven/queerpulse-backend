@@ -390,8 +390,10 @@ export class BarterService {
         'You cannot propose a swap on your own listing',
       );
     }
+    // SEC-19: a block either way answers the same 404 `getById` gives a
+    // blocked pair, so the listing reads as absent and the block stays unsaid.
     if (await this.blockFilter.isBlockedEitherWay(proposerId, ownerId)) {
-      throw new ForbiddenException('You cannot contact this member');
+      throw new NotFoundException('Listing not found');
     }
 
     const saved = await this.dataSource.transaction(async (manager) => {

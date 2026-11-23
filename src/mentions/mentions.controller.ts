@@ -1,7 +1,8 @@
-import { Controller, Get, Post, Query } from '@nestjs/common';
+import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import {
   ApiCookieAuth,
   ApiCreatedResponse,
+  ApiForbiddenResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -11,6 +12,7 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { ListMentionsQuery } from './dto/list-mentions.query';
 import { ResolveMentionNamesQuery } from './dto/resolve-mention-names.query';
 import { MentionNameResolveService } from './mention-name-resolve.service';
@@ -19,9 +21,11 @@ import { MentionsInboxService } from './mentions-inbox.service';
 /**
  * The `@`-mentions inbox — the read endpoint the mentions feature was missing
  * (it previously only fanned mentions OUT as notifications). Auth is enforced by
- * the global JWT guard; every route is scoped to the current member. No
- * `ActiveMemberGuard` — mirrors `NotificationsController`, since a mention is
- * just a notification and a member must always be able to read their own.
+ * the global JWT guard; every route is scoped to the current member. The inbox
+ * reads carry no `ActiveMemberGuard`, mirroring `NotificationsController`,
+ * since a mention is just a notification and a member must always be able to
+ * read their own. `GET /mentions/names` is the exception: it turns slugs into
+ * names for other members, so it needs an active membership (SEC-16).
  *
  * Per-mention "mark read" reuses `POST /notifications/:id/read` (a mention id is
  * a notification id); only the *scoped* "mark all" needs a route of its own, so
@@ -55,9 +59,13 @@ export class MentionsController {
    * private, or simply mistyped, and the client renders those unchanged.
    */
   @Get('names')
+  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Resolve mention refs to display names' })
   @ApiOkResponse({ description: 'The refs that resolved, as kind/slug/name.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({
+    description: 'The member account is not active.',
+  })
   resolveNames(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ResolveMentionNamesQuery,

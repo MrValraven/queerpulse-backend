@@ -196,6 +196,11 @@ export class EnvironmentVariables {
   // unset, that language sends the sign-in email instead.
   @IsOptional() @IsString() RESEND_SIGNUP_TEMPLATE_ID_EN?: string;
   @IsOptional() @IsString() RESEND_SIGNUP_TEMPLATE_ID_PT?: string;
+  // Resend template ids for the English and Portuguese emails that carry the
+  // code confirming a join-request address (SEC-10). Optional: with one unset,
+  // that language sends the sign-in email instead.
+  @IsOptional() @IsString() RESEND_JOIN_REQUEST_TEMPLATE_ID_EN?: string;
+  @IsOptional() @IsString() RESEND_JOIN_REQUEST_TEMPLATE_ID_PT?: string;
   // Resend template ids for the English and Portuguese welcome emails a
   // reviewer sends to an approved applicant. Optional: with one unset, sending
   // the welcome email in that language answers 503 welcome_email_not_configured.

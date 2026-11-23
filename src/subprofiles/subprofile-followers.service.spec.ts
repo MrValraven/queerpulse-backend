@@ -9,6 +9,7 @@ import {
   SubprofileVisibility,
 } from './entities/subprofile.entity';
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
+import { memberShownOnPeopleListSql } from './persona-creator-gates';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SUBPROFILE_FOLLOWED } from './subprofile.events';
@@ -39,7 +40,13 @@ describe('SubprofileFollowersService.follow', () => {
   // transaction's own manager, after a locked re-read of the persona.
   let transactionManager: { findOne: jest.Mock; insert: jest.Mock };
   let followers: { manager: { transaction: jest.Mock } };
-  let subprofiles: { findOne: jest.Mock };
+  // The persona read's options, typed so a test can read its `where`.
+  let subprofiles: {
+    findOne: jest.Mock<
+      Promise<Subprofile | null>,
+      [{ where: Record<string, unknown> }]
+    >;
+  };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
@@ -58,7 +65,11 @@ describe('SubprofileFollowersService.follow', () => {
         ),
       },
     };
-    subprofiles = { findOne: jest.fn().mockResolvedValue(makePersona()) };
+    subprofiles = {
+      findOne: jest
+        .fn<Promise<Subprofile | null>, [{ where: Record<string, unknown> }]>()
+        .mockResolvedValue(makePersona()),
+    };
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
     eventEmitter = { emit: jest.fn() };
     contentModeration = {
@@ -211,5 +222,106 @@ describe('SubprofileFollowersService.follow', () => {
       followerCount: 1,
       viewerFollowing: true,
     });
+  });
+
+  // SEC-02: a block with the creator closes a linked persona alone.
+  it('404s a linked persona across a block with its creator', async () => {
+    blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+    await expect(service.follow(VISITOR_ID, PERSONA_ID)).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(transactionManager.insert).not.toHaveBeenCalled();
+  });
+
+  it('follows an unlinked persona the same whether or not the visitor and its creator are blocked', async () => {
+    const unlinkedPersona = makePersona({
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    });
+    subprofiles.findOne.mockResolvedValue(unlinkedPersona);
+    transactionManager.findOne.mockResolvedValue(unlinkedPersona);
+    blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+    await expect(service.follow(VISITOR_ID, PERSONA_ID)).resolves.toEqual({
+      followerCount: 1,
+      viewerFollowing: true,
+    });
+    expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+  });
+
+  // SEC-33: the persona read only matches a persona whose creator is active.
+  it('reads the persona only with an active creator', async () => {
+    await service.follow(VISITOR_ID, PERSONA_ID);
+
+    expect(subprofiles.findOne.mock.calls[0]?.[0].where).toMatchObject({
+      id: PERSONA_ID,
+      user: { status: 'active' },
+    });
+  });
+});
+
+describe('SubprofileFollowersService.listFollowers', () => {
+  // The fluent query builder `listFollowers` builds, recording every `where`.
+  interface FollowersQueryBuilderStub {
+    where: jest.Mock;
+    andWhere: jest.Mock;
+    orderBy: jest.Mock;
+    skip: jest.Mock;
+    take: jest.Mock;
+    getCount: jest.Mock;
+    getMany: jest.Mock;
+  }
+
+  let queryBuilder: FollowersQueryBuilderStub;
+  let blockFilter: { excludeBlocked: jest.Mock };
+  let service: SubprofileFollowersService;
+
+  beforeEach(() => {
+    queryBuilder = {
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      orderBy: jest.fn(),
+      skip: jest.fn(),
+      take: jest.fn(),
+      getCount: jest.fn().mockResolvedValue(0),
+      getMany: jest.fn().mockResolvedValue([]),
+    };
+    for (const chained of [
+      queryBuilder.where,
+      queryBuilder.andWhere,
+      queryBuilder.orderBy,
+      queryBuilder.skip,
+      queryBuilder.take,
+    ]) {
+      chained.mockReturnValue(queryBuilder);
+    }
+    blockFilter = { excludeBlocked: jest.fn() };
+    service = new SubprofileFollowersService(
+      { createQueryBuilder: jest.fn().mockReturnValue(queryBuilder) } as never,
+      {} as never,
+      { find: jest.fn().mockResolvedValue([]) } as never,
+      {
+        findOne: jest.fn().mockResolvedValue({ id: 'membership-1' }),
+      } as never,
+      blockFilter as unknown as BlockFilterService,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+  });
+
+  // SEC-21: the followers list drops paused, suspended, erasure-pending and
+  // 24-hour-hidden members through the one shared people-list rule.
+  it('filters followers through the shared people-list rule', async () => {
+    await service.listFollowers(CREATOR_ID, PERSONA_ID);
+
+    expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+      memberShownOnPeopleListSql('"sf"."follower_id"'),
+    );
+    expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+      queryBuilder,
+      CREATOR_ID,
+      '"sf"."follower_id"',
+    );
   });
 });

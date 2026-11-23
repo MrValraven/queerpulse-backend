@@ -92,6 +92,11 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { seatExcludedFromMailboxPredicate } from './mailbox-seats';
 import {
+  AbsenceGapSeat,
+  andOutsideAbsenceGap,
+  insideAbsenceGapPredicate,
+} from './group-absence-gap';
+import {
   MessagingCoreService,
   type PageConversationHint,
 } from './messaging-core.service';
@@ -135,6 +140,27 @@ export const MESSAGE_KIND_NOT_EDITABLE_CODE = 'MESSAGE_KIND_NOT_EDITABLE';
  * `MessagingCoreService.postMessage`, below this method.
  */
 export const OFFICIAL_THREAD_READ_ONLY_CODE = 'OFFICIAL_THREAD_READ_ONLY';
+
+/**
+ * PRD-511: the reason codes of the permanent send refusals, so the failed
+ * bubble names why a send can never succeed and offers no Retry.
+ *
+ * - `SENDER_ACCOUNT_INACTIVE`: the sender's own account is suspended,
+ *   banned or gone.
+ * - `GROUP_MEMBERSHIP_ENDED`: the sender left the group or was removed.
+ * - `RECIPIENT_NOT_CONNECTED`: a direct thread that only opens once the
+ *   counterpart replies or the two connect, a business mailbox thread the
+ *   business has not opened yet included.
+ * - `RECIPIENT_UNAVAILABLE`: a direct-thread counterpart who cannot be
+ *   messaged, for either of two causes that read the same: a block either
+ *   way, or an account that is deactivated, suspended, banned or gone. The
+ *   code and its copy say only that this member cannot be messaged, so the
+ *   sender never learns a block exists.
+ */
+export const SENDER_ACCOUNT_INACTIVE_CODE = 'SENDER_ACCOUNT_INACTIVE';
+export const GROUP_MEMBERSHIP_ENDED_CODE = 'GROUP_MEMBERSHIP_ENDED';
+export const RECIPIENT_NOT_CONNECTED_CODE = 'RECIPIENT_NOT_CONNECTED';
+export const RECIPIENT_UNAVAILABLE_CODE = 'RECIPIENT_UNAVAILABLE';
 
 /**
  * A short window of `body` around the first case-insensitive occurrence of
@@ -323,6 +349,7 @@ export class MessagesService {
         limit,
         isGroupConversation,
         pageConversation,
+        participant,
       );
     }
     // An explicit `before`/`beforeId` wins; otherwise decode the frontend's
@@ -346,6 +373,7 @@ export class MessagesService {
       participant.clearedAt,
       participant.leftAt,
       isGroupConversation,
+      participant,
     );
     if (before) {
       if (beforeId) {
@@ -434,8 +462,10 @@ export class MessagesService {
     isGroupConversation: boolean,
     // PRD-423: the row `getMessages` read, so the page needs no lookup.
     pageConversation?: PageConversationHint,
+    // SEC-25: the caller's absence gap, see `visibleHistoryQuery`.
+    absenceGap?: AbsenceGapSeat,
   ): Promise<MessageResponse[]> {
-    // Every visibility rule of the backward page (floor, ceiling, hides,
+    // Every visibility rule of the backward page (floor, ceiling, gap, hides,
     // PRD-354 group block filter), so reconnect sync can never resurrect a
     // message the thread itself hides.
     const qb = this.visibleHistoryQuery(
@@ -444,6 +474,7 @@ export class MessagesService {
       clearedAt,
       leftAt,
       isGroupConversation,
+      absenceGap,
     );
     if (afterId) {
       qb.andWhere(
@@ -488,6 +519,8 @@ export class MessagesService {
    *    pre-hire history;
    *  - the `leftAt` ceiling (P0 hardening): a removed or departed group
    *    member reads only what was posted while they belonged;
+   *  - SEC-25, the absence gap: a member who took their seat back reads
+   *    nothing posted between leaving and returning (`andOutsideAbsenceGap`);
    *  - PRD-227 "delete for me": a message THIS viewer hid never exists for
    *    them again, while every other participant's copy is untouched;
    *  - PRD-354, groups only: a blocked-either-way sender's messages are
@@ -504,6 +537,7 @@ export class MessagesService {
     clearedAt: Date | null,
     leftAt: Date | null,
     isGroupConversation: boolean,
+    absenceGap?: AbsenceGapSeat,
   ): SelectQueryBuilder<Message> {
     const qb = this.messages
       .createQueryBuilder('m')
@@ -518,6 +552,7 @@ export class MessagesService {
         leftAt: leftAt.toISOString(),
       });
     }
+    andOutsideAbsenceGap(qb, 'm.created_at', absenceGap);
     qb.andWhere(
       `NOT EXISTS (
         SELECT 1 FROM "message_hides" "mh"
@@ -585,6 +620,7 @@ export class MessagesService {
         participant.clearedAt,
         participant.leftAt,
         isGroupConversation,
+        participant,
       );
     const [target] = await this.loadExactHistoryRows(
       visibleQuery().andWhere('m.id = :aroundId', { aroundId }).take(1),
@@ -775,6 +811,7 @@ export class MessagesService {
             AND "p"."user_id" = :userId
             AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at)
             AND (p.left_at IS NULL OR m.created_at <= p.left_at)
+            AND NOT ${insideAbsenceGapPredicate('m.created_at', 'p')}
             ${mailboxSeatPredicate}
         )`,
         hasMailboxFilter ? { userId, mailboxIdentityId } : { userId },
@@ -972,7 +1009,12 @@ export class MessagesService {
     // it drops the offending sockets on its next sweep.
     const sender = await this.usersService.findById(userId);
     if (sender?.status !== UserStatus.Active) {
-      throw new ForbiddenException('Your account cannot send messages');
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'Your account cannot send messages',
+        code: SENDER_ACCOUNT_INACTIVE_CODE,
+      });
     }
     // ENG-242: a moderator `restrict` action blocks a send over EITHER
     // transport. `POST /conversations/:id/messages` already refuses this via
@@ -1030,7 +1072,12 @@ export class MessagesService {
     }
     // A member who LEFT a group keeps read access to history but cannot post.
     if (convo.kind === ConversationKind.Group && participant.leftAt) {
-      throw new ForbiddenException('You have left this group');
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'You have left this group',
+        code: GROUP_MEMBERSHIP_ENDED_CODE,
+      });
     }
     // The 1:1 connection gate applies only to DIRECT member DMs — a group's
     // membership was validated at creation (and Phase 2 owns per-member gates),
@@ -1075,9 +1122,12 @@ export class MessagesService {
               openedAt: new Date(),
             });
           } else {
-            throw new ForbiddenException(
-              'You can only message accepted connections',
-            );
+            throw new ForbiddenException({
+              statusCode: 403,
+              error: 'Forbidden',
+              message: 'You can only message accepted connections',
+              code: RECIPIENT_NOT_CONNECTED_CODE,
+            });
           }
         }
       } else if (otherSeats.length) {
@@ -1087,9 +1137,23 @@ export class MessagesService {
         // racing `SocialService.blockMember`'s transactional sever) —
         // defense-in-depth, checked before (and independent of) the
         // connection gate below. An ordinary DM has exactly one other seat.
+        //
+        // PRD-511: a counterpart whose account is deactivated, suspended,
+        // banned or gone is refused with the same `RECIPIENT_UNAVAILABLE`
+        // code and sentence as a block, so the code never singles out a
+        // block.
         for (const other of otherSeats) {
-          if (await this.blockFilter.isBlockedEitherWay(userId, other.userId)) {
-            throw new ForbiddenException('You cannot message this member');
+          const counterpart = await this.usersService.findById(other.userId);
+          if (
+            counterpart?.status !== UserStatus.Active ||
+            (await this.blockFilter.isBlockedEitherWay(userId, other.userId))
+          ) {
+            throw new ForbiddenException({
+              statusCode: 403,
+              error: 'Forbidden',
+              message: 'You cannot message this member',
+              code: RECIPIENT_UNAVAILABLE_CODE,
+            });
           }
         }
         // PRD-340 (one-tap reply): a non-connected 1:1 thread is no longer an
@@ -1124,9 +1188,12 @@ export class MessagesService {
               openedAt: new Date(),
             });
           } else {
-            throw new ForbiddenException(
-              'You can only message accepted connections',
-            );
+            throw new ForbiddenException({
+              statusCode: 403,
+              error: 'Forbidden',
+              message: 'You can only message accepted connections',
+              code: RECIPIENT_NOT_CONNECTED_CODE,
+            });
           }
         }
       }
@@ -1164,6 +1231,9 @@ export class MessagesService {
           clearedAt: participant.clearedAt.toISOString(),
         });
       }
+      // SEC-25: a message posted while a re-seated member was away does not
+      // exist for them, so it cannot be quoted either.
+      andOutsideAbsenceGap(parentQuery, 'parent.created_at', participant);
       const parent = await parentQuery.getOne();
       if (!parent) {
         throw new NotFoundException('Replied-to message not found');

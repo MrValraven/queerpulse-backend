@@ -36,6 +36,7 @@ import {
   requireAuthorSummary,
 } from './message-response';
 import { readGroupJoinHistoryFloor } from './group-join-history-floor';
+import { reseatHistoryWindow } from './group-absence-gap';
 import {
   inviteLinkUsageFields,
   isInviteLinkUsedUp,
@@ -298,7 +299,16 @@ export class GroupInvitesService {
     }
     const existingRow = await this.participants.findOne({
       where: { conversationId: convo.id, userId },
-      select: { id: true, clearedAt: true, leftAt: true },
+      // SEC-25: `seatParticipant` hands these to `reseatHistoryWindow`,
+      // the absence gap columns included, so a second re-seat keeps the
+      // first gap hidden.
+      select: {
+        id: true,
+        clearedAt: true,
+        leftAt: true,
+        absenceStartedAt: true,
+        absenceEndedAt: true,
+      },
     });
     // A second `addMembers` call could have seated this exact invitee
     // directly (their policy read `connections` at that later moment, or a
@@ -803,13 +813,12 @@ export class GroupInvitesService {
 
   /**
    * Reactivate-or-insert one participant row: the SAME contract
-   * `GroupsService.addMembers`'s reactivation branch uses: `clearedAt`
-   * advances to the later of its old value and the row's own `leftAt` (so
-   * history resumes from the RE-JOIN point, not from the beginning of the
-   * thread, and not by resurrecting anything the member had cleared for
-   * themselves before leaving), `leftAt` clears, role resets to `member`, and
-   * `removedBy` clears (a re-seated member reads as freshly added, not still
-   * "removed").
+   * `GroupsService.addMembers`'s reactivation branch uses. SEC-25: the
+   * history window comes from `reseatHistoryWindow`, so the member keeps
+   * what they could read up to leaving (minus their own clear) and the
+   * stretch they were away for becomes the seat's absence gap. `leftAt`
+   * clears, role resets to `member`, and `removedBy` clears, so a re-seated
+   * member reads as freshly added.
    *
    * A brand-new row carries `joinerIdentityId`, the joiner's own profile
    * identity (`conversation_participants.identity_id` is NOT NULL), and
@@ -824,22 +833,21 @@ export class GroupInvitesService {
     joinerIdentityId: string,
     existing: Pick<
       ConversationParticipant,
-      'id' | 'clearedAt' | 'leftAt'
+      'id' | 'clearedAt' | 'leftAt' | 'absenceStartedAt' | 'absenceEndedAt'
     > | null,
   ): Promise<void> {
     if (existing) {
-      const resumeFloor = [existing.clearedAt, existing.leftAt]
-        .filter((value): value is Date => value != null)
-        .reduce<Date | null>(
-          (latest, value) =>
-            latest === null || value > latest ? value : latest,
-          null,
-        );
+      // The gap ends just before this transaction's `member_joined` pill,
+      // so the joiner still sees the pill announcing their return.
+      const historyWindow = reseatHistoryWindow(
+        existing,
+        await readGroupJoinHistoryFloor(manager),
+      );
       await manager.update(
         ConversationParticipant,
         { id: existing.id },
         {
-          clearedAt: resumeFloor,
+          ...historyWindow,
           leftAt: null,
           role: ConversationRole.Member,
           // Both columns, together: `removedAt` is the durable record
@@ -1019,10 +1027,18 @@ export class GroupInvitesService {
       where: { userId: In(participantRows.map((row) => row.userId)) },
     });
     const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
-    const privacyByUser =
-      await this.preferencesService.getMessagingPrivacyForUsers(
+    // SEC-26: one batched read of every member blocked either way with the
+    // caller, alongside the privacy rows, so the roster withholds their
+    // watermarks.
+    const [privacyByUser, blockedUserIds] = await Promise.all([
+      this.preferencesService.getMessagingPrivacyForUsers(
         participantRows.map((row) => row.userId),
-      );
+      ),
+      this.blockFilter.blockedUserIds(
+        userId,
+        participantRows.map((row) => row.userId),
+      ),
+    ]);
     const hasCallerLeft = callerRow?.leftAt != null;
     const activeMemberCount = participantRows.filter(
       (row) => row.leftAt == null,
@@ -1037,6 +1053,7 @@ export class GroupInvitesService {
           profileByUser,
           userId,
           privacyByUser,
+          blockedUserIds,
           nameOptions,
         );
     const lastMessage = lastByConvo.get(convo.id) ?? null;

@@ -7,11 +7,16 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
 import { PersonaImageKeysService } from './persona-image-keys.service';
+import {
+  DAILY_PRESIGN_BYTE_LIMIT,
+  PresignByteQuotaService,
+} from './presign-byte-quota.service';
 import { StorageService, PresignedUpload } from './storage.service';
 import { ALLOWED_IMAGE_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
 import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UploadsController } from './uploads.controller';
+import { allowsVjKeys } from './shared-upload-handlers';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 
 const user: CurrentUserData = {
@@ -46,12 +51,16 @@ const VJ_PRESIGNED: PresignedUpload = {
 describe('UploadsController', () => {
   let controller: UploadsController;
   let storage: { presignImageUpload: jest.Mock; presignVjUpload: jest.Mock };
-  let studioAudioUploads: { presign: jest.Mock };
+  let studioAudioUploads: {
+    presign: jest.Mock;
+    confirmUploadRefusal: jest.Mock;
+  };
   let mediaCropService: { upsert: jest.Mock };
   let personaImageKeys: { isMemberOfKeyPersona: jest.Mock };
   // The staff grants each user id holds, read by the VJ kinds.
   let grantsByUserId: Map<string, string[]>;
   let staffRoles: { exists: jest.Mock };
+  let presignQuota: PresignByteQuotaService;
 
   beforeEach(() => {
     storage = {
@@ -60,6 +69,7 @@ describe('UploadsController', () => {
     };
     studioAudioUploads = {
       presign: jest.fn().mockResolvedValue(STUDIO_PRESIGNED),
+      confirmUploadRefusal: jest.fn().mockResolvedValue('upload_not_yours'),
     };
     mediaCropService = {
       upsert: jest.fn().mockResolvedValue(undefined),
@@ -81,13 +91,271 @@ describe('UploadsController', () => {
           ),
       ),
     };
+    presignQuota = new PresignByteQuotaService();
     controller = new UploadsController(
       storage as unknown as StorageService,
       mediaCropService as unknown as MediaCropService,
       personaImageKeys as unknown as PersonaImageKeysService,
       studioAudioUploads as unknown as StudioAudioUploadsService,
       staffRoles as unknown as Repository<UserStaffRole>,
+      presignQuota,
     );
+  });
+
+  // SEC-43: `POST /uploads/confirm` names each refusal with its own code.
+  describe('confirm', () => {
+    const OWN_KEY = `work/${'11111111-2222-4333-8444-555555555555'}/66666666-7777-4888-8999-000000000000.jpg`;
+    const confirmer: CurrentUserData = {
+      ...user,
+      userId: '11111111-2222-4333-8444-555555555555',
+    };
+    let inspectStoredObject: jest.Mock;
+
+    beforeEach(() => {
+      inspectStoredObject = jest.fn().mockResolvedValue('valid');
+      (
+        storage as unknown as { inspectStoredObject: jest.Mock }
+      ).inspectStoredObject = inspectStoredObject;
+    });
+
+    async function codeOf(key: string): Promise<unknown> {
+      try {
+        await controller.confirm(confirmer, { key });
+        return undefined;
+      } catch (error) {
+        const body = (error as HttpException).getResponse() as {
+          code?: unknown;
+        };
+        return body.code;
+      }
+    }
+
+    it('passes a servable upload', async () => {
+      await expect(codeOf(OWN_KEY)).resolves.toBeUndefined();
+    });
+
+    it.each([
+      ['location_metadata', 'UPLOAD_HAS_LOCATION_DATA'],
+      ['mismatch', 'UPLOAD_CONTENT_MISMATCH'],
+      ['missing', 'UPLOAD_NOT_FOUND'],
+      ['indeterminate', 'UPLOAD_CHECK_UNAVAILABLE'],
+    ])('answers a %s verdict with %s', async (verdict, code) => {
+      inspectStoredObject.mockResolvedValue(verdict);
+      await expect(codeOf(OWN_KEY)).resolves.toBe(code);
+    });
+
+    it('refuses a key that names no uploader before reading storage', async () => {
+      await expect(codeOf('not-a-key')).resolves.toBe(
+        'UPLOAD_KEY_NOT_CONFIRMABLE',
+      );
+      expect(inspectStoredObject).not.toHaveBeenCalled();
+    });
+
+    it("refuses somebody else's key with the ownership code", async () => {
+      await expect(
+        codeOf(
+          'work/99999999-8888-4777-8666-555555555555/66666666-7777-4888-8999-000000000000.jpg',
+        ),
+      ).resolves.toBe('UPLOAD_NOT_YOURS');
+    });
+
+    // Open item A: Studio audio keys name nobody, so the registry row and the
+    // Studio presign checks decide who may confirm one.
+    describe('a Studio audio key', () => {
+      const STUDIO_KEY = STUDIO_PRESIGNED.key;
+
+      it('passes a caller who may presign for the registered persona', async () => {
+        studioAudioUploads.confirmUploadRefusal.mockResolvedValue(null);
+        await expect(codeOf(STUDIO_KEY)).resolves.toBeUndefined();
+        expect(studioAudioUploads.confirmUploadRefusal).toHaveBeenCalledWith(
+          confirmer.userId,
+          STUDIO_KEY,
+        );
+        expect(inspectStoredObject).toHaveBeenCalledWith(STUDIO_KEY);
+      });
+
+      it.each([
+        ['upload_not_yours', 'UPLOAD_NOT_YOURS'],
+        ['studio_access_required', 'studio_access_required'],
+        ['studio_persona_kind_not_allowed', 'studio_persona_kind_not_allowed'],
+      ])(
+        'answers a %s refusal with a 403 coded %s before reading storage',
+        async (refusal, code) => {
+          studioAudioUploads.confirmUploadRefusal.mockResolvedValue(refusal);
+          let caught: unknown;
+          try {
+            await controller.confirm(confirmer, { key: STUDIO_KEY });
+          } catch (error) {
+            caught = error;
+          }
+          expect(caught).toBeInstanceOf(HttpException);
+          expect((caught as HttpException).getStatus()).toBe(403);
+          expect((caught as HttpException).getResponse()).toEqual(
+            expect.objectContaining({ code }),
+          );
+          expect(inspectStoredObject).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        ['mismatch', 'UPLOAD_CONTENT_MISMATCH'],
+        ['missing', 'UPLOAD_NOT_FOUND'],
+      ])('answers a %s verdict with %s', async (verdict, code) => {
+        studioAudioUploads.confirmUploadRefusal.mockResolvedValue(null);
+        inspectStoredObject.mockResolvedValue(verdict);
+        await expect(codeOf(STUDIO_KEY)).resolves.toBe(code);
+      });
+    });
+
+    // Open item A: VJ keys belong to the shared library, open to whoever the
+    // VJ presign admits (the Admin role or the `vj_operator` grant).
+    describe('a VJ key', () => {
+      const VJ_KEYS = [
+        VJ_PRESIGNED.key,
+        'vj-thumbnails/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.webp',
+        'vj-previews/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.webm',
+      ];
+
+      it('lets the ownership interceptor pass a VJ key to confirm', () => {
+        expect(allowsVjKeys('UploadsController', 'confirm')).toBe(true);
+      });
+
+      it.each(VJ_KEYS)(
+        'refuses a caller with no VJ access for %s',
+        async (key) => {
+          await expect(codeOf(key)).resolves.toBe('UPLOAD_NOT_YOURS');
+          expect(inspectStoredObject).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(VJ_KEYS)(
+        'passes a vj_operator grant holder for %s',
+        async (key) => {
+          grantsByUserId.set(confirmer.userId, ['vj_operator']);
+          await expect(codeOf(key)).resolves.toBeUndefined();
+          expect(inspectStoredObject).toHaveBeenCalledWith(key);
+        },
+      );
+
+      it('passes an admin without a grant lookup', async () => {
+        const admin: CurrentUserData = { ...confirmer, role: 'admin' };
+        await expect(
+          controller.confirm(admin, { key: VJ_PRESIGNED.key }),
+        ).resolves.toBeUndefined();
+        expect(staffRoles.exists).not.toHaveBeenCalled();
+      });
+
+      it('names a clip whose bytes are no MP4 with the mismatch code', async () => {
+        grantsByUserId.set(confirmer.userId, ['vj_operator']);
+        inspectStoredObject.mockResolvedValue('mismatch');
+        await expect(codeOf(VJ_PRESIGNED.key)).resolves.toBe(
+          'UPLOAD_CONTENT_MISMATCH',
+        );
+      });
+    });
+  });
+
+  // SEC-44: a member's presigns are charged to a daily byte allowance.
+  describe('daily presign byte allowance', () => {
+    it('refuses a presign past the allowance with the coded 429', async () => {
+      presignQuota.charge(user.userId, DAILY_PRESIGN_BYTE_LIMIT);
+      let refusal: unknown;
+      try {
+        await controller.avatar(user, {
+          contentType: 'image/png',
+          byteSize: 2048,
+        });
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(HttpException);
+      expect((refusal as HttpException).getStatus()).toBe(429);
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
+    });
+
+    it('refunds an over-cap request the presign refuses as too large', async () => {
+      presignQuota.charge(
+        user.userId,
+        DAILY_PRESIGN_BYTE_LIMIT - 100 * 1024 * 1024,
+      );
+      // 100 MB is past the avatar cap: the request is charged, the presign
+      // refuses it by size, and the refund leaves the allowance whole.
+      storage.presignImageUpload.mockRejectedValueOnce(
+        new BadRequestException('too large'),
+      );
+      await expect(
+        controller.avatar(user, {
+          contentType: 'image/png',
+          byteSize: 100 * 1024 * 1024,
+        }),
+      ).rejects.toThrow('too large');
+      await expect(
+        controller.avatar(user, {
+          contentType: 'image/png',
+          byteSize: 100 * 1024 * 1024,
+        }),
+      ).resolves.toBe(PRESIGNED);
+    });
+
+    it('hands a presign past the whole allowance to the size refusal, uncharged', async () => {
+      // No kind accepts more bytes than a day's allowance, so the request
+      // gets the presign's "too large" refusal and never the quota 429.
+      storage.presignImageUpload.mockRejectedValueOnce(
+        new BadRequestException('too large'),
+      );
+      let refusal: unknown;
+      try {
+        await controller.avatar(user, {
+          contentType: 'image/png',
+          byteSize: DAILY_PRESIGN_BYTE_LIMIT + 1,
+        });
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(BadRequestException);
+      expect(storage.presignImageUpload).toHaveBeenCalledTimes(1);
+      // Nothing was charged: a full allowance is still there to spend.
+      await expect(
+        controller.avatar(user, {
+          contentType: 'image/png',
+          byteSize: DAILY_PRESIGN_BYTE_LIMIT,
+        }),
+      ).resolves.toBe(PRESIGNED);
+    });
+
+    it('charges a studio_audio presign above the kind table cap', async () => {
+      // A podcast persona presigns audio past `UPLOAD_KIND_SPECS`'s
+      // studio_audio cap; the bytes still count against the allowance.
+      const podcastBytes = UPLOAD_KIND_SPECS.studio_audio.maxBytes + 1024;
+      presignQuota.charge(user.userId, DAILY_PRESIGN_BYTE_LIMIT - podcastBytes);
+      await controller.presign(user, {
+        kind: 'studio_audio',
+        contentType: 'audio/mpeg',
+        byteSize: podcastBytes,
+        subprofileId: PERSONA_ID,
+      });
+      let refusal: unknown;
+      try {
+        await controller.avatar(user, {
+          contentType: 'image/png',
+          byteSize: 1024,
+        });
+      } catch (error) {
+        refusal = error;
+      }
+      expect((refusal as HttpException).getStatus()).toBe(429);
+    });
+
+    it('refunds the charge of a presign that fails', async () => {
+      storage.presignImageUpload.mockRejectedValueOnce(new Error('bucket'));
+      presignQuota.charge(user.userId, DAILY_PRESIGN_BYTE_LIMIT - 2048);
+      await expect(
+        controller.avatar(user, { contentType: 'image/png', byteSize: 2048 }),
+      ).rejects.toThrow('bucket');
+      await expect(
+        controller.avatar(user, { contentType: 'image/png', byteSize: 2048 }),
+      ).resolves.toBe(PRESIGNED);
+    });
   });
 
   // The controller is a thin pass-through: it forwards the authenticated

@@ -103,6 +103,23 @@ function linkedThreadReadableSql(viewerParam: string): string {
     )
   )`;
 }
+
+/**
+ * The topic post author column the block and mute filters compare against
+ * (`BlockFilterService.excludeHidden`), as a SQL expression on the alias `tp`.
+ * NULL for a row linked to an anonymous, non-official forum thread, so a
+ * viewer's block or mute of the hidden writer leaves the row in place and
+ * the topic page cannot confirm who wrote the thread (the SEC-02 class, the
+ * same rule as `forum-author-filter.ts`). A NULL member column passes both
+ * filters. Every other row keeps its author's filtering unchanged.
+ */
+export const TOPIC_POST_AUTHOR_FILTER_COLUMN_SQL = `CASE WHEN EXISTS (
+    SELECT 1 FROM "forum_thread" "masked_topic_thread"
+    WHERE "masked_topic_thread"."id" = "tp"."forum_thread_id"
+      AND "masked_topic_thread"."is_anonymous"
+      AND NOT "masked_topic_thread"."is_official"
+  ) THEN NULL ELSE "tp"."author_id" END`;
+
 const RELATED_TOPICS_LIMIT = 6;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -154,7 +171,10 @@ export class TopicsService {
   //    `NOT EXISTS` compares `blocked_id`/`muted_id` against `"tp"."author_id"`,
   //    and `<uuid> = NULL` is never true, so the subquery matches nothing and
   //    `NOT EXISTS` is TRUE. The filter therefore silences real members without
-  //    swallowing the editorial seed content.
+  //    swallowing the editorial seed content. A row linked to an anonymous,
+  //    non-official thread compares as NULL the same way
+  //    (`TOPIC_POST_AUTHOR_FILTER_COLUMN_SQL`), so blocking or muting the
+  //    hidden writer never drops it.
   // 2. `andWhere` only, no joins. `cursorPaginate` calls `getMany()` with
   //    `.take()`, and TypeORM's `.take()` + join combination switches to its
   //    two-query "distinct pagination" path (see the note at
@@ -184,7 +204,11 @@ export class TopicsService {
     const qb = this.topicPosts
       .createQueryBuilder('tp')
       .where('tp.topicId = :topicId', { topicId: topic.id });
-    this.blockFilter.excludeHidden(qb, viewerId, '"tp"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      viewerId,
+      TOPIC_POST_AUTHOR_FILTER_COLUMN_SQL,
+    );
     qb.andWhere(linkedThreadReadableSql('topicPostViewerId'), {
       topicPostPublicTier: AccessTier.Public,
       topicPostViewerId: viewerId,

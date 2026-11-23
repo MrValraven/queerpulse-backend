@@ -120,6 +120,8 @@ function baseParticipant(
     deliveredAt: null,
     clearedAt: null,
     historyFloorAt: null,
+    absenceStartedAt: null,
+    absenceEndedAt: null,
     muted: false,
     muteMode: ConversationMuteMode.All,
     mutedUntil: null,

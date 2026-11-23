@@ -2,7 +2,14 @@ import { EventStatus, EventVisibility } from '../events/entities/event.entity';
 import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
 import { StudioArtistRef, toStudioArtistRef } from './studio-response';
 import { listenablePersonaSql } from './studio-visibility';
-import { ARTIST_KIND_LIST } from './studio-playlist-visibility';
+import {
+  unlinkedPersonaByIdSql,
+  unlinkedPersonaSql,
+} from '../subprofiles/persona-creator-gates';
+import {
+  ARTIST_KIND_LIST,
+  personaCreditActiveSql,
+} from './studio-playlist-visibility';
 
 /*
  * Studio discovery: raw SQL pieces the discovery reads share. They run
@@ -40,9 +47,39 @@ export function notBlockedEitherWaySql(
     )`;
 }
 
+/**
+ * SEC-02: no block either way between the viewer and a LINKED persona's
+ * creator. An unlinked persona passes whoever the viewer blocked, so a block
+ * cannot test who runs it (`isCreatorBlockConsulted`). Persona reads use this
+ * where they would block-check the persona's `user_id`.
+ */
+export function notBlockedWithLinkedCreatorSql(
+  viewerPlaceholder: string,
+  personaAlias: string,
+  blockAlias: string,
+): string {
+  return `(${unlinkedPersonaSql(personaAlias)} OR ${notBlockedEitherWaySql(
+    viewerPlaceholder,
+    `"${personaAlias}"."user_id"`,
+    blockAlias,
+  )})`;
+}
+
+/**
+ * SEC-02: the `unless` of the block filter on a playlist's OWNER. A playlist
+ * whose persona credit stands names an unlinked persona, and its owner runs
+ * that persona, so hiding it on a block with the owner would test who runs
+ * the persona. Such a playlist answers every viewer alike.
+ */
+export function unlinkedPersonaCreditStandsSql(playlistAlias: string): string {
+  return `(${personaCreditActiveSql(playlistAlias)} AND ${unlinkedPersonaByIdSql(
+    `"${playlistAlias}"."credit_subprofile_id"`,
+  )})`;
+}
+
 /** A release the viewer can hear: published, its persona listenable, and
- *  the persona creator clear of any block either way with the viewer. The
- *  same rule `StudioCatalogService.listenableReleases` applies. */
+ *  for a linked persona its creator clear of any block either way with the
+ *  viewer. The same rule `StudioCatalogService.listenableReleases` applies. */
 export function listenableReleaseSql(
   releaseAlias: string,
   personaAlias: string,
@@ -50,25 +87,25 @@ export function listenableReleaseSql(
 ): string {
   return `("${releaseAlias}"."status" = 'published'
     AND ${listenablePersonaSql(personaAlias)}
-    AND ${notBlockedEitherWaySql(
+    AND ${notBlockedWithLinkedCreatorSql(
       viewerPlaceholder,
-      `"${personaAlias}"."user_id"`,
+      personaAlias,
       `${personaAlias}_block`,
     )})`;
 }
 
 /**
  * `$1` the viewer, `$2` a persona id: one row when the persona is a
- * listenable persona of a Studio artist kind whose creator is clear of
- * blocks with the viewer. The audience of "Appears on" and "Related
- * artists".
+ * listenable persona of a Studio artist kind, and for a linked persona its
+ * creator is clear of blocks with the viewer. The audience of "Appears on"
+ * and "Related artists".
  */
 export const LISTENABLE_ARTIST_SQL = `SELECT 1 AS "found"
   FROM "subprofiles" "artist"
  WHERE "artist"."id" = $2
    AND "artist"."kind" IN (${STUDIO_ARTIST_KIND_LIST_SQL})
    AND ${listenablePersonaSql('artist')}
-   AND ${notBlockedEitherWaySql('$1', '"artist"."user_id"', 'artist_block')}
+   AND ${notBlockedWithLinkedCreatorSql('$1', 'artist', 'artist_block')}
  LIMIT 1`;
 
 /** The persona columns every persona reference reads. The owner's user id

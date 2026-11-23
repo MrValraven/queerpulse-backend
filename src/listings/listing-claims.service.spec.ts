@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
@@ -311,6 +312,22 @@ describe('ListingClaimsService', () => {
   // `transferOwnership` never touches it. These two cases pin the fix at the
   // one site allowed to set it from a claim.
   describe('review', () => {
+    it.each(['approved', 'declined'] as const)(
+      'refuses the claimant deciding their own claim (%s)',
+      async (decision) => {
+        const claim = claimFixture();
+        listings.findOne.mockResolvedValue(listingForReview());
+        claims.findOne.mockResolvedValue(claim);
+
+        await expect(
+          service.review('claim-1', 'claimant-1', decision),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+
+        expect(ownership.transferOwnership).not.toHaveBeenCalled();
+        expect(claims.update).not.toHaveBeenCalled();
+      },
+    );
+
     it('stamps the affirming baseline when the listing has never carried one', async () => {
       const listing = listingForReview({ affirmingBaselineAcceptedAt: null });
       const claim = claimFixture();

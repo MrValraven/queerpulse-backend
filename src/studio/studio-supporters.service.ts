@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { SubprofileSocialLink } from '../subprofiles/entities/subprofile-social-link.entity';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
 import { SubprofileFollowersService } from '../subprofiles/subprofile-followers.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
@@ -13,8 +14,10 @@ import {
 } from './studio-discovery-sql';
 import { StudioOwnershipService } from './studio-ownership.service';
 import {
+  blockedWithAnyLinkedPersonaMemberSql,
   blockedWithAnyPersonaMemberSql,
   chosenPersonaShowableSql,
+  chosenPersonaShownToOthersSql,
   personaIdentityBlockedBySql,
   personaMemberUserIdsSql,
 } from './studio-persona-members';
@@ -44,8 +47,12 @@ import {
 
 /**
  * The artist rule every supporter read applies to the artist persona: a
- * Studio artist kind (`kindsParam`, a text array parameter), listenable, clear
- * of blocks either way between the caller and any persona member, and clear
+ * Studio artist kind (`kindsParam`, a text array parameter), listenable, for
+ * a linked persona clear of blocks either way between the caller and any
+ * persona member (an unlinked one answers every caller alike, SEC-02; the
+ * owner-side supporter lists still drop a supporter blocked with any member
+ * through `eligibleSupporterSql`, unless that supporter shows as an unlinked
+ * persona), and clear
  * of an identity block the caller placed on the persona (ruling 4, direct or
  * carried). `callerExpression` is a uuid expression such as `$2::uuid`.
  */
@@ -57,7 +64,7 @@ function supportableArtistSql(
   const artistId = `"${artistAlias}"."id"`;
   return `"${artistAlias}"."kind"::text = ANY(${kindsParam}::text[])
    AND ${listenablePersonaSql(artistAlias)}
-   AND NOT ${blockedWithAnyPersonaMemberSql(callerExpression, artistId)}
+   AND NOT ${blockedWithAnyLinkedPersonaMemberSql(callerExpression, artistId)}
    AND NOT ${personaIdentityBlockedBySql(`(${callerExpression})`, artistId)}`;
 }
 
@@ -65,11 +72,13 @@ function supportableArtistSql(
  * Section 8 eligibility of one listener of the persona `$1`, shown as
  * `shownAsExpression` (a persona id, or NULL for the account when the
  * listener has no preference row or chose the account): an active account
- * with a Studio grant, clear of blocks either way with every persona member,
+ * with a Studio grant, clear of blocks either way with every persona member
+ * (a listener shown as an unlinked persona skips this check, SEC-02: hiding
+ * them on a block would tell the persona members who runs that persona),
  * outside the persona members today, still a member of the persona it chose
  * to show, that chosen persona clear of an identity block by any persona
- * member (ruling 4), and that chosen persona neither removed nor taken down
- * by a moderator. `userIdExpression` is a uuid expression such as
+ * member (ruling 4), neither removed nor taken down by a moderator, and
+ * created by an active account (SEC-33). `userIdExpression` is a uuid expression such as
  * `"listener"."user_id"`. The listen and hide rules are applied by the
  * callers.
  */
@@ -86,7 +95,13 @@ function eligibleSupporterSql(
      SELECT 1 FROM "studio_access_grants" "supporter_grant"
       WHERE "supporter_grant"."user_id" = ${userIdExpression}
    )
-   AND NOT ${blockedWithAnyPersonaMemberSql(userIdExpression, '$1')}
+   AND (
+     (
+       ${shownAsExpression} IS NOT NULL
+       AND ${unlinkedPersonaByIdSql(shownAsExpression)}
+     )
+     OR NOT ${blockedWithAnyPersonaMemberSql(userIdExpression, '$1')}
+   )
    AND ${userIdExpression} NOT IN ${personaMemberUserIdsSql('$1')}
    AND (
      ${shownAsExpression} IS NULL
@@ -98,7 +113,7 @@ function eligibleSupporterSql(
    )}
    AND (
      ${shownAsExpression} IS NULL
-     OR ${chosenPersonaShowableSql(shownAsExpression)}
+     OR ${chosenPersonaShownToOthersSql(shownAsExpression)}
    )`;
 }
 
@@ -472,6 +487,7 @@ export class StudioSupportersService {
       rows
         .filter((row) => row.shown_as_subprofile_id === null)
         .map((row) => row.user_id),
+      { inactive: 'drop' },
     );
     const personasById = await this.chosenPersonasById(
       rows.map((row) => row.shown_as_subprofile_id),

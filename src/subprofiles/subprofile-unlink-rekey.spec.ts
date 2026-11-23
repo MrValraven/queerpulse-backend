@@ -61,7 +61,7 @@ describe('issueFreshPersonaId', () => {
     expect(freshId).toMatch(UUID_PATTERN);
     expect(freshId).not.toBe(PREVIOUS_ID);
     expect(query.mock.calls[0]).toEqual([
-      `UPDATE "subprofiles" SET "id" = $1 WHERE "id" = $2`,
+      `UPDATE "subprofiles" SET "id" = $1, "created_at" = now(), "updated_at" = now() WHERE "id" = $2`,
       [freshId, PREVIOUS_ID],
     ]);
   });

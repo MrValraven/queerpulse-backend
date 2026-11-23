@@ -1,4 +1,5 @@
 import { EntityManager } from 'typeorm';
+import { personaCreatorActiveSql } from '../subprofiles/persona-creator-gates';
 import {
   PLAYLIST_CREDIT_RELEASE_ASSIGNMENTS,
   RELEASE_PLAYLIST_CREDITS_IF_UNLISTENABLE_SQL,
@@ -11,6 +12,7 @@ import {
   CLEAR_ENDED_EDITOR_ADDED_BY_SQL,
   RELEASED_PLAYLIST_EDITORS_CTE,
 } from './studio-playlist-editor-endings';
+import { listenablePersonaStateSql } from './studio-visibility';
 
 const PERSONA_ID = '0b9f3c1e-5a52-4c51-9d6e-2f1a7c3b8e40';
 
@@ -105,5 +107,17 @@ describe('Studio playlist credit release', () => {
 
   it('keeps NOT EXISTS out of the delete and unlink release', () => {
     expect(RELEASE_PLAYLIST_CREDITS_OF_PERSONA_SQL).not.toContain('NOT EXISTS');
+  });
+
+  // SEC-33: a co-owner saving the persona while its creator's account is
+  // paused, suspended or pending erasure keeps every credit and co-owner
+  // editor, so the save-time release reads the persona state alone.
+  it('releases on the persona state alone, leaving the creator account out', () => {
+    expect(RELEASE_PLAYLIST_CREDITS_IF_UNLISTENABLE_SQL).toContain(
+      listenablePersonaStateSql('credit_persona'),
+    );
+    expect(RELEASE_PLAYLIST_CREDITS_IF_UNLISTENABLE_SQL).not.toContain(
+      personaCreatorActiveSql('credit_persona'),
+    );
   });
 });

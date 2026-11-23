@@ -1,4 +1,8 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -446,6 +450,48 @@ describe('SocialService', () => {
         reasonCode: 'other',
         detail: 'Filed alongside a block.',
       });
+    });
+
+    it('keeps the block when the open report already holds all it can (PRD-510)', async () => {
+      stubSlugResolution({ them: 'them' });
+      blocks.findOneOrFail.mockResolvedValue({
+        id: 'b1',
+        blockerId: 'me',
+        blockedId: 'them',
+        reason: 'harassment',
+        createdAt: new Date(),
+      });
+      reportsService.create.mockRejectedValueOnce(
+        new ConflictException({
+          code: 'REPORT_FOLLOW_UP_LIMIT',
+          message: 'Full.',
+        }),
+      );
+
+      await expect(
+        service.blockMember('me', 'them', {
+          alsoReport: true,
+          reason: 'harassment',
+        }),
+      ).resolves.toMatchObject({ id: 'b1' });
+    });
+
+    it('still surfaces any other refusal of the companion report', async () => {
+      stubSlugResolution({ them: 'them' });
+      blocks.findOneOrFail.mockResolvedValue({
+        id: 'b1',
+        blockerId: 'me',
+        blockedId: 'them',
+        reason: null,
+        createdAt: new Date(),
+      });
+      reportsService.create.mockRejectedValueOnce(
+        new BadRequestException({ code: 'REPORT_REASON_NOT_OFFERED' }),
+      );
+
+      await expect(
+        service.blockMember('me', 'them', { alsoReport: true }),
+      ).rejects.toThrow(BadRequestException);
     });
 
     it('does not file a report when alsoReport is not set', async () => {

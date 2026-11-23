@@ -24,6 +24,10 @@ import { parseCookie } from 'cookie';
 import { DefaultEventsMap, Namespace, Socket } from 'socket.io';
 import { IsNull, MoreThan, Repository } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import {
+  USER_SESSION_REVOKED,
+  UserSessionRevokedEvent,
+} from '../chat/session.events';
 import { TokenBucketLimiter } from '../chat/ws-rate-limiter';
 import { VALIDATION_PIPE_OPTIONS } from '../common/validation-pipe.options';
 import {
@@ -82,6 +86,11 @@ interface DeskSocketData {
   admission?: Promise<DeskViewer | null>;
   viewer?: DeskViewer;
   expiryTimer?: NodeJS.Timeout;
+  /** The verified `sub`, stored before the first database read so a
+   *  revocation landing mid-handshake still finds this socket. */
+  userId?: string;
+  /** The token's refresh-token family (`sid`), absent on a pre-claim token. */
+  sessionId?: string;
 }
 
 type DeskSocket = Socket<
@@ -198,6 +207,11 @@ export class MagazineDeskPresenceGateway
   private async admit(client: DeskSocket): Promise<DeskViewer | null> {
     try {
       const claims = await this.verifyHandshakeToken(client);
+      client.data.userId = claims.sub;
+      client.data.sessionId =
+        typeof claims.sid === 'string' && claims.sid !== ''
+          ? claims.sid
+          : undefined;
       // Metered on the VERIFIED user id, before any database read, so a
       // client cannot spend a stranger's budget with a forged `sub`.
       if (!this.handshakeLimiter.tryConsume(claims.sub)) {
@@ -279,6 +293,33 @@ export class MagazineDeskPresenceGateway
       `Lockdown enabled by ${payload.actorId}: disconnecting desk presence sockets`,
     );
     this.namespace?.disconnectSockets(true);
+  }
+
+  /**
+   * SEC-30: drop an editor's desk sockets when their session is revoked
+   * (sign-out, "sign out this device", "log out other devices", a
+   * suspension, token reuse, the liveness sweep), as the chat, VJ and
+   * quizshow gateways do. With a `sessionId` only that device's sockets go,
+   * plus any socket whose token predates the `sid` claim and so cannot be
+   * told apart; without one every socket of the member goes. No frame is
+   * sent: each socket reconnects, and the handshake (`assertSessionLive`,
+   * the live status and staff-role reads) decides who comes back. A socket
+   * still mid-handshake is dropped too, and `admit` sees it disconnected.
+   * Single replica only, like the rest of this gateway.
+   */
+  @OnEvent(USER_SESSION_REVOKED)
+  handleSessionRevoked(payload: UserSessionRevokedEvent): void {
+    for (const socket of [...(this.namespace?.sockets.values() ?? [])]) {
+      const deskSocket = socket as DeskSocket;
+      if (deskSocket.data.userId !== payload.userId) continue;
+      if (
+        !payload.sessionId ||
+        deskSocket.data.sessionId === undefined ||
+        deskSocket.data.sessionId === payload.sessionId
+      ) {
+        deskSocket.disconnect(true);
+      }
+    }
   }
 
   @SubscribeMessage('desk:watch')

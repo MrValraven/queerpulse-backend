@@ -5,7 +5,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import { communityAvatarPhotoReference } from '../storage/public-media-reference';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { assertCommunityInteriorReadable } from './community-read-gate';
 import {
@@ -603,7 +604,11 @@ export class CommunityMembershipService {
           slug: community.slug,
           name: community.name,
           accessTier: community.accessTier,
-          avatarImageUrl: toImageUrl(community.avatarImageUrl),
+          // SEC-04: the avatar's key names its uploader; render by reference.
+          avatarImageUrl: toImageUrlByReference(
+            community.avatarImageUrl,
+            communityAvatarPhotoReference(communityId),
+          ),
         }
       : null;
   }
@@ -637,7 +642,11 @@ export class CommunityMembershipService {
         slug: row.slug,
         name: row.name,
         accessTier: row.accessTier,
-        avatarImageUrl: toImageUrl(row.avatarImageUrl),
+        // SEC-04: the avatar's key names its uploader; render by reference.
+        avatarImageUrl: toImageUrlByReference(
+          row.avatarImageUrl,
+          communityAvatarPhotoReference(row.id),
+        ),
       });
     }
     return tierRefs;

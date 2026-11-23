@@ -1,3 +1,4 @@
+import { mediaReferenceVersion } from '../storage/media-reference-version';
 import {
   Listing,
   ListingOperatingState,
@@ -37,6 +38,10 @@ const coverKey =
   'listing-covers/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.webp';
 const galleryKey =
   'listing-photos/11111111-1111-4111-8111-111111111111/33333333-3333-4333-8333-333333333333.webp';
+// The uploader segment of both keys above, and a listing row id, for the
+// opaque reference tests (SEC-04).
+const UPLOADER_UUID = '11111111-1111-4111-8111-111111111111';
+const LISTING_UUID = '44444444-4444-4444-8444-444444444444';
 // A saved photo framing, shared by the framing tests below.
 const framing = { focusX: 0.25, focusY: 0.75, zoom: 2 };
 
@@ -469,6 +474,19 @@ describe('toReviewDTO', () => {
 
   it('reads an empty photo slot as no photo', () => {
     expect(toReviewDTO(makeReview()).photoUrl).toBeNull();
+  });
+
+  it("addresses a member's review photo by the review's reference (SEC-04)", () => {
+    setImageUrlBase('https://api.test');
+    try {
+      const reviewId = '55555555-5555-4555-8555-555555555555';
+      const dto = toReviewDTO(makeReview({ id: reviewId, photo: galleryKey }));
+      expect(dto.photoUrl).toBe(
+        `https://api.test/files/listing-reviews/${reviewId}/photo?v=${mediaReferenceVersion(galleryKey, `listing-reviews/${reviewId}/photo`)}`,
+      );
+    } finally {
+      resetImageUrlBaseForTesting();
+    }
   });
 });
 
@@ -931,6 +949,16 @@ describe('toListingDTO (the owner/managed response)', () => {
       expect(withoutCover.coverPhoto).toBeNull();
     });
 
+    it('keeps the gallery on the storage key, whose form re-sends it', () => {
+      const dto = toListingDTO(
+        makeManagedListing({
+          photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+        }),
+        null,
+      );
+      expect(dto.photoGallery[0]?.image).toBe(toImageUrl(galleryKey));
+    });
+
     it('carries the cover crop from the batched map', () => {
       const crop: CropRect = {
         x: 0,
@@ -1350,7 +1378,11 @@ describe('toGalleryView framing', () => {
     const listing = makeDirectoryListing({
       photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '', framing }],
     });
-    const view = toGalleryView(listing, new Map([[galleryKey, crop]]));
+    const view = toGalleryView(
+      listing,
+      new Map([[galleryKey, crop]]),
+      'storage-key',
+    );
     expect(view[0]).toEqual({
       image: toImageUrl(galleryKey),
       alt: 'Bar',
@@ -1391,7 +1423,7 @@ describe('toCoverPhoto', () => {
       coverPhoto: { image: coverKey, alt: 'Front door' },
       photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
     });
-    expect(toCoverPhoto(listing)).toEqual({
+    expect(toCoverPhoto(listing, undefined, 'storage-key')).toEqual({
       image: toImageUrl(coverKey),
       alt: 'Front door',
       caption: '',
@@ -1400,14 +1432,103 @@ describe('toCoverPhoto', () => {
 
   it('keeps the cover alt even when it is empty', () => {
     const listing = makeDirectoryListing({
+      id: LISTING_UUID,
       coverPhoto: { image: coverKey, alt: '' },
       photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
     });
     expect(toCoverPhoto(listing)?.alt).toBe('');
-    // The card carries the same cover, with the cover's own (empty) alt.
+    // The card carries the same cover, with the cover's own (empty) alt,
+    // addressed by the listing's opaque reference (SEC-04).
     const card = toDirectoryCard(listing);
-    expect(card.coverPhoto?.image).toBe(toImageUrl(coverKey));
+    expect(card.coverPhoto?.image).toBe(
+      `https://api.test/files/listings/${LISTING_UUID}/cover?v=${mediaReferenceVersion(coverKey, `listings/${LISTING_UUID}/cover`)}`,
+    );
     expect(card.coverPhoto?.alt).toBe('');
+  });
+
+  it('keeps the uploader id out of every public photo URL (SEC-04)', () => {
+    const listing = makeDirectoryListing({
+      id: LISTING_UUID,
+      visibility: 'anon',
+      coverPhoto: null,
+      photoGallery: [
+        { image: galleryKey, alt: 'Bar', caption: '' },
+        { image: 'https://cdn.example.com/seeded.jpg', alt: '', caption: '' },
+      ],
+    });
+    const detail = toDirectoryDetail(listing, [], [], 0);
+    expect(detail.coverPhoto?.image).toBe(
+      `https://api.test/files/listings/${LISTING_UUID}/photos/0?v=${mediaReferenceVersion(galleryKey, `listings/${LISTING_UUID}/photos/0`)}`,
+    );
+    expect(detail.photoGallery.map((photo) => photo.image)).toEqual([
+      `https://api.test/files/listings/${LISTING_UUID}/photos/0?v=${mediaReferenceVersion(galleryKey, `listings/${LISTING_UUID}/photos/0`)}`,
+      // An external URL names nobody and passes through.
+      'https://cdn.example.com/seeded.jpg',
+    ]);
+    expect(detail.photos.wide).toBe(
+      `https://api.test/files/listings/${LISTING_UUID}/photos/0?v=${mediaReferenceVersion(galleryKey, `listings/${LISTING_UUID}/photos/0`)}`,
+    );
+    expect(JSON.stringify(detail)).not.toContain(UPLOADER_UUID);
+  });
+
+  it('keeps the storage key on the owner wire, whose form re-sends it', () => {
+    const listing = makeDirectoryListing({
+      id: LISTING_UUID,
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+    });
+    expect(toGalleryView(listing, undefined, 'storage-key')[0]?.image).toBe(
+      toImageUrl(galleryKey),
+    );
+  });
+
+  it('addresses gallery and cover by reference when no addressing is named', () => {
+    // C2: the default fails closed, so a caller that forgets to name the
+    // owner wire leaks no uploader id.
+    const listing = makeDirectoryListing({
+      id: LISTING_UUID,
+      coverPhoto: { image: coverKey, alt: 'Front door' },
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+    });
+    expect(toGalleryView(listing)[0]?.image).toBe(
+      `https://api.test/files/listings/${LISTING_UUID}/photos/0?v=${mediaReferenceVersion(galleryKey, `listings/${LISTING_UUID}/photos/0`)}`,
+    );
+    expect(toCoverPhoto(listing)?.image).toBe(
+      `https://api.test/files/listings/${LISTING_UUID}/cover?v=${mediaReferenceVersion(coverKey, `listings/${LISTING_UUID}/cover`)}`,
+    );
+    expect(JSON.stringify(toCoverPhoto(listing))).not.toContain(UPLOADER_UUID);
+  });
+
+  it('addresses shop item photos and the menu file by reference on the public detail', () => {
+    const menuKey = `listing-menus/${UPLOADER_UUID}/77777777-7777-4777-8777-777777777777.pdf`;
+    const listing = makeDirectoryListing({
+      id: LISTING_UUID,
+      shopItems: [
+        {
+          id: 'item-1',
+          name: 'Mug',
+          price: '12',
+          link: '',
+          photo: { image: galleryKey, alt: 'A mug', caption: '' },
+        },
+      ],
+      menu: {
+        sections: [],
+        file: {
+          url: menuKey,
+          contentType: 'application/pdf',
+          fileName: 'Menu.pdf',
+        },
+        link: '',
+      },
+    });
+    const detail = toDirectoryDetail(listing, [], [], 0);
+    expect(detail.shopItems[0]?.photo?.image).toBe(
+      `https://api.test/files/listings/${LISTING_UUID}/shop-items/0/photo?v=${mediaReferenceVersion(galleryKey, `listings/${LISTING_UUID}/shop-items/0/photo`)}`,
+    );
+    expect(detail.menu.file?.url).toBe(
+      `https://api.test/files/listings/${LISTING_UUID}/menu?v=${mediaReferenceVersion(menuKey, `listings/${LISTING_UUID}/menu`)}`,
+    );
+    expect(JSON.stringify(detail)).not.toContain(UPLOADER_UUID);
   });
 
   it('falls back to the first gallery photo', () => {
@@ -1417,7 +1538,7 @@ describe('toCoverPhoto', () => {
         { image: galleryKey, alt: 'Bar', caption: 'Opening night' },
       ],
     });
-    const cover = toCoverPhoto(listing);
+    const cover = toCoverPhoto(listing, undefined, 'storage-key');
     expect(cover?.image).toBe(toImageUrl(galleryKey));
     expect(cover?.alt).toBe('Bar');
     expect(cover?.caption).toBe('Opening night');

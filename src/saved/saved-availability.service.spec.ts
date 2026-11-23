@@ -12,6 +12,8 @@ import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { episodeReleasedSql } from '../studio/studio-episode-rule';
 import { withdrawnReleaseSql } from '../studio/studio-visibility';
 import { SavedAvailabilityService } from './saved-availability.service';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
+import { unlinkedPersonaCreditStandsSql } from '../studio/studio-discovery-sql';
 
 /**
  * One chainable query-builder stub per resolved kind. `getRawMany` resolves to
@@ -130,16 +132,23 @@ describe('SavedAvailabilityService', () => {
     expect(available.has('post:long-gone')).toBe(false);
   });
 
-  describe('the bookmarked-thread gate', () => {
-    // Every predicate the thread query folded on, in the order it folded them.
-    const foldedPredicates = (): string[] => {
-      const result = manager.createQueryBuilder.mock.results[0] as
-        { value: Record<string, jest.Mock> } | undefined;
-      const andWhere = result?.value.andWhere;
-      if (!andWhere) return [];
-      return andWhere.mock.calls.map((call: unknown[]) => String(call[0]));
-    };
+  // Every `andWhere` call the first query folded on, in order: the predicate
+  // text and the parameters it bound.
+  const foldedCalls = (): { predicate: string; parameters: unknown }[] => {
+    const result = manager.createQueryBuilder.mock.results[0] as
+      { value: Record<string, jest.Mock> } | undefined;
+    const andWhere = result?.value.andWhere;
+    if (!andWhere) return [];
+    return andWhere.mock.calls.map((call: unknown[]) => ({
+      predicate: String(call[0]),
+      parameters: call[1],
+    }));
+  };
+  // Every predicate the first query folded on, in the order it folded them.
+  const foldedPredicates = (): string[] =>
+    foldedCalls().map((call) => call.predicate);
 
+  describe('the bookmarked-thread gate', () => {
     it("carries the forum's own scheduled/under-review gate, verbatim", async () => {
       // The regression this closes: this service re-implements `loadOr404`
       // predicate for predicate, fell exactly one predicate behind when the
@@ -161,6 +170,24 @@ describe('SavedAvailabilityService', () => {
           sql.includes(forumThreadVisibleSql('"thread"')),
         ),
       ).toBe(true);
+    });
+
+    it("does not filter on an anonymous thread's hidden author", async () => {
+      // Coordinator ruling (the SEC-02 class): a saved anonymous thread
+      // turning unavailable for a viewer who blocked its hidden author would
+      // confirm who wrote it, so the author column is NULL for those threads.
+      await build({ thread: ['a-thread'] });
+
+      await service.availableRefs(
+        [ref(SavedKind.Post, 'a-thread')],
+        'viewer-1',
+      );
+
+      expect(excludeBlocked).toHaveBeenCalledWith(
+        expect.anything(),
+        'viewer-1',
+        `CASE WHEN "thread"."is_anonymous" AND NOT "thread"."is_official" THEN NULL ELSE "thread"."author_id" END`,
+      );
     });
 
     it("lets the thread's own author past it, as `loadOr404` does", async () => {
@@ -244,6 +271,45 @@ describe('SavedAvailabilityService', () => {
         '"housing"."owner_id"',
       );
       expect(available).toEqual(new Set(['housing:a-room']));
+    });
+
+    it('is withheld while its lister is not an active member, unless the viewer is the lister', async () => {
+      await build({ housing: ['a-room'] });
+
+      await service.availableRefs(
+        [ref(SavedKind.Housing, 'a-room')],
+        'viewer-1',
+      );
+
+      const gate = foldedCalls().find((call) =>
+        call.predicate.includes('"lister_user"."status"'),
+      );
+      expect(gate?.predicate).toContain(
+        '"housing"."owner_id" = :savedViewerId',
+      );
+      expect(gate?.parameters).toEqual({ activeListerStatus: 'active' });
+    });
+  });
+
+  describe('a saved flatmate profile', () => {
+    it('is withheld while its owner is not an active member, unless the viewer is the owner', async () => {
+      await build({ flatmate: ['sam-flatmate'] });
+
+      await service.availableRefs(
+        [ref(SavedKind.Flatmate, 'sam-flatmate')],
+        'viewer-1',
+      );
+
+      const gate = foldedCalls().find((call) =>
+        call.predicate.includes('"owner_user"."status"'),
+      );
+      expect(gate?.predicate).toContain(
+        '"flatmate"."owner_id" = :savedViewerId',
+      );
+      expect(gate?.parameters).toEqual({
+        savedViewerId: 'viewer-1',
+        activeOwnerStatus: 'active',
+      });
     });
   });
 
@@ -336,6 +402,7 @@ describe('SavedAvailabilityService', () => {
         queryBuilder,
         'viewer-1',
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -440,6 +507,7 @@ describe('SavedAvailabilityService', () => {
         queryBuilder,
         'viewer-1',
         '"playlist"."user_id"',
+        { unless: unlinkedPersonaCreditStandsSql('playlist') },
       );
     });
 
@@ -464,10 +532,10 @@ describe('SavedAvailabilityService', () => {
         'viewer-1',
         creditPersonaCreatorIdSql('playlist'),
         {
-          unless: personaCreatorBlockExemptSql(
+          unless: `(${personaCreatorBlockExemptSql(
             'playlist',
             'savedPlaylistViewerId',
-          ),
+          )} OR ${unlinkedPersonaByIdSql('"playlist"."credit_subprofile_id"')})`,
         },
       );
       expect(
@@ -524,6 +592,7 @@ describe('SavedAvailabilityService', () => {
             queryBuilder,
             'viewer-1',
             '"persona"."user_id"',
+            { unless: `"persona"."link_visibility" = 'unlinked'` },
           );
         }
       });

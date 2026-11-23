@@ -16,6 +16,8 @@ import { Agent as UndiciAgent } from 'undici';
  *
  * Layers:
  *  1. Scheme allow-list — only http/https (no file:, gopher:, data:, ...).
+ *     The link preview's own fetches (`safeFetchHtml`, `safeFetchImage`) also
+ *     hold every hop to ports 80 and 443 (`shouldRestrictToDefaultPorts`).
  *  2. DNS resolution + IP-range block — every resolved address must be a
  *     public unicast IP (rejects loopback, link-local, private, CGNAT, ULA,
  *     multicast, reserved, and IPv4-mapped/embedded forms of all of those).
@@ -39,6 +41,42 @@ const MAX_REDIRECTS = 3;
 const FETCH_TIMEOUT_MS = 4000;
 const MAX_BYTES = 512 * 1024; // 512 KB is ample for a document <head>.
 const HTML_CONTENT_TYPE = /text\/html|application\/xhtml\+xml/i;
+
+/**
+ * SEC-45: the ports a member-chosen URL may reach. `URL.port` is the empty
+ * string when the URL names its scheme's default port, so an address with no
+ * port passes, and so do explicit `:80` and `:443`. Any other port would let a
+ * member use the unfurler as a slow port probe against public hosts from
+ * QueerPulse's own address.
+ */
+const DEFAULT_WEB_PORTS = new Set(['', '80', '443']);
+
+/** True when `url` dials port 80 or 443 (explicitly or by its scheme's default). */
+export function isDefaultWebPort(url: URL): boolean {
+  return DEFAULT_WEB_PORTS.has(url.port);
+}
+
+/**
+ * SEC-23: the image types the link-preview image route relays. Each one has a
+ * magic-bytes check in `storage/served-object.ts`, so a body that only claims
+ * to be an image is refused. SVG is left out on purpose: it is a document that
+ * can carry script.
+ */
+export const LINK_PREVIEW_IMAGE_TYPES: ReadonlySet<string> = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
+/** The largest preview image the route relays. Open Graph images are sized
+ *  for a card, so a body past this is a misconfigured page or an abuse. */
+export const LINK_PREVIEW_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
+
+/** `image/png; charset=binary` becomes `image/png`. */
+export function bareContentType(contentType: string): string {
+  return (contentType.split(';')[0] ?? '').trim().toLowerCase();
+}
 
 /** Parse a dotted-quad into its 32-bit integer, or null if malformed. */
 function ipv4ToInt(ip: string): number | null {
@@ -286,6 +324,9 @@ export interface SafeFetchOptions {
   /** Checked against the final response's Content-Type (possibly empty)
    *  before the body is read. */
   acceptsContentType?: (contentType: string) => boolean;
+  /** SEC-45: refuse, as `blocked`, any hop (the first URL or a redirect
+   *  target) whose port is outside 80 and 443. */
+  shouldRestrictToDefaultPorts?: boolean;
 }
 
 export type SafeFetchResult =
@@ -344,6 +385,14 @@ export async function safeFetch(
         error instanceof Error &&
         ('code' in error || error.message === 'no-dns');
       return { ok: false, failure: isDnsFailure ? 'unreachable' : 'blocked' };
+    }
+    // Checked on every hop, so a public page cannot 3xx the fetcher onto an
+    // odd port the first URL never named.
+    if (
+      options.shouldRestrictToDefaultPorts &&
+      !isDefaultWebPort(validated.url)
+    ) {
+      return { ok: false, failure: 'blocked' };
     }
 
     // Pin this hop's socket to the exact IP we just vetted (closes the
@@ -501,10 +550,40 @@ export async function safeFetchHtml(
     // declares itself as something other than HTML has nothing to unfurl.
     acceptsContentType: (contentType) =>
       !contentType || HTML_CONTENT_TYPE.test(contentType),
+    shouldRestrictToDefaultPorts: true,
   });
   if (!fetched.ok || fetched.notModified) return null;
   return {
     html: new TextDecoder('utf-8').decode(fetched.body),
     finalUrl: fetched.finalUrl,
+  };
+}
+
+/**
+ * SEC-23: fetch a link preview's image, SSRF-safe, with the same redirect and
+ * timeout budget as the page and the same 80/443 port rule. Only a declared
+ * {@link LINK_PREVIEW_IMAGE_TYPES} type is read, a body past
+ * {@link LINK_PREVIEW_IMAGE_MAX_BYTES} fails whole (a truncated image is a
+ * broken one), and the caller checks the bytes against the declared type.
+ * Returns null for every "cannot relay this" case.
+ */
+export async function safeFetchImage(
+  rawUrl: string,
+): Promise<{ body: Uint8Array; contentType: string } | null> {
+  const fetched = await safeFetch(rawUrl, {
+    userAgent: 'QueerPulseBot/1.0 (+link-preview)',
+    accept: [...LINK_PREVIEW_IMAGE_TYPES].join(','),
+    maxBytes: LINK_PREVIEW_IMAGE_MAX_BYTES,
+    overflow: 'error',
+    timeoutMs: FETCH_TIMEOUT_MS,
+    maxRedirects: MAX_REDIRECTS,
+    acceptsContentType: (contentType) =>
+      LINK_PREVIEW_IMAGE_TYPES.has(bareContentType(contentType)),
+    shouldRestrictToDefaultPorts: true,
+  });
+  if (!fetched.ok || fetched.notModified) return null;
+  return {
+    body: fetched.body,
+    contentType: bareContentType(fetched.headers.get('content-type') ?? ''),
   };
 }

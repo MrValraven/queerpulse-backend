@@ -117,6 +117,18 @@ export interface CommunityGovernanceLogDetailsDTO {
    *  is NEVER sent to the author. This route is owner/co-owner/mod only and is
    *  where such a note is meant to be read. */
   internalNote?: string;
+  /** `badge_created` / `badge_updated` / `badge_deleted`: the badge acted on. */
+  badgeId?: string;
+  /** `badge_created` / `badge_updated` / `badge_deleted`: the badge name as
+   *  it read at the moment of the action. `badge_updated` carries its diff in
+   *  `changedSettings`. */
+  badgeName?: string;
+  /** `badge_deleted`: how many members on the roster held the badge. */
+  holderCount?: number;
+  /** `gift_sent` / `gift_removed`: the gift acted on. */
+  giftId?: string;
+  /** `gift_sent` / `gift_removed`: which catalogue gift it was. */
+  giftKey?: string;
 }
 
 /**
@@ -181,6 +193,17 @@ function readBoolean(
 ): boolean | undefined {
   const value = metadata[key];
   return typeof value === 'boolean' ? value : undefined;
+}
+
+/** A finite number under `key`, or `undefined` for anything else. */
+function readNumber(
+  metadata: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = metadata[key];
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function readRosterRole(
@@ -254,6 +277,11 @@ export function toCommunityGovernanceLogDetails(
   const postId = readString(metadata, 'postId');
   const replyId = readString(metadata, 'replyId');
   const internalNote = readString(metadata, 'internalNote');
+  const badgeId = readString(metadata, 'badgeId');
+  const badgeName = readString(metadata, 'badgeName');
+  const holderCount = readNumber(metadata, 'holderCount');
+  const giftId = readString(metadata, 'giftId');
+  const giftKey = readString(metadata, 'giftKey');
 
   if (fromRole !== undefined) details.fromRole = fromRole;
   if (toRole !== undefined) details.toRole = toRole;
@@ -271,6 +299,11 @@ export function toCommunityGovernanceLogDetails(
   if (postId !== undefined) details.postId = postId;
   if (replyId !== undefined) details.replyId = replyId;
   if (internalNote !== undefined) details.internalNote = internalNote;
+  if (badgeId !== undefined) details.badgeId = badgeId;
+  if (badgeName !== undefined) details.badgeName = badgeName;
+  if (holderCount !== undefined) details.holderCount = holderCount;
+  if (giftId !== undefined) details.giftId = giftId;
+  if (giftKey !== undefined) details.giftKey = giftKey;
   return details;
 }
 

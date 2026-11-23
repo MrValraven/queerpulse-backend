@@ -166,7 +166,10 @@ export class MemberRecognitionController {
       "The member's recognition (perk state omitted for non-owners).",
   })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiForbiddenResponse({
+    description:
+      'Caller is not an active member, or code PROFILE_LIMITED: the member keeps their full profile, recognition included, to their connections or to themself.',
+  })
   @ApiNotFoundResponse({ description: 'No profile with that slug.' })
   @Get(':slug/recognition')
   getForMember(

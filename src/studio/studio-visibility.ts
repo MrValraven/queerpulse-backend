@@ -2,6 +2,7 @@ import {
   SubprofileStatus,
   SubprofileVisibility,
 } from '../subprofiles/entities/subprofile.entity';
+import { personaCreatorActiveSql } from '../subprofiles/persona-creator-gates';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from '../subprofiles/subprofile-takedown';
 import {
   StudioRelease,
@@ -13,9 +14,19 @@ import {
  * Every listening read (home, search, release, track, artist, stream), the
  * uploadable persona list and the saved-card availability check use it, so
  * a persona that is unpublished, removed, missing its handle or under a
- * moderator takedown drops out of all of them at once. A persona set to
- * network or private is shown only to its chosen audience, so Studio lists
- * open personas only.
+ * moderator takedown drops out of all of them at once. SEC-33: so does a
+ * persona whose creator's account is suspended, banned, paused or pending
+ * erasure (`personaCreatorActiveSql`), as `/p/<handle>` already answers 404.
+ * A persona set to network or private is shown only to its chosen audience,
+ * so Studio lists open personas only.
+ *
+ * Owners and co-owners keep managing such a persona through the ownership
+ * reads (`StudioOwnershipService.isPersonaMember`), which skip this rule.
+ * The one owner-side exception is `StudioOwnershipService
+ * .listUploadablePersonas`, which backs the upload picker (`GET /studio/me`)
+ * and the playlist "Show as" credit check: it keeps the full rule, so a
+ * co-owner can neither upload to nor credit a playlist to a persona whose
+ * creator's account is inactive until that account is active again.
  *
  * The takedown arm mirrors `SubprofilePublicReadService
  * .excludeModeratedSubprofiles`: hidden and removed both count, keyed by the
@@ -25,6 +36,21 @@ import {
  * since that one binds a parameter.
  */
 export function listenablePersonaSql(personaAlias: string): string {
+  return `(${listenablePersonaStateSql(personaAlias)}
+    AND ${personaCreatorActiveSql(personaAlias)})`;
+}
+
+/**
+ * The persona's own half of `listenablePersonaSql`: published, present,
+ * holding a handle, open and clear of a moderator takedown, whatever the
+ * state of its creator's account. For the statements that change stored
+ * state when a persona stops being listenable (the playlist credit release,
+ * the Notify me reminder discard): a creator's account pause, suspension or
+ * erasure grace can end, so those statements wait for the persona itself to
+ * change, and every reader still hides the persona through
+ * `listenablePersonaSql` meanwhile.
+ */
+export function listenablePersonaStateSql(personaAlias: string): string {
   const persona = `"${personaAlias}"`;
   return `(${persona}."status" = '${SubprofileStatus.Published}'
     AND ${persona}."removed_at" IS NULL

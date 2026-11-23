@@ -34,6 +34,11 @@ import {
   VISIBLE_SECTIONS_PARAMETER,
   visibleSectionSql,
 } from './subprofile-visible-sections-sql';
+import {
+  PERSONA_CREATOR_ACTIVE_WHERE,
+  isCreatorBlockConsulted,
+  memberIdShownOnPeopleListIn,
+} from './persona-creator-gates';
 
 /**
  * Safety cap on the OUTBOUND scan (the page's own credited items). A page of
@@ -146,7 +151,10 @@ export class SubprofileCreditGraphService {
     const [profileRows, personaRows] = await Promise.all([
       memberUserIds.length
         ? this.profiles.find({
-            where: { userId: In(memberUserIds) },
+            // SEC-21: a credited member loads only while their account is
+            // active and they have no live 24-hour hide, so a card or credit
+            // names them exactly when the people lists do.
+            where: { userId: memberIdShownOnPeopleListIn(memberUserIds) },
             select: {
               userId: true,
               firstName: true,
@@ -158,7 +166,12 @@ export class SubprofileCreditGraphService {
         : Promise.resolve([] as Profile[]),
       personaIdsToLoad.length
         ? this.subprofiles.find({
-            where: { id: In(personaIdsToLoad) },
+            // SEC-33: a persona whose creator is not active never loads, so
+            // it is never a credit face or a "Made together" author.
+            where: {
+              id: In(personaIdsToLoad),
+              ...PERSONA_CREATOR_ACTIVE_WHERE,
+            },
             select: {
               id: true,
               handle: true,
@@ -182,9 +195,14 @@ export class SubprofileCreditGraphService {
     const rosterIds = profileRows.length
       ? [...new Set(options.rosterPersonaIds ?? [])]
       : [];
+    // A block with a persona's creator counts for a LINKED persona alone: an
+    // unlinked one answers every viewer alike, so a credit that vanished on
+    // a block could test who runs it (SEC-02).
     const candidateBlockedIds = [
       ...new Set([
-        ...personaRows.map((persona) => persona.userId),
+        ...personaRows
+          .filter((persona) => isCreatorBlockConsulted(persona))
+          .map((persona) => persona.userId),
         ...profileRows.map((profile) => profile.userId),
       ]),
     ];
@@ -231,7 +249,9 @@ export class SubprofileCreditGraphService {
         isUnderTakedown: Boolean(
           moderationState?.hidden || moderationState?.removed,
         ),
-        isOwnerBlocked: blockedUserIds.has(persona.userId),
+        isOwnerBlocked:
+          isCreatorBlockConsulted(persona) &&
+          blockedUserIds.has(persona.userId),
       });
     }
 

@@ -13,8 +13,12 @@ import {
 } from '../content-moderation/content-moderation.service';
 import {
   COMMUNITY_POST_CREATED,
+  COMMUNITY_REPLY_CREATED,
   CommunityPostCreatedEvent,
+  CommunityReplyCreatedEvent,
 } from './community.events';
+import { nameMarksFor } from '../community-badges/community-badge-response';
+import { CommunityNameMarksService } from '../community-badges/community-name-marks.service';
 import { Event } from '../events/entities/event.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { StorageService } from '../storage/storage.service';
@@ -205,6 +209,9 @@ export class CommunityPostsService {
     // The effective-role resolver (own roster row, plus the role parent staff
     // inherit inside a space). Every gate in this service reads it.
     private readonly communityMembership: CommunityMembershipService,
+    // One batched read per page of the worn flair and recent-gift mark shown
+    // beside each author's name.
+    private readonly nameMarks: CommunityNameMarksService,
   ) {}
 
   private readonly logger = new Logger(CommunityPostsService.name);
@@ -308,7 +315,7 @@ export class CommunityPostsService {
       );
     }
     return paginate(qb, normalizedPage, (rows) =>
-      this.toPostDTOs(rows, viewerId, viewerRole),
+      this.toPostDTOs(rows, community.id, viewerId, viewerRole),
     );
   }
 
@@ -351,7 +358,12 @@ export class CommunityPostsService {
         throw new NotFoundException('Post not found');
       }
     }
-    const [dto] = await this.toPostDTOs([post], viewerId, viewerRole);
+    const [dto] = await this.toPostDTOs(
+      [post],
+      post.communityId,
+      viewerId,
+      viewerRole,
+    );
     if (!dto) {
       // `toPostDTOs` withheld it: moderator-hidden, and this viewer is not
       // staff. Same answer as a post that never existed.
@@ -440,13 +452,15 @@ export class CommunityPostsService {
   }
 
   /**
-   * `PATCH /community-posts/:id` — the flat alias's own update: author-only,
+   * `PATCH /community-posts/:id`: the flat alias's own update, author-only,
    * body/kind/image only (see `UpdateFlatPostInput`'s doc comment for why
    * `pinned` isn't part of this shape). Shares `applyPostFieldEdit` with the
-   * nested route above. The difference is there's no roster or pin
-   * authorization step here, only `assertPostCommunityOpenForEdit`'s archive
-   * and takedown check. `applyPostFieldEdit` itself still enforces the
-   * author-only check on any actual field change.
+   * nested route above, and `assertPostCommunityOpenForEdit` runs the same
+   * takedown, roster and archive checks the nested route gets through
+   * `assertMemberForWrite`, so an author a moderator removed or banned from
+   * the community cannot rewrite the post here (SEC-39). There is no pin
+   * authorization step on this route. `applyPostFieldEdit` itself still
+   * enforces the author-only check on any actual field change.
    */
   async updateFlatPost(
     postId: string,
@@ -571,7 +585,10 @@ export class CommunityPostsService {
   // a community mod tombstoned a post through `/communities/:slug/posts/:id`
   // and its author cleared the tombstone here, roster unread (BE-COM-01). The
   // post's community is now resolved so the SAME `assertCanRestore` rule
-  // applies on both routes — a moderator tombstone needs a moderator to lift.
+  // applies on both routes: a moderator tombstone needs a moderator to lift.
+  // The actor must also still hold a role there (`assertFlatRestoreAllowed`,
+  // the nested route's `assertMember`), so an author a moderator removed or
+  // banned cannot bring their own deleted post back (SEC-39).
   // A global post (`communityId: null`) has no roster, so the actor's role is
   // null and only "you set this tombstone" can authorize.
   async restoreFlatPost(
@@ -579,10 +596,10 @@ export class CommunityPostsService {
     actorId: string,
   ): Promise<CommunityPostDTO> {
     const post = await this.loadPostByIdOr404(postId);
-    await this.assertPostCommunityNotArchived(post.communityId);
-    const viewerRole = post.communityId
-      ? await this.viewerRoleInCommunityId(post.communityId, actorId)
-      : null;
+    const viewerRole = await this.assertFlatRestoreAllowed(
+      post.communityId,
+      actorId,
+    );
     if (!CommunityPostsService.isStaffRole(viewerRole)) {
       this.assertAuthorOnly(post.authorId, actorId);
     }
@@ -640,10 +657,11 @@ export class CommunityPostsService {
     return this.mapReply(saved, actorId, membership.role);
   }
 
-  // PATCH /community-posts/:id/replies/:replyId — the flat alias's own reply
-  // edit: author-only (same as the nested route — edit was already
-  // author-only there too), just without the community-membership check.
-  // Shares `applyReplyTextEdit`.
+  // PATCH /community-posts/:id/replies/:replyId: the flat alias's own reply
+  // edit, author-only like the nested route. `assertPostCommunityOpenForEdit`
+  // runs the nested route's takedown, roster and archive checks, so a removed
+  // or banned author cannot rewrite the reply here (SEC-39). Shares
+  // `applyReplyTextEdit`.
   async updateFlatReply(
     postId: string,
     replyId: string,
@@ -743,19 +761,20 @@ export class CommunityPostsService {
   }
 
   // POST /community-posts/:id/replies/:replyId/restore — the flat alias's own
-  // reply restore. Same community resolution + `assertCanRestore` rule as
-  // `restoreFlatPost` above, for the same reason (BE-COM-01).
+  // reply restore. Same community resolution, roster check and
+  // `assertCanRestore` rule as `restoreFlatPost` above, for the same reasons
+  // (BE-COM-01, SEC-39).
   async restoreFlatReply(
     postId: string,
     replyId: string,
     actorId: string,
   ): Promise<CommunityReplyDTO> {
     const post = await this.loadPostByIdOr404(postId);
-    await this.assertPostCommunityNotArchived(post.communityId);
+    const viewerRole = await this.assertFlatRestoreAllowed(
+      post.communityId,
+      actorId,
+    );
     const reply = await this.loadReplyOr404(post.id, replyId);
-    const viewerRole = post.communityId
-      ? await this.viewerRoleInCommunityId(post.communityId, actorId)
-      : null;
     if (!CommunityPostsService.isStaffRole(viewerRole)) {
       this.assertAuthorOnly(reply.authorId, actorId);
     }
@@ -1024,13 +1043,17 @@ export class CommunityPostsService {
     viewerId: string,
     viewerRole: RosterRole | null,
   ): Promise<CommunityReplyDTO> {
-    const [authors, states] = await Promise.all([
+    const [authors, states, nameMarks] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(
         reply.authorId ? [reply.authorId] : [],
       ),
       this.contentModeration.statesForAnyType(
         CommunityPostsService.SUBJECT_TYPES,
         [reply.id],
+      ),
+      this.nameMarks.marksForPost(
+        reply.postId,
+        reply.authorId ? [reply.authorId] : [],
       ),
     ]);
     return toCommunityReply(
@@ -1039,6 +1062,7 @@ export class CommunityPostsService {
       viewerId,
       viewerRole,
       states.get(reply.id) ?? CommunityPostsService.VISIBLE,
+      nameMarksFor(nameMarks, reply.authorId),
     );
   }
 
@@ -1120,12 +1144,24 @@ export class CommunityPostsService {
     if (post.authorId && !mentioned.has(post.authorId)) {
       await this.mentions.notifyPostReply(post.authorId, userId, replyPayload);
     }
-    const authors = await new MemberLookup(this.profiles).byUserIds([userId]);
+    // A failure earlier in this method leaves the badge to the daily sweep.
+    this.eventEmitter.emit(COMMUNITY_REPLY_CREATED, {
+      communityId: community.id,
+      authorId: userId,
+      postId: post.id,
+      replyId: saved.id,
+    } satisfies CommunityReplyCreatedEvent);
+    const [authors, nameMarks] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([userId]),
+      this.nameMarks.marksFor(community.id, [userId]),
+    ]);
     return toCommunityReply(
       saved,
       authors.get(userId) ?? null,
       userId,
       membership.role,
+      undefined,
+      nameMarksFor(nameMarks, userId),
     );
   }
 
@@ -1189,9 +1225,11 @@ export class CommunityPostsService {
         [],
         rows.map((row) => row.id),
       );
-      const authors = await new MemberLookup(this.profiles).byUserIds(
-        nonNullIds(rows.map((row) => row.authorId)),
-      );
+      const authorIds = nonNullIds(rows.map((row) => row.authorId));
+      const [authors, nameMarks] = await Promise.all([
+        new MemberLookup(this.profiles).byUserIds(authorIds),
+        this.nameMarks.marksFor(community.id, authorIds),
+      ]);
       return rows.map((row) =>
         toCommunityReply(
           row,
@@ -1199,6 +1237,7 @@ export class CommunityPostsService {
           viewerId,
           viewerRole,
           states.get(row.id) ?? CommunityPostsService.VISIBLE,
+          nameMarksFor(nameMarks, row.authorId),
         ),
       );
     });
@@ -1335,6 +1374,15 @@ export class CommunityPostsService {
     // same guard in `addReply` above.
     if (post.authorId && !mentioned.has(post.authorId)) {
       await this.mentions.notifyPostReply(post.authorId, userId, replyPayload);
+    }
+    if (community) {
+      // A failure earlier in this method leaves the badge to the daily sweep.
+      this.eventEmitter.emit(COMMUNITY_REPLY_CREATED, {
+        communityId: community.id,
+        authorId: userId,
+        postId: post.id,
+        replyId: saved.id,
+      } satisfies CommunityReplyCreatedEvent);
     }
     return { id: saved.id };
   }
@@ -1617,14 +1665,29 @@ export class CommunityPostsService {
    * cascade missed writes nothing. Parent staff act here with no space row.
    */
   private async assertMember(
-    community: Pick<Community, 'id' | 'parentId'>,
+    community: Pick<Community, 'id' | 'parentId' | 'accessTier'>,
     userId: string,
   ): Promise<ActingMember> {
     const role = await this.viewerRoleIn(community, userId);
-    if (role === null) {
-      throw new ForbiddenException('Only roster members can do that');
-    }
+    CommunityPostsService.assertRosterRole(community, role);
     return { userId, role };
+  }
+
+  /**
+   * The roster refusal every write gate shares. An outsider of a `private`
+   * community hears the same 404 an unknown slug answers, matching the read
+   * gate (`assertViewable`), so a write probe learns nothing about whether
+   * the community exists (SEC-41). Every other tier keeps the 403.
+   */
+  private static assertRosterRole(
+    community: Pick<Community, 'accessTier'>,
+    role: RosterRole | null,
+  ): asserts role is RosterRole {
+    if (role !== null) return;
+    if (community.accessTier === AccessTier.Private) {
+      throw new NotFoundException('Community not found');
+    }
+    throw new ForbiddenException('Only roster members can do that');
   }
 
   /**
@@ -1640,14 +1703,12 @@ export class CommunityPostsService {
    * down.
    */
   private async assertMemberForWrite(
-    community: Pick<Community, 'id' | 'parentId' | 'slug'>,
+    community: Pick<Community, 'id' | 'parentId' | 'slug' | 'accessTier'>,
     userId: string,
   ): Promise<ActingMember> {
     const role = await this.viewerRoleIn(community, userId);
     await this.assertNotTakenDown(community, role);
-    if (role === null) {
-      throw new ForbiddenException('Only roster members can do that');
-    }
+    CommunityPostsService.assertRosterRole(community, role);
     return { userId, role };
   }
 
@@ -1673,10 +1734,19 @@ export class CommunityPostsService {
   }
 
   /**
-   * The gate for the flat (`/community-posts*`) post and reply EDITS, which
-   * are author-scoped and so carry no roster check: the archive check plus
-   * the takedown check. Returns the author's effective role in the post's
-   * community (null off the roster) so the caller needs no second lookup.
+   * The gate for the flat (`/community-posts*`) post and reply EDITS: the
+   * same takedown, roster and archive checks, in the same order, as the
+   * nested `updatePost` / `updateReply` (`assertMemberForWrite`, then
+   * `assertNotArchived`). Returns the author's effective role in the post's
+   * community so the caller needs no second lookup.
+   *
+   * This gate used to skip the roster: the edits are author-scoped, so it
+   * read the role for the takedown exemption and stopped there. A member a
+   * moderator removed or banned (a ban takes the roster row) kept editing
+   * their still-visible posts and replies through these aliases, and could
+   * rewrite one into harassment of the moderator who banned them (SEC-39).
+   * The freeze stays off this path on both routes: a freeze halts new
+   * activity and leaves edits to existing content open (`assertNotFrozen`).
    *
    * A GLOBAL post (`communityId: null`) belongs to no community, so this is a
    * no-op returning null for one.
@@ -1687,10 +1757,35 @@ export class CommunityPostsService {
   ): Promise<RosterRole | null> {
     if (!communityId) return null;
     const community = await this.loadCommunityByIdOr404(communityId);
+    const membership = await this.assertMemberForWrite(community, actorId);
     this.assertNotArchived(community);
-    const viewerRole = await this.viewerRoleIn(community, actorId);
-    await this.assertNotTakenDown(community, viewerRole);
-    return viewerRole;
+    return membership.role;
+  }
+
+  /**
+   * The gate for the flat (`/community-posts*`) post and reply RESTORES: the
+   * same roster and archive checks, in the same order, as the nested
+   * `restorePost` / `restoreReply` (`assertMember`, then `assertNotArchived`).
+   * Returns the actor's effective role so the caller can apply the staff
+   * branch and `assertCanRestore` without a second lookup.
+   *
+   * The roster half closes SEC-39: these aliases used to read the role and
+   * fall back to the author check when there was none, so a member a
+   * moderator removed or banned could bring their own deleted post or reply
+   * back. Community staff hold a role, so their moderation restores pass.
+   *
+   * A GLOBAL post (`communityId: null`) has no roster, so this is a no-op
+   * returning null and only "you set this tombstone" can authorize.
+   */
+  private async assertFlatRestoreAllowed(
+    communityId: string | null,
+    actorId: string,
+  ): Promise<RosterRole | null> {
+    if (!communityId) return null;
+    const community = await this.loadCommunityByIdOr404(communityId);
+    const membership = await this.assertMember(community, actorId);
+    this.assertNotArchived(community);
+    return membership.role;
   }
 
   /**
@@ -1719,10 +1814,11 @@ export class CommunityPostsService {
   }
 
   /**
-   * The archive gate for the flat (`/community-posts*`) edit, delete and
-   * restore aliases, which carry no membership check of their own (they are
-   * author-scoped, or author-or-staff on restore) and so never reach
-   * `assertFlatWriteAllowed`.
+   * The archive gate for the flat (`/community-posts*`) delete aliases, which
+   * are author-scoped and carry no membership check of their own. The flat
+   * edits and restores run `assertPostCommunityOpenForEdit` and
+   * `assertFlatRestoreAllowed`, which carry the archive check with the
+   * roster one.
    *
    * A GLOBAL post (`communityId: null`) belongs to no community and can never
    * be archived, so this is a no-op for one.
@@ -1823,20 +1919,6 @@ export class CommunityPostsService {
     userId: string,
   ): Promise<RosterRole | null> {
     return this.communityMembership.effectiveRole(community, userId);
-  }
-
-  // `viewerRoleIn` for the flat (`/community-posts*`) paths, which hold a
-  // post's `communityId` only. An unknown id resolves to no role.
-  private async viewerRoleInCommunityId(
-    communityId: string,
-    userId: string,
-  ): Promise<RosterRole | null> {
-    const community = await this.communities.findOne({
-      where: { id: communityId },
-      select: { id: true, parentId: true },
-    });
-    if (!community) return null;
-    return this.viewerRoleIn(community, userId);
   }
 
   // Delete / restore / history authz: the author, or the community's owner/mod.
@@ -2429,12 +2511,13 @@ export class CommunityPostsService {
       post.authorId,
       ...replyRows.map((r) => r.authorId),
     ]);
-    const [authors, states] = await Promise.all([
+    const [authors, states, nameMarks] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
       this.moderationStatesFor(
         [post.id],
         replyRows.map((r) => r.id),
       ),
+      this.nameMarks.marksFor(post.communityId, authorIds),
     ]);
 
     // This is a mutation echo (create/react/delete/restore returns the acted-on
@@ -2447,6 +2530,7 @@ export class CommunityPostsService {
         viewerId,
         viewerRole,
         states.get(r.id) ?? CommunityPostsService.VISIBLE,
+        nameMarksFor(nameMarks, r.authorId),
       ),
     );
     return toCommunityPost(
@@ -2458,6 +2542,7 @@ export class CommunityPostsService {
       viewerId,
       viewerRole,
       states.get(post.id) ?? CommunityPostsService.VISIBLE,
+      nameMarksFor(nameMarks, post.authorId),
     );
   }
 
@@ -2467,6 +2552,7 @@ export class CommunityPostsService {
   // `CommunitiesService.statsForMany`.
   private async toPostDTOs(
     rows: CommunityPost[],
+    communityId: string | null,
     viewerId: string,
     viewerRole: RosterRole | null,
   ): Promise<CommunityPostDTO[]> {
@@ -2512,8 +2598,11 @@ export class CommunityPostsService {
     const authorIds = new Set<string>();
     for (const p of visiblePosts) if (p.authorId) authorIds.add(p.authorId);
     for (const r of replyRows) if (r.authorId) authorIds.add(r.authorId);
-    const authors = await new MemberLookup(this.profiles).byUserIds([
-      ...authorIds,
+    // The caller names the page's community, so one marks read covers the
+    // whole page.
+    const [authors, nameMarks] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([...authorIds]),
+      this.nameMarks.marksFor(communityId, [...authorIds]),
     ]);
 
     return visiblePosts.map((post) => {
@@ -2524,6 +2613,7 @@ export class CommunityPostsService {
           viewerId,
           viewerRole,
           states.get(r.id) ?? CommunityPostsService.VISIBLE,
+          nameMarksFor(nameMarks, r.authorId),
         ),
       );
       return toCommunityPost(
@@ -2535,6 +2625,7 @@ export class CommunityPostsService {
         viewerId,
         viewerRole,
         states.get(post.id) ?? CommunityPostsService.VISIBLE,
+        nameMarksFor(nameMarks, post.authorId),
       );
     });
   }

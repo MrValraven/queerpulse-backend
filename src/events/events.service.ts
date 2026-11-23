@@ -73,7 +73,10 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { invitedByByInvitee } from './attendee-invited-by';
-import { restrictToAttendeesVisibleTo } from './attendee-roster-visibility';
+import {
+  excludeSelfHiddenAttendees,
+  restrictToAttendeesVisibleTo,
+} from './attendee-roster-visibility';
 import {
   AttendeeArrivalFilter,
   AttendeeStatusFilter,
@@ -2509,37 +2512,16 @@ export class EventsService {
     };
   }
 
-  async addCohost(
-    slug: string,
-    actorId: string,
-    cohostSlug: string,
-  ): Promise<{ ok: true }> {
-    const event = await this.loadEventOr404(slug);
-    await this.assertOrganizer(event.id, actorId);
-    const profile = await this.profiles.findOne({
-      where: { slug: cohostSlug },
-    });
-    if (!profile) {
-      throw new NotFoundException('Member not found');
-    }
-    const cohostUser = await this.usersService.findById(profile.userId);
-    if (!cohostUser || cohostUser.status !== UserStatus.Active) {
-      throw new BadRequestException('Co-hosts must be active members');
-    }
-    await this.addCohostByUserId(event.id, profile.userId);
-    return { ok: true };
-  }
-
   /**
-   * The actual `event_cohosts` insert, extracted so both the direct-add path
-   * (`addCohost`, organizer-authorized) and the cohost-invite accept path
+   * The actual `event_cohosts` insert, extracted so both the admin add path
+   * and the cohost-invite accept path
    * (`EventCohostInvitesService.respond`, authorized by the pending invite
    * itself; the acceptor need not be an organizer) share one place
    * that writes the roster row. Idempotent (`ON CONFLICT DO NOTHING`): a
    * no-op for the host, who is already an implicit organizer.
    *
    * House Music events: this is the single writer of `event_cohosts`, so it
-   * holds the seat rule for the direct add, the invite accept and the admin
+   * holds the seat rule for the invite accept and the admin
    * add alike. A member who holds the Music manager & producer grant, or a
    * moderator or admin, cannot take a co-host seat on a Music event the house
    * hosts. The seat lock is taken first and the grant hook takes the same
@@ -2707,8 +2689,11 @@ export class EventsService {
     // so this page's `total` counts the rows this viewer may page through,
     // while `goingCount` and `seatsTaken` below keep counting everybody: a
     // hidden member still takes a seat, as a number with no face or name.
+    // PRD-508: a member who used "Hide me for 24 hours" drops out for every
+    // non-organiser reader but themself, like the member directory.
     if (!isOrganizer) {
       restrictToAttendeesVisibleTo(qb, viewerId, 'r');
+      excludeSelfHiddenAttendees(qb, viewerId, 'r');
     }
     // Named rows only for active accounts, organisers included (see
     // `activeAttendeeAccountClause`). In-query so the page stays full; the
@@ -4123,6 +4108,9 @@ export class EventsService {
    *    non-organiser sees a face only when that answer admits them
    *    (`everyone` or unset, `connections` for an accepted connection, and
    *    always their own row). `justMe` reaches organisers only.
+   *  - The attendee's live "Hide me for 24 hours" (PRD-508) via
+   *    `excludeSelfHiddenAttendees`: no non-organiser sees that face while
+   *    the hide lasts, except the hidden member themself.
    * `total` is counted BEFORE the per-attendee filter, so a member who hid
    * their attendance still counts toward the "+N more" line as a number, with
    * no face or name attached.
@@ -4148,6 +4136,7 @@ export class EventsService {
 
     if (!isOrganizer) {
       restrictToAttendeesVisibleTo(qb, viewerId, 'r');
+      excludeSelfHiddenAttendees(qb, viewerId, 'r');
     }
     // Faces for active accounts only, organisers included, joined after the
     // count so `total` keeps counting everybody.

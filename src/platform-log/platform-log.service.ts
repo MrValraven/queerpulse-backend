@@ -30,6 +30,7 @@ export const PLATFORM_LOG_MAX_LIMIT = 50;
 
 export interface PlatformLogViewer {
   role: string;
+  userId: string;
 }
 
 @Injectable()
@@ -71,6 +72,7 @@ export class PlatformLogService {
       memberId: query.memberId ?? null,
       staffRowsOnly: !isAdmin,
       categories,
+      viewerUserId: viewer.userId,
     };
     const selectedSources = this.sources.filter(
       (source) =>
@@ -86,6 +88,7 @@ export class PlatformLogService {
     const lastEntry = pageEntries[pageEntries.length - 1];
     const names = await new MemberLookup(this.profiles).byUserIds(
       userIdsToResolve(pageEntries),
+      { inactive: 'include' },
     );
 
     return {

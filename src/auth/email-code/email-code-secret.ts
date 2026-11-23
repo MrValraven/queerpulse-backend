@@ -8,6 +8,28 @@ const EMAIL_CODE_KEY_PURPOSE = 'queerpulse:email-sign-in-code:v1';
  *  minted in that process verifies against the same key. */
 let testProcessSecret: string | null = null;
 
+/** The purpose the trusted-requester cookie key derives from, kept apart
+ *  from the code key so one key never signs both. */
+const EMAIL_CODE_TRUSTED_REQUESTER_KEY_PURPOSE =
+  'queerpulse:email-code-trusted-requester:v1';
+
+/** The server secret both keys derive from, under the rules below. */
+function emailCodeServerSecret(
+  codeSecret: string | undefined,
+  jwtAccessSecret: string | undefined,
+  nodeEnv: string | undefined,
+): string {
+  const serverSecret = codeSecret || jwtAccessSecret;
+  if (serverSecret) return serverSecret;
+  if (nodeEnv !== 'test') {
+    throw new Error(
+      'EMAIL_CODE_SECRET or JWT_ACCESS_SECRET must be set to issue sign-in codes',
+    );
+  }
+  testProcessSecret ??= randomBytes(32).toString('hex');
+  return testProcessSecret;
+}
+
 /**
  * The HMAC key that sign-in codes are hashed with. `EMAIL_CODE_SECRET` wins
  * when set, which decouples stored codes from JWT rotation; otherwise the key
@@ -21,17 +43,28 @@ export function deriveEmailCodeKey(
   jwtAccessSecret: string | undefined,
   nodeEnv: string | undefined,
 ): Buffer {
-  let serverSecret = codeSecret || jwtAccessSecret;
-  if (!serverSecret) {
-    if (nodeEnv !== 'test') {
-      throw new Error(
-        'EMAIL_CODE_SECRET or JWT_ACCESS_SECRET must be set to issue sign-in codes',
-      );
-    }
-    testProcessSecret ??= randomBytes(32).toString('hex');
-    serverSecret = testProcessSecret;
-  }
-  return createHmac('sha256', serverSecret)
+  return createHmac(
+    'sha256',
+    emailCodeServerSecret(codeSecret, jwtAccessSecret, nodeEnv),
+  )
     .update(EMAIL_CODE_KEY_PURPOSE)
+    .digest();
+}
+
+/**
+ * The HMAC key that signs the trusted-requester cookie (SEC-11). Same server
+ * secret and the same rules as `deriveEmailCodeKey`, under its own purpose
+ * string.
+ */
+export function deriveEmailCodeTrustedRequesterKey(
+  codeSecret: string | undefined,
+  jwtAccessSecret: string | undefined,
+  nodeEnv: string | undefined,
+): Buffer {
+  return createHmac(
+    'sha256',
+    emailCodeServerSecret(codeSecret, jwtAccessSecret, nodeEnv),
+  )
+    .update(EMAIL_CODE_TRUSTED_REQUESTER_KEY_PURPOSE)
     .digest();
 }

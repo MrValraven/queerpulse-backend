@@ -1,4 +1,8 @@
 import {
+  POST_AUTHOR_FILTER_COLUMN_SQL,
+  THREAD_AUTHOR_FILTER_COLUMN_SQL,
+} from './forum-author-filter';
+import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
@@ -569,6 +573,8 @@ export interface ForumReviewQueueRow extends ForumThreadResponse {
   fundingReview: ForumFundingReviewFacts | null;
 }
 
+export { THREAD_AUTHOR_FILTER_COLUMN_SQL } from './forum-author-filter';
+
 @Injectable()
 export class ForumThreadsService {
   private readonly logger = new Logger(ForumThreadsService.name);
@@ -638,7 +644,11 @@ export class ForumThreadsService {
     // fetched rows so `cursorPaginate`'s `LIMIT` counts only visible threads —
     // post-query filtering (`FeedService.dropBlocked`) returns short pages.
     // `t`'s author column is `author_id` under `SnakeNamingStrategy`.
-    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      viewerId,
+      THREAD_AUTHOR_FILTER_COLUMN_SQL,
+    );
     // A gated community's threads never enter a non-member's browse list (H1).
     // Every tier but `public` is gated, and this is the same gate `loadOr404`
     // and the feed apply, so the list cannot leak a thread the detail read
@@ -856,7 +866,11 @@ export class ForumThreadsService {
       .select('t.category', 'category')
       .addSelect('COUNT(*)', 'count')
       .groupBy('t.category');
-    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      viewerId,
+      THREAD_AUTHOR_FILTER_COLUMN_SQL,
+    );
     // Same gated-community gate as `list` (H1) so the category badges never
     // count threads the viewer can't open.
     this.applyCommunityAccessFilter(qb, viewerId);
@@ -898,7 +912,11 @@ export class ForumThreadsService {
     fundingFilter: FundingListFilter,
   ): Promise<ForumFundingFacets> {
     const qb = this.threads.createQueryBuilder('t');
-    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      viewerId,
+      THREAD_AUTHOR_FILTER_COLUMN_SQL,
+    );
     this.applyCommunityAccessFilter(qb, viewerId);
     this.excludeDeletedThreads(qb, viewerIsModerator);
     this.applyPublishedThreadGate(qb, viewerIsModerator);
@@ -1184,7 +1202,11 @@ export class ForumThreadsService {
     const qb = this.threads
       .createQueryBuilder('t')
       .andWhere('t.is_pinned = true');
-    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      viewerId,
+      THREAD_AUTHOR_FILTER_COLUMN_SQL,
+    );
     // Same gated-community gate as `list` (H1): a pinned thread in a gated
     // community stays out of a non-member's sticky bucket.
     this.applyCommunityAccessFilter(qb, viewerId);
@@ -1231,7 +1253,11 @@ export class ForumThreadsService {
         `(${searchVector} @@ ${searchTsQuery} OR ${searchHaystack} LIKE ${foldedPattern})`,
         { searchTerm: term, searchPattern: pattern },
       );
-    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      viewerId,
+      THREAD_AUTHOR_FILTER_COLUMN_SQL,
+    );
     // Same gated-community gate as `list` (H1): global search must not
     // surface a gated community's thread titles to a non-member, on any tier
     // but `public`.
@@ -1744,9 +1770,19 @@ export class ForumThreadsService {
     // The second argument stays the real author: `notify` uses it only for
     // the block filter and to skip a self-mention. What the bell and the push
     // show as the actor comes from `payload.actorId` alone, so a masked
-    // author's payload leaves it out.
+    // author's payload leaves it out. An anonymous, non-official thread also
+    // carries the `MASKED_ACTOR_PAYLOAD_KEY` flag (SEC-05, as a reply by the
+    // hidden author does), which drops the block and mute gate keyed on the
+    // writer: a mentioned member who blocked or muted them would otherwise be
+    // skipped, and the missing notification would confirm who wrote it.
+    const mentionActorPayload: { actorId?: string; isActorMasked?: true } =
+      thread.isAnonymous && !thread.isOfficial
+        ? { isActorMasked: true }
+        : isAuthorMasked
+          ? {}
+          : { actorId: authorId };
     await this.mentions.notify(body, authorId, {
-      ...(isAuthorMasked ? {} : { actorId: authorId }),
+      ...mentionActorPayload,
       source: 'forum',
       threadSlug: thread.slug,
       ...(isForumWide ? { excerpt: truncateCharacters(body, 140) } : {}),
@@ -2218,9 +2254,13 @@ export class ForumThreadsService {
       throw new NotFoundException('Thread not found');
     }
     // An erased author (ENG-494) blocks nobody, so there is no pair to check.
+    // The hidden author of an anonymous, non-official thread is not checked
+    // either: a 404 on it would confirm who wrote it (see
+    // `THREAD_AUTHOR_FILTER_COLUMN_SQL`).
     if (
       viewerId &&
       thread.authorId !== null &&
+      !(thread.isAnonymous && !thread.isOfficial) &&
       (await this.blockFilter.isBlockedEitherWay(viewerId, thread.authorId))
     ) {
       throw new NotFoundException('Thread not found');
@@ -2990,7 +3030,11 @@ export class ForumThreadsService {
       .andWhere('"funding"."link_key" = :fundingLinkKey', {
         fundingLinkKey: normalized.linkKey,
       });
-    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      viewerId,
+      THREAD_AUTHOR_FILTER_COLUMN_SQL,
+    );
     this.applyCommunityAccessFilter(qb, viewerId);
     this.excludeDeletedThreads(qb, false);
     this.applyPublishedThreadGate(qb, false);
@@ -3741,13 +3785,13 @@ export class ForumThreadsService {
           AND "p"."author_id" <> $1
           AND NOT EXISTS (
                 SELECT 1 FROM "blocks" "__unread_block"
-                 WHERE ("__unread_block"."blocker_id" = $1 AND "__unread_block"."blocked_id" = "p"."author_id")
-                    OR ("__unread_block"."blocked_id" = $1 AND "__unread_block"."blocker_id" = "p"."author_id")
+                 WHERE ("__unread_block"."blocker_id" = $1 AND "__unread_block"."blocked_id" = ${POST_AUTHOR_FILTER_COLUMN_SQL})
+                    OR ("__unread_block"."blocked_id" = $1 AND "__unread_block"."blocker_id" = ${POST_AUTHOR_FILTER_COLUMN_SQL})
               )
           AND NOT EXISTS (
                 SELECT 1 FROM "mutes" "__unread_mute"
                  WHERE "__unread_mute"."muter_id" = $1
-                   AND "__unread_mute"."muted_id" = "p"."author_id"
+                   AND "__unread_mute"."muted_id" = ${POST_AUTHOR_FILTER_COLUMN_SQL}
               )
         WHERE "watermark"."user_id" = $1
           AND "watermark"."last_read_at" IS NOT NULL

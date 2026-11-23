@@ -294,7 +294,9 @@ describe('SubprofileCreditsService', () => {
           itemTitle: 'Collab track',
           deepLink: '/p/nightform',
         },
-        'user-1',
+        // SEC-02: an unlinked persona's credit is filtered against no owner,
+        // so a missing bell cannot test who runs it.
+        undefined,
       );
     });
 
@@ -390,13 +392,13 @@ describe('SubprofileCreditsService', () => {
         'user-2',
         NotificationType.SubprofileCredit,
         expect.objectContaining({ itemTitle: 'Collab track' }),
-        'user-1',
+        undefined,
       );
       expect(notifications.create).toHaveBeenCalledWith(
         'user-3',
         NotificationType.SubprofileCredit,
         expect.objectContaining({ itemTitle: 'Collab track' }),
-        'user-1',
+        undefined,
       );
     });
 
@@ -478,6 +480,64 @@ describe('SubprofileCreditsService', () => {
       // Never even loads the persona's members when there is nothing to check
       // them against.
       expect(membersRepo.find).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- assertNoOwnerCreditOnUnlinked (SEC-03) -------------------------------
+
+  describe('assertNoOwnerCreditOnUnlinked', () => {
+    const unlinkedPersona = {
+      id: 'sp-1',
+      userId: 'user-1',
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    };
+
+    it.each([
+      ['the creator', 'user-1'],
+      ['a co-owner', 'user-3'],
+    ])(
+      'refuses an unlinked persona crediting %s by member handle, with the code and handle',
+      async (_label, creditedUserId) => {
+        handleRegistry.find.mockResolvedValue([
+          makeHandleRow({ name: 'alice', userId: creditedUserId }),
+        ]);
+        membersRepo.find.mockResolvedValue([
+          { userId: 'user-1' } as SubprofileMember,
+          { userId: 'user-3' } as SubprofileMember,
+        ]);
+
+        await expect(
+          service.assertNoOwnerCreditOnUnlinked(unlinkedPersona, ['alice']),
+        ).rejects.toMatchObject({
+          response: { code: 'UNLINKED_PERSONA_OWNER_CREDIT', handle: 'alice' },
+        });
+      },
+    );
+
+    it('lets an unlinked persona credit a member who does not run it', async () => {
+      handleRegistry.find.mockResolvedValue([
+        makeHandleRow({ name: 'alice', userId: 'user-2' }),
+      ]);
+      membersRepo.find.mockResolvedValue([
+        { userId: 'user-1' } as SubprofileMember,
+      ]);
+
+      await expect(
+        service.assertNoOwnerCreditOnUnlinked(unlinkedPersona, ['alice']),
+      ).resolves.toBeUndefined();
+    });
+
+    it('lets a linked persona credit its own creator, with no lookup', async () => {
+      await expect(
+        service.assertNoOwnerCreditOnUnlinked(
+          {
+            ...unlinkedPersona,
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          },
+          ['alice'],
+        ),
+      ).resolves.toBeUndefined();
+      expect(handleRegistry.find).not.toHaveBeenCalled();
     });
   });
 });

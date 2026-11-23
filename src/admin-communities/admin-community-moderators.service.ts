@@ -135,6 +135,7 @@ export class AdminCommunityModeratorsService {
     // Bounded by the LIMIT above, so this lookup never exceeds the cap.
     const memberRefsByUserId = await new MemberLookup(this.profiles).byUserIds(
       candidateMembers.map((candidateMember) => candidateMember.userId),
+      { inactive: 'drop' },
     );
 
     const candidates: AdminModeratorCandidateDTO[] = [];
@@ -340,7 +341,9 @@ export class AdminCommunityModeratorsService {
     membership: CommunityMember,
   ): Promise<AdminCommunityModeratorDTO> {
     const memberRef = (
-      await new MemberLookup(this.profiles).byUserIds([membership.userId])
+      await new MemberLookup(this.profiles).byUserIds([membership.userId], {
+        inactive: 'include',
+      })
     ).get(membership.userId);
     if (!memberRef) {
       throw new NotFoundException('Member profile not found');
@@ -364,6 +367,7 @@ export class AdminCommunityModeratorsService {
 
     const memberRefsByUserId = await new MemberLookup(this.profiles).byUserIds(
       moderatorMembers.map((moderatorMember) => moderatorMember.userId),
+      { inactive: 'include' },
     );
 
     const moderators: AdminCommunityModeratorDTO[] = [];

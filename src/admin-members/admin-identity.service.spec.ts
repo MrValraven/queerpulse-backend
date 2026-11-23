@@ -5,10 +5,15 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { DataSource, In } from 'typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { DeletionRequest } from '../account/entities/deletion-request.entity';
-import { EmailSuppression } from '../account/entities/email-suppression.entity';
+import {
+  EmailSuppression,
+  hashSuppressedEmail,
+  hmacSuppressedEmail,
+} from '../account/entities/email-suppression.entity';
 import { AuthService } from '../auth/auth.service';
 import {
   IdentityRelinkCandidate,
@@ -21,6 +26,7 @@ import { AdminIdentityService } from './admin-identity.service';
 
 const ACTOR_ID = 'user-admin';
 const MEMBER_ID = 'user-ines';
+const SUPPRESSION_PEPPER = 'test-pepper';
 
 function makeProfile(): Profile {
   return {
@@ -105,7 +111,14 @@ function buildMocks() {
     applyGoogleIdRelink: jest.fn().mockResolvedValue(true),
     revokeAllForUser: jest.fn().mockResolvedValue(undefined),
   };
+  // Backs `suppressionPepper` for the SEC-14 suppression keys.
+  const config: Pick<ConfigService, 'get'> = {
+    get: jest.fn((key: string) =>
+      key === 'banEvasion.pepper' ? SUPPRESSION_PEPPER : undefined,
+    ),
+  };
   return {
+    config,
     profiles,
     users,
     relinkCandidates,
@@ -152,6 +165,7 @@ async function buildService(
         useValue: mocks.deletionRequests,
       },
       { provide: AuthService, useValue: mocks.auth },
+      { provide: ConfigService, useValue: mocks.config },
     ],
   }).compile();
   return module.get(AdminIdentityService);
@@ -366,6 +380,66 @@ describe('AdminIdentityService suppression lift (PRD-13)', () => {
     expect(auditRow.note).toContain('ticket 233');
     // The account this row protected was erased, so there is nobody to name.
     expect(auditRow.targetUserId).toBeNull();
+  });
+
+  describe('peppered and legacy keys (SEC-14)', () => {
+    const address = 'someone@example.com';
+    const lookupKeys = () => [
+      hmacSuppressedEmail(address, SUPPRESSION_PEPPER),
+      hashSuppressedEmail(address),
+    ];
+
+    it('looks an address up under both the peppered HMAC and the legacy SHA-256 key', async () => {
+      mocks.emailSuppressions.findOne.mockResolvedValue({
+        id: 'suppression-legacy',
+        emailHash: hashSuppressedEmail(address),
+        reason: 'account_deleted',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      const result = await service.lookupSuppression(address);
+
+      expect(mocks.emailSuppressions.findOne).toHaveBeenCalledWith({
+        where: { emailHash: In(lookupKeys()) },
+      });
+      expect(result.isSuppressed).toBe(true);
+      // The prefix names the key the table actually holds.
+      expect(result.emailHashPrefix).toBe(
+        hashSuppressedEmail(address).slice(0, 12),
+      );
+    });
+
+    it('quotes the peppered key prefix for an address with no row', async () => {
+      const result = await service.lookupSuppression(address);
+
+      expect(result.emailHashPrefix).toBe(
+        hmacSuppressedEmail(address, SUPPRESSION_PEPPER)?.slice(0, 12),
+      );
+    });
+
+    it('lifts a row written under the peppered key and deletes every key the address may sit under', async () => {
+      const pepperedKey = hmacSuppressedEmail(address, SUPPRESSION_PEPPER);
+      mocks.manager.findOne.mockResolvedValue({
+        id: 'suppression-hmac',
+        emailHash: pepperedKey,
+        reason: 'account_deleted',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      const result = await service.liftSuppression(
+        ACTOR_ID,
+        address,
+        'ticket 412, erased in error',
+      );
+
+      expect(mocks.manager.findOne).toHaveBeenCalledWith(EmailSuppression, {
+        where: { emailHash: In(lookupKeys()) },
+      });
+      expect(mocks.manager.delete).toHaveBeenCalledWith(EmailSuppression, {
+        emailHash: In(lookupKeys()),
+      });
+      expect(result.emailHashPrefix).toBe(pepperedKey?.slice(0, 12));
+    });
   });
 });
 

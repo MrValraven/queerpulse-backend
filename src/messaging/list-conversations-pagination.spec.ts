@@ -340,6 +340,10 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
       participants.createQueryBuilder.mockReturnValueOnce(
         makeParticipantsQb([buildGroupParticipant({ draft })]),
       );
+      // SEC-26: the inbox's batched blocked-either-way set reaches the
+      // roster, so a blocked member's watermarks are withheld.
+      const blockedUserIds = new Set(['blocked-member']);
+      blockFilter.blockedUserIds.mockResolvedValue(blockedUserIds);
 
       const rows = await service.listConversations(USER_ID);
 
@@ -347,6 +351,14 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
       expect(rows[0]!.draft).toBe(draft);
       expect(rows[0]!.members).toHaveLength(1);
       expect(core.buildMemberSummaries).toHaveBeenCalledTimes(1);
+      expect(core.buildMemberSummaries).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.any(Map),
+        USER_ID,
+        expect.any(Map),
+        blockedUserIds,
+        expect.anything(),
+      );
     });
   });
 
@@ -495,6 +507,7 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
 
 describe('ConversationsService.getConversation (ENG-253 single-conversation read path)', () => {
   let service: ConversationsService;
+  let detailBlockFilter: { blockedUserIds: jest.Mock };
   let participants: { find: jest.Mock; update: jest.Mock };
   let conversations: { find: jest.Mock };
   let profiles: { find: jest.Mock };
@@ -556,14 +569,15 @@ describe('ConversationsService.getConversation (ENG-253 single-conversation read
       requireParticipant: jest.fn(),
     };
 
+    detailBlockFilter = {
+      blockedUserIds: jest.fn().mockResolvedValue(new Set()),
+    };
     service = new ConversationsService(
       conversations as unknown as Repository<Conversation>,
       participants as unknown as Repository<ConversationParticipant>,
       profiles as unknown as Repository<Profile>,
       core as unknown as MessagingCoreService,
-      {
-        blockedUserIds: jest.fn().mockResolvedValue(new Set()),
-      } as unknown as BlockFilterService,
+      detailBlockFilter as unknown as BlockFilterService,
       { emit: jest.fn() } as unknown as EventEmitter2,
       {} as unknown as DataSource,
       {
@@ -599,6 +613,9 @@ describe('ConversationsService.getConversation (ENG-253 single-conversation read
     core.requireParticipant.mockResolvedValueOnce(
       buildGroupParticipant({ draft }),
     );
+    // SEC-26: the blocked-either-way set reaches the roster.
+    const blockedUserIds = new Set(['blocked-member']);
+    detailBlockFilter.blockedUserIds.mockResolvedValue(blockedUserIds);
 
     const result = await service.getConversation(
       GROUP_CONVERSATION_ID,
@@ -609,6 +626,14 @@ describe('ConversationsService.getConversation (ENG-253 single-conversation read
     expect(result.members).toHaveLength(1);
     expect(result.members[0]!.lastReadInstant).toBe('2026-01-01T00:05:00.000Z');
     expect(core.buildMemberSummaries).toHaveBeenCalledTimes(1);
+    expect(core.buildMemberSummaries).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.any(Map),
+      USER_ID,
+      expect.any(Map),
+      blockedUserIds,
+      expect.anything(),
+    );
   });
 
   // PRD-423: the single-conversation read path is what the client re-reads

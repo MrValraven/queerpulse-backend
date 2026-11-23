@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
+import { User } from '../users/entities/user.entity';
 import { CalendarFeedController } from './calendar-feed.controller';
 import { CalendarFeedService } from './calendar-feed.service';
 import { CalendarFeedTokenService } from './calendar-feed-token.service';
@@ -27,7 +28,7 @@ import { CalendarFeedToken } from './entities/calendar-feed-token.entity';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Event, EventRsvp, CalendarFeedToken]),
+    TypeOrmModule.forFeature([Event, EventRsvp, CalendarFeedToken, User]),
     ContentModerationModule,
   ],
   controllers: [CalendarFeedController],

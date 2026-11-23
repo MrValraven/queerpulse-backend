@@ -31,6 +31,8 @@ export const CARD_CREDIT_FACE_LIMIT = 3;
  * value (a storage key or an external URL), resolved to a URL only by the
  * response mappers. `isUnderTakedown` and `isOwnerBlocked` are precomputed by
  * the service from one batched moderation lookup and one batched block lookup.
+ * `isOwnerBlocked` is only ever true for a LINKED persona: an unlinked one
+ * answers every viewer alike, whoever they blocked (SEC-02).
  */
 export interface CreditPersonaIdentity {
   id: string;
@@ -118,7 +120,8 @@ export function rosterOf(
 /**
  * The base gate every persona counterpart passes in both directions:
  * published, open, not removed, not under a moderator takedown, has a handle,
- * and its owner is not blocked either way with the viewer.
+ * and (a linked persona) its creator is not blocked either way with the
+ * viewer.
  */
 export function isCreditablePersona(persona: CreditPersonaIdentity): boolean {
   return (

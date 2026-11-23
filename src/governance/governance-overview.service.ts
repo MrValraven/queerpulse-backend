@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { MemberLookup } from '../common/member-ref';
+import { InactiveMemberHandling, MemberLookup } from '../common/member-ref';
 import { toStoredPlainText } from '../communities/community-plain-text';
 import { Profile } from '../users/entities/profile.entity';
 import { PlatformStaffService } from '../platform-staff/platform-staff.service';
@@ -208,7 +208,7 @@ export class GovernanceOverviewService {
     overview.health = isHealthEntered
       ? await this.withLiveActiveMemberCount(overview.health)
       : [];
-    const seats = await this.resolveCouncilSeats(overview.council);
+    const seats = await this.resolveCouncilSeats(overview.council, 'drop');
     return toGovernanceOverviewResponse(
       overview,
       seats
@@ -288,13 +288,14 @@ export class GovernanceOverviewService {
     ];
     const editorsByActorId = await new MemberLookup(this.profiles).byUserIds(
       actorIds,
+      { inactive: 'include' },
     );
 
     return toAdminOverviewResponse(
       overview,
       latestChangeBySection,
       editorsByActorId,
-      await this.resolveCouncilSeats(overview.council),
+      await this.resolveCouncilSeats(overview.council, 'include'),
     );
   }
 
@@ -307,13 +308,20 @@ export class GovernanceOverviewService {
    * account was deleted, or has no profile row. Both callers get the same
    * array and decide separately what that means: the public page drops those
    * seats, the admin editor keeps them so someone can see what happened.
+   *
+   * PRD-507. `inactiveHandling` comes from the caller: the public page passes
+   * `drop`, so a paused or suspended holder's seat leaves the page with the
+   * same null the public mapper already drops; the admin editor passes
+   * `include`, so staff still see who holds the seat.
    */
   private async resolveCouncilSeats(
     council: OverviewCouncilSeat[],
+    inactiveHandling: InactiveMemberHandling,
   ): Promise<AdminCouncilSeatDTO[]> {
-    const membersById = await new MemberLookup(this.profiles).byUserIds([
-      ...new Set(council.map((seat) => seat.memberId)),
-    ]);
+    const membersById = await new MemberLookup(this.profiles).byUserIds(
+      [...new Set(council.map((seat) => seat.memberId))],
+      { inactive: inactiveHandling },
+    );
     return council.map((seat) => ({
       memberId: seat.memberId,
       member: membersById.get(seat.memberId) ?? null,
@@ -484,7 +492,9 @@ export class GovernanceOverviewService {
           .filter((id): id is string => id !== null),
       ),
     ];
-    const actors = await new MemberLookup(this.profiles).byUserIds(actorIds);
+    const actors = await new MemberLookup(this.profiles).byUserIds(actorIds, {
+      inactive: 'include',
+    });
     return rows.map((row) =>
       toAdminOverviewChange(
         row,

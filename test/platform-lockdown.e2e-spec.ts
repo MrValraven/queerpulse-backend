@@ -5,6 +5,11 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { EmailCodeEnabledGuard } from '../src/auth/email-code/email-code-enabled.guard';
+import {
+  EmailCodeMailer,
+  SignInCodeEmail,
+} from '../src/auth/email-code/email-code.mailer';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
 import { encodeOAuthState } from '../src/auth/oauth-state';
 import { PlatformJoinRequest } from '../src/membership/entities/join-request.entity';
@@ -27,6 +32,17 @@ const stubGuard = {
   },
 };
 
+// The join-request routes (SEC-10) need a code the test can read: the mailer
+// is replaced by one that keeps the last code it was handed, and the
+// email-code switch is held on whatever the environment's Resend settings are.
+const sentCodes: SignInCodeEmail[] = [];
+const recordingMailer = {
+  sendSignInCode: (email: SignInCodeEmail) => {
+    sentCodes.push(email);
+    return Promise.resolve({ delivered: true, emailId: null });
+  },
+};
+
 describe('Platform kill switches (e2e)', () => {
   let app: INestApplication;
   let ds: DataSource;
@@ -37,6 +53,10 @@ describe('Platform kill switches (e2e)', () => {
     })
       .overrideGuard(GoogleAuthGuard)
       .useValue(stubGuard)
+      .overrideGuard(EmailCodeEnabledGuard)
+      .useValue({ canActivate: () => true })
+      .overrideProvider(EmailCodeMailer)
+      .useValue(recordingMailer)
       .compile();
     app = moduleRef.createNestApplication();
     // Same as src/main.ts: req.cookies is only populated once cookie-parser is
@@ -74,6 +94,8 @@ describe('Platform kill switches (e2e)', () => {
     const settingsService = app.get(PlatformSettingsService);
     Object.assign(settingsService as object, { cached: null, cachedAt: 0 });
     await ds.getRepository(PlatformJoinRequest).delete({});
+    await ds.query(`DELETE FROM email_sign_in_challenges`);
+    sentCodes.length = 0;
     await ds.getRepository(PlatformSettingChange).delete({});
     await ds.getRepository(User).delete({});
   });
@@ -317,33 +339,73 @@ describe('Platform kill switches (e2e)', () => {
   });
 
   describe('join requests', () => {
-    // CreateJoinRequestDto (src/membership/dto/create-join-request.dto.ts)
-    // requires `message` (1-1000 chars) in addition to name/email/ageAttested/
-    // termsVersion; the global ValidationPipe runs `forbidNonWhitelisted` +
-    // whitelist validation ahead of the controller, so omitting it would 400
-    // before the joinRequestsEnabled check is ever reached.
-    it('accepts a submission when the switch is on', async () => {
-      // JoinRequestsController.submit is @Public() (opts out of JwtAuthGuard
-      // only) but NOT @SkipCsrf(), so the global CsrfGuard still applies to
-      // this POST. /csrf-token is itself @Public(), so an anonymous caller can
-      // fetch a token before submitting.
+    // SEC-10: filing takes two public POSTs under /auth/email-code (the
+    // requester cookie is scoped to /auth). Both are @Public() and both still
+    // pass the global CsrfGuard, so each carries a token from /csrf-token.
+    const FORM = {
+      name: 'Ada',
+      message: 'I would love to join the community.',
+      ageAttested: true,
+      termsVersion: '1.0',
+      heardFrom: 'A friend',
+    };
+
+    it('files a request once the emailed code is typed back', async () => {
       const { cookies, csrfToken } = await withCsrf([]);
-      await request(app.getHttpServer() as App)
-        .post('/join-requests')
+      const asked = await request(app.getHttpServer() as App)
+        .post('/auth/email-code/join-request/request')
         .set('Cookie', cookies)
         .set('X-CSRF-Token', csrfToken)
-        .send({
-          name: 'Ada',
-          email: 'ada@example.com',
-          message: 'I would love to join the community.',
-          ageAttested: true,
-          termsVersion: '1.0',
-          heardFrom: 'A friend',
-        })
+        .send({ email: 'ada@example.com' })
+        .expect(200);
+      const { challengeId } = asked.body as { challengeId: string };
+      const requesterCookies = asked.headers[
+        'set-cookie'
+      ] as unknown as string[];
+      const code = sentCodes.at(-1)?.code;
+      expect(code).toMatch(/^\d{6}$/);
+
+      const filed = await request(app.getHttpServer() as App)
+        .post('/auth/email-code/join-request/verify')
+        .set('Cookie', [...cookies, ...requesterCookies])
+        .set('X-CSRF-Token', csrfToken)
+        .send({ ...FORM, challengeId, code })
         .expect(201);
+
+      expect(filed.body).toEqual(
+        expect.objectContaining({ statusToken: expect.any(String) as unknown }),
+      );
+      const rows = await ds.getRepository(PlatformJoinRequest).find();
+      expect(rows.map((row) => row.email)).toEqual(['ada@example.com']);
     });
 
-    it('returns 403 JOIN_REQUESTS_CLOSED when the switch is off', async () => {
+    it('files nothing for a wrong code', async () => {
+      const { cookies, csrfToken } = await withCsrf([]);
+      const asked = await request(app.getHttpServer() as App)
+        .post('/auth/email-code/join-request/request')
+        .set('Cookie', cookies)
+        .set('X-CSRF-Token', csrfToken)
+        .send({ email: 'ada@example.com' })
+        .expect(200);
+      const { challengeId } = asked.body as { challengeId: string };
+      const requesterCookies = asked.headers[
+        'set-cookie'
+      ] as unknown as string[];
+      const wrongCode =
+        sentCodes.at(-1)?.code === '000000' ? '111111' : '000000';
+
+      const res = await request(app.getHttpServer() as App)
+        .post('/auth/email-code/join-request/verify')
+        .set('Cookie', [...cookies, ...requesterCookies])
+        .set('X-CSRF-Token', csrfToken)
+        .send({ ...FORM, challengeId, code: wrongCode })
+        .expect(400);
+
+      expect((res.body as { reason: string }).reason).toBe('code_incorrect');
+      expect(await ds.getRepository(PlatformJoinRequest).count()).toBe(0);
+    });
+
+    it('returns 403 JOIN_REQUESTS_CLOSED and sends no code when the switch is off', async () => {
       const admin = await signInAs('a-1', 'admin@example.com', UserRole.Admin);
       await setFlags(admin, {
         joinRequestsEnabled: false,
@@ -352,22 +414,16 @@ describe('Platform kill switches (e2e)', () => {
 
       const { cookies, csrfToken } = await withCsrf([]);
       const res = await request(app.getHttpServer() as App)
-        .post('/join-requests')
+        .post('/auth/email-code/join-request/request')
         .set('Cookie', cookies)
         .set('X-CSRF-Token', csrfToken)
-        .send({
-          name: 'Ada',
-          email: 'ada@example.com',
-          message: 'I would love to join the community.',
-          ageAttested: true,
-          termsVersion: '1.0',
-          heardFrom: 'A friend',
-        })
+        .send({ email: 'ada@example.com' })
         .expect(403);
 
       const body = res.body as { code: string; message: string };
       expect(body.code).toBe('JOIN_REQUESTS_CLOSED');
       expect(body.message).toBe('Paused while we clear out spam.');
+      expect(sentCodes).toHaveLength(0);
     });
   });
 

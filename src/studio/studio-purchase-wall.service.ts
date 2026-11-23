@@ -2,12 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
 import { Profile } from '../users/entities/profile.entity';
 import { notBlockedEitherWaySql } from './studio-discovery-sql';
 import { keysetCursorParameters, toKeysetPage } from './studio-keyset-page';
 import { toStudioPlaylistPerson } from './studio-playlist-response';
 import {
-  chosenPersonaShowableSql,
+  chosenPersonaShownToOthersSql,
   personaIdentityBlockedBySql,
   personaMemberUserIdsSql,
 } from './studio-persona-members';
@@ -47,14 +48,20 @@ export const RELEASE_WALL_SQL = `WITH "eligible" AS (
        OR "purchase"."track_id" IN (SELECT "wall_track"."id" FROM "studio_tracks" "wall_track" WHERE "wall_track"."release_id" = $1::uuid)
      )
      AND EXISTS (SELECT 1 FROM "studio_access_grants" "wall_grant" WHERE "wall_grant"."user_id" = "purchase"."buyer_user_id")
-     AND ${notBlockedEitherWaySql('$2::uuid', '"purchase"."buyer_user_id"', 'wall_block')}
+     AND (
+       (
+         "purchase"."is_shown_as_persona"
+         AND ${unlinkedPersonaByIdSql('"purchase"."shown_as_subprofile_id"')}
+       )
+       OR ${notBlockedEitherWaySql('$2::uuid', '"purchase"."buyer_user_id"', 'wall_block')}
+     )
      AND "purchase"."buyer_user_id" NOT IN ${personaMemberUserIdsSql('"release"."subprofile_id"')}
      AND (
        NOT "purchase"."is_shown_as_persona"
        OR (
          "purchase"."shown_as_subprofile_id" IS NOT NULL
          AND "purchase"."buyer_user_id" IN ${personaMemberUserIdsSql('"purchase"."shown_as_subprofile_id"')}
-         AND ${chosenPersonaShowableSql('"purchase"."shown_as_subprofile_id"')}
+         AND ${chosenPersonaShownToOthersSql('"purchase"."shown_as_subprofile_id"')}
          AND NOT ${personaIdentityBlockedBySql('($2::uuid)', '"purchase"."shown_as_subprofile_id"')}
        )
      )
@@ -87,15 +94,18 @@ export interface ReleaseWallRow {
  * currently on it, had the purchase confirmed and chose to appear on the
  * wall. Each buyer account is active, holds a Studio grant and sits outside
  * the release persona's members today; no block stands either way between
- * viewer and buyer; a chosen persona still exists, still counts the buyer as
- * a member, carries no removal or moderator hide, and the viewer has not
- * identity-blocked it; a persona choice whose persona is gone drops the
- * entry and the account never appears in its place. Each shown identity (an
- * account, or a persona shared by co-owners) appears once, at its newest
- * confirmed purchase, ordered by decision time then purchase id, 24 per
- * page. Amounts are never selected. The account key is `account:` plus the
- * purchase id of the identity's newest entry, so no user id reaches the
- * wire.
+ * viewer and buyer, unless the entry shows as an unlinked persona (SEC-02:
+ * hiding that entry on a block with its buyer would tell the viewer who runs
+ * the persona, so only an identity block of the persona itself hides it); a
+ * chosen persona still exists, still counts the buyer as a member, carries no
+ * removal or moderator hide, has a creator whose account is active (SEC-33),
+ * and the viewer has not identity-blocked it; a persona choice whose persona
+ * is gone drops the entry and the account never appears in its place. Each
+ * shown identity (an account, or a persona shared by co-owners) appears
+ * once, at its newest confirmed purchase, ordered by decision time then
+ * purchase id, 24 per page. Amounts are never selected. The account key is
+ * `account:` plus the purchase id of the identity's newest entry, so no user
+ * id reaches the wire.
  */
 @Injectable()
 export class StudioPurchaseWallService {
@@ -152,6 +162,7 @@ export class StudioPurchaseWallService {
     ];
     const members = await new MemberLookup(this.profiles).byUserIds(
       accountBuyerIds,
+      { inactive: 'drop' },
     );
     const personasById = await this.personasById(rows);
     return rows.flatMap((row): StudioWallEntry[] => {

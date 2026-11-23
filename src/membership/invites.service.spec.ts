@@ -119,9 +119,9 @@ describe('toPublicInviteView', () => {
     });
   });
 
-  it('exposes no inviter ids/emails — only the whitelisted public fields', () => {
+  it('exposes only the whitelisted public inviter fields', () => {
     const view = toPublicInviteView(invite, inviter, 1, now, false);
-    expect(Object.keys(view.inviter).sort()).toEqual(
+    expect(Object.keys(view.inviter ?? {}).sort()).toEqual(
       [
         'avatarUrl',
         'firstName',
@@ -133,23 +133,150 @@ describe('toPublicInviteView', () => {
     );
   });
 
-  it('returns null note/vouch and null avatar when absent, omitting memberSince when no inviter', () => {
+  it('returns null note/vouch and a null avatar when the invite and profile carry none', () => {
     const view = toPublicInviteView(
       { ...invite, note: null, vouch: null },
-      null,
+      {
+        ...inviter,
+        profile: { ...inviter.profile, avatarUrl: null },
+      },
       0,
       now,
       false,
     );
     expect(view.note).toBeNull();
     expect(view.vouch).toBeNull();
-    expect(view.inviter.avatarUrl).toBeNull();
-    expect(view.inviter).not.toHaveProperty('memberSince');
+    expect(view.inviter?.avatarUrl).toBeNull();
   });
 
   it('sets isAmbassador on the inviter block from the given flag', () => {
     const view = toPublicInviteView(invite, inviter, 247, now, true);
-    expect(view.inviter.isAmbassador).toBe(true);
+    expect(view.inviter?.isAmbassador).toBe(true);
+  });
+
+  // SEC-13: identity, note and vouch go out only on a usable invite.
+  describe('an invite that can no longer be used', () => {
+    function expectNoInviterIdentity(
+      view: ReturnType<typeof toPublicInviteView>,
+    ) {
+      expect(view.inviter).toBeNull();
+      expect(view.note).toBeNull();
+      expect(view.vouch).toBeNull();
+      const wire = JSON.stringify(view);
+      expect(wire).not.toContain('ines');
+      expect(wire).not.toContain('Inês');
+      expect(wire).not.toContain('cdn/ines.jpg');
+      expect(wire).not.toContain('two years');
+      expect(wire).not.toContain('Why they belong here');
+    }
+
+    it.each([
+      ['revoked', InviteStatus.Revoked],
+      ['used', InviteStatus.Accepted],
+      ['expired', InviteStatus.Expired],
+    ])(
+      'answers a %s invite with its status and no inviter, note or vouch',
+      (expected, status) => {
+        const view = toPublicInviteView(
+          { ...invite, status },
+          inviter,
+          247,
+          now,
+          true,
+        );
+        expect(view.status).toBe(expected);
+        expect(view.inviterActive).toBe(true);
+        expectNoInviterIdentity(view);
+      },
+    );
+
+    it('treats a pending invite past its expiry as expired and withholds the inviter', () => {
+      const view = toPublicInviteView(
+        { ...invite, expiresAt: new Date('2026-06-29T00:00:00.000Z') },
+        inviter,
+        247,
+        now,
+        false,
+      );
+      expect(view.status).toBe('expired');
+      expectNoInviterIdentity(view);
+    });
+
+    it('withholds a suspended inviter on a still-valid invite and says the inviter is inactive', () => {
+      const view = toPublicInviteView(
+        invite,
+        { ...inviter, status: UserStatus.Suspended },
+        247,
+        now,
+        false,
+      );
+      expect(view.status).toBe('valid');
+      expect(view.inviterActive).toBe(false);
+      expectNoInviterIdentity(view);
+    });
+
+    it('withholds an erased inviter (no user row)', () => {
+      const view = toPublicInviteView(invite, null, 247, now, false);
+      expect(view.inviterActive).toBe(false);
+      expectNoInviterIdentity(view);
+    });
+
+    it.each([
+      ['revoked', InviteStatus.Revoked],
+      ['used', InviteStatus.Accepted],
+      ['expired', InviteStatus.Expired],
+    ])(
+      'answers a %s invite from a suspended or erased inviter with inviterActive true, so the dead link names only its own state',
+      (expected, status) => {
+        const goneInviters: (User | null)[] = [
+          { ...inviter, status: UserStatus.Suspended },
+          null,
+        ];
+        for (const goneInviter of goneInviters) {
+          const view = toPublicInviteView(
+            { ...invite, status },
+            goneInviter,
+            247,
+            now,
+            false,
+          );
+          expect(view.status).toBe(expected);
+          expect(view.inviterActive).toBe(true);
+          expectNoInviterIdentity(view);
+        }
+      },
+    );
+
+    it('answers a pending invite past its expiry from a suspended inviter with inviterActive true', () => {
+      const view = toPublicInviteView(
+        { ...invite, expiresAt: new Date('2026-06-29T00:00:00.000Z') },
+        { ...inviter, status: UserStatus.Suspended },
+        247,
+        now,
+        false,
+      );
+      expect(view.status).toBe('expired');
+      expect(view.inviterActive).toBe(true);
+      expectNoInviterIdentity(view);
+    });
+
+    it('keeps the fields the landing needs to name the state', () => {
+      const view = toPublicInviteView(
+        { ...invite, status: InviteStatus.Expired },
+        inviter,
+        247,
+        now,
+        false,
+      );
+      expect(view).toMatchObject({
+        code: 'QP-7F3K-2026',
+        status: 'expired',
+        expiresAt: '2026-07-07T10:42:00.000Z',
+        validForDays: 14,
+        memberCount: 247,
+        inviterActive: true,
+      });
+    });
   });
 
   // The private note is the inviter's own label, and this view is reachable by
@@ -242,7 +369,7 @@ describe('InvitesService.resolveInvite', () => {
     expect(users.findByIdWithProfile).toHaveBeenCalledWith('inviter');
     expect(view.status).toBe('valid');
     expect(view.memberCount).toBe(247);
-    expect(view.inviter.slug).toBe('ines');
+    expect(view.inviter?.slug).toBe('ines');
     expect(view.note).toBe('hello');
   });
 
@@ -261,13 +388,13 @@ describe('InvitesService.resolveInvite', () => {
 
     ambassadorStatus.isVisibleAmbassador.mockResolvedValue(true);
     const visibleView = await service.resolveInvite('QP-7F3K-2026');
-    expect(visibleView.inviter.isAmbassador).toBe(true);
+    expect(visibleView.inviter?.isAmbassador).toBe(true);
 
     // Hidden tag, even with an active grant underneath. isVisibleAmbassador
     // is the single source of truth here and already folds that in.
     ambassadorStatus.isVisibleAmbassador.mockResolvedValue(false);
     const hiddenView = await service.resolveInvite('QP-7F3K-2026');
-    expect(hiddenView.inviter.isAmbassador).toBe(false);
+    expect(hiddenView.inviter?.isAmbassador).toBe(false);
   });
 
   it('never checks ambassador status when the invite has no resolvable inviter', async () => {
@@ -283,7 +410,8 @@ describe('InvitesService.resolveInvite', () => {
 
     const view = await service.resolveInvite('QP-7F3K-2026');
 
-    expect(view.inviter.isAmbassador).toBe(false);
+    expect(view.inviter).toBeNull();
+    expect(view.inviterActive).toBe(false);
     expect(ambassadorStatus.isVisibleAmbassador).not.toHaveBeenCalled();
   });
 
@@ -304,8 +432,33 @@ describe('InvitesService.resolveInvite', () => {
 
     const view = await service.resolveInvite('QP-7F3K-2026');
 
-    expect(view.inviter.isAmbassador).toBe(false);
+    expect(view.inviter).toBeNull();
     expect(view.inviterActive).toBe(false);
+    expect(ambassadorStatus.isVisibleAmbassador).not.toHaveBeenCalled();
+  });
+
+  // SEC-13: a revoked link keeps answering, with no name or note on it.
+  it('answers a revoked invite with its status and no inviter identity, note or vouch', async () => {
+    repo.findOne.mockResolvedValue({
+      code: 'QP-7F3K-2026',
+      inviterId: 'inviter',
+      status: InviteStatus.Revoked,
+      note: 'sent to the wrong person',
+      vouch: 'a vouch meant for someone else',
+      createdAt: new Date('2026-06-23T10:42:00.000Z'),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+    users.findByIdWithProfile.mockResolvedValue(buildInviterUser());
+    ambassadorStatus.isVisibleAmbassador.mockResolvedValue(true);
+
+    const view = await service.resolveInvite('QP-7F3K-2026');
+
+    expect(view.status).toBe('revoked');
+    expect(view.inviterActive).toBe(true);
+    expect(view.inviter).toBeNull();
+    expect(view.note).toBeNull();
+    expect(view.vouch).toBeNull();
+    expect(JSON.stringify(view)).not.toContain('wrong person');
     expect(ambassadorStatus.isVisibleAmbassador).not.toHaveBeenCalled();
   });
 });

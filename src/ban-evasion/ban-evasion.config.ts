@@ -16,6 +16,12 @@ import { registerAs } from '@nestjs/config';
  *
  * Rotating the pepper invalidates every stored hash (old rows stop matching new
  * applicants). Treat it as write-once for the life of the deployment.
+ *
+ * The erased-account email suppression list depends on it too (SEC-14): new
+ * `email_suppression` rows are keyed on an HMAC derived from this pepper (see
+ * `account/entities/email-suppression.entity.ts`). Rotating it orphans every
+ * peppered row, and unsetting it leaves lookups with the legacy SHA-256 key
+ * alone, so in both cases an erased address can register again.
  */
 export default registerAs('banEvasion', () => ({
   pepper: process.env.BAN_EVASION_PEPPER,

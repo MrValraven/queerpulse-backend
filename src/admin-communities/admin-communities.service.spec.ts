@@ -29,6 +29,7 @@ import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Event as Gathering } from '../events/entities/event.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ReportSubjectResolverService } from '../moderation/report-subject-resolver.service';
 import {
   AccessTier,
   Community,
@@ -128,6 +129,8 @@ function makeCommunityMember(
     rulesAcceptedAt: null,
     rulesVersionAccepted: null,
     welcomeSeenAt: null,
+    wornBadgeId: null,
+    eventsAttendedCount: 0,
     ...overrides,
   };
 }
@@ -1062,6 +1065,77 @@ describe('AdminCommunitiesService', () => {
       // Three reports resolved to this community, one of them resolved-status.
       expect(result.openReportCount).toBe(2);
       expect(result.resolvedPercentage).toBe(33);
+    });
+
+    // SEC-31: a staff member never reads, in a community's queue, a report
+    // about something they posted; a colleague still does.
+    it('drops reports about the viewing staff member from the scoped queue', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      queueQueryBuilders(communityPosts.createQueryBuilder, {
+        'post.id': [
+          { contentId: REPORTED_POST_ID, communityId: 'community-1' },
+        ],
+        'post.community_id': [],
+      });
+      queueQueryBuilders(communityPostReplies.createQueryBuilder, {
+        'reply.id': [],
+        'post.community_id': [],
+      });
+      stubReportsQueryBuilder(reports.createQueryBuilder, [
+        makeReport({
+          id: 'report-about-staff',
+          subjectId: REPORTED_POST_ID,
+          status: ReportStatus.Open,
+        }),
+        makeReport({
+          id: 'report-about-other',
+          subjectId: REPORTED_POST_ID,
+          status: ReportStatus.Open,
+        }),
+      ]);
+      const resolveMany = jest
+        .spyOn(ReportSubjectResolverService.prototype, 'resolveMany')
+        .mockResolvedValue(
+          new Map([
+            [
+              'report-about-staff',
+              {
+                authorUserId: 'user-staff',
+                excerpt: null,
+                communityId: 'community-1',
+                isAuthorAmbiguous: false,
+              },
+            ],
+            [
+              'report-about-other',
+              {
+                authorUserId: 'user-other',
+                excerpt: null,
+                communityId: 'community-1',
+                isAuthorAmbiguous: false,
+              },
+            ],
+          ]),
+        );
+
+      const forStaff = await service.getCommunity(
+        'circle-of-care',
+        true,
+        'user-staff',
+      );
+      const forColleague = await service.getCommunity(
+        'circle-of-care',
+        true,
+        'user-colleague',
+      );
+      resolveMany.mockRestore();
+
+      expect(forStaff.scopedQueue.map((queueItem) => queueItem.id)).toEqual([
+        'report-about-other',
+      ]);
+      expect(
+        forColleague.scopedQueue.map((queueItem) => queueItem.id).sort(),
+      ).toEqual(['report-about-other', 'report-about-staff']);
     });
 
     // Regression for the CRITICAL fix: `CreateReportDto` only validates

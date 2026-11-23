@@ -362,6 +362,68 @@ describe('ActivityVisibilityService.filterVisible', () => {
     expect(repos.activities.delete).not.toHaveBeenCalled();
   });
 
+  it('hides a join row from others while the community hides its roster, and keeps it in the table', async () => {
+    const { service, repos } = await buildService();
+    repos.communities.find.mockResolvedValue([
+      { slug: 'quiet-circle', rosterVisible: false },
+    ]);
+    const joinRow = row({
+      id: 'row-1',
+      kind: ActivityKind.Community,
+      subjectKind: ActivitySubjectKind.Community,
+      subjectId: 'quiet-circle',
+    });
+    const postRow = row({
+      id: 'row-2',
+      kind: ActivityKind.Post,
+      subjectKind: ActivitySubjectKind.Community,
+      subjectId: 'quiet-circle',
+    });
+
+    // A post in a public community stays a public fact; "Joined X" would
+    // rebuild the hidden roster one profile at a time.
+    await expect(
+      service.filterVisible([joinRow, postRow], 'viewer-1'),
+    ).resolves.toEqual([postRow]);
+    await expect(service.filterVisible([joinRow], null)).resolves.toEqual([]);
+    await flush();
+    expect(repos.activities.delete).not.toHaveBeenCalled();
+  });
+
+  it('shows the owner their own join row while the roster is hidden', async () => {
+    const { service, repos } = await buildService();
+    repos.communities.find.mockResolvedValue([
+      { slug: 'quiet-circle', rosterVisible: false },
+    ]);
+    const joinRow = row({
+      id: 'row-1',
+      kind: ActivityKind.Community,
+      subjectKind: ActivitySubjectKind.Community,
+      subjectId: 'quiet-circle',
+    });
+
+    await expect(service.filterVisible([joinRow], 'member-1')).resolves.toEqual(
+      [joinRow],
+    );
+  });
+
+  it('keeps a join row while the roster is visible', async () => {
+    const { service, repos } = await buildService();
+    repos.communities.find.mockResolvedValue([
+      { slug: 'open-circle', rosterVisible: true },
+    ]);
+    const joinRow = row({
+      id: 'row-1',
+      kind: ActivityKind.Community,
+      subjectKind: ActivitySubjectKind.Community,
+      subjectId: 'open-circle',
+    });
+
+    await expect(service.filterVisible([joinRow], 'viewer-1')).resolves.toEqual(
+      [joinRow],
+    );
+  });
+
   it('scopes the community re-check to top-level communities, excluding spaces', async () => {
     const { service, repos } = await buildService();
     repos.communities.find.mockResolvedValue([]);

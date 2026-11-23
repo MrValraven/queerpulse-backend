@@ -231,7 +231,7 @@ export class ListingTeamLinksService {
             manager,
             userId,
             listing.ownerUserId,
-            persona.ownerUserId,
+            persona,
           )
         ) {
           throw listingTeamError('listing_team_listing_not_found');
@@ -315,7 +315,7 @@ export class ListingTeamLinksService {
             manager,
             userId,
             listing.ownerUserId,
-            persona.ownerUserId,
+            persona,
           ))
         ) {
           throw listingTeamError('listing_team_link_not_found');
@@ -462,15 +462,18 @@ export class ListingTeamLinksService {
   /**
    * True when the persona's owner and the listing's owner have a block either
    * way. The pair is read only when the persona's owner is someone other than
-   * the acting member, whose own block the caller has already checked.
+   * the acting member, whose own block the caller has already checked. An
+   * unlinked persona skips the pair (SEC-02): the team reads show it whoever
+   * blocked whom, so the write path matches them.
    */
   private async hasOwnerPairBlock(
     manager: EntityManager,
     actingUserId: string,
     listingOwnerUserId: string | null,
-    personaOwnerUserId: string,
+    persona: TeamPersonaFacts,
   ): Promise<boolean> {
-    if (personaOwnerUserId === actingUserId) {
+    const personaOwnerUserId = persona.ownerUserId;
+    if (persona.isUnlinked || personaOwnerUserId === actingUserId) {
       return false;
     }
     return hasBlockEitherWay(manager, personaOwnerUserId, listingOwnerUserId);
@@ -561,11 +564,14 @@ export class ListingTeamLinksService {
       for (const member of rows) {
         const listing = listingById.get(member.listingId);
         if (!listing) continue;
+        const isListingLive = liveListingIds.has(member.listingId);
         shaped.push(
           toListingTeamPersonaRow(
             member,
-            toListingTeamListing(listing, crops),
-            liveListingIds.has(member.listingId),
+            // A hidden listing's cover reference would 404, so its card goes
+            // without one and shows the tint and initials.
+            toListingTeamListing(listing, crops, isListingLive),
+            isListingLive,
           ),
         );
       }

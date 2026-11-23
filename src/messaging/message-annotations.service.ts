@@ -62,6 +62,11 @@ import {
 } from './messaging.constants';
 import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
 import {
+  hasAbsenceGap,
+  insideAbsenceGapPredicate,
+  isInsideAbsenceGap,
+} from './group-absence-gap';
+import {
   MESSAGE_PINNED,
   MESSAGE_REACTION,
   MessagePinnedEvent,
@@ -171,7 +176,10 @@ export class MessageAnnotationsService {
     callerSeat: ConversationParticipant,
     messageId: string,
   ): Promise<void> {
-    if (!callerSeat.historyFloorAt) {
+    // SEC-25: a re-seated member's absence gap rides inside
+    // `groupJoinHistoryFloorCoversPredicate`, so a seat with a gap and no
+    // join floor still runs the query.
+    if (!callerSeat.historyFloorAt && !hasAbsenceGap(callerSeat)) {
       return;
     }
     const isBelowFloor = await this.messages
@@ -313,9 +321,13 @@ export class MessageAnnotationsService {
    * capped at `MAX_MESSAGE_REACTORS`. `message_reactions` has no timestamp, so
    * the order is deterministic instead of chronological: the caller's own
    * rows first (so their "Tap to remove" survives the cap), then reaction key
-   * order (the enum's declaration order), then name. No block filter: no
-   * message read in this module filters by blocks (a group keeps a blocked
-   * member's messages and reactions visible), so this list does not add one.
+   * order (the enum's declaration order), then name.
+   *
+   * SEC-26: in a group, the reactions of a member blocked either way with
+   * the caller are left out, the same rows `reactionSummariesByMessage`
+   * leaves out of the counts and the live `reaction` frame never relays.
+   * The filter runs after the cap, so the list can come back shorter than
+   * `MAX_MESSAGE_REACTORS`.
    */
   async listMessageReactors(
     conversationId: string,
@@ -334,7 +346,9 @@ export class MessageAnnotationsService {
       !!participant.clearedAt && message.createdAt <= participant.clearedAt;
     const isAfterLeaving =
       !!participant.leftAt && message.createdAt > participant.leftAt;
-    if (isBeforeClearPoint || isAfterLeaving) {
+    // SEC-25: posted while a re-seated member was away.
+    const isWhileAway = isInsideAbsenceGap(message.createdAt, participant);
+    if (isBeforeClearPoint || isAfterLeaving || isWhileAway) {
       throw new NotFoundException('Message not found');
     }
     // A moderator hide withholds the message from ordinary participants only:
@@ -379,10 +393,20 @@ export class MessageAnnotationsService {
       reactorView.shape === 'customerOfMailbox'
         ? reactorView.businessUserIds
         : new Set();
+    const blockedReactorIds =
+      reactorView.shape === 'individuals' && reactorView.isGroup
+        ? await this.core.blockedEitherWayWith(
+            userId,
+            rows.map((row) => row.userId),
+          )
+        : new Set<string>();
+    const unblockedRows = rows.filter(
+      (row) => !blockedReactorIds.has(row.userId),
+    );
     const visibleRows =
       reactorView.shape === 'ownOnly'
-        ? rows.filter((row) => row.userId === userId)
-        : collapseBusinessReactions(rows, businessUserIds);
+        ? unblockedRows.filter((row) => row.userId === userId)
+        : collapseBusinessReactions(unblockedRows, businessUserIds);
     const reactors: MessageReactorsResponse['reactors'] = visibleRows.map(
       (row) => ({
         key: row.key,
@@ -622,6 +646,10 @@ export class MessageAnnotationsService {
       if (participant.leftAt && message.createdAt > participant.leftAt) {
         continue;
       }
+      // SEC-25: a pin on a message posted while a re-seated member was away.
+      if (isInsideAbsenceGap(message.createdAt, participant)) {
+        continue;
+      }
       ordered.push(message);
     }
     return this.core.toMessageResponses(
@@ -804,6 +832,8 @@ export class MessageAnnotationsService {
       // invariant must hold identically on every listing path, not only most
       // of them.
       .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
+      // SEC-25: nor a message posted while a re-seated member was away.
+      .andWhere(`NOT ${insideAbsenceGapPredicate('m.created_at', 'p')}`)
       // Task 13c fix round 1: a STAFF member blocked either way with a
       // mailbox thread's customer lists nothing from that thread. Task 14a:
       // nor does a staff member who has left the business. Task 14: nor

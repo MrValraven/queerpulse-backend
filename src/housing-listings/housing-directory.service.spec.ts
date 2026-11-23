@@ -16,7 +16,6 @@ import {
   HousingListingType,
 } from './entities/housing-listing.entity';
 
-type RepoMock = Record<string, jest.Mock>;
 type QueryBuilderStub = Record<string, jest.Mock>;
 
 /** Fluent builder covering the paginated browse (`getManyAndCount`), its
@@ -120,11 +119,11 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
 
 describe('HousingDirectoryService', () => {
   let service: HousingDirectoryService;
-  // Declared with the exact method shape (rather than the bare `RepoMock`
-  // index-signature alias) so `listings.findOne.mockResolvedValue(...)`-style
-  // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+  // Declared with the exact method shape (no index signature) so
+  // `listings.findOne.mockResolvedValue(...)`-style chained access doesn't
+  // see `noUncheckedIndexedAccess`'s `| undefined`.
   let listings: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
-  let profiles: RepoMock;
+  let profiles: { find: jest.Mock; exists: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
   let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };
   let connections: { areConnected: jest.Mock };
@@ -136,7 +135,10 @@ describe('HousingDirectoryService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       createQueryBuilder: jest.fn(() => makeBuilder()),
     };
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      exists: jest.fn().mockResolvedValue(true),
+    };
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
@@ -174,6 +176,18 @@ describe('HousingDirectoryService', () => {
   });
 
   describe('browse', () => {
+    it('drops homes whose lister is suspended, banned or deactivated', async () => {
+      const builder = makeBuilder({ getManyAndCount: [[], 0] });
+      listings.createQueryBuilder.mockReturnValue(builder);
+
+      await service.browse({ page: 1 });
+
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"owner_user"."status" = :activeOwnerStatus'),
+        { activeOwnerStatus: 'active' },
+      );
+    });
+
     it('restricts to live listings and applies each supplied filter', async () => {
       const builder = makeBuilder({ getManyAndCount: [[makeListing()], 1] });
       listings.createQueryBuilder.mockReturnValue(builder);
@@ -273,6 +287,18 @@ describe('HousingDirectoryService', () => {
       ]);
     });
 
+    it('drops homes whose lister is not an active member', async () => {
+      const builder = makeBuilder({ getMany: [] });
+      listings.createQueryBuilder.mockReturnValue(builder);
+
+      await service.searchByText('sunny', 5);
+
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"owner_user"."status" = :activeOwnerStatus'),
+        { activeOwnerStatus: 'active' },
+      );
+    });
+
     it('hides the homes of members the viewer blocked, was blocked by or muted', async () => {
       const builder = makeBuilder({ getMany: [] });
       listings.createQueryBuilder.mockReturnValue(builder);
@@ -302,6 +328,15 @@ describe('HousingDirectoryService', () => {
         hidden: true,
         removed: false,
       });
+
+      await expect(service.detail('sunny-room', 'viewer-1')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('404s a non-owner when the lister account is not active', async () => {
+      listings.findOne.mockResolvedValue(makeListing());
+      profiles.exists.mockResolvedValue(false);
 
       await expect(service.detail('sunny-room', 'viewer-1')).rejects.toThrow(
         NotFoundException,

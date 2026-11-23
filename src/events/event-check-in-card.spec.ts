@@ -35,7 +35,12 @@ describe('EventCheckInService card check-in', () => {
   const MEMBER_ID = 'member-1';
 
   let profiles: { findOne: jest.Mock };
-  let rsvps: { findOne: jest.Mock; save: jest.Mock };
+  let rsvps: {
+    findOne: jest.Mock;
+    update: jest.Mock;
+    query: jest.Mock;
+    manager: { transaction: jest.Mock };
+  };
   let service: EventCheckInService;
 
   const holderProfile = (status: UserStatus) => ({
@@ -70,7 +75,14 @@ describe('EventCheckInService card check-in', () => {
         status: RsvpStatus.Going,
         checkedInAt: null,
       }),
-      save: jest.fn((row: EventRsvp) => Promise.resolve(row)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      query: jest.fn().mockResolvedValue([]),
+      manager: {
+        transaction: jest.fn(
+          (work: (manager: { getRepository: () => unknown }) => unknown) =>
+            work({ getRepository: () => rsvps }),
+        ),
+      },
     };
     profiles = {
       findOne: jest.fn().mockResolvedValue(holderProfile(UserStatus.Active)),
@@ -129,7 +141,7 @@ describe('EventCheckInService card check-in', () => {
 
   it('checks in the holder of a good card whose account is active', async () => {
     await service.checkIn('supper', HOST_ID, { cardToken: 'signed.code' });
-    expect(rsvps.save).toHaveBeenCalledTimes(1);
+    expect(rsvps.update).toHaveBeenCalledTimes(1);
   });
 
   it('joins the holder account when reading the card holder', async () => {
@@ -152,7 +164,7 @@ describe('EventCheckInService card check-in', () => {
         response: { statusCode: 400, code: CHECK_IN_CARD_UNREADABLE },
       });
       expect(rsvps.findOne).not.toHaveBeenCalled();
-      expect(rsvps.save).not.toHaveBeenCalled();
+      expect(rsvps.update).not.toHaveBeenCalled();
     },
   );
 });
@@ -171,7 +183,12 @@ describe('EventCheckInService check-in by name', () => {
   const MEMBER_ID = 'member-1';
 
   let profiles: { findOne: jest.Mock };
-  let rsvps: { findOne: jest.Mock; save: jest.Mock };
+  let rsvps: {
+    findOne: jest.Mock;
+    update: jest.Mock;
+    query: jest.Mock;
+    manager: { transaction: jest.Mock };
+  };
   let service: EventCheckInService;
 
   const holderProfile = (status: UserStatus) => ({
@@ -204,7 +221,14 @@ describe('EventCheckInService check-in by name', () => {
         status: RsvpStatus.Going,
         checkedInAt: null,
       }),
-      save: jest.fn((row: EventRsvp) => Promise.resolve(row)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      query: jest.fn().mockResolvedValue([]),
+      manager: {
+        transaction: jest.fn(
+          (work: (manager: { getRepository: () => unknown }) => unknown) =>
+            work({ getRepository: () => rsvps }),
+        ),
+      },
     };
     profiles = {
       findOne: jest.fn().mockResolvedValue(holderProfile(UserStatus.Active)),
@@ -242,7 +266,7 @@ describe('EventCheckInService check-in by name', () => {
 
   it('checks in a named guest whose account is active', async () => {
     await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
-    expect(rsvps.save).toHaveBeenCalledTimes(1);
+    expect(rsvps.update).toHaveBeenCalledTimes(1);
   });
 
   it('reads the holder account when resolving a member slug for check-in', async () => {
@@ -266,7 +290,7 @@ describe('EventCheckInService check-in by name', () => {
         response: { statusCode: 404, code: CHECK_IN_MEMBER_NOT_FOUND },
       });
       expect(rsvps.findOne).not.toHaveBeenCalled();
-      expect(rsvps.save).not.toHaveBeenCalled();
+      expect(rsvps.update).not.toHaveBeenCalled();
     },
   );
 
@@ -281,7 +305,7 @@ describe('EventCheckInService check-in by name', () => {
       response: { statusCode: 404, code: CHECK_IN_MEMBER_NOT_FOUND },
     });
     expect(rsvps.findOne).not.toHaveBeenCalled();
-    expect(rsvps.save).not.toHaveBeenCalled();
+    expect(rsvps.update).not.toHaveBeenCalled();
   });
 
   it.each([UserStatus.Suspended, UserStatus.Deactivated])(
@@ -296,9 +320,9 @@ describe('EventCheckInService check-in by name', () => {
         checkedInAt: new Date(),
       });
       await service.undoCheckIn('supper', HOST_ID, 'mara');
-      expect(rsvps.save).toHaveBeenCalledWith(
-        expect.objectContaining({ checkedInAt: null }),
-      );
+      expect(rsvps.update).toHaveBeenCalledWith(expect.anything(), {
+        checkedInAt: null,
+      });
     },
   );
 });
@@ -315,7 +339,12 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
   const MEMBER_ID = 'member-1';
 
   let profiles: { findOne: jest.Mock };
-  let rsvps: { findOne: jest.Mock; save: jest.Mock };
+  let rsvps: {
+    findOne: jest.Mock;
+    update: jest.Mock;
+    query: jest.Mock;
+    manager: { transaction: jest.Mock };
+  };
   let service: EventCheckInService;
 
   beforeEach(() => {
@@ -334,7 +363,14 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
     };
     rsvps = {
       findOne: jest.fn(),
-      save: jest.fn((row: EventRsvp) => Promise.resolve(row)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      query: jest.fn().mockResolvedValue([]),
+      manager: {
+        transaction: jest.fn(
+          (work: (manager: { getRepository: () => unknown }) => unknown) =>
+            work({ getRepository: () => rsvps }),
+        ),
+      },
     };
     profiles = {
       findOne: jest.fn().mockResolvedValue({
@@ -383,7 +419,7 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
       await expect(outcome).rejects.toMatchObject({
         response: { statusCode: 404, code: CHECK_IN_NOT_ON_GUEST_LIST },
       });
-      expect(rsvps.save).not.toHaveBeenCalled();
+      expect(rsvps.update).not.toHaveBeenCalled();
     },
   );
 
@@ -397,7 +433,7 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
     await expect(outcome).rejects.toMatchObject({
       response: { statusCode: 404, code: CHECK_IN_NOT_ON_GUEST_LIST },
     });
-    expect(rsvps.save).not.toHaveBeenCalled();
+    expect(rsvps.update).not.toHaveBeenCalled();
   });
 
   it('carries CHECK_IN_WAITLISTED for a waitlisted RSVP, and writes nothing', async () => {
@@ -410,7 +446,7 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
     await expect(outcome).rejects.toMatchObject({
       response: { statusCode: 400, code: CHECK_IN_WAITLISTED },
     });
-    expect(rsvps.save).not.toHaveBeenCalled();
+    expect(rsvps.update).not.toHaveBeenCalled();
   });
 
   it('carries CHECK_IN_MAYBE for a "maybe" RSVP, and writes nothing', async () => {
@@ -423,7 +459,7 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
     await expect(outcome).rejects.toMatchObject({
       response: { statusCode: 400, code: CHECK_IN_MAYBE },
     });
-    expect(rsvps.save).not.toHaveBeenCalled();
+    expect(rsvps.update).not.toHaveBeenCalled();
   });
 
   it('carries CHECK_IN_MEMBER_NOT_FOUND when undoing an unmatched slug, the same code the checkIn-by-name resolver uses', async () => {
@@ -435,6 +471,6 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
       response: { statusCode: 404, code: CHECK_IN_MEMBER_NOT_FOUND },
     });
     expect(rsvps.findOne).not.toHaveBeenCalled();
-    expect(rsvps.save).not.toHaveBeenCalled();
+    expect(rsvps.update).not.toHaveBeenCalled();
   });
 });

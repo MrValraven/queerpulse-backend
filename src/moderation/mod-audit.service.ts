@@ -8,6 +8,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { AuditFeedQuery } from './dto/audit-feed.query';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
+import { excludeAuditRowsAboutViewer } from './mod-audit-viewer-filter';
 import {
   AuditEntryDTO,
   AuditFeedModerator,
@@ -32,6 +33,17 @@ const CSV_EXPORT_LIMIT = 5000;
  * resolution those reads share. `ModerationService` injects this and delegates;
  * its public API is unchanged.
  */
+/**
+ * SEC-31: the staff member reading the audit feed, and how to tell which of
+ * a page's reports are about them. Passed by `ModerationService`, which owns
+ * that rule (`reportIdsAboutActor`); this service only applies it, so it
+ * takes on no dependency of its own.
+ */
+export interface AuditFeedViewer {
+  userId: string;
+  reportIdsAboutViewer: (reportIds: string[]) => Promise<Set<string>>;
+}
+
 @Injectable()
 export class ModAuditService {
   constructor(
@@ -70,17 +82,25 @@ export class ModAuditService {
   // report: paginated, newest first, filterable by moderator/action/range/
   // free-text note search, and includes report-less rows (e.g.
   // `suspension_lifted`) that `auditTrail` never surfaces.
-  async auditFeed(query: AuditFeedQuery): Promise<AuditFeedResponseDTO> {
+  async auditFeed(
+    query: AuditFeedQuery,
+    viewer?: AuditFeedViewer,
+  ): Promise<AuditFeedResponseDTO> {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 8;
 
-    const builder = this.auditFeedQueryBuilder(query);
+    const builder = this.auditFeedQueryBuilder(query, viewer?.userId);
 
-    const total = await builder.getCount();
-    const rows = await builder
+    const countedTotal = await builder.getCount();
+    const pageRows = await builder
       .skip((page - 1) * pageSize)
       .take(pageSize)
       .getMany();
+    // SEC-31: the rows the SQL above cannot see are about the viewer through
+    // the content they authored; they leave this page, and the count with
+    // them. A page can come back shorter than `pageSize`.
+    const rows = await this.withoutRowsAboutViewer(pageRows, viewer);
+    const total = countedTotal - (pageRows.length - rows.length);
 
     const { resolveName, subjectFor } = await this.enrichAuditRows(rows);
     const items: AuditFeedRowDTO[] = rows.map((log) =>
@@ -115,10 +135,16 @@ export class ModAuditService {
   // irrelevant to an export — it dumps every matching row up to
   // `CSV_EXPORT_LIMIT`, newest first). Columns mirror the audit table the page
   // renders: when, moderator, action, subject, reason.
-  async auditFeedCsv(query: AuditFeedQuery): Promise<string> {
-    const rows = await this.auditFeedQueryBuilder(query)
-      .take(CSV_EXPORT_LIMIT)
-      .getMany();
+  async auditFeedCsv(
+    query: AuditFeedQuery,
+    viewer?: AuditFeedViewer,
+  ): Promise<string> {
+    const rows = await this.withoutRowsAboutViewer(
+      await this.auditFeedQueryBuilder(query, viewer?.userId)
+        .take(CSV_EXPORT_LIMIT)
+        .getMany(),
+      viewer,
+    );
     const { resolveName, subjectFor } = await this.enrichAuditRows(rows);
 
     const table: string[][] = [
@@ -142,10 +168,17 @@ export class ModAuditService {
   // from what the on-screen feed shows.
   private auditFeedQueryBuilder(
     query: AuditFeedQuery,
+    viewerUserId?: string,
   ): SelectQueryBuilder<ModAuditLog> {
     const builder = this.auditLogs
       .createQueryBuilder('log')
       .orderBy('log.createdAt', 'DESC');
+
+    // SEC-31, the part SQL can decide; the platform log applies the same
+    // helper to its own read of this table.
+    if (viewerUserId) {
+      excludeAuditRowsAboutViewer(builder, 'log', viewerUserId);
+    }
 
     if (query.moderator) {
       builder.andWhere('log.actorId = :moderatorId', {
@@ -180,6 +213,28 @@ export class ModAuditService {
       );
     }
     return builder;
+  }
+
+  /** `rows` without those whose report is about the viewer, by the rule
+   *  `ModerationService` passes in (authorship included). Order kept. */
+  private async withoutRowsAboutViewer(
+    rows: ModAuditLog[],
+    viewer: AuditFeedViewer | undefined,
+  ): Promise<ModAuditLog[]> {
+    if (!viewer) return rows;
+    const reportIds = [
+      ...new Set(
+        rows
+          .map((row) => row.reportId)
+          .filter((reportId): reportId is string => reportId !== null),
+      ),
+    ];
+    if (!reportIds.length) return rows;
+    const aboutViewer = await viewer.reportIdsAboutViewer(reportIds);
+    if (!aboutViewer.size) return rows;
+    return rows.filter(
+      (row) => row.reportId === null || !aboutViewer.has(row.reportId),
+    );
   }
 
   // Resolves the per-row derived fields (actor display name + human subject

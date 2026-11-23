@@ -7,6 +7,10 @@ export interface ReaderCommentAuthor {
   handle: string;
   displayName: string;
   avatarUrl: string | null;
+  /** PRD-507. Set when the author's account is paused, suspended or in the
+   *  deletion grace: `handle` and `displayName` are empty and the client
+   *  renders its "[deactivated member]" label. */
+  isInactiveMember?: true;
 }
 
 const UNKNOWN_AUTHOR: ReaderCommentAuthor = {
@@ -31,6 +35,7 @@ function toReaderCommentAuthor(
     handle: ref.slug,
     displayName: `${ref.firstName} ${ref.lastName}`.trim(),
     avatarUrl: toImageUrl(ref.avatarUrl),
+    ...(ref.isInactiveMember ? { isInactiveMember: true as const } : {}),
   };
 }
 

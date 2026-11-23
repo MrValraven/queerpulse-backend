@@ -20,6 +20,7 @@ import { HousingViewingsService } from '../housing-viewings/housing-viewings.ser
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
@@ -665,6 +666,20 @@ export class HousingListingsService {
     );
     if (moderation.hidden || moderation.removed) {
       throw new NotFoundException('Housing listing not found');
+    }
+    // SEC-34: a lister who is suspended, banned or deactivated takes the home
+    // off the board (`HousingDirectoryService` hides it from browse, search and
+    // detail), so it takes no enquiries either, with the same 404.
+    if (listing.ownerId !== null) {
+      const isListerActive = await this.profiles.exists({
+        where: {
+          userId: listing.ownerId,
+          user: { status: UserStatus.Active },
+        },
+      });
+      if (!isListerActive) {
+        throw new NotFoundException('Housing listing not found');
+      }
     }
     return listing;
   }

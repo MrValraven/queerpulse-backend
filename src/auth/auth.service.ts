@@ -4,7 +4,14 @@ import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  IsNull,
+  MoreThan,
+  Repository,
+} from 'typeorm';
 import { ReauthResult } from '../account/account-response';
 import { isUniqueViolation } from '../common/db-errors';
 import { REAUTH_TTL_MS } from '../account/account.constants';
@@ -28,7 +35,8 @@ import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   EmailSuppression,
-  hashSuppressedEmail,
+  suppressionLookupKeys,
+  suppressionPepper,
 } from '../account/entities/email-suppression.entity';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import {
@@ -303,9 +311,16 @@ export class AuthService {
   // and `AccountModule` already imports `AuthModule`'s entity the same way —
   // so this reads the repository directly rather than creating a module cycle
   // by injecting an account-module service here.
+  //
+  // SEC-14: rows are keyed on a peppered HMAC since that change and on a bare
+  // SHA-256 before it, so the lookup asks for both keys.
   private async isEmailSuppressed(email: string): Promise<boolean> {
     const hit = await this.emailSuppressions.findOne({
-      where: { emailHash: hashSuppressedEmail(email) },
+      where: {
+        emailHash: In(
+          suppressionLookupKeys(email, suppressionPepper(this.configService)),
+        ),
+      },
     });
     return hit !== null;
   }
@@ -1111,7 +1126,10 @@ export class AuthService {
     //    `REFRESH_ROTATION_GRACE_MS`.
     if (row.revokedAt) {
       if (this.withinRotationGrace(row)) {
-        return this.issueGraceReplacement(row, userAgent);
+        const replacement = await this.issueGraceReplacement(row, userAgent);
+        if (replacement) {
+          return replacement;
+        }
       }
       await this.revokeAllUserSessions(row.userId, 'reuse-detected', {
         rowId: row.id,
@@ -1178,7 +1196,13 @@ export class AuthService {
         where: { id: row.id },
       });
       if (rotated && this.withinRotationGrace(rotated)) {
-        return this.issueGraceReplacement(rotated, userAgent);
+        const replacement = await this.issueGraceReplacement(
+          rotated,
+          userAgent,
+        );
+        if (replacement) {
+          return replacement;
+        }
       }
       await this.revokeAllUserSessions(row.userId, 'reuse-detected', {
         rowId: row.id,
@@ -1245,27 +1269,87 @@ export class AuthService {
    * cannot simply revoke the winner's row instead — its holder is a live client
    * that would present it after the 10-second grace window and trip reuse
    * detection, signing the member out everywhere.
+   *
+   * Resolves to `null` when the grace mint is refused, and the caller then
+   * answers exactly as it answers reuse (SEC-09). Two things refuse it:
+   *
+   * - The parent itself is past its `expiresAt`. A grace mint only stands in
+   *   for a rotation the parent could still have made.
+   * - The family has no live row left. A legitimate race always leaves the
+   *   winner's row live, so an empty family means the session was ended on
+   *   purpose (logout, "sign out this device", "sign out everywhere", a
+   *   moderation revoke). Every revoke stamps only rows where
+   *   `revoked_at IS NULL`, so the rotated parent keeps its rotation stamp and
+   *   would otherwise still read as inside the window: whoever held a copy of
+   *   it could bring the signed-out session back for up to ten seconds.
+   *
+   * The family check and the insert share one transaction, and one live row
+   * is read `FOR UPDATE` (`take: 1`: a single locked live row proves the
+   * family is alive, and holding one lock keeps the read from deadlocking
+   * with a revoke UPDATE walking the same rows). A revoke that commits first
+   * is seen here, and a revoke statement that starts after this transaction
+   * commits stamps the new row along with the rest of the family.
+   *
+   * Residual race, accepted: a revoke UPDATE whose statement STARTS while this
+   * transaction holds its lock waits for the lock, then stamps the rows its
+   * snapshot already held. The row inserted here is outside that snapshot, so
+   * it stays live. The window is the few milliseconds between this lock and
+   * the commit, and it needs a stolen parent presented inside the 10-second
+   * grace window at that exact moment. The next "sign out this device" or
+   * "sign out everywhere" ends the surviving row.
    */
   private async issueGraceReplacement(
     row: RefreshToken,
     userAgent?: string,
-  ): Promise<TokenPair> {
+  ): Promise<TokenPair | null> {
+    if (row.expiresAt.getTime() <= Date.now()) {
+      this.logger.warn(
+        `Refresh grace mint refused, parent expired: userId=${row.userId} rowId=${row.id} familyId=${row.familyId}`,
+      );
+      return null;
+    }
     const user = await this.usersService.findByIdWithEmail(row.userId);
     if (!user) {
       throw new UnauthorizedException('User no longer exists');
+    }
+    const tokens = await this.dataSource.transaction(async (manager) => {
+      const liveRows = await manager.getRepository(RefreshToken).find({
+        select: { id: true },
+        where: {
+          familyId: row.familyId,
+          revokedAt: IsNull(),
+          expiresAt: MoreThan(new Date()),
+        },
+        take: 1,
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (liveRows.length === 0) {
+        return null;
+      }
+      return this.issueTokensWithRow(
+        user,
+        { familyId: row.familyId, sessionStartedAt: row.sessionStartedAt },
+        userAgent,
+        undefined,
+        manager,
+      );
+    });
+    if (!tokens) {
+      this.logger.warn(
+        `Refresh grace mint refused, family has no live row: userId=${row.userId} rowId=${row.id} familyId=${row.familyId}`,
+      );
+      return null;
     }
     // `log`, not `warn`: this is an expected multi-client race, and logging it
     // at the same level as a real theft signal is what diluted that signal.
     this.logger.log(
       `Refresh rotation race absorbed within the grace window: userId=${row.userId} rowId=${row.id} familyId=${row.familyId}`,
     );
-    const { accessToken, refreshToken } = await this.issueTokensWithRow(
-      user,
-      { familyId: row.familyId, sessionStartedAt: row.sessionStartedAt },
-      userAgent,
-    );
     this.announceSessionRefreshed(row.userId);
-    return { accessToken, refreshToken };
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
   }
 
   /**

@@ -79,6 +79,10 @@ const UNREAD_THREAD_FRAGMENT = normaliseSql(`( p.marked_unread_at IS NOT NULL
       AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at)
       AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at)
       AND (p.left_at IS NULL OR m.created_at <= p.left_at)
+      AND NOT (p.absence_started_at IS NOT NULL
+        AND p.absence_ended_at IS NOT NULL
+        AND m.created_at > p.absence_started_at
+        AND m.created_at <= p.absence_ended_at)
       AND NOT EXISTS ( SELECT 1 FROM "content_moderation" "cm"
         WHERE "cm"."subject_type" = :messageSubjectType
           AND "cm"."subject_id" = m.id::text

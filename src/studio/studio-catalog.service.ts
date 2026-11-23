@@ -99,6 +99,7 @@ import {
   studioFormatForKind,
   studioPersonaKindsForFormat,
 } from './studio.constants';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 /** The persona columns a release card needs, selected through a join. */
 const ARTIST_PERSONA_COLUMNS = [
@@ -937,10 +938,14 @@ export class StudioCatalogService {
         publishedStatus: StudioReleaseStatus.Published,
       })
       .andWhere(listenablePersonaSql('persona'));
+    // SEC-02: a block with the creator withholds a LINKED artist alone. An
+    // unlinked one answers every listener alike, so a block cannot test who
+    // runs it.
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     return queryBuilder;
   }
@@ -972,10 +977,14 @@ export class StudioCatalogService {
       })
       .andWhere(listenablePersonaSql('persona'))
       .andWhere('release.id = :releaseId', { releaseId });
+    // SEC-02: a block with the creator withholds a LINKED artist alone. An
+    // unlinked one answers every listener alike, so a block cannot test who
+    // runs it.
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     return queryBuilder.getExists();
   }
@@ -988,10 +997,14 @@ export class StudioCatalogService {
       .createQueryBuilder('persona')
       .where('persona.id = :subprofileId', { subprofileId })
       .andWhere(listenablePersonaSql('persona'));
+    // SEC-02: a block with the creator withholds a LINKED artist alone. An
+    // unlinked one answers every listener alike, so a block cannot test who
+    // runs it.
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     return queryBuilder.getExists();
   }
@@ -1098,10 +1111,14 @@ export class StudioCatalogService {
       .limit(studioSearchRowLimit(window));
     applySearchOffset(queryBuilder, window);
     this.applyReleaseFilters(queryBuilder, filters);
+    // SEC-02: a block with the creator withholds a LINKED artist alone. An
+    // unlinked one answers every listener alike, so a block cannot test who
+    // runs it.
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     // The probe row comes off before the cards are read, so a track whose
     // card is missing never hides that more rows exist.
@@ -1154,10 +1171,14 @@ export class StudioCatalogService {
       .addOrderBy('persona.id', 'ASC')
       .limit(studioSearchRowLimit(window));
     applySearchOffset(queryBuilder, window);
+    // SEC-02: a block with the creator withholds a LINKED artist alone. An
+    // unlinked one answers every listener alike, so a block cannot test who
+    // runs it.
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     const { pageRows, hasMore } = sliceStudioSearchRows(
       await queryBuilder.getMany(),

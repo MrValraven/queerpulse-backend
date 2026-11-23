@@ -711,6 +711,46 @@ describe('EventsService', () => {
         });
       });
 
+      // PRD-508: the "Hide me for 24 hours" clause rides on the same
+      // non-organiser branch as the visibility clause.
+      const selfHideCalls = (
+        qb: Record<string, jest.Mock>,
+      ): Array<[string, Record<string, unknown>]> =>
+        (qb.andWhere!.mock.calls as Array<[unknown, Record<string, unknown>]>)
+          .filter(
+            (call): call is [string, Record<string, unknown>] =>
+              typeof call[0] === 'string' &&
+              call[0].includes('"__attendee_self_hide"'),
+          )
+          .map(([clause, parameters]) => [clause, parameters]);
+
+      it('drops self-hidden attendees for a non-organiser but keeps the viewer own row', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', 'stranger-1', 'going');
+
+        const calls = selfHideCalls(qb);
+        expect(calls).toHaveLength(1);
+        const [clause, parameters] = calls[0]!;
+        expect(clause).toContain('"r"."user_id" = :attendeeSelfHideViewerId');
+        expect(clause).toContain('"hidden_until" > now()');
+        expect(parameters).toEqual({
+          attendeeSelfHideViewerId: 'stranger-1',
+        });
+      });
+
+      it('leaves the organiser roster without the self-hide clause', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', 'host-1', 'going');
+
+        expect(selfHideCalls(qb)).toHaveLength(0);
+      });
+
       it('shows a justMe attendee to the organiser with every note filled', async () => {
         events.findOne.mockResolvedValue(publishedEvent);
         const qb = attendeesQbStub();

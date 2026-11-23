@@ -1,7 +1,14 @@
 import { HttpException } from '@nestjs/common';
-import { DataSource, In, Repository } from 'typeorm';
+import { MemberLookup } from '../common/member-ref';
+import { DataSource, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
 import { encodeStudioCursor } from './studio-cursor';
+import { notBlockedEitherWaySql } from './studio-discovery-sql';
+import {
+  chosenPersonaShownToOthersSql,
+  personaIdentityBlockedBySql,
+} from './studio-persona-members';
 import { RELEASE_FOR_VIEWER_SQL } from './studio-purchase-rows';
 import {
   RELEASE_WALL_SQL,
@@ -165,9 +172,9 @@ describe('StudioPurchaseWallService', () => {
       }),
     });
     expect(profiles.find).toHaveBeenCalledTimes(1);
-    expect(profiles.find).toHaveBeenCalledWith({
-      where: { userId: In(indexes.slice(0, 24).map(buyerIdAt)) },
-    });
+    expect(profiles.find).toHaveBeenCalledWith(
+      MemberLookup.findOptionsFor(indexes.slice(0, 24).map(buyerIdAt)),
+    );
     expect(sqlCalled()).not.toContain(SUPPORTER_PERSONAS_SQL);
     const serializedPage = JSON.stringify(page);
     for (const index of indexes) {
@@ -254,9 +261,9 @@ describe('StudioPurchaseWallService', () => {
         (call: unknown[]) => call[0] === SUPPORTER_PERSONAS_SQL,
       ),
     ).toEqual([[SUPPORTER_PERSONAS_SQL, [[PERSONA_ID, GONE_PERSONA_ID]]]]);
-    expect(profiles.find).toHaveBeenCalledWith({
-      where: { userId: In([buyerIdAt(0)]) },
-    });
+    expect(profiles.find).toHaveBeenCalledWith(
+      MemberLookup.findOptionsFor([buyerIdAt(0)]),
+    );
     const serializedPage = JSON.stringify(page);
     expect(serializedPage).not.toContain(PERSONA_BUYER_ID);
     expect(serializedPage).not.toContain(GONE_PERSONA_BUYER_ID);
@@ -265,5 +272,40 @@ describe('StudioPurchaseWallService', () => {
 
   it('selects no amount', () => {
     expect(RELEASE_WALL_SQL).not.toMatch(/amount_cents/);
+  });
+
+  // SEC-02 ruling on C1: an entry shown as an unlinked persona stays on the
+  // wall whoever the viewer blocked, so a block cannot test who runs it.
+  it('skips the buyer block for an entry shown as an unlinked persona', () => {
+    const buyerBlock = notBlockedEitherWaySql(
+      '$2::uuid',
+      '"purchase"."buyer_user_id"',
+      'wall_block',
+    );
+    expect(RELEASE_WALL_SQL).toContain(`AND (
+       (
+         "purchase"."is_shown_as_persona"
+         AND ${unlinkedPersonaByIdSql('"purchase"."shown_as_subprofile_id"')}
+       )
+       OR ${buyerBlock}
+     )`);
+    expect(RELEASE_WALL_SQL).not.toContain(`AND ${buyerBlock}`);
+  });
+
+  it('keeps the viewer identity block of the shown persona itself', () => {
+    expect(RELEASE_WALL_SQL).toContain(
+      `AND NOT ${personaIdentityBlockedBySql(
+        '($2::uuid)',
+        '"purchase"."shown_as_subprofile_id"',
+      )}`,
+    );
+  });
+
+  // SEC-33: a shown persona whose creator is suspended, banned, paused or
+  // pending erasure leaves the wall, as its public page does.
+  it('needs an active creator behind the shown persona', () => {
+    expect(RELEASE_WALL_SQL).toContain(
+      chosenPersonaShownToOthersSql('"purchase"."shown_as_subprofile_id"'),
+    );
   });
 });

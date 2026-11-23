@@ -265,6 +265,7 @@ describe('StudioPreviewsService', () => {
         queryBuilder,
         USER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
   });

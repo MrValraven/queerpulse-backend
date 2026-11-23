@@ -1,3 +1,8 @@
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
+import { verifyLinkPreviewImageToken } from './link-preview-image-token';
 import { LinkPreviewService } from './link-preview.service';
 import { emptyPreview } from './link-preview.response';
 import { safeFetchHtml } from './ssrf';
@@ -72,5 +77,65 @@ describe('LinkPreviewService Studio refusal (Studio rich cards)', () => {
     expect(previews[1]?.title).toBe('Elsewhere');
     expect(mockedSafeFetchHtml).toHaveBeenCalledTimes(1);
     expect(mockedSafeFetchHtml).toHaveBeenCalledWith(otherUrl);
+  });
+});
+
+describe('LinkPreviewService image address (SEC-23)', () => {
+  const API_ORIGIN = 'https://api.queerpulse.test';
+  const OG_IMAGE = 'https://tracker.example/pixel.png?reader=1';
+
+  beforeEach(() => {
+    setImageUrlBase(API_ORIGIN);
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  it('hands the client a signed address on this API for the og:image', async () => {
+    mockedSafeFetchHtml.mockResolvedValue({
+      html: `<html><head><meta property="og:title" content="Elsewhere"><meta property="og:image" content="${OG_IMAGE}"></head></html>`,
+      finalUrl: 'https://elsewhere.example/page',
+    });
+    const service = new LinkPreviewService();
+
+    const preview = await service.preview('https://elsewhere.example/page');
+
+    const prefix = `${API_ORIGIN}/link-preview-images/`;
+    expect(preview.imageUrl?.startsWith(prefix)).toBe(true);
+    expect(preview.imageUrl).not.toContain('tracker.example');
+    const token = preview.imageUrl?.slice(prefix.length) ?? '';
+    expect(verifyLinkPreviewImageToken(token)).toBe(OG_IMAGE);
+    expect(JSON.stringify(preview)).not.toContain('imageSourceUrl');
+  });
+
+  it('resolves a relative og:image against the page before signing it', async () => {
+    mockedSafeFetchHtml.mockResolvedValue({
+      html: '<html><head><meta property="og:image" content="/img/card.jpg"></head></html>',
+      finalUrl: 'https://elsewhere.example/page',
+    });
+    const service = new LinkPreviewService();
+
+    const preview = await service.preview('https://elsewhere.example/page');
+
+    const token =
+      preview.imageUrl?.slice(`${API_ORIGIN}/link-preview-images/`.length) ??
+      '';
+    expect(verifyLinkPreviewImageToken(token)).toBe(
+      'https://elsewhere.example/img/card.jpg',
+    );
+  });
+
+  it('drops an og:image it cannot sign', async () => {
+    mockedSafeFetchHtml.mockResolvedValue({
+      html: '<html><head><meta property="og:title" content="Elsewhere"><meta property="og:image" content="data:image/png;base64,AAAA"></head></html>',
+      finalUrl: 'https://elsewhere.example/page',
+    });
+    const service = new LinkPreviewService();
+
+    const preview = await service.preview('https://elsewhere.example/page');
+
+    expect(preview.imageUrl).toBeNull();
+    expect(preview.title).toBe('Elsewhere');
   });
 });

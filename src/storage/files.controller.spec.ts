@@ -20,7 +20,9 @@ import {
   NO_MAILBOX_IDENTITY_BLOCKS,
   seatExcludedFromMailboxPredicate,
 } from '../messaging/mailbox-seats';
+import { notModeratedMessagePredicate } from '../messaging/message-visibility-predicates';
 import { FilesController } from './files.controller';
+import { mediaReferenceVersion } from './media-reference-version';
 import { PersonaImageKeysService } from './persona-image-keys.service';
 import {
   contentTypeForStorageKey,
@@ -45,6 +47,8 @@ const LOGGED_IN = { userId: USER_SEGMENT, email: 'member@example.com' };
 const EXPECTED_HISTORY_FLOOR_CLAUSE = `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`;
 // PRD-400: the requester's group join floor.
 const EXPECTED_JOIN_FLOOR_CLAUSE = `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`;
+// SEC-29: the message takedown clause the by-message route composes too.
+const EXPECTED_NOT_MODERATED_CLAUSE = notModeratedMessagePredicate('message');
 // ENG-401: the requester's `leftAt` read ceiling, pinned as literal SQL.
 const EXPECTED_LEFT_AT_CEILING_CLAUSE =
   '(participant.left_at IS NULL OR message.created_at <= participant.left_at)';
@@ -62,7 +66,7 @@ describe('FilesController', () => {
     validateImageMagicBytes: jest.Mock;
     openObjectStream: jest.Mock;
   };
-  let users: { findOne: jest.Mock };
+  let users: { findOne: jest.Mock; query: jest.Mock };
   let messageQueryBuilder: {
     innerJoin: jest.Mock;
     where: jest.Mock;
@@ -96,7 +100,12 @@ describe('FilesController', () => {
     // Default: the key owner is not a withheld (suspended) member, so serving
     // proceeds. `null` stands in for "no matching owner row" — the gate only
     // withholds on a resolved Suspended owner.
-    users = { findOne: jest.fn().mockResolvedValue(null) };
+    // `query` answers the raw reads (scene, landing and forum lookups); by
+    // default no forum post holds any key.
+    users = {
+      findOne: jest.fn().mockResolvedValue(null),
+      query: jest.fn().mockResolvedValue([]),
+    };
     // Default: the requester is NOT a participant of any conversation holding
     // the message-image key; individual tests flip `getExists` to true.
     messageQueryBuilder = {
@@ -251,6 +260,28 @@ describe('FilesController', () => {
         clause.includes('blocked_staff_seat'),
       );
       expect(blockClause).toMatch(/^NOT /);
+    });
+  });
+
+  // SEC-29: a participant who still holds the URL of an attachment a
+  // moderator hid or removed is refused, through the same takedown clause
+  // the by-message route composes. The fake query builder cannot evaluate
+  // SQL, so this confirms the participant query carries the clause.
+  describe('message attachments a moderator took down (SEC-29)', () => {
+    it('composes the takedown clause into the participant query', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(true);
+      await serve(MESSAGE_IMAGE_KEY, OTHER_MEMBER);
+      expect(messageQueryBuilder.andWhere).toHaveBeenCalledWith(
+        EXPECTED_NOT_MODERATED_CLAUSE,
+        { messageSubjectType: 'message' },
+      );
+    });
+
+    it('refuses with the plain 404 when no unmoderated message grants it', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(false);
+      await expect(serve(MESSAGE_IMAGE_KEY, OTHER_MEMBER)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
@@ -409,6 +440,9 @@ describe('FilesController', () => {
                   isGroupConversation: groupThreadIds.has(seat.conversationId),
                 }),
             );
+          } else if (clause === EXPECTED_NOT_MODERATED_CLAUSE) {
+            // SEC-29: no message in this fixture carries a takedown.
+            continue;
           } else {
             throw new Error(`Unrecognised participant clause: ${clause}`);
           }
@@ -647,6 +681,9 @@ describe('FilesController', () => {
                   isGroupConversation: false,
                 }),
             );
+          } else if (clause === EXPECTED_NOT_MODERATED_CLAUSE) {
+            // SEC-29: no message in this fixture carries a takedown.
+            continue;
           } else {
             throw new Error(`Unrecognised participant clause: ${clause}`);
           }
@@ -847,6 +884,9 @@ describe('FilesController', () => {
                   isGroupConversation: true,
                 }),
             );
+          } else if (clause === EXPECTED_NOT_MODERATED_CLAUSE) {
+            // SEC-29: no message in this fixture carries a takedown.
+            continue;
           } else {
             throw new Error(`Unrecognised participant clause: ${clause}`);
           }
@@ -1141,6 +1181,402 @@ describe('FilesController', () => {
 
       await serve(PERSONA_KEY, LOGGED_IN);
 
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+  });
+
+  // SEC-01 / SEC-04 / SEC-42: photos addressed by a public media reference
+  // are looked up from their row and streamed, so neither the response nor a
+  // redirect carries the uploader id; a raw forum key is refused on a
+  // withdrawn post and on an anonymous thread.
+  describe('public media references', () => {
+    const POST_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+    const LISTING_ID = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+    const FORUM_KEY = `forum-photos/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
+    const LISTING_KEY = `listing-photos/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
+    const ACTIVE_READER = { ...OTHER_MEMBER, status: 'active' };
+    let query: jest.Mock;
+
+    interface ForumPhotoRowFixture {
+      storageKey: string | null;
+      postAuthorId: string;
+      postAuthorStatus: string | null;
+      isThreadAnonymous: boolean;
+      threadAuthorId: string | null;
+      isWithdrawn: boolean;
+    }
+
+    const forumRow = (
+      overrides: Partial<ForumPhotoRowFixture> = {},
+    ): ForumPhotoRowFixture => ({
+      storageKey: FORUM_KEY,
+      postAuthorId: USER_SEGMENT,
+      postAuthorStatus: 'active',
+      isThreadAnonymous: true,
+      threadAuthorId: USER_SEGMENT,
+      isWithdrawn: false,
+      ...overrides,
+    });
+
+    function streamingSink() {
+      const sink = Object.assign(new PassThrough(), {
+        req: Object.assign(new EventEmitter(), { method: 'GET' }),
+        setHeader: jest.fn(),
+        status: jest.fn(),
+        redirect: jest.fn(),
+      });
+      sink.status.mockReturnValue(sink);
+      sink.resume();
+      return sink;
+    }
+
+    beforeEach(() => {
+      query = jest.fn();
+      (users as unknown as { query: jest.Mock }).query = query;
+      storage.openObjectStream.mockImplementation(() =>
+        Promise.resolve(Readable.from([Buffer.from([0xff, 0xd8, 0xff])])),
+      );
+    });
+
+    it('streams a forum photo to a reader and never redirects', async () => {
+      query.mockResolvedValueOnce([forumRow()]);
+      const sink = streamingSink();
+      await controller.serve(
+        `forum-posts/${POST_ID}/photos/0`.split('/'),
+        ACTIVE_READER as never,
+        sink as unknown as Response,
+      );
+      expect(query).toHaveBeenCalledWith(expect.any(String), [POST_ID, 0]);
+      expect(storage.openObjectStream).toHaveBeenCalledWith(FORUM_KEY);
+      expect(sink.redirect).not.toHaveBeenCalled();
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('asks a signed-out caller for a session', async () => {
+      await expect(
+        serve(`forum-posts/${POST_ID}/photos/0`, null),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('refuses a withdrawn post to a reader (SEC-42)', async () => {
+      query.mockResolvedValueOnce([forumRow({ isWithdrawn: true })]);
+      await expect(
+        serve(`forum-posts/${POST_ID}/photos/0`, ACTIVE_READER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(storage.openObjectStream).not.toHaveBeenCalled();
+    });
+
+    it('still streams a withdrawn post to its author', async () => {
+      query.mockResolvedValueOnce([
+        forumRow({ isWithdrawn: true, postAuthorId: OTHER_MEMBER.userId }),
+      ]);
+      await controller.serve(
+        `forum-posts/${POST_ID}/photos/0`.split('/'),
+        ACTIVE_READER as never,
+        streamingSink() as unknown as Response,
+      );
+      expect(storage.openObjectStream).toHaveBeenCalledWith(FORUM_KEY);
+    });
+
+    it('refuses a reference whose row holds a session-gated key', async () => {
+      query.mockResolvedValueOnce([
+        forumRow({ storageKey: MESSAGE_IMAGE_KEY }),
+      ]);
+      await expect(
+        serve(`forum-posts/${POST_ID}/photos/0`, ACTIVE_READER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('streams a listing gallery photo signed out', async () => {
+      query.mockResolvedValueOnce([{ value: LISTING_KEY }]);
+      await controller.serve(
+        `listings/${LISTING_ID}/photos/2`.split('/'),
+        null,
+        streamingSink() as unknown as Response,
+      );
+      expect(query).toHaveBeenCalledWith(expect.any(String), [LISTING_ID, 2]);
+      expect(storage.openObjectStream).toHaveBeenCalledWith(LISTING_KEY);
+    });
+
+    it.each([
+      ['events', 'event-covers', 'FROM "events"'],
+      ['communities', 'community-covers', 'FROM "communities"'],
+    ])(
+      'streams a %s cover by reference signed out',
+      async (segment, prefix, expectedSql) => {
+        const coverKey = `${prefix}/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
+        query.mockResolvedValueOnce([{ value: coverKey }]);
+        await controller.serve(
+          `${segment}/${LISTING_ID}/cover`.split('/'),
+          null,
+          streamingSink() as unknown as Response,
+        );
+        expect(query).toHaveBeenCalledWith(
+          expect.stringContaining(expectedSql),
+          [LISTING_ID],
+        );
+        expect(storage.openObjectStream).toHaveBeenCalledWith(coverKey);
+      },
+    );
+
+    it('lets a shared cache keep a listing photo, longer when the version matches', async () => {
+      query.mockResolvedValue([{ value: LISTING_KEY, isWithdrawn: false }]);
+      const unversioned = streamingSink();
+      await controller.serve(
+        `listings/${LISTING_ID}/photos/0`.split('/'),
+        null,
+        unversioned as unknown as Response,
+      );
+      expect(unversioned.setHeader).toHaveBeenCalledWith(
+        'Cache-Control',
+        'public, max-age=240',
+      );
+      const versioned = streamingSink();
+      await controller.serve(
+        `listings/${LISTING_ID}/photos/0`.split('/'),
+        null,
+        versioned as unknown as Response,
+        undefined,
+        mediaReferenceVersion(LISTING_KEY, `listings/${LISTING_ID}/photos/0`),
+      );
+      expect(versioned.setHeader).toHaveBeenCalledWith(
+        'Cache-Control',
+        'public, max-age=86400',
+      );
+    });
+
+    it('keeps the short cache for a token minted for another reference', async () => {
+      // The token covers the reference identity: the same key's token from
+      // another surface is no version of this one.
+      query.mockResolvedValue([{ value: LISTING_KEY, isWithdrawn: false }]);
+      const sink = streamingSink();
+      await controller.serve(
+        `listings/${LISTING_ID}/photos/0`.split('/'),
+        null,
+        sink as unknown as Response,
+        undefined,
+        mediaReferenceVersion(LISTING_KEY, `listings/${LISTING_ID}/cover`),
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'Cache-Control',
+        'public, max-age=240',
+      );
+    });
+
+    it('names the file photo.<ext> and caps a shared cache at the short window', async () => {
+      query.mockResolvedValue([{ value: LISTING_KEY, isWithdrawn: false }]);
+      const sink = streamingSink();
+      await controller.serve(
+        `listings/${LISTING_ID}/photos/0`.split('/'),
+        null,
+        sink as unknown as Response,
+        undefined,
+        mediaReferenceVersion(LISTING_KEY, `listings/${LISTING_ID}/photos/0`),
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'Content-Disposition',
+        'inline; filename="photo.webp"',
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'CDN-Cache-Control',
+        'public, max-age=240',
+      );
+    });
+
+    it('refuses the cover of a taken-down event', async () => {
+      query.mockResolvedValueOnce([
+        {
+          value: `event-covers/${USER_SEGMENT}/${FILE_SEGMENT}.webp`,
+          isWithdrawn: true,
+        },
+      ]);
+      await expect(
+        serve(`events/${LISTING_ID}/cover`, null),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `"event_moderation"."subject_id" = "event"."id"::text`,
+        ),
+        [LISTING_ID],
+      );
+    });
+
+    it('keeps the cover of a cancelled event readable', async () => {
+      const eventCoverKey = `event-covers/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
+      query.mockResolvedValueOnce([
+        { value: eventCoverKey, isWithdrawn: false },
+      ]);
+      const sink = streamingSink();
+      // A 404 here rejects and fails the test.
+      await controller.serve(
+        `events/${LISTING_ID}/cover`.split('/'),
+        null,
+        sink as unknown as Response,
+      );
+      expect(storage.openObjectStream).toHaveBeenCalledWith(eventCoverKey);
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'Cache-Control',
+        'public, max-age=240',
+      );
+      // Only a takedown withdraws an event cover, so the gate never reads
+      // the event's status.
+      const [eventSql] = query.mock.calls[0] as [string, unknown[]];
+      expect(eventSql).not.toContain(`"event"."status"`);
+    });
+
+    it('refuses the avatar of a taken-down community', async () => {
+      query.mockResolvedValueOnce([
+        {
+          value: `community-avatars/${USER_SEGMENT}/${FILE_SEGMENT}.webp`,
+          isWithdrawn: true,
+        },
+      ]);
+      await expect(
+        serve(`communities/${LISTING_ID}/avatar`, OTHER_MEMBER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `"community_moderation"."subject_id" = "community"."slug"`,
+        ),
+        [LISTING_ID],
+      );
+    });
+
+    it('keeps a forum photo in the private cache only', async () => {
+      query.mockResolvedValueOnce([forumRow()]);
+      const sink = streamingSink();
+      await controller.serve(
+        `forum-posts/${POST_ID}/photos/0`.split('/'),
+        ACTIVE_READER as never,
+        sink as unknown as Response,
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'Cache-Control',
+        'private, max-age=60',
+      );
+    });
+
+    it('refuses a photo of a withdrawn listing to a member (minor 7)', async () => {
+      query.mockResolvedValueOnce([{ value: LISTING_KEY, isWithdrawn: true }]);
+      await expect(
+        serve(`listings/${LISTING_ID}/photos/0`, OTHER_MEMBER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses a slot that holds a key of another kind (minor 4)', async () => {
+      query.mockResolvedValueOnce([
+        {
+          value: `listing-menus/${USER_SEGMENT}/${FILE_SEGMENT}.pdf`,
+          isWithdrawn: false,
+        },
+      ]);
+      await expect(
+        serve(`listings/${LISTING_ID}/photos/0`, null),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('streams a PDF menu as a sandboxed download', async () => {
+      const menuKey = `listing-menus/${USER_SEGMENT}/${FILE_SEGMENT}.pdf`;
+      query.mockResolvedValueOnce([
+        { value: menuKey, fileName: 'Menu.pdf', isWithdrawn: false },
+      ]);
+      const sink = streamingSink();
+      await controller.serve(
+        `listings/${LISTING_ID}/menu`.split('/'),
+        null,
+        sink as unknown as Response,
+      );
+      expect(storage.openObjectStream).toHaveBeenCalledWith(menuKey);
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'Content-Security-Policy',
+        "sandbox; default-src 'none'",
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'X-Content-Type-Options',
+        'nosniff',
+      );
+    });
+
+    it('withholds a suspended reply author on an anonymous thread (minor 6)', async () => {
+      query.mockResolvedValueOnce([
+        forumRow({
+          postAuthorId: 'replier-1',
+          threadAuthorId: USER_SEGMENT,
+          postAuthorStatus: 'suspended',
+        }),
+      ]);
+      await expect(
+        serve(`forum-posts/${POST_ID}/photos/0`, ACTIVE_READER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('keeps serving the masked author of an anonymous thread while suspended', async () => {
+      query.mockResolvedValueOnce([
+        forumRow({
+          threadAuthorId: USER_SEGMENT,
+          postAuthorStatus: 'suspended',
+        }),
+      ]);
+      await controller.serve(
+        `forum-posts/${POST_ID}/photos/0`.split('/'),
+        ACTIVE_READER as never,
+        streamingSink() as unknown as Response,
+      );
+      expect(storage.openObjectStream).toHaveBeenCalledWith(FORUM_KEY);
+    });
+
+    it('refuses an orphaned raw forum key to another member (minor 5)', async () => {
+      query.mockResolvedValue([]);
+      await expect(serve(FORUM_KEY, OTHER_MEMBER)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('checks a raw work image against the photo rows alone', async () => {
+      query.mockResolvedValue([]);
+      await serve(WORK_KEY, OTHER_MEMBER);
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('404s a listing slot that holds no member key', async () => {
+      query.mockResolvedValueOnce([{ value: 'https://cdn.example.com/a.jpg' }]);
+      await expect(
+        serve(`listings/${LISTING_ID}/cover`, null),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses a raw forum key from an anonymous thread to another member', async () => {
+      query.mockResolvedValueOnce([
+        { isThreadAnonymous: true, isWithdrawn: false },
+      ]);
+      await expect(serve(FORUM_KEY, OTHER_MEMBER)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(response.redirect).not.toHaveBeenCalled();
+    });
+
+    it('refuses a raw forum key whose post was taken down (SEC-42)', async () => {
+      query.mockResolvedValueOnce([
+        { isThreadAnonymous: false, isWithdrawn: true },
+      ]);
+      await expect(serve(FORUM_KEY, null)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('keeps serving a raw forum key on a live named thread', async () => {
+      query.mockResolvedValueOnce([
+        { isThreadAnonymous: false, isWithdrawn: false },
+      ]);
+      await serve(FORUM_KEY, OTHER_MEMBER);
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('serves the uploader their own raw forum key with no lookup', async () => {
+      await serve(FORUM_KEY, LOGGED_IN);
+      expect(query).not.toHaveBeenCalled();
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
   });

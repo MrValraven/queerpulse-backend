@@ -19,6 +19,7 @@ import { StudioPlaylistEntryTrack } from './studio-playlist-response';
 import { playableTrackSql } from './studio-playlist-visibility';
 import { StudioReleaseCard, toStudioTrackSummary } from './studio-response';
 import { STUDIO_LIMITS } from './studio.constants';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 /** `saved_item.subject_id` is a varchar: only a uuid may reach a uuid lookup. */
 const UUID_PATTERN =
@@ -261,6 +262,7 @@ export class StudioLikedTracksService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     return queryBuilder.getRawOne<LikedStatsRow>();
   }

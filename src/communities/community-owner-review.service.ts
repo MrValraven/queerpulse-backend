@@ -22,7 +22,7 @@ import {
 import { toStoredPlainText } from './community-plain-text';
 import {
   loadActiveCommunityOr404,
-  loadMembershipOr403,
+  loadMembershipOrRefuse,
   resolveMemberCommunityInterior,
 } from './community-staff-access';
 import { CreateCommunityOwnerReviewDto } from './dto/create-community-owner-review.dto';
@@ -199,9 +199,11 @@ export class CommunityOwnerReviewService {
     dto: CreateCommunityOwnerReviewDto,
   ): Promise<CommunityOwnerReviewStateDTO> {
     const community = await loadActiveCommunityOr404(this.communities, slug);
-    const membership = await loadMembershipOr403(
+    // SEC-41: a caller off the roster of a private community gets the same
+    // 404 as an unknown slug.
+    const membership = await loadMembershipOrRefuse(
       this.members,
-      community.id,
+      community,
       userId,
     );
     // Read the owner from BOTH sources, the same pairing `withdraw` and
@@ -282,9 +284,10 @@ export class CommunityOwnerReviewService {
     userId: string,
   ): Promise<CommunityOwnerReviewStateDTO> {
     const community = await loadActiveCommunityOr404(this.communities, slug);
-    const membership = await loadMembershipOr403(
+    // SEC-41: same private-outsider 404 as `open`.
+    const membership = await loadMembershipOrRefuse(
       this.members,
-      community.id,
+      community,
       userId,
     );
 

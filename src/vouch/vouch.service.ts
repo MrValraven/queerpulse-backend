@@ -46,6 +46,19 @@ const NAMED_VOUCHER_SCAN_CAP = 500;
 // bind-parameter limit.
 const MAX_NAMED_VOUCHER_ROSTER_SCAN = 5000;
 
+// True when the VOUCHER on the `v` row keeps their own trust network private
+// ("Keep my trust network private", `privateNetwork`, SEC-17). A vouch is a
+// row in both members' networks, so a private voucher is never named on
+// another member's roster or counted in a mutual-voucher cue: the vouch reads
+// like an anonymous one, the same rule `closenessFor` (related-closeness.ts)
+// applies to the "People close by" chip. Raw SQL on the `v` alias, snake_case
+// and pre-quoted, matching `excludeBlocked`'s column contract.
+const VOUCHER_NETWORK_PRIVATE_SQL = `EXISTS (
+  SELECT 1 FROM "profiles" "voucher_profile"
+  WHERE "voucher_profile"."user_id" = "v"."voucher_id"
+    AND "voucher_profile"."private_network" = true
+)`;
+
 // Caps how many *new* vouches a single member can give in a day (COM-26):
 // vouching has only ever had a per-minute throttle
 // (`vouch.controller.ts`'s `@Throttle`), which stops rapid-fire bursts but not
@@ -204,9 +217,11 @@ export class VouchService {
     // Without this, someone the member had blocked could still vouch for them,
     // raise their `vouch_count`, fire a `VOUCH_CREATED` notification at them,
     // and put their own face in the member's voucher roster with no way for
-    // the member to take it down. Same symmetric check, same 403.
+    // the member to take it down. Same symmetric check. SEC-19: it answers the
+    // same 404 as the inactive miss above, so a block reads as an absent
+    // member, the way the profile read answers it.
     if (await this.blockFilter.isBlockedEitherWay(voucherId, voucheeId)) {
-      throw new ForbiddenException('You cannot vouch for this member');
+      throw new NotFoundException('Member not found');
     }
 
     // Empty/whitespace-only notes are stored as null, not "".
@@ -464,8 +479,13 @@ export class VouchService {
     // see the number only") but never the roster of who vouched — the owner
     // always sees the real list, same as the photoVisible/hoodVisible content
     // gates in toFullProfile.
+    //
+    // "Keep my trust network private" (`privateNetwork`, SEC-17) hides the
+    // roster the same way: the member asked to keep who vouched for them to
+    // themself, and the admin trust graph is the only other reader that
+    // still names them.
     const isOwner = viewerId === target.userId;
-    if (!isOwner && !target.vouchersVisible) {
+    if (!isOwner && (!target.vouchersVisible || target.privateNetwork)) {
       return { count, vouchers: [] };
     }
     // The viewer-relative visibility boundary is resolved for the target's
@@ -481,10 +501,12 @@ export class VouchService {
       page,
     );
     // A row is kept when it is anonymous (never dropped, see
-    // `resolveVisibleNamedVoucherIds`), when it is the viewer's own vouch
-    // (always shown to them, the owner exception every profile gate makes),
-    // or when its voucher is in the resolved visible set.
-    let visibilityClause = 'v.anonymous = true OR v.voucherId = :viewerId';
+    // `resolveVisibleNamedVoucherIds`), when its voucher keeps their trust
+    // network private (shown shielded, exactly like an anonymous row), when it
+    // is the viewer's own vouch (always shown to them, the owner exception
+    // every profile gate makes), or when its voucher is in the resolved
+    // visible set.
+    let visibilityClause = `v.anonymous = true OR ${VOUCHER_NETWORK_PRIVATE_SQL} OR v.voucherId = :viewerId`;
     const visibilityParams: Record<string, unknown> = { viewerId };
     if (visibleVoucherIds.size) {
       visibilityClause += ' OR v.voucherId IN (:...visibleVoucherIds)';
@@ -501,20 +523,33 @@ export class VouchService {
       .getMany();
     // Anonymous vouchers are shielded: never resolve their profile (so an
     // identity can't leak) and emit a redacted view. Non-anonymous rows resolve
-    // as usual.
+    // as usual, and a voucher whose own `privateNetwork` is on (M3, SEC-17)
+    // gets the same redacted view: their profile is read server-side for that
+    // flag alone and none of it is emitted. Their note is withheld too (null,
+    // the "no note" value), because it was written as a named vouch and can
+    // identify them. An anonymous voucher wrote theirs knowing it would show
+    // unsigned, so it stays. The privateNetwork shield is for third parties
+    // alone: the voucher reading their own vouch and the member reading their
+    // own roster (they received that vouch by name already) see it named.
     const voucherProfiles = await this.profilesByUserIds(
       pageRows.filter((v) => !v.anonymous).map((v) => v.voucherId),
     );
-    const vouchers = pageRows.map((v) =>
-      v.anonymous
-        ? this.toShieldedVouchView(v.note, v.createdAt, v.relationships)
-        : this.toVouchView(
-            voucherProfiles.get(v.voucherId),
-            v.note,
-            v.createdAt,
-            v.relationships,
-          ),
-    );
+    const vouchers = pageRows.map((v) => {
+      if (v.anonymous) {
+        return this.toShieldedVouchView(v.note, v.createdAt, v.relationships);
+      }
+      const voucherProfile = voucherProfiles.get(v.voucherId);
+      const isThirdPartyView = !isOwner && v.voucherId !== viewerId;
+      if (isThirdPartyView && voucherProfile?.privateNetwork) {
+        return this.toShieldedVouchView(null, v.createdAt, v.relationships);
+      }
+      return this.toVouchView(
+        voucherProfile,
+        v.note,
+        v.createdAt,
+        v.relationships,
+      );
+    });
     return { count, vouchers };
   }
 
@@ -609,7 +644,7 @@ export class VouchService {
    * `voucheeId`, newest first and capped at `scanLimit` (default
    * `NAMED_VOUCHER_SCAN_CAP`).
    *
-   * Three exclusions carry the whole privacy contract of this read, and they
+   * Four exclusions carry the whole privacy contract of this read, and they
    * live here rather than in the caller so no later caller can forget them:
    *
    *  - `withdrawnAt IS NULL` — a withdrawn vouch is excluded everywhere else
@@ -623,6 +658,9 @@ export class VouchService {
    *    `getVouchDirections`. Handing their id to a viewer-relative intersection
    *    would de-anonymize them the moment that viewer's connection set is
    *    small, which is exactly the common case.
+   *  - the voucher's own `privateNetwork` off (M3, SEC-17). A voucher who
+   *    keeps their trust network private is treated like an anonymous one, so
+   *    they never surface by name on a roster or in a mutual count.
    *
    * `scanLimit` bounds the `IN (...)` list the caller builds from this set. A
    * caller asking for the default sees a count over their newest
@@ -639,6 +677,7 @@ export class VouchService {
   ): Promise<string[]> {
     const rows = await this.activeVouchesReceivedBy(voucheeId)
       .andWhere('v.anonymous = false')
+      .andWhere(`NOT ${VOUCHER_NETWORK_PRIVATE_SQL}`)
       .select('v.voucherId', 'voucher_id')
       .orderBy('v.createdAt', 'DESC')
       .addOrderBy('v.id', 'DESC')

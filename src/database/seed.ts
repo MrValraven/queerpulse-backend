@@ -29,6 +29,7 @@ import {
   ReactionKey,
 } from '../communities/entities/community-post-reaction.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { seedCommunityBadgeStarters } from '../community-badges/community-badge-starters';
 import {
   CommunityJoinRequest,
   JoinRequestStatus,
@@ -977,6 +978,9 @@ async function seedCommunities(
         ref: await nextCommunityRef(manager),
       }),
     );
+    // Every seeded community is top level, so each gets the four starter
+    // badges, as a community created through the app does.
+    await seedCommunityBadgeStarters(manager, community.id);
 
     await communityMembers.save(
       communityMembers.create({

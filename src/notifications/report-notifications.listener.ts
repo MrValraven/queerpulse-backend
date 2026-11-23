@@ -445,18 +445,18 @@ export class ReportNotificationsListener {
 
   /**
    * The member a report is about, so they are never told about it even when
-   * they hold a staff role. Resolvable for the five subject types that name a
-   * member: a post or reply through its author, a gathering photograph through
+   * they hold a staff role. Resolvable for the six subject types that name a
+   * member: a post or reply through its author, an event photograph through
    * its uploader (TS-13, the only member `event_photos` records: nothing on
    * that row says who is depicted), a member subject through its `subjectId`,
    * which is addressed by slug or by user id exactly as
-   * `ModerationService.resolveReportedProfiles` reads it, and (PRD-356) a
-   * group conversation through its current owner. Every other subject type (a
-   * venue, a listing, a message) yields `null`, which only means there is
-   * nobody to exclude on that axis.
+   * `ModerationService.resolveReportedProfiles` reads it, (PRD-356) a group
+   * conversation through its current owner, and a community gift through its
+   * sender. Every other subject type (a venue, a listing, a message) yields
+   * `null`, which only means there is nobody to exclude on that axis.
    *
    * An erased uploader yields `null` on the same terms: there is no account
-   * left to leave out, and the fan-out proceeds rather than failing.
+   * left to leave out, and the fan-out carries on.
    */
   private async resolveReportedUserId(
     event: ReportCreatedEvent,
@@ -474,6 +474,9 @@ export class ReportNotificationsListener {
     if (event.subjectType === ReportSubjectType.Conversation) {
       return this.resolveConversationOwnerId(event.subjectId);
     }
+    if (event.subjectType === ReportSubjectType.CommunityGift) {
+      return this.resolveCommunityGiftSenderId(event.subjectId);
+    }
     if (event.subjectType !== ReportSubjectType.Member) return null;
     const profile = await this.profiles.findOne({
       where: UUID_RE.test(event.subjectId)
@@ -482,6 +485,25 @@ export class ReportNotificationsListener {
       select: { userId: true },
     });
     return profile?.userId ?? null;
+  }
+
+  /**
+   * Community badges: the sender of a reported gift, so a sender who is also
+   * platform staff is left out of the fan-out about their own gift. Mirrors
+   * `ReportSubjectResolverService`'s `COMMUNITY_GIFT_SQL`, which names the
+   * same person as the reported author. A malformed id, an unknown gift and a
+   * deleted sender all answer null.
+   */
+  private async resolveCommunityGiftSenderId(
+    giftId: string,
+  ): Promise<string | null> {
+    if (!UUID_RE.test(giftId)) return null;
+    const giftRows: { sender_id: string | null }[] =
+      await this.dataSource.query(
+        `SELECT "sender_id" FROM "community_gifts" WHERE "id" = $1`,
+        [giftId],
+      );
+    return giftRows[0]?.sender_id ?? null;
   }
 
   /**

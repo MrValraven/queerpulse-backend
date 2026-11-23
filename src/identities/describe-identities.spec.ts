@@ -1,4 +1,8 @@
 import { In } from 'typeorm';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
 import { IdentityKind } from './entities/identity.entity';
 import { IdentitiesService } from './identities.service';
@@ -13,7 +17,10 @@ import { IdentitiesService } from './identities.service';
  */
 function makeService() {
   const identities = { find: jest.fn().mockResolvedValue([]) };
-  const listings = { find: jest.fn().mockResolvedValue([]) };
+  const listings = {
+    find: jest.fn().mockResolvedValue([]),
+    query: jest.fn().mockResolvedValue([]),
+  };
   const subprofiles = { find: jest.fn().mockResolvedValue([]) };
   const companies = { find: jest.fn().mockResolvedValue([]) };
   const profiles = { find: jest.fn().mockResolvedValue([]) };
@@ -86,6 +93,8 @@ describe('IdentitiesService.describeIdentities', () => {
         id: 'listing-1',
         name: 'Cafe Lisboa',
         slug: 'cafe-lisboa',
+        status: 'live',
+        isHiddenByOwner: false,
         photoGallery: [
           {
             image: 'https://example.test/cafe-cover.jpg',
@@ -95,6 +104,7 @@ describe('IdentitiesService.describeIdentities', () => {
         ],
       },
     ]);
+    listings.query.mockResolvedValue([{ id: 'listing-1' }]);
     subprofiles.find.mockResolvedValue([
       {
         id: 'subprofile-1',
@@ -391,5 +401,93 @@ describe('IdentitiesService.describeIdentities', () => {
     const result = await service.describeIdentities(['identity-nowhere']);
 
     expect(result.has('identity-nowhere')).toBe(false);
+  });
+
+  describe('a business mailbox avatar (C2)', () => {
+    const UPLOADER_ID = '11111111-1111-4111-8111-111111111111';
+    const LISTING_ID = '44444444-4444-4444-8444-444444444444';
+    const COVER_KEY = `listing-photos/${UPLOADER_ID}/55555555-5555-4555-8555-555555555555.jpg`;
+    const GALLERY_KEY = `listing-photos/${UPLOADER_ID}/66666666-6666-4666-8666-666666666666.jpg`;
+
+    beforeAll(() => setImageUrlBase('https://api.test'));
+    afterAll(() => resetImageUrlBaseForTesting());
+
+    async function listingAvatar(
+      listingRow: object,
+      isPubliclyVisible = true,
+    ): Promise<unknown> {
+      const { service, identities, listings } = makeService();
+      listings.query.mockResolvedValue(
+        isPubliclyVisible ? [{ id: LISTING_ID }] : [],
+      );
+      identities.find.mockResolvedValue([
+        {
+          id: 'identity-listing',
+          kind: IdentityKind.Listing,
+          userId: null,
+          listingId: LISTING_ID,
+          subprofileId: null,
+          companyId: null,
+        },
+      ]);
+      listings.find.mockResolvedValue([
+        {
+          id: LISTING_ID,
+          name: 'Cafe Lisboa',
+          slug: 'cafe-lisboa',
+          status: 'live',
+          isHiddenByOwner: false,
+          ...listingRow,
+        },
+      ]);
+      const result = await service.describeIdentities(['identity-listing']);
+      return result.get('identity-listing')?.avatarUrl;
+    }
+
+    it('addresses an own cover by the listing cover reference', async () => {
+      const avatarUrl = await listingAvatar({
+        coverPhoto: { image: COVER_KEY, alt: '' },
+        photoGallery: [{ image: GALLERY_KEY, alt: '', caption: '' }],
+      });
+      expect(avatarUrl).toMatch(
+        new RegExp(
+          `^https://api\\.test/files/listings/${LISTING_ID}/cover\\?v=`,
+        ),
+      );
+      expect(avatarUrl).not.toContain(UPLOADER_ID);
+    });
+
+    it('falls back to the first gallery photo by its reference', async () => {
+      const avatarUrl = await listingAvatar({
+        coverPhoto: null,
+        photoGallery: [{ image: GALLERY_KEY, alt: '', caption: '' }],
+      });
+      expect(avatarUrl).toMatch(
+        new RegExp(
+          `^https://api\\.test/files/listings/${LISTING_ID}/photos/0\\?v=`,
+        ),
+      );
+      expect(avatarUrl).not.toContain(UPLOADER_ID);
+    });
+
+    it.each([
+      ['hidden by its owner', { isHiddenByOwner: true }, true],
+      ['still in review', { status: 'review' }, true],
+      ['under a takedown', {}, false],
+    ])(
+      'sends no avatar for a listing %s',
+      async (_label, overrides, isPubliclyVisible) => {
+        const avatarUrl = await listingAvatar(
+          {
+            coverPhoto: { image: COVER_KEY, alt: '' },
+            photoGallery: [],
+            ...overrides,
+          },
+          isPubliclyVisible,
+        );
+        // Its reference would answer 404, so the client draws the initials.
+        expect(avatarUrl).toBeNull();
+      },
+    );
   });
 });

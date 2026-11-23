@@ -12,6 +12,9 @@ import { User } from '../../users/entities/user.entity';
 export enum EmailSignInChallengePurpose {
   SignIn = 'sign_in',
   Reauth = 'reauth',
+  /** SEC-10: an applicant confirming the address on a join request
+   *  (`1840840000000-AddJoinRequestEmailCodePurpose`). */
+  JoinRequest = 'join_request',
 }
 
 /**
@@ -76,6 +79,11 @@ export class EmailSignInChallenge {
 
   @Column({ type: 'integer', default: 0 })
   failedAttempts!: number;
+
+  // SEC-11: true when the send drew on the trusted-requester allowance
+  // (`1840860000000-AddEmailCodeTrustedSend`).
+  @Column({ type: 'boolean', default: false })
+  isTrustedSend!: boolean;
 
   @Column({ type: 'timestamptz' })
   expiresAt!: Date;

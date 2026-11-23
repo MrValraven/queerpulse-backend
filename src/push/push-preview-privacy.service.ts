@@ -118,8 +118,8 @@ export class PushPreviewPrivacyService {
     // One after the other. Every push in this module funnels through here,
     // and `sendToUsers` caps its OWN fan-out at `MAX_CONCURRENT_PUSH_SENDS`,
     // so running the sends at once put a multiple of that many sockets and
-    // `last_used_at` writes in flight against a pool that defaults to 10
-    // connections. The recipient groups (preview shown or hidden, each in
+    // dead-subscription prune writes in flight against a pool that defaults
+    // to 10 connections. The recipient groups (preview shown or hidden, each in
     // English or Portuguese) partition the batch into up to four sequential
     // sends, and each group past the first costs one more sequential round of
     // the per-call cap. Each such round is bounded by a single send (up to

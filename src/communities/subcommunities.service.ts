@@ -16,6 +16,7 @@ import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-up
 import { CommunitiesService } from './communities.service';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityMembershipService } from './community-membership.service';
+import { visibleMemberSql } from './community-visible-member';
 import {
   CommunityDetailDTO,
   CommunityStats,
@@ -252,6 +253,9 @@ export class SubcommunitiesService {
         .select('member.community_id', 'communityId')
         .addSelect('COUNT(*)', 'count')
         .where('member.community_id IN (:...spaceIds)', { spaceIds })
+        // PRD-507 and PRD-508: the same "member who counts" every other
+        // community card applies, so a space card agrees with its roster.
+        .andWhere(visibleMemberSql('"member"."user_id"'))
         .groupBy('member.community_id')
         .getRawMany<{ communityId: string; count: string }>(),
       this.posts

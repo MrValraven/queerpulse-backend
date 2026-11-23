@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { In, MoreThanOrEqual } from 'typeorm';
@@ -23,7 +19,10 @@ import {
   HousingViewingParty,
   HousingViewingStatus,
 } from './entities/housing-viewing.entity';
-import { HousingViewingsService } from './housing-viewings.service';
+import {
+  HOUSING_VIEWING_NOT_HAPPENED_YET_CODE,
+  HousingViewingsService,
+} from './housing-viewings.service';
 
 /**
  * The viewing rules that decide who may reach whom and who sees the exact
@@ -63,7 +62,7 @@ describe('HousingViewingsService', () => {
     execute: jest.Mock;
   };
   let listings: { findOne: jest.Mock; find: jest.Mock };
-  let profiles: { find: jest.Mock };
+  let profiles: { find: jest.Mock; exists: jest.Mock };
   let verification: { requireLevel: jest.Mock };
   let affirmingPledge: { requireAccepted: jest.Mock };
   let notifications: { create: jest.Mock };
@@ -145,7 +144,10 @@ describe('HousingViewingsService', () => {
       findOne: jest.fn().mockResolvedValue(liveListing()),
       find: jest.fn().mockResolvedValue([liveListing()]),
     };
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      exists: jest.fn().mockResolvedValue(true),
+    };
     verification = { requireLevel: jest.fn().mockResolvedValue(undefined) };
     affirmingPledge = {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
@@ -234,6 +236,15 @@ describe('HousingViewingsService', () => {
       expect(viewings.save).not.toHaveBeenCalled();
     });
 
+    it('404s a home whose lister is no longer an active member', async () => {
+      profiles.exists.mockResolvedValue(false);
+
+      await expect(
+        service.request('guest-1', requestDto),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(viewings.save).not.toHaveBeenCalled();
+    });
+
     it('404s an expired home', async () => {
       listings.findOne.mockResolvedValue(
         liveListing({ expiresAt: new Date(NOW.getTime() - HOUR_MS) }),
@@ -279,13 +290,37 @@ describe('HousingViewingsService', () => {
       expect(viewings.save).not.toHaveBeenCalled();
     });
 
-    it('refuses an answer across a block with a 403, since both sides already hold the viewing', async () => {
+    it('answers 400 when the lister is no longer an active member', async () => {
+      viewings.findOne.mockResolvedValue(viewing());
+      profiles.exists.mockResolvedValue(false);
+
+      await expect(
+        service.accept('viewing-1', 'lister-1', acceptDto),
+      ).rejects.toThrow(
+        new BadRequestException('This home is no longer on the board'),
+      );
+      expect(viewings.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses an accept across a block with the 404 a gone member gets', async () => {
       viewings.findOne.mockResolvedValue(viewing());
       blockFilter.isBlockedEitherWay.mockResolvedValue(true);
 
       await expect(
         service.accept('viewing-1', 'lister-1', acceptDto),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toThrow(new NotFoundException('Member not found'));
+      expect(viewings.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a counter-proposal across a block with the same 404', async () => {
+      viewings.findOne.mockResolvedValue(viewing());
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(
+        service.propose('viewing-1', 'lister-1', {
+          slots: [new Date(NOW.getTime() + 72 * HOUR_MS).toISOString()],
+        }),
+      ).rejects.toThrow(new NotFoundException('Member not found'));
       expect(viewings.save).not.toHaveBeenCalled();
     });
   });
@@ -352,6 +387,46 @@ describe('HousingViewingsService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(viewings.save).not.toHaveBeenCalled();
       expect(notifications.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('complete', () => {
+    it('refuses a viewing whose accepted time has not come round, with a reason code', async () => {
+      viewings.findOne.mockResolvedValue(
+        viewing({
+          status: HousingViewingStatus.Accepted,
+          acceptedSlot: new Date(NOW.getTime() + 48 * HOUR_MS),
+        }),
+      );
+
+      const refusal = await service
+        .complete('viewing-1', 'guest-1')
+        .catch((error: unknown) => error);
+
+      if (!(refusal instanceof BadRequestException)) throw refusal;
+      expect(refusal.getResponse()).toMatchObject({
+        statusCode: 400,
+        code: HOUSING_VIEWING_NOT_HAPPENED_YET_CODE,
+      });
+      expect(viewings.save).not.toHaveBeenCalled();
+    });
+
+    it('answers a viewing with no accepted time the same way', async () => {
+      viewings.findOne.mockResolvedValue(
+        viewing({
+          status: HousingViewingStatus.Accepted,
+          acceptedSlot: null,
+        }),
+      );
+
+      const refusal = await service
+        .complete('viewing-1', 'lister-1')
+        .catch((error: unknown) => error);
+
+      if (!(refusal instanceof BadRequestException)) throw refusal;
+      expect(refusal.getResponse()).toMatchObject({
+        code: 'housing_viewing_not_happened_yet',
+      });
     });
   });
 

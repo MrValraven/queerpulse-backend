@@ -13,6 +13,7 @@ import { actorIdOf } from '../notifications/notification-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
 import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
+import { NotificationPushThrottleService } from '../notifications/notification-push-throttle.service';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import {
   displayNameFor,
@@ -30,6 +31,19 @@ import { PushPreviewPrivacyService } from './push-preview-privacy.service';
  *  `routes.goTogetherFeedback` in the frontend's `routeMap.ts`, the same
  *  link the bell row opens (`notifications.adapters.ts`). */
 const GO_TOGETHER_FEEDBACK_PATH = '/go-together/feedback';
+
+/**
+ * PRD-512: the push fatigue window. A member pushed about one bundled subject
+ * (a busy forum thread, a community's new posts, a followed topic, an
+ * event's RSVPs, a persona's updates: whatever `bundleKeyFor` collapses
+ * onto one bell row) is not pushed about that same subject again until this
+ * long has passed. The in-app row is always written; only the buzz is
+ * quieted.
+ */
+export const PUSH_FATIGUE_WINDOW_MS = 15 * 60 * 1000;
+
+/** The throttle bucket prefix, so these keys never meet another caller's. */
+const PUSH_FATIGUE_BUCKET_PREFIX = 'push-fatigue';
 
 /**
  * Turns persisted in-app notifications into phone pushes for a curated WHITELIST
@@ -103,6 +117,8 @@ export class PushNotificationListener {
     // `pushed_at` on the recipient's row.
     @InjectRepository(Notification)
     private readonly notificationRows: Repository<Notification>,
+    // PRD-512: the per-member push fatigue cap, see `PUSH_FATIGUE_WINDOW_MS`.
+    private readonly pushThrottle: NotificationPushThrottleService,
   ) {}
 
   @OnEvent(NOTIFICATION_BATCH_CREATED)
@@ -120,10 +136,16 @@ export class PushNotificationListener {
       // when they wake up. Withholding the buzz is the entire promise the
       // setting makes, and the 3am push that contradicted it is the bug this
       // closes.
-      const userIds =
+      const audibleUserIds =
         await this.notificationDelivery.recipientsOutsideQuietHours(
           event.userIds,
         );
+      // PRD-512: the fatigue cap, applied once here for the same reason as
+      // quiet hours, so every push path inherits it.
+      const userIds = this.recipientsPastFatigueWindow(
+        audibleUserIds,
+        notification,
+      );
       if (userIds.length === 0) return;
       switch (notification.type) {
         case NotificationType.ConnectionRequest:
@@ -301,6 +323,15 @@ export class PushNotificationListener {
         case NotificationType.ListingOwnerOffer:
           await this.pushListingOwnerOffer(userIds, notification);
           return;
+        // PRD-514: a community owner offered this member the ownership, and
+        // the answer to that offer when the recipient declined. Both are
+        // always delivered, so no category gate.
+        case NotificationType.CommunityOwnershipOffered:
+          await this.pushCommunityOwnershipOffered(userIds, notification);
+          return;
+        case NotificationType.CommunityOwnershipOfferDeclined:
+          await this.pushCommunityOwnershipOfferDeclined(userIds, notification);
+          return;
         // A sign-in from a device the member has not used before (ID-06).
         // No `NotificationPreferenceCategory` gate, deliberately: the member's
         // own switch (`member_preferences.login_alerts_enabled`) is enforced at
@@ -352,6 +383,29 @@ export class PushNotificationListener {
       // Push is best-effort and must never affect notification delivery.
       this.logger.warn(`Push on notification failed: ${String(error)}`);
     }
+  }
+
+  /**
+   * PRD-512: drops each recipient already pushed about this notification's
+   * bundled subject inside `PUSH_FATIGUE_WINDOW_MS`, through
+   * `NotificationPushThrottleService`. A type that never bundles (an outcome,
+   * a decision, a security alert, a mention) has no subject to repeat, so it
+   * always passes. The in-app row was written before this event fired, which
+   * is the contract the throttle requires of its callers.
+   */
+  private recipientsPastFatigueWindow(
+    userIds: string[],
+    notification: Notification,
+  ): string[] {
+    const bundleKey = bundleKeyFor(notification.type, notification.payload);
+    if (!bundleKey || userIds.length === 0) return userIds;
+    return this.pushThrottle.allowedRecipients(
+      userIds,
+      `${PUSH_FATIGUE_BUCKET_PREFIX}:${bundleKey}`,
+      PUSH_FATIGUE_WINDOW_MS,
+      // One bucket per subject, so the whole family is pruned on each call.
+      `${PUSH_FATIGUE_BUCKET_PREFIX}:`,
+    );
   }
 
   // --- Per-type handlers ----------------------------------------------------
@@ -1891,6 +1945,71 @@ export class PushNotificationListener {
       },
       GENERIC_PUSH_COPY.notification,
     );
+  }
+
+  /** PRD-514: "<name> offered you ownership of <community>". Always
+   *  delivered, so no category gate. */
+  private async pushCommunityOwnershipOffered(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    const communityName =
+      this.payloadString(notification, 'communityName') ?? 'a community';
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      userIds,
+      {
+        title: 'Ownership offer',
+        body: `${name} has offered you ownership of ${communityName}.`,
+        tag: `notification:${notification.id}`,
+        data: { url: this.communityUrl(notification) },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:communityOwnershipOffered.title',
+          bodyKey: 'push:communityOwnershipOffered.body',
+          params: { name, communityName },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /** PRD-514: "<name> declined your offer of <community>", to the owner who
+   *  made the offer. Always delivered, so no category gate. */
+  private async pushCommunityOwnershipOfferDeclined(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    const communityName =
+      this.payloadString(notification, 'communityName') ?? 'a community';
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      userIds,
+      {
+        title: 'Offer declined',
+        body: `${name} declined your offer of ${communityName}.`,
+        tag: `notification:${notification.id}`,
+        data: { url: this.communityUrl(notification) },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:communityOwnershipOfferDeclined.title',
+          bodyKey: 'push:communityOwnershipOfferDeclined.body',
+          params: { name, communityName },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /** The community a PRD-514 ownership push opens, or the directory when
+   *  the payload names no slug. */
+  private communityUrl(notification: Notification): string {
+    const communitySlug = this.payloadString(notification, 'communitySlug');
+    return communitySlug ? `/community/${communitySlug}` : '/communities';
   }
 
   /** "The landlord you suggested was decided on" (LOC-19). */

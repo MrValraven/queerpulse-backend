@@ -22,6 +22,7 @@ const claimedRow: ClaimedEpisodeRow = {
   subprofile_name: 'Lisbon After Dark',
   subprofile_slug_or_handle: 'lisbon-after-dark',
   owner_user_id: OWNER_ID,
+  link_visibility: 'linked',
 };
 
 const followerIds = (count: number): string[] =>
@@ -127,6 +128,29 @@ describe('StudioEpisodeAlertsListener', () => {
     });
     expect(JSON.stringify(payload)).not.toContain(OWNER_ID);
     expect(actorId).toBe(OWNER_ID);
+  });
+
+  // SEC-02: an unlinked show's followers hear whoever they blocked or muted,
+  // so a missing alert cannot test who runs it.
+  it('sends an unlinked persona episode alert with no owner to filter against', async () => {
+    respond([{ ...claimedRow, link_visibility: 'unlinked' }], followerIds(2));
+
+    await listener.handleEpisodePublished({ trackId: TRACK_ID });
+
+    expect(createForRecipients).toHaveBeenCalledTimes(1);
+    const [, , , actorId] = createForRecipients.mock.calls[0] as [
+      string[],
+      NotificationType,
+      object,
+      string | undefined,
+    ];
+    expect(actorId).toBeUndefined();
+  });
+
+  it('returns the link state from the claim', () => {
+    expect(EPISODE_ALERT_CLAIM_SQL).toContain(
+      '"persona"."link_visibility"::text AS "link_visibility"',
+    );
   });
 
   it('fans out in chunks of 500', async () => {

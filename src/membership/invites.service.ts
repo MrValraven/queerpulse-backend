@@ -332,27 +332,30 @@ export class InvitesService {
   }
 
   // Public, unauthenticated read powering the recipient's invite landing page.
-  // Returns only limited, non-sensitive fields (see toPublicInviteView).
+  // Returns only limited, non-sensitive fields (see toPublicInviteView): the
+  // inviter's card, note and vouch only for a usable invite (SEC-13).
   async resolveInvite(code: string): Promise<PublicInviteView> {
     const invite = await this.invites.findOne({ where: { code } });
     if (!invite) {
       throw new NotFoundException('Invite not found');
     }
+    const now = new Date();
     const [inviter, memberCount] = await Promise.all([
       this.usersService.findByIdWithProfile(invite.inviterId),
       this.usersService.countActiveMembers(),
     ]);
-    // Only an active inviter can carry the ambassador line, the same rule
-    // `inviterActive` applies to the rest of the inviter card.
+    // The ambassador line rides on the inviter card, which only a usable
+    // invite from an active inviter carries, so nothing else asks.
     const isInviterAmbassador =
-      inviter?.status === UserStatus.Active
+      inviter?.status === UserStatus.Active &&
+      resolveInviteStatus(invite, now) === 'valid'
         ? await this.ambassadorStatus.isVisibleAmbassador(inviter.id)
         : false;
     return toPublicInviteView(
       invite,
       inviter,
       memberCount,
-      new Date(),
+      now,
       isInviterAmbassador,
     );
   }

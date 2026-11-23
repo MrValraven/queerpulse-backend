@@ -1,5 +1,14 @@
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
+import {
+  communityAvatarPhotoReference,
+  communityCoverPhotoReference,
+} from '../storage/public-media-reference';
 import { MemberRef } from '../common/member-ref';
+import {
+  type CommunityFlairDTO,
+  type CommunityNameMarks,
+  NO_COMMUNITY_NAME_MARKS,
+} from '../community-badges/community-badge-response';
 import type { CropRect } from '../media-crops/crop-rect';
 import { cropFor } from '../media-crops/crop-response';
 import {
@@ -296,9 +305,20 @@ export function toCommunityCard(
     activeThisWeek: stats.activeThisWeek,
     postsThisWeek: stats.postsThisWeek,
     myRole,
-    coverImageUrl: toImageUrl(c.coverImageUrl),
+    // SEC-04: a member storage key names whoever uploaded the cover (the
+    // owner or one of the moderators), so every read gets the community's
+    // opaque reference. The edit modal strips an unchanged cover before it
+    // saves, and the write interceptor resolves a reference it does send.
+    coverImageUrl: toImageUrlByReference(
+      c.coverImageUrl,
+      communityCoverPhotoReference(c.id),
+    ),
     tags: c.tags,
-    avatarImageUrl: toImageUrl(c.avatarImageUrl),
+    // SEC-04: the avatar is a member upload too, so it goes by reference.
+    avatarImageUrl: toImageUrlByReference(
+      c.avatarImageUrl,
+      communityAvatarPhotoReference(c.id),
+    ),
     city: c.city,
     area: c.area,
     isOnline: c.isOnline,
@@ -379,7 +399,10 @@ export function toCommunityDetail(
       ? {
           slug: parent.slug,
           name: parent.name,
-          avatarImageUrl: toImageUrl(parent.avatarImageUrl),
+          avatarImageUrl: toImageUrlByReference(
+            parent.avatarImageUrl,
+            communityAvatarPhotoReference(parent.id),
+          ),
           isMember: isParentMember,
         }
       : null,
@@ -399,6 +422,10 @@ export function toCommunityDetail(
 export interface RosterEntryDTO {
   member: MemberRef;
   role: RosterRole;
+  /** The worn badge, shown only when it is enabled, held and on the roster. */
+  flair: CommunityFlairDTO | null;
+  /** The member has at least one visible gift mark in this community. */
+  hasRecentGift: boolean;
   joinedAt: string;
 }
 
@@ -506,10 +533,13 @@ export interface JoinResultDTO {
 export function toRosterEntry(
   member: CommunityMember,
   memberRef: MemberRef,
+  nameMarks: CommunityNameMarks = NO_COMMUNITY_NAME_MARKS,
 ): RosterEntryDTO {
   return {
     member: memberRef,
     role: member.role,
+    flair: nameMarks.flair,
+    hasRecentGift: nameMarks.hasRecentGift,
     joinedAt: member.joinedAt.toISOString(),
   };
 }
@@ -558,6 +588,10 @@ export interface CommunityContentModeration {
 export interface CommunityReplyDTO {
   id: string;
   author: MemberRef | null;
+  /** Null when the author is blanked or null. */
+  authorFlair: CommunityFlairDTO | null;
+  /** False when the author is blanked or null. */
+  authorHasRecentGift: boolean;
   text: string;
   createdAt: string;
   editedAt: string | null;
@@ -573,6 +607,10 @@ export interface CommunityReplyDTO {
 export interface CommunityPostDTO {
   id: string;
   author: MemberRef | null;
+  /** Null when the author is blanked or null. */
+  authorFlair: CommunityFlairDTO | null;
+  /** False when the author is blanked or null. */
+  authorHasRecentGift: boolean;
   body: string;
   image: string | null;
   kind: PostKind;
@@ -634,17 +672,21 @@ export function toCommunityReply(
   viewerId: string,
   viewerRole: RosterRole | null,
   moderation?: CommunityContentModeration,
+  nameMarks: CommunityNameMarks = NO_COMMUNITY_NAME_MARKS,
 ): CommunityReplyDTO {
   const authorTombstoned = reply.deletedAt != null;
   const moderationRemoved = moderation?.removed ?? false;
   const moderationHidden = moderation?.hidden ?? false;
   const blanked = authorTombstoned || moderationRemoved || moderationHidden;
+  const isAuthorShown = !blanked && author !== null && !author.isInactiveMember;
   const isAuthor = reply.authorId === viewerId;
   const isMember = viewerRole != null;
   const canManage = (isAuthor || isOwnerOrMod(viewerRole)) && isMember;
   return {
     id: reply.id,
     author: blanked ? DELETED_MEMBER : author,
+    authorFlair: isAuthorShown ? nameMarks.flair : null,
+    authorHasRecentGift: isAuthorShown && nameMarks.hasRecentGift,
     text: blanked ? '' : reply.text,
     createdAt: reply.createdAt.toISOString(),
     editedAt: reply.editedAt ? reply.editedAt.toISOString() : null,
@@ -689,17 +731,21 @@ export function toCommunityPost(
   viewerId: string,
   viewerRole: RosterRole | null,
   moderation?: CommunityContentModeration,
+  nameMarks: CommunityNameMarks = NO_COMMUNITY_NAME_MARKS,
 ): CommunityPostDTO {
   const authorTombstoned = post.deletedAt != null;
   const moderationRemoved = moderation?.removed ?? false;
   const moderationHidden = moderation?.hidden ?? false;
   const blanked = authorTombstoned || moderationRemoved || moderationHidden;
+  const isAuthorShown = !blanked && author !== null && !author.isInactiveMember;
   const isAuthor = post.authorId === viewerId;
   const isMember = viewerRole != null;
   const canManage = (isAuthor || isOwnerOrMod(viewerRole)) && isMember;
   return {
     id: post.id,
     author: blanked ? DELETED_MEMBER : author,
+    authorFlair: isAuthorShown ? nameMarks.flair : null,
+    authorHasRecentGift: isAuthorShown && nameMarks.hasRecentGift,
     body: blanked ? '' : post.body,
     image: blanked ? null : toImageUrl(post.image),
     kind: post.kind,

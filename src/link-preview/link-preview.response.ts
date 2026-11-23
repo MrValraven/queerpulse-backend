@@ -11,6 +11,8 @@ export interface LinkPreviewResponse {
   siteName: string | null;
   title: string | null;
   description: string | null;
+  /** SEC-23: always an address on this API (`GET /link-preview-images/<token>`)
+   *  or null. The linked page's own `og:image` URL never leaves the server. */
   imageUrl: string | null;
 }
 

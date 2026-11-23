@@ -33,13 +33,29 @@ import { studioError } from './studio.constants';
 export const LOCK_PURCHASE_SQL = `SELECT "id", "subprofile_id", "status" FROM "studio_purchases" WHERE "id" = $1 FOR UPDATE`;
 
 /**
+ * SEC-02: `ownerPlaceholder` is the owner reading the list or count. A buyer
+ * blocked either way with that owner is left out of it: a buyer can claim
+ * from an unlinked persona whoever blocked whom (so a refusal cannot test who
+ * runs it), and the owner must still never see someone they blocked. A
+ * deleted buyer (NULL) stays.
+ */
+function buyerNotBlockedWithOwnerSql(ownerPlaceholder: string): string {
+  return `("purchase"."buyer_user_id" IS NULL OR NOT EXISTS (
+     SELECT 1 FROM "blocks" "sale_block"
+      WHERE ("sale_block"."blocker_id" = ${ownerPlaceholder} AND "sale_block"."blocked_id" = "purchase"."buyer_user_id")
+         OR ("sale_block"."blocked_id" = ${ownerPlaceholder} AND "sale_block"."blocker_id" = "purchase"."buyer_user_id")
+   ))`;
+}
+
+/**
  * Contract 3.8, "To confirm". `$1` the persona, `$2`/`$3` the cursor or two
- * nulls, `$4` the page size plus one. Pending rows, oldest first, on
- * `IDX_studio_purchases_subprofile_status_created_at`.
+ * nulls, `$4` the page size plus one, `$5` the owner reading it. Pending
+ * rows, oldest first, on `IDX_studio_purchases_subprofile_status_created_at`.
  */
 export const TO_CONFIRM_SQL = `${PURCHASE_ROW_SELECT_SQL}
  WHERE "purchase"."subprofile_id" = $1::uuid
    AND "purchase"."status" = 'pending'
+   AND ${buyerNotBlockedWithOwnerSql('$5::uuid')}
    AND ($2::timestamptz IS NULL
      OR ("purchase"."created_at", "purchase"."id") > ($2::timestamptz, $3::uuid))
  ORDER BY "purchase"."created_at" ASC, "purchase"."id" ASC
@@ -47,12 +63,13 @@ export const TO_CONFIRM_SQL = `${PURCHASE_ROW_SELECT_SQL}
 
 /**
  * Contract 3.10, sales. `$1` the persona, `$2`/`$3` the cursor or two nulls,
- * `$4` the page size plus one. Confirmed rows, newest decision first, on
- * `IDX_studio_purchases_subprofile_decided_at`.
+ * `$4` the page size plus one, `$5` the owner reading it. Confirmed rows,
+ * newest decision first, on `IDX_studio_purchases_subprofile_decided_at`.
  */
 export const SALES_SQL = `${PURCHASE_ROW_SELECT_SQL}
  WHERE "purchase"."subprofile_id" = $1::uuid
    AND "purchase"."status" = 'confirmed'
+   AND ${buyerNotBlockedWithOwnerSql('$5::uuid')}
    AND ($2::timestamptz IS NULL
      OR ("purchase"."decided_at", "purchase"."id") < ($2::timestamptz, $3::uuid))
  ORDER BY "purchase"."decided_at" DESC, "purchase"."id" DESC
@@ -74,7 +91,9 @@ export const SALES_TOTALS_SQL = `SELECT COALESCE(sum("purchase"."amount_cents") 
 
 /**
  * Contract 3.11. `$1` the caller. One row per persona the caller is a member
- * of (`subprofile_members`) with at least one pending claim.
+ * of (`subprofile_members`) with at least one pending claim, counting only
+ * claims the caller's own "To confirm" list shows (a buyer blocked either way
+ * with the caller is left out; a deleted buyer counts).
  */
 export const PENDING_COUNT_SQL = `SELECT "purchase"."subprofile_id" AS "subprofile_id",
        count(*)::int AS "count"
@@ -82,6 +101,7 @@ export const PENDING_COUNT_SQL = `SELECT "purchase"."subprofile_id" AS "subprofi
   INNER JOIN "subprofile_members" "member" ON "member"."subprofile_id" = "purchase"."subprofile_id"
  WHERE "member"."user_id" = $1::uuid
    AND "purchase"."status" = 'pending'
+   AND ${buyerNotBlockedWithOwnerSql('$1::uuid')}
  GROUP BY "purchase"."subprofile_id"
  ORDER BY "purchase"."subprofile_id" ASC`;
 
@@ -125,9 +145,11 @@ interface PendingCountRow {
 /**
  * The artist side of Studio purchases (contract 3.8 to 3.11 and 4.2). Every
  * owner route answers `studio_persona_not_found` to a caller who is no
- * member of the persona, before anything else is read. The inbox shows every
- * pending claim of the persona, across later blocks, so a payment someone
- * made stays answerable. Each decision runs in one transaction: the row lock
+ * member of the persona, before anything else is read. The inbox and its
+ * pending count show every pending claim of the persona except one by a
+ * buyer blocked either way with the owner reading it, which is left out for
+ * that owner alone (SEC-02). On a persona that owner runs alone, such a claim
+ * expires unseen. Each decision runs in one transaction: the row lock
  * first, then the status check under that lock, so the second of two members
  * deciding at once (or a decision racing the buyer's cancel or the expiry
  * run) answers `studio_purchase_not_pending`. The event is emitted once the
@@ -158,6 +180,7 @@ export class StudioSalesService {
       subprofileId,
       ...keysetCursorParameters(cursor),
       pageSize + 1,
+      userId,
     ]);
     return toKeysetPage(
       rows,
@@ -179,6 +202,7 @@ export class StudioSalesService {
       subprofileId,
       ...keysetCursorParameters(cursor),
       pageSize + 1,
+      userId,
     ]);
     return toKeysetPage(
       rows,

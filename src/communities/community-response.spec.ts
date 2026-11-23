@@ -1,17 +1,24 @@
 import { CommunityPost, PostKind } from './entities/community-post.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
-import { RosterRole } from './entities/community-member.entity';
+import {
+  CommunityMember,
+  CommunityNotificationLevel,
+  RosterRole,
+} from './entities/community-member.entity';
 import {
   AccessTier,
   Community,
   CommunityType,
 } from './entities/community.entity';
+import type { MemberRef } from '../common/member-ref';
+import type { CommunityNameMarks } from '../community-badges/community-badge-response';
 import {
   CommunityStats,
   ReactionAggregate,
   toCommunityDetail,
   toCommunityPost,
   toCommunityReply,
+  toRosterEntry,
 } from './community-response';
 
 const EMPTY_STATS: CommunityStats = {
@@ -480,5 +487,233 @@ describe('toCommunityDetail setup checklist', () => {
 
     expect(Object.keys(memberDto)).not.toContain('setupChecklist');
     expect(Object.keys(spaceDto)).not.toContain('setupChecklist');
+  });
+});
+
+describe('name marks', () => {
+  const memberRef: MemberRef = {
+    slug: 'author',
+    firstName: 'Author',
+    lastName: 'Member',
+    pronouns: null,
+    avatarUrl: null,
+  };
+
+  const marks: CommunityNameMarks = {
+    flair: {
+      name: 'Regular',
+      starterKey: 'regular',
+      iconKey: 'calendar',
+      tint: 'jade',
+    },
+    hasRecentGift: true,
+  };
+
+  function makeMember(
+    overrides: Partial<CommunityMember> = {},
+  ): CommunityMember {
+    return {
+      id: 'membership-1',
+      communityId: 'community-1',
+      userId: 'author-1',
+      role: RosterRole.Member,
+      joinedAt: new Date('2026-01-02T00:00:00.000Z'),
+      notificationLevel: CommunityNotificationLevel.Announcements,
+      rulesAcceptedAt: null,
+      rulesVersionAccepted: null,
+      welcomeSeenAt: null,
+      wornBadgeId: null,
+      eventsAttendedCount: 0,
+      ...overrides,
+    };
+  }
+
+  it('places flair and the gift mark right after role on a roster entry', () => {
+    const entry = toRosterEntry(makeMember(), memberRef, marks);
+    expect(Object.keys(entry)).toEqual([
+      'member',
+      'role',
+      'flair',
+      'hasRecentGift',
+      'joinedAt',
+    ]);
+    expect(entry.flair).toEqual(marks.flair);
+    expect(entry.hasRecentGift).toBe(true);
+  });
+
+  it('gives a roster entry no marks when none are passed', () => {
+    const entry = toRosterEntry(makeMember(), memberRef);
+    expect(entry.flair).toBeNull();
+    expect(entry.hasRecentGift).toBe(false);
+  });
+
+  it('defaults to no marks when none are passed', () => {
+    const dto = toCommunityPost(
+      makePost(),
+      memberRef,
+      EMPTY_REACTIONS,
+      [],
+      0,
+      'viewer-1',
+      RosterRole.Member,
+    );
+    expect(dto.authorFlair).toBeNull();
+    expect(dto.authorHasRecentGift).toBe(false);
+    const reply = toCommunityReply(
+      makeReply(),
+      memberRef,
+      'viewer-1',
+      RosterRole.Member,
+    );
+    expect(reply.authorFlair).toBeNull();
+    expect(reply.authorHasRecentGift).toBe(false);
+  });
+
+  it('carries the author marks right after author on a live post and reply', () => {
+    const post = toCommunityPost(
+      makePost(),
+      memberRef,
+      EMPTY_REACTIONS,
+      [],
+      0,
+      'viewer-1',
+      RosterRole.Member,
+      undefined,
+      marks,
+    );
+    expect(Object.keys(post).slice(0, 4)).toEqual([
+      'id',
+      'author',
+      'authorFlair',
+      'authorHasRecentGift',
+    ]);
+    expect(post.authorFlair).toEqual(marks.flair);
+    expect(post.authorHasRecentGift).toBe(true);
+    const reply = toCommunityReply(
+      makeReply(),
+      memberRef,
+      'viewer-1',
+      RosterRole.Member,
+      undefined,
+      marks,
+    );
+    expect(Object.keys(reply).slice(0, 4)).toEqual([
+      'id',
+      'author',
+      'authorFlair',
+      'authorHasRecentGift',
+    ]);
+    expect(reply.authorFlair).toEqual(marks.flair);
+    expect(reply.authorHasRecentGift).toBe(true);
+  });
+
+  it('blanks authorFlair and authorHasRecentGift for a tombstoned post', () => {
+    const dto = toCommunityPost(
+      makePost({ deletedAt: new Date() }),
+      memberRef,
+      EMPTY_REACTIONS,
+      [],
+      0,
+      'viewer-1',
+      RosterRole.Member,
+      undefined,
+      marks,
+    );
+    expect(dto.authorFlair).toBeNull();
+    expect(dto.authorHasRecentGift).toBe(false);
+  });
+
+  it('blanks the marks for a moderator-removed post', () => {
+    const dto = toCommunityPost(
+      makePost(),
+      memberRef,
+      EMPTY_REACTIONS,
+      [],
+      0,
+      'viewer-1',
+      RosterRole.Member,
+      { hidden: false, removed: true },
+      marks,
+    );
+    expect(dto.authorFlair).toBeNull();
+    expect(dto.authorHasRecentGift).toBe(false);
+  });
+
+  it('blanks the marks for a moderator-hidden reply and a null author', () => {
+    const hiddenReply = toCommunityReply(
+      makeReply(),
+      memberRef,
+      'viewer-1',
+      RosterRole.Member,
+      { hidden: true, removed: false },
+      marks,
+    );
+    expect(hiddenReply.authorFlair).toBeNull();
+    expect(hiddenReply.authorHasRecentGift).toBe(false);
+    const authorlessReply = toCommunityReply(
+      makeReply(),
+      null,
+      'viewer-1',
+      RosterRole.Member,
+      undefined,
+      marks,
+    );
+    expect(authorlessReply.authorFlair).toBeNull();
+    expect(authorlessReply.authorHasRecentGift).toBe(false);
+  });
+
+  // A paused, suspended or deleting author renders as the anonymous
+  // "[deactivated member]" stand-in, so the byline carries no marks either.
+  const inactiveRef: MemberRef = {
+    slug: '',
+    firstName: '',
+    lastName: '',
+    pronouns: null,
+    avatarUrl: null,
+    isInactiveMember: true,
+  };
+
+  it('blanks the marks on a live post whose author is the inactive placeholder', () => {
+    const dto = toCommunityPost(
+      makePost(),
+      inactiveRef,
+      EMPTY_REACTIONS,
+      [],
+      0,
+      'viewer-1',
+      RosterRole.Member,
+      undefined,
+      marks,
+    );
+    expect(dto.author).toEqual(inactiveRef);
+    expect(dto.authorFlair).toBeNull();
+    expect(dto.authorHasRecentGift).toBe(false);
+  });
+
+  it('blanks the marks on a live reply whose author is the inactive placeholder', () => {
+    const dto = toCommunityReply(
+      makeReply(),
+      inactiveRef,
+      'viewer-1',
+      RosterRole.Member,
+      undefined,
+      marks,
+    );
+    expect(dto.author).toEqual(inactiveRef);
+    expect(dto.authorFlair).toBeNull();
+    expect(dto.authorHasRecentGift).toBe(false);
+  });
+
+  it('blanks the marks for a tombstoned reply', () => {
+    const dto = toCommunityReply(
+      makeReply({ deletedAt: new Date() }),
+      memberRef,
+      'viewer-1',
+      RosterRole.Member,
+      undefined,
+      marks,
+    );
+    expect(dto.authorFlair).toBeNull();
+    expect(dto.authorHasRecentGift).toBe(false);
   });
 });

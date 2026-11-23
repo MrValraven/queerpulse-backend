@@ -27,6 +27,7 @@ import {
   isStudioArtistPersonaKind,
   studioError,
 } from './studio.constants';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 /** An empty string clears a press kit text field. */
 function textOrNull(value: string | null): string | null {
@@ -236,6 +237,7 @@ export class StudioPressKitService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     return queryBuilder.getExists();
   }

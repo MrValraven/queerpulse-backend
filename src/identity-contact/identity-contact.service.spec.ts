@@ -182,6 +182,20 @@ function makeContact(
           })),
       ),
     ),
+    // SEC-02: the unlinked-persona mailbox read. It matches the persona's
+    // mailbox while the persona is unlinked (the default) and nothing else.
+    manager: {
+      query: jest.fn((_sql: string, parameters: unknown[]) =>
+        Promise.resolve(
+          parameters[0] === PERSONA_IDENTITY &&
+            (options.persona === undefined ||
+              options.persona?.linkVisibility ===
+                SubprofileLinkVisibility.Unlinked)
+            ? [{ matched: 1 }]
+            : [],
+        ),
+      ),
+    },
   };
   const requests = new MessageRequestsService(
     {} as never,
@@ -480,8 +494,9 @@ describe('persona contact', () => {
     expect(transaction).not.toHaveBeenCalled();
   });
 
-  // Fix round 1 (c2): the persona page 404s a persona whose owner and the
-  // viewer are person-blocked either way, and contact answers the same.
+  // Fix round 1 (c2): the persona page 404s a LINKED persona whose creator
+  // and the viewer are person-blocked either way, and contact answers the
+  // same.
   it.each([
     [
       'the member blocked the owner, or the owner blocked the member',
@@ -492,10 +507,16 @@ describe('persona contact', () => {
       'customer-user',
     ],
   ])(
-    '404s both the read and the send when %s',
+    '404s both the read and the send of a linked persona when %s',
     async (_description, blockedUserId) => {
       const { personaController, transaction } = makeContact({
         personBlockedUserIds: [blockedUserId],
+        persona: {
+          id: PERSONA_ID,
+          slug: 'drag-night',
+          userId: 'persona-owner',
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        },
       });
 
       await expect(
@@ -509,6 +530,56 @@ describe('persona contact', () => {
       expect(transaction).not.toHaveBeenCalled();
     },
   );
+
+  // SEC-02: an unlinked persona answers every member alike, so a block with
+  // its creator cannot test who runs it. The co-owner still reads the
+  // mailbox, so the send lands exactly as it does with no block at all.
+  it('delivers to an unlinked persona the same whether or not the member and its creator are blocked', async () => {
+    const { personaController, postMessage } = makeContact({
+      personBlockedUserIds: ['persona-owner'],
+    });
+
+    await expect(
+      personaController.getContact(customer, PERSONA_ID),
+    ).resolves.toMatchObject({ canMessage: true });
+    await expect(
+      personaController.send(customer, PERSONA_ID, {
+        body: 'A question here.',
+      }),
+    ).resolves.toMatchObject({ conversationId: 'mailbox-conversation' });
+    expect(postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // SEC-02: with every owner blocked either way, an unlinked persona still
+  // answers like any other: the enquiry delivers, and the blocked seats stay
+  // out of the mailbox at read time.
+  it('delivers to an unlinked persona even when every owner and the member are blocked', async () => {
+    const { personaController, postMessage } = makeContact({
+      personBlockedUserIds: ['persona-owner', 'persona-coowner'],
+    });
+
+    await expect(
+      personaController.getContact(customer, PERSONA_ID),
+    ).resolves.toMatchObject({ canMessage: true });
+    await expect(
+      personaController.send(customer, PERSONA_ID, {
+        body: 'A question here.',
+      }),
+    ).resolves.toMatchObject({ conversationId: 'mailbox-conversation' });
+    expect(postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // SEC-33: the persona read only matches a persona whose creator is active.
+  it('reads the persona only with an active creator', async () => {
+    const { personaController, subprofiles } = makeContact();
+
+    await personaController.getContact(customer, PERSONA_ID);
+
+    const [query] = subprofiles.findOne.mock.calls[0] as unknown as [
+      { where: Record<string, unknown> },
+    ];
+    expect(query.where).toMatchObject({ user: { status: 'active' } });
+  });
 
   it('does not withhold the persona over a block with a co-owner, as the page does not', async () => {
     const { personaController, postMessage } = makeContact({

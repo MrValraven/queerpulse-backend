@@ -62,16 +62,21 @@ export class AdminMembersController {
   @ApiOkResponse({ description: 'One page of members.' })
   @ApiBadRequestResponse({ description: 'Malformed query parameters.' })
   @Get()
-  list(@Query() query: ListAdminMembersQuery) {
-    return this.adminMembers.list(query);
+  list(
+    @Query() query: ListAdminMembersQuery,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    // SEC-31: the viewer, so their own row withholds its open report count.
+    return this.adminMembers.list(query, user.userId);
   }
 
   // Declared before ':id' so 'flagged' is not captured as an id param.
   @ApiOperation({ summary: 'List the flagged-members queue.' })
   @ApiOkResponse({ description: 'The flagged members.' })
   @Get('flagged')
-  listFlagged() {
-    return this.adminMembers.listFlagged();
+  listFlagged(@CurrentUser() user: CurrentUserData) {
+    // SEC-31: the viewer, so their own row stays out of their queue.
+    return this.adminMembers.listFlagged(user.userId);
   }
 
   // Declared before ':id' for the same reason as 'flagged' above.
@@ -104,8 +109,13 @@ export class AdminMembersController {
   @ApiOkResponse({ description: 'The member detail.' })
   @ApiNotFoundResponse({ description: 'Member not found.' })
   @Get(':id')
-  getMember(@Param('id', ParseUUIDPipe) id: string) {
-    return this.adminMembers.getMember(id);
+  getMember(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    // SEC-31: the viewer, so a staff member opening their own page reads
+    // none of the reports about them.
+    return this.adminMembers.getMember(id, user.userId);
   }
 
   // Grant or revoke `moderator` / `admin`. Guardrails (no self-change, no

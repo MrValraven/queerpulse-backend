@@ -38,8 +38,19 @@ import {
   storageKeyOwnerId,
 } from './storage-key';
 import { PersonaImageKeysService } from './persona-image-keys.service';
-import { UPLOAD_KIND_SPECS } from './upload-kinds';
+import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { parseMessageAttachmentReference } from './message-attachment-reference';
+import {
+  PublicMediaReference,
+  formatPublicMediaReference,
+  parsePublicMediaReference,
+} from './public-media-reference';
+import {
+  findForumPhotoByReference,
+  findForumPhotoKeyState,
+  findRowPhotoState,
+} from './public-media-reference-route';
+import { mediaReferenceVersion } from './media-reference-version';
 import {
   findViewableMessageAttachment,
   isMatchedChatUploaderWithheld,
@@ -57,7 +68,11 @@ import {
   mailboxStaffHistoryFloorCoversPredicate,
   seatExcludedFromMailboxPredicate,
 } from '../messaging/mailbox-seats';
-import { withinLeftAtCeilingPredicate } from '../messaging/message-visibility-predicates';
+import {
+  MESSAGE_SUBJECT_TYPE,
+  notModeratedMessagePredicate,
+  withinLeftAtCeilingPredicate,
+} from '../messaging/message-visibility-predicates';
 import {
   ApiNotFoundResponse,
   ApiOperation,
@@ -74,6 +89,37 @@ import {
 // previously this was a bare literal (240) with only a comment tying it to
 // the TTL, so changing the TTL would silently break the invariant.
 const PUBLIC_IMAGE_MAX_AGE_SECONDS = PRESIGN_EXPIRY_SECONDS - 60;
+
+// SEC-01 / SEC-42: how long a browser may keep a forum photo it fetched by
+// reference. Short, because a reference names a place in a post's gallery
+// (an edit that reorders the photos moves what it points at) and because a
+// takedown should reach a reader who reopens the thread within a minute.
+const FORUM_REFERENCE_MAX_AGE_SECONDS = 60;
+
+// A row-photo reference (listing, review, event, community) answers the same
+// bytes to every viewer, so a shared cache may keep it: `public`. A URL whose
+// `?v=` token matches the stored photo (`media-reference-version.ts`) names
+// that exact photo, so it may be kept for a day; any other URL gets the
+// short public window, since the slot may hold a newer photo.
+const VERSIONED_REFERENCE_MAX_AGE_SECONDS = 24 * 60 * 60;
+
+// The member photo kinds a photo reference may resolve to. A slot can hold a
+// past upload reused from "Your photos", so each slot accepts the member's
+// own photo kinds alone. Session-gated kinds (message attachments, event
+// photos), platform artwork (stickers, VJ, Studio) and menu files are left
+// out. The forum composer uploads as `work-image`.
+const MEMBER_PHOTO_KINDS: ReadonlySet<UploadKind> = new Set<UploadKind>([
+  'avatar',
+  'work-image',
+  'story-cover',
+  'persona-cover',
+  'listing-photo',
+  'listing-cover',
+  'community-cover',
+  'community-avatar',
+  'event-cover',
+  'forum-photo',
+]);
 
 // Railway Buckets are private and expose no public URL, so every uploaded image
 // is reached through here. This route does NOT proxy bytes: it authorizes, then
@@ -219,6 +265,15 @@ export class FilesController {
         .andWhere(
           `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
         )
+        // SEC-29: a message a moderator hid or removed grants nothing, the
+        // same takedown clause the by-message route and every message listing
+        // compose (`notModeratedMessagePredicate`). The thread renders such a
+        // message without its attachment, so its bytes stop serving to the
+        // participants who still hold the URL. Another live message carrying
+        // the same key keeps its own grant.
+        .andWhere(notModeratedMessagePredicate('message'), {
+          messageSubjectType: MESSAGE_SUBJECT_TYPE,
+        })
         .getExists()
     );
   }
@@ -398,7 +453,21 @@ export class FilesController {
     storageKey: string,
     response: Response,
   ): Promise<void> {
-    const originalFileName = await this.documentDisplayFileName(storageKey);
+    await this.streamDocument(
+      storageKey,
+      response,
+      await this.documentDisplayFileName(storageKey),
+    );
+  }
+
+  // Streams one document under the sandboxed download headers
+  // (`document-download-headers.ts`), named `originalFileName` when one is
+  // known. Shared by a message document and a listing's PDF menu (SEC-04).
+  private async streamDocument(
+    storageKey: string,
+    response: Response,
+    originalFileName: string | null,
+  ): Promise<void> {
     const headers = buildDocumentDownloadHeaders({
       storageKey,
       originalFileName,
@@ -511,29 +580,45 @@ export class FilesController {
       await this.streamMessageDocument(storageKey, response);
       return;
     }
-    await this.streamMessageImage(storageKey, response, download === '1');
+    await this.streamImage(
+      storageKey,
+      response,
+      download === '1',
+      'private, no-store',
+    );
   }
 
-  // Streams one message image with the headers a presigned GET would have
-  // signed in (`createPresignedDownload`): the content type forced from the
-  // key's extension, an inline disposition, or an attachment one for the
-  // viewer's Save button, both naming the file `<uuid>.<ext>`. `private,
-  // no-store` because the answer depends on who asks, and `nosniff`. HEAD is
-  // answered from `HeadObject` without opening the body, and a missing object
-  // is a 404, as for a document.
-  private async streamMessageImage(
+  // Streams one image with the headers a presigned GET would have signed in
+  // (`createPresignedDownload`): the content type forced from the key's
+  // extension, an inline disposition, or an attachment one for the viewer's
+  // Save button, both naming the file `<uuid>.<ext>`, and `nosniff`. The
+  // caller picks `Cache-Control`: `private, no-store` for a message image,
+  // whose answer depends on who asks. HEAD is answered from `HeadObject`
+  // without opening the body, and a missing object is a 404, as for a
+  // document. Used by every route that must keep the key out of a redirect's
+  // `Location` (message attachments and public media references).
+  //
+  // `options.fileName` replaces the `<uuid>.<ext>` filename: a reference
+  // response names its file `photo.<ext>`, so even the object's own uuid
+  // stays on the server. `options.extraHeaders` are set alongside.
+  private async streamImage(
     storageKey: string,
     response: Response,
     isDownload: boolean,
+    cacheControl: string,
+    options: { fileName?: string; extraHeaders?: Record<string, string> } = {},
   ): Promise<void> {
     const headers: Record<string, string> = {
       'Content-Type':
         contentTypeForStorageKey(storageKey) ?? 'application/octet-stream',
-      'Content-Disposition': isDownload
-        ? attachmentContentDispositionForStorageKey(storageKey)
-        : inlineContentDispositionForStorageKey(storageKey),
-      'Cache-Control': 'private, no-store',
+      'Content-Disposition': options.fileName
+        ? `${isDownload ? 'attachment' : 'inline'}; filename="${options.fileName}"`
+        : isDownload
+          ? attachmentContentDispositionForStorageKey(storageKey)
+          : inlineContentDispositionForStorageKey(storageKey),
+      'Cache-Control': cacheControl,
       'X-Content-Type-Options': 'nosniff',
+      ...(options.extraHeaders ?? {}),
     };
     if (response.req.method === 'HEAD') {
       let contentLength: number | null;
@@ -575,9 +660,213 @@ export class FilesController {
         'ERR_STREAM_PREMATURE_CLOSE';
       if (!isClientAbort) {
         this.logger.warn(
-          `Message image stream failed for ${storageKey}: ${String(error)}`,
+          `Image stream failed for ${storageKey}: ${String(error)}`,
         );
       }
+    }
+  }
+
+  // SEC-01 / SEC-04: the bytes of a photo addressed by a public media
+  // reference (`public-media-reference.ts`), which every reader surface
+  // renders for a forum photo, a listing gallery, cover, shop item or menu
+  // file, a listing review photo, and an event or community cover. The key
+  // is looked up from the row here and the bytes are streamed, because a 302
+  // to a presigned GET would put the key, uploader id included, in the
+  // redirect's `Location`. Every refusal is the same 404 an unresolvable key
+  // gets.
+  //
+  // Only the kind a reference expects qualifies (`isExpectedReferenceKey`):
+  // a member photo of an image type for a photo slot, and a `listing-menu`
+  // PDF or image for the menu. A row-photo reference (listing, review, event,
+  // community) is served to everyone, signed out included, exactly as its
+  // key was, and refused while its surface is withdrawn (a listing out of
+  // `live` or under a takedown, a review takedown), unless the viewer is
+  // staff. The uploader's account status is not consulted, for the reason
+  // the message reference gives: withholding the photos of one suspended
+  // uploader would show which photos came from that person.
+  private async servePublicMediaReference(
+    reference: PublicMediaReference,
+    user: CurrentUserData | null,
+    response: Response,
+    download: string | undefined,
+    version: string | undefined,
+  ): Promise<void> {
+    if (reference.kind === 'forum-post-photo') {
+      const storageKey = await this.servableForumPhotoKey(reference, user);
+      if (
+        !storageKey ||
+        !FilesController.isExpectedReferenceKey(reference, storageKey)
+      ) {
+        throw new NotFoundException();
+      }
+      await this.assertServableBytes(storageKey);
+      await this.streamImage(
+        storageKey,
+        response,
+        download === '1',
+        `private, max-age=${FORUM_REFERENCE_MAX_AGE_SECONDS}`,
+        { fileName: FilesController.referenceFileName(storageKey) },
+      );
+      return;
+    }
+    const state = await findRowPhotoState(this.users, reference);
+    const storageKey = state?.value ?? null;
+    if (
+      !state ||
+      !storageKey ||
+      (state.isWithdrawn && !FilesController.isStaffViewer(user)) ||
+      !FilesController.isExpectedReferenceKey(reference, storageKey)
+    ) {
+      throw new NotFoundException();
+    }
+    await this.assertServableBytes(storageKey);
+    if (contentTypeForStorageKey(storageKey) === 'application/pdf') {
+      // A constant name: the member's own file name could say who made it.
+      await this.streamDocument(storageKey, response, 'menu.pdf');
+      return;
+    }
+    const isCurrentVersion =
+      version !== undefined &&
+      version ===
+        mediaReferenceVersion(
+          storageKey,
+          formatPublicMediaReference(reference),
+        );
+    // A withdrawn surface served to staff must not land in a shared cache.
+    const cacheControl = state.isWithdrawn
+      ? 'private, no-store'
+      : `public, max-age=${
+          isCurrentVersion
+            ? VERSIONED_REFERENCE_MAX_AGE_SECONDS
+            : PUBLIC_IMAGE_MAX_AGE_SECONDS
+        }`;
+    await this.streamImage(
+      storageKey,
+      response,
+      download === '1',
+      cacheControl,
+      {
+        fileName: FilesController.referenceFileName(storageKey),
+        // A shared cache holds even a versioned copy for the short window
+        // only, so a takedown reaches it within minutes; the browser keeps
+        // the longer `Cache-Control` lifetime.
+        ...(state.isWithdrawn
+          ? {}
+          : {
+              extraHeaders: {
+                'CDN-Cache-Control': `public, max-age=${PUBLIC_IMAGE_MAX_AGE_SECONDS}`,
+              },
+            }),
+      },
+    );
+  }
+
+  // `photo.<ext>`, the constant filename a reference response carries.
+  private static referenceFileName(storageKey: string): string {
+    const lastDot = storageKey.lastIndexOf('.');
+    return `photo${lastDot === -1 ? '' : storageKey.slice(lastDot)}`;
+  }
+
+  // Whether `storageKey` is a key the slot `reference` names may serve: a
+  // member key (it names an uploader, the case references exist for) of a
+  // kind public on the key route, of a type the slot renders.
+  private static isExpectedReferenceKey(
+    reference: PublicMediaReference,
+    storageKey: string,
+  ): boolean {
+    const kindSpec = parseStorageKey(storageKey);
+    if (
+      !kindSpec ||
+      kindSpec.requiresSession ||
+      storageKeyOwnerId(storageKey) === null
+    ) {
+      return false;
+    }
+    const contentType = contentTypeForStorageKey(storageKey);
+    if (reference.kind === 'listing-menu-file') {
+      return (
+        kindSpec === UPLOAD_KIND_SPECS['listing-menu'] &&
+        (contentType === 'application/pdf' ||
+          (contentType?.startsWith('image/') ?? false))
+      );
+    }
+    const isMemberPhotoKind = [...MEMBER_PHOTO_KINDS].some(
+      (kind) => UPLOAD_KIND_SPECS[kind] === kindSpec,
+    );
+    return isMemberPhotoKind && (contentType?.startsWith('image/') ?? false);
+  }
+
+  // The key behind a forum photo reference, when `user` may see it. The forum
+  // is for signed-in active members, so no session is a 401 and an account
+  // that is not active gets the 404. The post's author and platform staff
+  // always may (a moderator reviews a taken-down post). Everyone else is
+  // refused when the post is withdrawn (SEC-42: an author or moderator
+  // tombstone, a hide or remove takedown, or a withdrawn thread). A
+  // suspended author's photo is withheld, as the key route withholds it,
+  // except for the masked author of an anonymous thread (a post whose author
+  // is the thread's author), whose photos disappearing together with their
+  // avatar would link the two.
+  private async servableForumPhotoKey(
+    reference: Extract<PublicMediaReference, { kind: 'forum-post-photo' }>,
+    user: CurrentUserData | null,
+  ): Promise<string | null> {
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+    const isStaffViewer = FilesController.isStaffViewer(user);
+    if (!isStaffViewer && (user.status as UserStatus) !== UserStatus.Active) {
+      return null;
+    }
+    const state = await findForumPhotoByReference(
+      this.users,
+      reference.postId,
+      reference.photoIndex,
+    );
+    if (!state) {
+      return null;
+    }
+    if (isStaffViewer || state.postAuthorId === user.userId) {
+      return state.storageKey;
+    }
+    if (state.isWithdrawn) {
+      return null;
+    }
+    const isMaskedAuthor =
+      state.isThreadAnonymous && state.postAuthorId === state.threadAuthorId;
+    if (!isMaskedAuthor && state.postAuthorStatus === UserStatus.Suspended) {
+      return null;
+    }
+    return state.storageKey;
+  }
+
+  // SEC-01 / SEC-42 on the key route: a raw key a forum post may hold,
+  // requested by someone who is neither its uploader nor staff. Every reader
+  // now gets the reference, so this is an old copied URL. It is refused when
+  // the post holding it is withdrawn, and always on an anonymous thread,
+  // whose raw URL names the author.
+  //
+  // A `forum-photos/...` key exists for the forum alone, so one no post holds
+  // (an orphan) is refused too, and the legacy `forum_post.image` column is
+  // read for it. A `work/...` key (the composer's upload kind, also a
+  // portfolio image) is checked against the indexed photo rows alone, and
+  // one no post holds keeps serving as before.
+  private async assertServableForumPhotoKey(
+    storageKey: string,
+    isForumPhotoKind: boolean,
+  ): Promise<void> {
+    const state = await findForumPhotoKeyState(
+      this.users,
+      storageKey,
+      isForumPhotoKind,
+    );
+    if (!state) {
+      if (isForumPhotoKind) {
+        throw new NotFoundException();
+      }
+      return;
+    }
+    if (state.isWithdrawn || state.isThreadAnonymous) {
+      throw new NotFoundException();
     }
   }
 
@@ -619,6 +908,11 @@ export class FilesController {
     // saves the image instead of rendering it (the chat viewer's Save button).
     // It changes nothing about who may read the object.
     @Query('download') download?: string,
+    // The `?v=` version token a public media reference URL carries
+    // (`media-reference-version.ts`). It changes nothing about who may read
+    // the object; a token matching the stored photo lets the answer be cached
+    // longer.
+    @Query('v') version?: string,
   ): Promise<void> {
     // Re-join the segments path-to-regexp split apart. This is safe: the
     // anchored UUID regex in `parseStorageKey` still rejects a `%2F`-smuggled
@@ -633,6 +927,19 @@ export class FilesController {
         user,
         response,
         download,
+      );
+      return;
+    }
+    // SEC-01 / SEC-04: a forum or listing photo addressed by its row, see
+    // `servePublicMediaReference`.
+    const publicMediaReference = parsePublicMediaReference(storageKey);
+    if (publicMediaReference) {
+      await this.servePublicMediaReference(
+        publicMediaReference,
+        user,
+        response,
+        download,
+        version,
       );
       return;
     }
@@ -756,6 +1063,17 @@ export class FilesController {
       if (owner && owner.status === UserStatus.Suspended) {
         throw new NotFoundException();
       }
+    }
+    if (
+      (kindSpec === UPLOAD_KIND_SPECS['forum-photo'] ||
+        kindSpec === UPLOAD_KIND_SPECS['work-image']) &&
+      ownerUserId !== user?.userId &&
+      !FilesController.isStaffViewer(user)
+    ) {
+      await this.assertServableForumPhotoKey(
+        storageKey,
+        kindSpec === UPLOAD_KIND_SPECS['forum-photo'],
+      );
     }
     // Content-type backstop (M2): verify the object's real bytes match the
     // image type its key declares before handing back a download URL. Runs after

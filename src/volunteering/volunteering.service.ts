@@ -8,7 +8,8 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import { communityAvatarPhotoReference } from '../storage/public-media-reference';
 import {
   DataSource,
   FindOptionsWhere,
@@ -1671,7 +1672,11 @@ export class VolunteeringService {
       resolvedRefs.set(communityId, {
         slug: rawRef.slug,
         name: rawRef.name,
-        avatarUrl: toImageUrl(rawRef.avatarImageUrl),
+        // SEC-04: the avatar's key names its uploader; render by reference.
+        avatarUrl: toImageUrlByReference(
+          rawRef.avatarImageUrl,
+          communityAvatarPhotoReference(communityId),
+        ),
       });
     }
     return resolvedRefs;

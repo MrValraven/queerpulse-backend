@@ -470,11 +470,18 @@ describe('SubprofileMadeTogetherService.list', () => {
       expect(joined).toContain('content_moderation');
     });
 
-    it('filters authors blocked either way with the viewer in the query', () => {
+    it('filters linked authors blocked either way with the viewer in the query', () => {
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         scan,
         'viewer-1',
         '"sp"."user_id"',
+        { unless: `"sp"."link_visibility" = 'unlinked'` },
+      );
+    });
+
+    it('keeps only authors whose creator is active', () => {
+      expect(clauses().join('\n')).toContain(
+        `"persona_creator"."status" = 'active'`,
       );
     });
   });

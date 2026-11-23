@@ -1,4 +1,5 @@
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
+import { eventCoverPhotoReference } from '../storage/public-media-reference';
 import { MemberRef } from '../common/member-ref';
 import { toPlainTextExcerpt } from '../communities/community-plain-text';
 import { CommunityPost } from '../communities/entities/community-post.entity';
@@ -32,6 +33,10 @@ export interface AuthorSummary {
   displayName: string;
   pronouns: string | null;
   avatarUrl: string | null;
+  /** PRD-507. Set when the member's account is paused, suspended or in the
+   *  deletion grace: `handle` and `displayName` are empty and the client
+   *  renders its "[deactivated member]" label. */
+  isInactiveMember?: true;
 }
 
 /**
@@ -53,6 +58,7 @@ export function toAuthorSummary(
     // `null` avatar and it stays null — the gate isn't re-applied here because
     // this shape has no `photoVisible`/viewer signal to re-derive it from.
     avatarUrl: toImageUrl(ref.avatarUrl),
+    ...(ref.isInactiveMember ? { isInactiveMember: true as const } : {}),
   };
 }
 
@@ -428,7 +434,12 @@ export function eventToFeedItem(
     summary: truncate(event.description),
     link: `/gatherings/${event.slug}`,
     actor: toAuthorSummary(host),
-    imageUrl: toImageUrl(event.coverImageUrl),
+    // SEC-04: a member storage key names its uploader, so this public read
+    // renders the row's opaque reference (`toImageUrlByReference`).
+    imageUrl: toImageUrlByReference(
+      event.coverImageUrl,
+      eventCoverPhotoReference(event.id),
+    ),
     startsAt: event.startAt.toISOString(),
     endsAt: event.endAt ? event.endAt.toISOString() : null,
     timezone: event.timezone,
@@ -516,11 +527,15 @@ export function communityNewMemberToFeedItem(
     id: membershipId,
     type: 'new_member',
     createdAt: joinedAt.toISOString(),
-    title: member
-      ? `${member.firstName} ${member.lastName}`.trim()
-      : 'A member',
+    // PRD-507. The anonymous stand-in reads like a missing member: no name
+    // in the title and no profile to link to.
+    title:
+      member && !member.isInactiveMember
+        ? `${member.firstName} ${member.lastName}`.trim()
+        : 'A member',
     summary: community ? `Joined ${community.name}` : 'Joined a community',
-    link: member ? `/profile/${member.slug}` : '/feed',
+    link:
+      member && !member.isInactiveMember ? `/profile/${member.slug}` : '/feed',
     actor: toAuthorSummary(member),
     ...(mutualConnectionCount !== undefined ? { mutualConnectionCount } : {}),
     ...(sharedInterests !== undefined ? { sharedInterests } : {}),

@@ -6,7 +6,12 @@ import { Request, Response } from 'express';
 import { setOAuthStateCookie } from '../auth-cookies';
 import { OAuthCallbackError } from '../errors/oauth-callback.error';
 import { OAuthProfileError } from '../errors/oauth-profile.error';
-import { encodeOAuthState, sanitizeTermsVersion } from '../oauth-state';
+import {
+  decodeOAuthState,
+  encodeOAuthState,
+  sanitizeTermsVersion,
+} from '../oauth-state';
+import { GooglePkceOptions } from '../strategies/google.strategy';
 
 /**
  * The OAuth 2.0 error codes an authorization endpoint may return
@@ -37,13 +42,35 @@ function safeOAuthErrorCode(raw: unknown): string {
     : 'oauth_failed';
 }
 
+/** The `oauth_state` nonce cookie this browser holds, if any. */
+function stateCookieNonce(req: Request): string | undefined {
+  const cookies = req.cookies as Record<string, string | undefined> | undefined;
+  const nonce = cookies?.['oauth_state'];
+  return typeof nonce === 'string' && nonce.length > 0 ? nonce : undefined;
+}
+
+/**
+ * True when a callback carries a `state` whose nonce this browser's cookie
+ * does not hold: the cookie lapsed (10 minutes), was cleared, or the attempt
+ * started in another browser. PKCE makes the code exchange fail first in that
+ * case, so the guard names it here; the controller's own nonce check stays the
+ * gate for a successful exchange.
+ */
+function callbackStateIsStale(req: Request): boolean {
+  const rawState = req.query?.state;
+  if (typeof rawState !== 'string') return false;
+  const cookieNonce = stateCookieNonce(req);
+  const stateNonce = decodeOAuthState(rawState).nonce;
+  return !cookieNonce || !stateNonce || cookieNonce !== stateNonce;
+}
+
 @Injectable()
 export class GoogleAuthGuard extends AuthGuard('google') {
   constructor(private readonly config: ConfigService) {
     super();
   }
 
-  getAuthenticateOptions(context: ExecutionContext): {
+  getAuthenticateOptions(context: ExecutionContext): GooglePkceOptions & {
     state?: string;
     prompt?: string;
   } {
@@ -54,8 +81,12 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     // query). Only mint a fresh nonce + cookie on the outbound leg — on the
     // callback passport reads `state` from the query, and re-setting the cookie
     // here would clobber the nonce we need to compare against.
+    //
+    // PKCE (SEC-15): the callback leg hands the cookie's nonce to the strategy,
+    // which derives the code verifier from it for the token exchange.
     if (typeof req.query?.state === 'string') {
-      return {};
+      const cookieNonce = stateCookieNonce(req);
+      return cookieNonce ? { pkceNonce: cookieNonce } : {};
     }
 
     const res = context.switchToHttp().getResponse<Response>();
@@ -104,6 +135,8 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     });
     return {
       ...(state ? { state } : {}),
+      // The strategy turns the nonce into the PKCE challenge (SEC-15).
+      pkceNonce: nonce,
       // `login` forces Google to show its login screen even if the browser
       // already has an active Google session — proof the caller can complete a
       // fresh login RIGHT NOW, not just that a cookie is still valid. Only set
@@ -137,8 +170,13 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     if (err || !user) {
       // Prefer Google's own error code (e.g. `access_denied` when the user
       // declines consent) when it round-tripped in the query, but only from
-      // the known vocabulary — see GOOGLE_OAUTH_ERROR_CODES.
+      // the known vocabulary (see GOOGLE_OAUTH_ERROR_CODES). A lapsed or
+      // foreign nonce is our own `invalid_state`, so the notice can say the
+      // attempt timed out.
       const req = context.switchToHttp().getRequest<Request>();
+      if (req.query?.error === undefined && callbackStateIsStale(req)) {
+        throw new OAuthCallbackError('invalid_state');
+      }
       throw new OAuthCallbackError(safeOAuthErrorCode(req.query?.error));
     }
     return user;

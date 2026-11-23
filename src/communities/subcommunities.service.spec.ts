@@ -12,6 +12,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { CommunitiesService } from './communities.service';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityMembershipService } from './community-membership.service';
+import { visibleMemberSql } from './community-visible-member';
 import { CreateSubcommunityDto } from './dto/create-subcommunity.dto';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
@@ -399,6 +400,25 @@ describe('SubcommunitiesService', () => {
       const hiddenCard = cards.find((card) => card.slug === 'hidden');
       expect(hiddenCard?.myRole).toBe(RosterRole.Mod);
       expect(hiddenCard?.memberCount).toBe(4);
+    });
+
+    // R4 #5: a space card counts only members who count everywhere else
+    // (an active account whose profile is not hidden), the predicate the
+    // parent cards and the roster apply.
+    it('counts only visible members on a space card', async () => {
+      membership.effectiveRolesAndOwnRowsFor.mockResolvedValue(
+        rolesResult(new Map([['space-open', RosterRole.Member]])),
+      );
+      const memberCountQuery = groupedCountStub([
+        { communityId: 'space-open', count: '2' },
+      ]);
+      members.createQueryBuilder.mockReturnValue(memberCountQuery);
+
+      await service.list(PARENT.slug, ACTOR_ID);
+
+      expect(memberCountQuery.andWhere).toHaveBeenCalledWith(
+        visibleMemberSql('"member"."user_id"'),
+      );
     });
 
     it('hides a space under a moderator takedown from a parent member', async () => {

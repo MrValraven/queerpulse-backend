@@ -4,7 +4,11 @@ import {
   Community,
   CommunityType,
 } from '../communities/entities/community.entity';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
+import {
+  communityCoverPhotoReference,
+  eventCoverPhotoReference,
+} from '../storage/public-media-reference';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Event } from '../events/entities/event.entity';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
@@ -215,7 +219,12 @@ export function toLandingCommunityFeatureDTO(
     name: community.name,
     memberCount,
     blurb: copy.blurb ?? null,
-    coverImageUrl: toImageUrl(community.coverImageUrl),
+    // SEC-04: a member storage key names its uploader, so this public read
+    // renders the row's opaque reference (`toImageUrlByReference`).
+    coverImageUrl: toImageUrlByReference(
+      community.coverImageUrl,
+      communityCoverPhotoReference(community.id),
+    ),
     category: community.type,
     accessTier: community.accessTier,
     foundedYear: community.createdAt.getFullYear(),
@@ -257,7 +266,12 @@ export function toLandingGatheringFeatureDTO(
     timezone: event.timezone,
     area: event.neighbourhood,
     isOnline: event.isOnline,
-    coverImageUrl: toImageUrl(event.coverImageUrl),
+    // SEC-04: a member storage key names its uploader, so this public read
+    // renders the row's opaque reference (`toImageUrlByReference`).
+    coverImageUrl: toImageUrlByReference(
+      event.coverImageUrl,
+      eventCoverPhotoReference(event.id),
+    ),
     blurb: copy.blurb ?? null,
   };
 }

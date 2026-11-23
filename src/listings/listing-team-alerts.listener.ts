@@ -9,6 +9,7 @@ import {
   LISTING_TEAM_REQUESTED,
   ListingTeamAlertEvent,
 } from './listing-team.events';
+import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
 
 /** `$1` the team row, `$2` the status it must still hold. A link answered or
  *  removed in the meantime returns no row and sends nothing. */
@@ -16,7 +17,8 @@ export const LISTING_TEAM_ALERT_SQL = `SELECT "member"."id", "member"."initiated
        "listing"."id" AS "listing_id", "listing"."ref" AS "listing_ref",
        "listing"."slug" AS "listing_slug", "listing"."name" AS "listing_name",
        "persona"."id" AS "subprofile_id", "persona"."handle" AS "persona_handle",
-       COALESCE(NULLIF(btrim("persona"."display_name"), ''), "persona"."handle") AS "persona_name"
+       COALESCE(NULLIF(btrim("persona"."display_name"), ''), "persona"."handle") AS "persona_name",
+       "persona"."link_visibility"::text AS "persona_link_visibility"
   FROM "listing_team_members" "member"
   INNER JOIN "listings" "listing" ON "listing"."id" = "member"."listing_id"
   INNER JOIN "subprofiles" "persona" ON "persona"."id" = "member"."subprofile_id"
@@ -48,14 +50,18 @@ interface TeamAlertRow {
   subprofile_id: string;
   persona_handle: string;
   persona_name: string;
+  /** SEC-02: an unlinked persona acting passes no member to filter against. */
+  persona_link_visibility: string;
 }
 
 type TeamSide = 'listing' | 'persona';
 
 /**
- * Meet the team: the three link notifications. The acting member's id
- * reaches `createForRecipients` for the block and mute filter only and is
- * left out of the recipients; payloads carry listing and persona fields
+ * Meet the team: the three link notifications. The acting member's id is
+ * left out of the recipients and, unless the acting side is an UNLINKED
+ * persona, reaches `createForRecipients` for the block and mute filter only
+ * (SEC-02: a request or acceptance from an unlinked persona that vanished on
+ * a block would test who runs it). Payloads carry listing and persona fields
  * alone. Best effort and post-commit: nothing here throws back at the write.
  */
 @Injectable()
@@ -152,11 +158,16 @@ export class ListingTeamAlertsListener {
         return;
       }
       const { type, payload } = build(row);
+      // The listing side hears from the persona side, so the persona acts.
+      const isActingSideUnlinkedPersona =
+        side === 'listing' &&
+        row.persona_link_visibility ===
+          String(SubprofileLinkVisibility.Unlinked);
       await this.notifications.createForRecipients(
         recipientIds,
         type,
         payload,
-        event.actingUserId,
+        isActingSideUnlinkedPersona ? undefined : event.actingUserId,
       );
     } catch (error) {
       this.logger.warn(

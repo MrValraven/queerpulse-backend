@@ -17,6 +17,8 @@ import {
   playlistOpenToViewerSql,
   playlistOwnerIsActiveSql,
 } from './studio-playlist-visibility';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
+import { unlinkedPersonaCreditStandsSql } from './studio-discovery-sql';
 
 const createdAt = new Date('2026-10-21T12:00:00.000Z');
 
@@ -185,20 +187,22 @@ describe('StudioPlaylistFoldersService', () => {
       manager.find.mockResolvedValue([folder()]);
       const { queryBuilder } = answerQueries({ rawMany: [] });
       await service.list('member-1');
+      // SEC-02: the owner block exempts a standing unlinked persona credit.
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         queryBuilder,
         'member-1',
         '"playlist"."user_id"',
+        { unless: unlinkedPersonaCreditStandsSql('playlist') },
       );
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         queryBuilder,
         'member-1',
         expect.stringContaining('"credit_creator"'),
         {
-          unless: personaCreatorBlockExemptSql(
+          unless: `(${personaCreatorBlockExemptSql(
             'playlist',
             FOLDER_VIEWER_PARAMETER,
-          ),
+          )} OR ${unlinkedPersonaByIdSql('"playlist"."credit_subprofile_id"')})`,
         },
       );
     });

@@ -99,19 +99,31 @@ export class CommunityAutoFreezeService {
     if (!community.autoFreezeOnReports) return; // policy off
     if (community.frozenAt || community.archivedAt) return; // already frozen / down
 
-    const isEmergency = event.severity === ReportSeverity.Emergency;
+    // SEC-32. The single-report emergency trigger belongs to a signed-in
+    // member's report. `POST /reports` takes signed-out filings too, and one
+    // of those with an emergency reason used to freeze any community with
+    // auto-freeze on, again every day from a fresh IP. A signed-out emergency
+    // report still reaches platform moderation as an Emergency-band report;
+    // here it only takes part in the pile-up check, where it counts toward
+    // the volume alone.
+    const isEmergency =
+      event.severity === ReportSeverity.Emergency &&
+      (await this.isFiledByMember(event));
     // Pile-up now needs BOTH the volume it always did and a floor on how many
-    // DIFFERENT people are behind it. The dedupe index on `reports` keys on
-    // `reason_code`, so one member can legitimately hold several open reports
-    // on the same post (one per reason) — five of them, filed well inside the
-    // `/reports` 10-per-minute throttle, used to be enough for ONE person to
-    // freeze any community with `autoFreezeOnReports` on, and to do it again
-    // after every staff unfreeze (BE-COM-20). A pile-up is meant to be a
-    // signal about the community, which a single reporter cannot produce.
+    // DIFFERENT signed-in members are behind it (SEC-32: a signed-out report
+    // adds to the volume only, see `distinctOpenReporterCount`). The dedupe
+    // index on `reports` keys on `reason_code`, so one member can legitimately
+    // hold several open reports on the same post (one per reason); five of
+    // them, filed well inside the `/reports` 10-per-minute throttle, used to
+    // be enough for ONE person to freeze any community with
+    // `autoFreezeOnReports` on, and to do it again after every staff
+    // unfreeze (BE-COM-20). A pile-up is meant to be a signal about the
+    // community, which a single reporter cannot produce.
     //
     // The emergency trigger is deliberately left as a single-reporter one: an
-    // outing/doxxing report has to be able to stop a community on its own.
-    // That is also the trigger `CommunitiesService.unfreeze`'s gate protects.
+    // outing/doxxing report from a member has to be able to stop a community
+    // on its own. That is also the trigger `CommunitiesService.unfreeze`'s
+    // gate protects.
     const shouldFreeze = isEmergency || (await this.isReportPileUp(community));
     if (!shouldFreeze) return;
 
@@ -344,10 +356,9 @@ export class CommunityAutoFreezeService {
    * Open reports scoped to this community: its own `community`-subject reports
    * plus reports on its posts and replies.
    *
-   * Public because `CommunitiesService.unfreeze` reuses the exact same count
-   * to decide whether an AUTOMATIC freeze may be lifted yet (BE-COM-04) —
-   * "the reports were handled" has to mean the same thing on both sides of
-   * the freeze, so there is one implementation, not two.
+   * The pile-up trigger's volume. `CommunitiesService.unfreeze` gates on the
+   * member-filed share of the same scope (`openMemberReportCount`), since
+   * only a member's report can freeze a community on its own (SEC-32).
    *
    * Joined, not an `IN (...)` list. This used to load every post id AND every
    * reply id of the community into Node and bind them as one parameter list,
@@ -364,20 +375,49 @@ export class CommunityAutoFreezeService {
   }
 
   /**
-   * The number of DISTINCT members currently holding an open report against
-   * this community — the pile-up trigger's real measure (see `maybeFreeze`).
+   * Open reports in the same scope that signed-in members filed. This is the
+   * count `CommunitiesService.unfreeze` waits on to lift an AUTOMATIC freeze
+   * (BE-COM-04). It matches what can start a freeze under SEC-32: a
+   * signed-out report can neither trip the emergency trigger nor count as a
+   * distinct reporter, so a visitor filing one from a fresh IP cannot hold a
+   * community frozen after its members' reports are resolved.
+   */
+  async openMemberReportCount(community: Community): Promise<number> {
+    return this.openReportsScoped(community)
+      .andWhere('report.reporter_id IS NOT NULL')
+      .getCount();
+  }
+
+  /**
+   * SEC-32. Whether the report behind this event was filed by a signed-in
+   * member. `ReportCreatedEvent` carries no reporter, so the row is read back:
+   * `ReportsService.create` saves it outside any transaction and emits only
+   * after the save, so the row is committed by the time this runs.
    *
-   * A report with no `reporterId` (an account-less reporter who left only a
-   * contact email) counts as its own distinct reporter rather than being
-   * dropped by `COUNT(DISTINCT ...)`'s NULL handling, which would otherwise
-   * make anonymous-only pile-ups invisible to this trigger.
+   * A row that cannot be found answers false, so a report this listener cannot
+   * attribute to a member never gets the single-report trigger.
+   */
+  private async isFiledByMember(event: ReportCreatedEvent): Promise<boolean> {
+    const report = await this.reports.findOne({
+      where: { id: event.reportId },
+      select: { id: true, reporterId: true },
+    });
+    return Boolean(report?.reporterId);
+  }
+
+  /**
+   * The number of DISTINCT members currently holding an open report against
+   * this community, the pile-up trigger's real measure (see `maybeFreeze`).
+   *
+   * SEC-32. A signed-out report (no `reporterId`) is left out, which is what
+   * `COUNT(DISTINCT ...)` does with a NULL. Each one used to count as its own
+   * distinct reporter, so a visitor rotating IPs could supply all three
+   * "different people" the trigger asks for. Signed-out reports still count
+   * toward the open-report volume in `openReportCount`.
    */
   async distinctOpenReporterCount(community: Community): Promise<number> {
     const row = await this.openReportsScoped(community)
-      .select(
-        `COUNT(DISTINCT COALESCE(report.reporter_id::text, 'anon:' || report.id::text))`,
-        'count',
-      )
+      .select(`COUNT(DISTINCT report.reporter_id)`, 'count')
       .getRawOne<{ count: string }>();
     return Number(row?.count ?? 0);
   }

@@ -9,6 +9,7 @@ import {
 } from 'typeorm';
 import { ContentModeration } from './entities/content-moderation.entity';
 import { releasePlaylistCreditsOnTakedown } from '../studio/studio-playlist-credit-release';
+import { removeCommunityGiftOnTakedown } from '../community-badges/community-gift-takedown';
 
 /** The resolved moderation state of one subject, as read paths consume it. */
 export interface ContentModerationState {
@@ -114,6 +115,13 @@ export class ContentModerationService {
       manager,
       input.subjectType,
       input.subjectId,
+    );
+    // A gift has no hidden state, so either takedown action removes it.
+    await removeCommunityGiftOnTakedown(
+      manager,
+      input.subjectType,
+      input.subjectId,
+      input.actorId,
     );
   }
 

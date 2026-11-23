@@ -1,11 +1,11 @@
 meta {
-  name: Create Join Request
+  name: Request Join Request Code
   type: http
   seq: 4
 }
 
 post {
-  url: {{baseUrl}}/join-requests
+  url: {{baseUrl}}/auth/email-code/join-request/request
   body: json
   auth: none
 }
@@ -16,9 +16,16 @@ headers {
 }
 
 body:json {
-  "message": "I'd love to join — referred by a friend in the network."
+  "email": "applicant@example.com",
+  "locale": "en"
 }
 
 docs {
-  Pending-ok. Returns the created join request.
+  Step one of filing a join request (SEC-10). Public and unversioned: the
+  email_code_requester cookie it sets is scoped to /auth. Emails a 6-digit
+  code to the address (with EMAIL_CODE_DEV_LOG=true it is logged on one [dev]
+  line). Every address gets the same answer: { challengeId, expiresAt,
+  resendAvailableAt }. Copy challengeId into "Verify Join Request Code".
+  403 JOIN_REQUESTS_CLOSED while requests are paused; 503
+  email_code_unavailable while email codes are switched off.
 }

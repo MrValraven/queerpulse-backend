@@ -16,16 +16,15 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
  * gone status, or the member just stops using it — leaving a row that is never
  * delivered to again and never cleaned up.
  *
- * A subscription is stale when nothing has confirmed it alive within the
- * window: `last_used_at` older than the threshold, or — for a subscription that
- * was created but never once delivered to — `created_at` older than it.
+ * A subscription is stale when the device has not confirmed it alive within
+ * the window: `last_used_at` older than the threshold, or `created_at` older
+ * than it for a row whose `last_used_at` was never set.
  *
- * Two things refresh `last_used_at`: a successful send (`PushService.sendToUser`)
- * and a (re)subscribe from the device itself (`PushService.saveSubscription`).
- * The second one exists because the first is not enough on its own — a device
- * that is always online receives no DM pushes at all (the listener skips online
- * recipients), so a healthy device could go 90 days without a single successful
- * send and be pruned while the browser still held a valid subscription.
+ * Only the device itself refreshes `last_used_at`, through a (re)subscribe
+ * (`PushService.saveSubscription`), so the column is a client-seen time
+ * (SEC-12). A successful send used to refresh it as well. A push service keeps
+ * accepting messages for a lost phone or a signed-out shared computer, so that
+ * kept those devices subscribed for as long as pushes kept arriving.
  *
  * The re-subscribe is also what keeps a quiet, healthy, never-rotating device
  * alive (ENG-233). The web client's boot re-sync (`usePushSubscription`)
@@ -38,8 +37,9 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
  *
  * Rows also leave outside this job: `PushService.deliverToSubscription` prunes
  * a 404/410 (gone) or a 401/403 (made under a VAPID key this server no longer
- * holds) at send time, and `PushService.handleSessionRevoked` removes every
- * row for a member once no live session of theirs remains.
+ * holds) at send time, and `PushService.handleSessionRevoked` removes a row
+ * once the session that registered it is signed out (SEC-12), and every
+ * unlinked row for a member once no live session of theirs remains.
  *
  * Single-instance job — safe because the app runs one scheduler; the delete is
  * idempotent and batched, so an overlapping tick or a future scale-out only

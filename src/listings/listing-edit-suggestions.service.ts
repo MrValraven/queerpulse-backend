@@ -253,7 +253,9 @@ export class ListingEditSuggestionsService {
     const userIds = rows
       .map((row) => row.suggestedByUserId)
       .filter((id): id is string => id !== null);
-    const refs = await new MemberLookup(this.profiles).byUserIds(userIds);
+    const refs = await new MemberLookup(this.profiles).byUserIds(userIds, {
+      inactive: 'include',
+    });
 
     // A suggestion whose listing has since been hard-deleted has nothing left
     // to render a queue row against — skip it rather than throw, since the

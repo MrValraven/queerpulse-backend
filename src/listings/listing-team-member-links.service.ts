@@ -280,11 +280,14 @@ export class ListingTeamMemberLinksService {
       for (const member of rows) {
         const listing = listingById.get(member.listingId);
         if (!listing) continue;
+        const isListingLive = liveListingIds.has(member.listingId);
         shaped.push(
           toListingTeamPersonaRow(
             member,
-            toListingTeamListing(listing, crops),
-            liveListingIds.has(member.listingId),
+            // A hidden listing's cover reference would 404, so its card goes
+            // without one and shows the tint and initials.
+            toListingTeamListing(listing, crops, isListingLive),
+            isListingLive,
           ),
         );
       }

@@ -141,12 +141,14 @@ export class BarterController {
       'The created proposal plus the conversation it was delivered into.',
   })
   @ApiForbiddenResponse({
-    description: 'Your own listing, or you cannot contact this member.',
+    description: 'Your own listing.',
   })
   @ApiConflictResponse({
     description: 'The listing is closed, or you already proposed on it.',
   })
-  @ApiNotFoundResponse({ description: 'No listing with that id.' })
+  @ApiNotFoundResponse({
+    description: 'No listing with that id, or a blocked pair.',
+  })
   propose(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,

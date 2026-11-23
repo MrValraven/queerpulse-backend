@@ -755,4 +755,83 @@ describe('ReportNotificationsListener', () => {
       );
     });
   });
+
+  // Community badges: a gift report routes to platform moderation only. The
+  // community that sent the gift is never told, and the sender is left out of
+  // the platform fan-out even when they hold a platform role.
+  describe('a community gift report', () => {
+    const GIFT_ID = '0d000000-0000-4000-8000-000000000001';
+    const giftReportEvent: ReportCreatedEvent = {
+      reportId: 'report-5',
+      subjectType: ReportSubjectType.CommunityGift,
+      subjectId: GIFT_ID,
+      severity: ReportSeverity.High,
+      reasonCode: 'harassment',
+    };
+    let giftQuery: jest.Mock;
+
+    const platformRecipients = (): string[] | null => {
+      const call = fanOutCalls().find(
+        ([, notificationType]) =>
+          notificationType === NotificationType.ReportFiled,
+      );
+      return call ? call[0] : null;
+    };
+
+    beforeEach(() => {
+      reports.findOne.mockResolvedValue({
+        ...PHOTO_REPORT,
+        id: 'report-5',
+        subjectType: ReportSubjectType.CommunityGift,
+        subjectId: GIFT_ID,
+        severity: ReportSeverity.High,
+        reasonCode: 'harassment',
+      });
+      giftQuery = jest.fn().mockResolvedValue([{ sender_id: 'user-sender' }]);
+      Object.assign(dataSource, { query: giftQuery });
+      communityMembers.find.mockResolvedValue([
+        makeRosterRow('user-owner', RosterRole.Owner),
+        makeRosterRow('user-mod'),
+      ]);
+    });
+
+    it('files no community_report_filed for a community_gift report', async () => {
+      users.find.mockResolvedValue([{ id: 'user-staff' }]);
+      notifications.createForRecipients.mockResolvedValue(['user-staff']);
+
+      await listener.onReportCreated(giftReportEvent);
+
+      expect(communities.findOne).not.toHaveBeenCalled();
+      expect(communityMembers.find).not.toHaveBeenCalled();
+      expect(communityRecipients()).toBeNull();
+      expect(platformRecipients()).toEqual(['user-staff']);
+    });
+
+    it('leaves the sender out of the platform fan-out', async () => {
+      users.find.mockResolvedValue([
+        { id: 'user-sender' },
+        { id: 'user-staff' },
+      ]);
+
+      await listener.onReportCreated(giftReportEvent);
+
+      expect(giftQuery).toHaveBeenCalledWith(
+        'SELECT "sender_id" FROM "community_gifts" WHERE "id" = $1',
+        [GIFT_ID],
+      );
+      expect(platformRecipients()).toEqual(['user-staff']);
+    });
+
+    it('reads no gift row for a malformed gift id', async () => {
+      users.find.mockResolvedValue([{ id: 'user-staff' }]);
+
+      await listener.onReportCreated({
+        ...giftReportEvent,
+        subjectId: 'gift-1',
+      });
+
+      expect(giftQuery).not.toHaveBeenCalled();
+      expect(platformRecipients()).toEqual(['user-staff']);
+    });
+  });
 });

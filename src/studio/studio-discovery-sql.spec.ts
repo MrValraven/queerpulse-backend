@@ -49,6 +49,16 @@ describe('Studio discovery SQL', () => {
     );
   });
 
+  // SEC-02: a block with the creator withholds a linked persona alone.
+  it('exempts an unlinked persona from the creator block, in releases and artists alike', () => {
+    expect(listenableReleaseSql('release', 'persona', '$1')).toContain(
+      `("persona"."link_visibility" = 'unlinked' OR NOT EXISTS`,
+    );
+    expect(LISTENABLE_ARTIST_SQL).toContain(
+      `("artist"."link_visibility" = 'unlinked' OR NOT EXISTS`,
+    );
+  });
+
   it('finds a listenable artist among Studio artist kinds only, blocks applied', () => {
     expect(LISTENABLE_ARTIST_SQL).toContain(`"artist"."id" = $2`);
     expect(LISTENABLE_ARTIST_SQL).toContain(

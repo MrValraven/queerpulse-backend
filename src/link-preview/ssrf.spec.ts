@@ -1,4 +1,10 @@
-import { safeFetch, safeFetchHtml, type SafeFetchOptions } from './ssrf';
+import {
+  isDefaultWebPort,
+  safeFetch,
+  safeFetchHtml,
+  safeFetchImage,
+  type SafeFetchOptions,
+} from './ssrf';
 
 // Literal public IPs, so `assertPublicUrl` never needs DNS in these specs.
 const PUBLIC = 'https://93.184.215.14';
@@ -204,5 +210,110 @@ describe('safeFetchHtml (link preview)', () => {
     await expect(safeFetchHtml('http://127.0.0.1/')).resolves.toBeNull();
     fetchSpy.mockResolvedValueOnce(new Response('x', { status: 404 }));
     await expect(safeFetchHtml(`${PUBLIC}/missing`)).resolves.toBeNull();
+  });
+});
+
+describe('default web ports (SEC-45)', () => {
+  let fetchSpy: jest.SpiedFunction<typeof fetch>;
+
+  beforeEach(() => {
+    fetchSpy = jest.spyOn(global, 'fetch');
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it.each([
+    ['https://example.org/', true],
+    ['http://example.org/', true],
+    ['https://example.org:443/', true],
+    ['http://example.org:80/', true],
+    ['https://example.org:80/', true],
+    ['http://example.org:443/', true],
+    ['http://example.org:8080/', false],
+    ['https://example.org:6379/', false],
+    ['http://example.org:22/', false],
+  ])('isDefaultWebPort(%s) is %s', (url, expected) => {
+    expect(isDefaultWebPort(new URL(url))).toBe(expected);
+  });
+
+  it('refuses a link preview page on another port without making a request', async () => {
+    await expect(safeFetchHtml(`${PUBLIC}:8080/page`)).resolves.toBeNull();
+    await expect(safeFetchHtml(`${PUBLIC}:22/`)).resolves.toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a redirect hop onto another port', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: `${PUBLIC}:6379/` },
+      }),
+    );
+    await expect(safeFetchHtml(`${PUBLIC}/page`)).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the refused port as blocked when the caller opts in', async () => {
+    await expect(
+      safeFetch(`${PUBLIC}:8443/feed`, {
+        ...OPTIONS,
+        shouldRestrictToDefaultPorts: true,
+      }),
+    ).resolves.toEqual({ ok: false, failure: 'blocked' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps any port open to a caller that does not opt in', async () => {
+    fetchSpy.mockResolvedValueOnce(new Response(streamOf('<rss/>')));
+    const result = await safeFetch(`${PUBLIC}:8443/feed`, OPTIONS);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('safeFetchImage (link preview image, SEC-23)', () => {
+  let fetchSpy: jest.SpiedFunction<typeof fetch>;
+
+  beforeEach(() => {
+    fetchSpy = jest.spyOn(global, 'fetch');
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it('returns the bytes and the bare content type of an image', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(streamOf('png-bytes'), {
+        status: 200,
+        headers: { 'content-type': 'image/PNG; charset=binary' },
+      }),
+    );
+    const result = await safeFetchImage(`${PUBLIC}/card.png`);
+    expect(result?.contentType).toBe('image/png');
+    expect(new TextDecoder().decode(result?.body)).toBe('png-bytes');
+  });
+
+  it('is null for SVG, HTML, a private host or another port', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(streamOf('<svg/>'), {
+        status: 200,
+        headers: { 'content-type': 'image/svg+xml' },
+      }),
+    );
+    await expect(safeFetchImage(`${PUBLIC}/card.svg`)).resolves.toBeNull();
+    fetchSpy.mockResolvedValueOnce(
+      new Response(streamOf('<html>'), {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    await expect(safeFetchImage(`${PUBLIC}/card`)).resolves.toBeNull();
+    await expect(
+      safeFetchImage('http://169.254.169.254/latest'),
+    ).resolves.toBeNull();
+    await expect(safeFetchImage(`${PUBLIC}:8080/card.png`)).resolves.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });

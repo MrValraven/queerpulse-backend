@@ -1549,7 +1549,9 @@ describe('VjStageService', () => {
         setlist.itemIds = [secondId, thirdId, fourthId];
 
         await jest.advanceTimersByTimeAsync(STEP_MS - EARLY_MS);
-        await jest.advanceTimersByTimeAsync(0);
+        // The read again at once is a 0 ms retry armed inside the fake
+        // clock's tick, which the clock schedules 1 ms out.
+        await jest.advanceTimersByTimeAsync(1);
 
         expect(reads.readSetlist).toHaveBeenCalledTimes(2);
         expect(reads.readSetlist).toHaveBeenNthCalledWith(

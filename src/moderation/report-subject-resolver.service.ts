@@ -375,6 +375,11 @@ export class ReportSubjectResolverService {
           await this.queryByUuid(QUIZSHOW_GAME_SNAPSHOT_SQL, subjectIds),
           await this.queryByUuid(QUIZSHOW_GAME_SQL, subjectIds),
         ]);
+
+      // Community badges: one staff gift, keyed by its uuid. See
+      // `COMMUNITY_GIFT_SQL`.
+      case ReportSubjectType.CommunityGift:
+        return this.queryByUuid(COMMUNITY_GIFT_SQL, subjectIds);
     }
   }
 
@@ -1006,6 +1011,19 @@ const QUIZSHOW_GAME_SNAPSHOT_SQL = `
     AND r.subject_id = ANY($1::text[])
     AND entry ->> 'type' = 'quizshow-game-snapshot'
   ORDER BY r.subject_id, r.created_at ASC
+`;
+
+/**
+ * Community badges: ONE staff gift, resolved to its sender, with the note as
+ * the excerpt (the gift key when the note is empty). A removed gift still
+ * resolves so a moderator can read what was reported. The community id stays
+ * null so the queue never routes a gift report to a community: gift reports
+ * go to platform moderation only. A deleted sender leaves `sender_id` null.
+ */
+const COMMUNITY_GIFT_SQL = `
+  SELECT "g"."id"::text AS key, "g"."sender_id" AS author_user_id,
+         COALESCE(NULLIF(btrim("g"."note"), ''), "g"."gift_key") AS excerpt, NULL::uuid AS community_id
+  FROM "community_gifts" "g" WHERE "g"."id" = ANY($1::uuid[])
 `;
 
 /**

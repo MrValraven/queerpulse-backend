@@ -1,4 +1,9 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityTarget, In, ObjectLiteral } from 'typeorm';
@@ -32,6 +37,7 @@ import {
   ADMIN_MEMBERS_PAGE_SIZE,
 } from './admin-members.service';
 import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
+import { USER_SESSION_REVOKED } from '../chat/session.events';
 
 // The Cultural Production access hook is pinned by its own spec; here only
 // the call sites matter, so the hook is a mock answering no dropped task.
@@ -165,15 +171,17 @@ describe('AdminMembersService', () => {
   // (`pendingInviteCount`).
   let invites: { count: jest.Mock };
   let vouchService: { getVouchCounts: jest.Mock; getVouchCount: jest.Mock };
-  // The last-admin guard counts admins through `UsersService.countAdmins`,
-  // inside the demotion's own transaction. Two by default, so an ordinary
-  // role change is never the last-admin case.
-  let usersService: { countAdmins: jest.Mock };
+  // The last-admin guard counts the OTHER active admins through
+  // `UsersService.countOtherActiveAdmins`, inside the demotion's own
+  // transaction. One by default, so an ordinary role change is never the
+  // last-admin case.
+  let usersService: { countOtherActiveAdmins: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   // ENG-457: losing the `partnerships` grant or the admin tier releases the
   // member's staff seat in the ambassadors circle.
   let ambassadorsService: { releaseStaffSeat: jest.Mock };
   let officialMailboxSeats: { resyncStaff: jest.Mock };
+  let eventEmitter: { emit: jest.Mock };
 
   // The repos as seen through `manager.getRepository(...)` inside
   // `dataSource.transaction` — separate mocks from the top-level injected
@@ -231,7 +239,7 @@ describe('AdminMembersService', () => {
       getVouchCounts: jest.fn().mockResolvedValue(new Map()),
       getVouchCount: jest.fn().mockResolvedValue(0),
     };
-    usersService = { countAdmins: jest.fn().mockResolvedValue(2) };
+    usersService = { countOtherActiveAdmins: jest.fn().mockResolvedValue(1) };
     ambassadorsService = {
       releaseStaffSeat: jest.fn().mockResolvedValue(undefined),
     };
@@ -256,6 +264,8 @@ describe('AdminMembersService', () => {
       save: jest.fn().mockResolvedValue(undefined),
     };
     transactionQuery = jest.fn().mockResolvedValue([]);
+
+    eventEmitter = { emit: jest.fn() };
 
     // `updateRole`/`grantStaffRole`/`revokeStaffRole` are the only methods
     // that open a transaction. This stub runs the callback for real against a
@@ -308,6 +318,7 @@ describe('AdminMembersService', () => {
           provide: OfficialMailboxSeatsService,
           useValue: officialMailboxSeats,
         },
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
 
@@ -352,6 +363,38 @@ describe('AdminMembersService', () => {
         initials: 'IM',
         vouchCount: 3,
       });
+    });
+
+    it('withholds the open report count on the viewer’s own row (SEC-31)', async () => {
+      const viewerRow = makeProfile();
+      const otherRow = makeProfile({
+        userId: 'user-bea',
+        slug: 'bea-lopes',
+        firstName: 'Bea',
+        lastName: 'Lopes',
+      });
+      profiles.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub({ getManyAndCount: [[viewerRow, otherRow], 2] }),
+      );
+      vouches.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub({ getMany: [] }),
+      );
+      reports.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub({ getRawMany: [] }),
+      );
+      communityMembers.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub({ getRawMany: [] }),
+      );
+      vouchService.getVouchCounts.mockResolvedValue(new Map());
+
+      const result = await service.list({ page: 1 }, viewerRow.userId);
+
+      expect(
+        result.items.map((card) => [card.slug, card.openReportCount]),
+      ).toEqual([
+        ['ines-martins', null],
+        ['bea-lopes', 0],
+      ]);
     });
 
     it('excludes spaces (subcommunities) from each card’s community names', async () => {
@@ -460,6 +503,28 @@ describe('AdminMembersService', () => {
       expect(flaggedMember!.moderationState).toBe('frozen');
     });
 
+    it('leaves the viewing staff member out of their own flagged queue (SEC-31)', async () => {
+      reports.find.mockResolvedValue([]);
+      users.find.mockResolvedValue([
+        { id: 'user-staff' },
+        { id: 'user-other' },
+      ]);
+      profiles.find.mockResolvedValue([
+        makeProfile({ userId: 'user-other', slug: 'other-member' }),
+      ]);
+
+      await service.listFlagged('user-staff');
+      // The viewer never reaches the profile read, so no row of theirs can.
+      expect(profiles.find).toHaveBeenLastCalledWith({
+        where: { userId: In(['user-other']) },
+      });
+
+      await service.listFlagged('user-colleague');
+      expect(profiles.find).toHaveBeenLastCalledWith({
+        where: { userId: In(['user-staff', 'user-other']) },
+      });
+    });
+
     it("discovers a member by their reports' subjectId (slug), and surfaces the most frequent reason and latest detail", async () => {
       const flaggedProfile = makeProfile({
         userId: 'user-devon',
@@ -558,6 +623,111 @@ describe('AdminMembersService', () => {
       expect(membershipQueryBuilder.andWhere).toHaveBeenCalledWith(
         'community.parent_id IS NULL',
       );
+    });
+
+    describe('a staff member opening their own page (SEC-31)', () => {
+      interface AuditFindArgs {
+        where: { reportId?: unknown };
+      }
+
+      function seedReportAndAuditRows(): void {
+        profiles.findOne.mockResolvedValue(makeProfile());
+        reports.find.mockResolvedValue([makeReport()]);
+        modAuditLogs.find.mockImplementation((options: AuditFindArgs) =>
+          Promise.resolve(
+            options.where.reportId !== undefined
+              ? [
+                  {
+                    id: 'audit-report-scoped',
+                    reportId: 'report-1',
+                    actorId: null,
+                    action: 'dismiss',
+                    reasonCode: null,
+                    note: 'Reporter says it happened twice.',
+                    createdAt: daysAgo(2),
+                  },
+                ]
+              : [
+                  {
+                    id: 'audit-report-sanction',
+                    reportId: 'report-1',
+                    actorId: null,
+                    action: 'warn',
+                    reasonCode: 'harassment',
+                    note: null,
+                    createdAt: daysAgo(1),
+                  },
+                  {
+                    id: 'audit-role-change',
+                    reportId: null,
+                    actorId: null,
+                    action: 'role_changed',
+                    reasonCode: null,
+                    note: null,
+                    createdAt: daysAgo(3),
+                  },
+                  {
+                    id: 'audit-citation',
+                    reportId: null,
+                    actorId: null,
+                    action: 'evidence_cited',
+                    reasonCode: null,
+                    note: 'Cited from the trust network.',
+                    createdAt: daysAgo(4),
+                  },
+                ],
+          ),
+        );
+      }
+
+      it('leaves out the reports about them and every report-linked audit row', async () => {
+        seedReportAndAuditRows();
+
+        const result = await service.getMember('ines-martins', 'user-ines');
+
+        expect(result.openReportCount).toBe(0);
+        const reportLinkedEntries = result.moderationTimeline.filter(
+          (entry) => entry.reportId !== null,
+        );
+        expect(reportLinkedEntries).toEqual([]);
+        expect(
+          result.moderationTimeline.some(
+            (entry) => entry.action === 'role_changed',
+          ),
+        ).toBe(true);
+        // The withheld count makes no "no reports" claim either.
+        expect(
+          result.moderationTimeline.some(
+            (entry) => entry.action === 'no_reports',
+          ),
+        ).toBe(false);
+        // A citation against them is evidence too, so it stays out.
+        expect(
+          result.moderationTimeline.some(
+            (entry) => entry.action === 'evidence_cited',
+          ),
+        ).toBe(false);
+      });
+
+      it('shows a colleague the same page in full', async () => {
+        seedReportAndAuditRows();
+
+        const result = await service.getMember(
+          'ines-martins',
+          'user-colleague',
+        );
+
+        expect(result.openReportCount).toBe(1);
+        expect(
+          result.moderationTimeline.filter((entry) => entry.reportId !== null)
+            .length,
+        ).toBe(2);
+        expect(
+          result.moderationTimeline.some(
+            (entry) => entry.action === 'evidence_cited',
+          ),
+        ).toBe(true);
+      });
     });
 
     it('defaults invite access to on with no pending invites', async () => {
@@ -1062,6 +1232,64 @@ describe('AdminMembersService', () => {
   });
 
   describe('revokeStaffRole', () => {
+    // SEC-30: a demoted editor loses the magazine desk (and any other
+    // grant-gated socket) at once, with every session left signed in.
+    it('drops the member live sockets once a grant is revoked', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+      transactionStaffRoles.find.mockResolvedValue([]);
+
+      await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_editor',
+      );
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(USER_SESSION_REVOKED, {
+        userId: 'user-ines',
+      });
+    });
+
+    it('emits nothing for a revoked grant that admits no live socket', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+      transactionStaffRoles.find.mockResolvedValue([]);
+
+      await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_writer',
+      );
+
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('emits nothing for a role the member does not hold', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 0 });
+      transactionStaffRoles.find.mockResolvedValue([]);
+
+      await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_editor',
+      );
+
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
     it("deletes the row and writes a 'staff_role_revoked' audit log", async () => {
       profiles.findOne.mockResolvedValue(makeProfile());
       transactionUsers.findOne.mockResolvedValue({
@@ -1408,6 +1636,50 @@ describe('AdminMembersService', () => {
   });
 
   describe('updateRole', () => {
+    // SEC-30: the magazine desk admits an Admin and VJ and the lockdown rule
+    // read the role, so a demotion drops the member's live sockets at once.
+    it.each([
+      [UserRole.Admin, UserRole.Member],
+      [UserRole.Admin, UserRole.Moderator],
+      [UserRole.Moderator, UserRole.Member],
+    ])(
+      'drops the live sockets of a member moved from %s to %s',
+      async (previousRole, targetRole) => {
+        profiles.findOne.mockResolvedValue(makeProfile());
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: previousRole,
+          isSystem: false,
+        });
+
+        await service.updateRole('user-admin', 'ines-martins', targetRole);
+
+        expect(eventEmitter.emit).toHaveBeenCalledWith(USER_SESSION_REVOKED, {
+          userId: 'user-ines',
+        });
+      },
+    );
+
+    it.each([
+      [UserRole.Member, UserRole.Moderator],
+      [UserRole.Moderator, UserRole.Admin],
+      [UserRole.Admin, UserRole.Admin],
+    ])(
+      'leaves the live sockets of a member moved from %s to %s alone',
+      async (previousRole, targetRole) => {
+        profiles.findOne.mockResolvedValue(makeProfile());
+        transactionUsers.findOne.mockResolvedValue({
+          id: 'user-ines',
+          role: previousRole,
+          isSystem: false,
+        });
+
+        await service.updateRole('user-admin', 'ines-martins', targetRole);
+
+        expect(eventEmitter.emit).not.toHaveBeenCalled();
+      },
+    );
+
     it('releases the ambassadors circle staff seat when an admin is demoted (ENG-457)', async () => {
       profiles.findOne.mockResolvedValue(makeProfile());
       transactionUsers.findOne.mockResolvedValue({
@@ -1425,6 +1697,27 @@ describe('AdminMembersService', () => {
       expect(ambassadorsService.releaseStaffSeat).toHaveBeenCalledWith(
         'user-ines',
       );
+    });
+
+    it('refuses to demote an admin when no other active admin remains (SEC-35)', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Admin,
+        isSystem: false,
+      });
+      // The other admin row exists but sits in deletion grace, so it is not
+      // an active admin.
+      usersService.countOtherActiveAdmins.mockResolvedValue(0);
+
+      await expect(
+        service.updateRole('user-admin', 'ines-martins', UserRole.Member),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(usersService.countOtherActiveAdmins).toHaveBeenCalledWith(
+        expect.anything(),
+        'user-ines',
+      );
+      expect(transactionUsers.update).not.toHaveBeenCalled();
     });
 
     it('keeps the seat of a member promoted to admin', async () => {

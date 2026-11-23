@@ -353,7 +353,7 @@ describe('AuthController.googleCallback (step-up reauth)', () => {
     );
     expect(
       new URLSearchParams(redirectedTo.hash.slice(1)).get('reauthError'),
-    ).toBe('reauth_failed');
+    ).toBe('reauth_session_expired');
   });
 
   it('fails closed when the Google account that logged back in belongs to a DIFFERENT member than the current session', async () => {
@@ -385,7 +385,34 @@ describe('AuthController.googleCallback (step-up reauth)', () => {
     const redirectedTo = new URL(res.redirect.mock.calls[0]![0]);
     expect(
       new URLSearchParams(redirectedTo.hash.slice(1)).get('reauthError'),
-    ).toBe('reauth_failed');
+    ).toBe('reauth_account_mismatch');
+  });
+
+  it('sends a reauth attempt with a mismatched nonce back to its start page with invalid_state (PRD-502)', async () => {
+    const { controller, authService } = build();
+    const req = makeReq({
+      query: {
+        state: encodeOAuthState({
+          nonce: 'state-nonce',
+          redirect: '/settings/account/delete',
+          reauth: true,
+        }),
+      },
+      cookies: { oauth_state: 'other-nonce', access_token: 'live' },
+      user: { googleId: 'g', email: 'a@b.c' },
+    });
+    const res = makeRes();
+
+    await controller.googleCallback(req, res as unknown as Response);
+
+    expect(authService.mintReauthToken).not.toHaveBeenCalled();
+    const redirectedTo = new URL(res.redirect.mock.calls[0]![0]);
+    expect(redirectedTo.origin + redirectedTo.pathname).toBe(
+      `${FRONTEND}/settings/account/delete`,
+    );
+    expect(
+      new URLSearchParams(redirectedTo.hash.slice(1)).get('reauthError'),
+    ).toBe('invalid_state');
   });
 });
 
@@ -592,6 +619,48 @@ describe('AuthController.logout', () => {
       expect.anything(),
     );
     expect(out).toEqual({ ok: true });
+  });
+});
+
+// SEC-11: signing out stops the browser vouching for an email-code address.
+describe('AuthController sign-out clears the trusted email-code cookie', () => {
+  const trustedClear = {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    path: '/auth/email-code',
+    domain: 'queerpulse.example',
+  };
+
+  it('logout clears email_code_trusted with the path and domain it was set with', async () => {
+    const { controller } = build('production', 'queerpulse.example');
+    const res = makeRes();
+
+    await controller.logout(makeReq(), res as unknown as Response, {});
+
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'email_code_trusted',
+      trustedClear,
+    );
+  });
+
+  it('logout-all clears email_code_trusted even when the revoke fails', async () => {
+    const { controller, authService } = build(
+      'production',
+      'queerpulse.example',
+    );
+    authService.revokeAllForUser.mockRejectedValue(new Error('db down'));
+    const res = makeRes();
+
+    await controller.logoutAll(
+      { userId: 'u1', email: 'a@b.c', status: 'active', role: 'member' },
+      res as unknown as Response,
+    );
+
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'email_code_trusted',
+      trustedClear,
+    );
   });
 });
 

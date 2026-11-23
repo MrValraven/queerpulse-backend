@@ -25,6 +25,10 @@ import {
   SubprofileVisibility,
 } from '../subprofiles/entities/subprofile.entity';
 import { isSubprofileUnderTakedown } from '../subprofiles/subprofile-takedown';
+import {
+  PERSONA_CREATOR_ACTIVE_WHERE,
+  isCreatorBlockConsulted,
+} from '../subprofiles/persona-creator-gates';
 import { CreateIdentityEnquiryDto } from './dto/create-identity-enquiry.dto';
 import {
   IdentityContactDTO,
@@ -214,12 +218,15 @@ export class IdentityContactService {
   }
 
   /** The persona's mailbox identity, or 404 when the member could not see
-   *  the persona: a draft, a private persona, a moderator takedown, or
-   *  (fix round 1) a person block in either direction between the member and
-   *  the persona's owner, the same 404 in the same order the persona page
-   *  gives (`SubprofilePublicReadService.assertPublicViewVisible`). Co-owners
-   *  are not consulted, as the page does not consult them. A removed persona
-   *  resolves, and the contactability refuses it with its code. */
+   *  the persona: a draft, a private persona, a creator whose account is not
+   *  active (SEC-33), a moderator takedown, or (fix round 1) for a LINKED
+   *  persona a person block in either direction between the member and its
+   *  creator, the same 404 the persona page gives
+   *  (`SubprofilePublicReadService.assertPublicViewVisible`). An unlinked
+   *  persona answers every member alike, so a block cannot test who runs it
+   *  (SEC-02). Co-owners are not consulted, as the page does not consult
+   *  them. A removed persona resolves, and the contactability refuses it with
+   *  its code. */
   private async resolvePersonaIdentityId(
     subprofileId: string,
     viewerUserId: string,
@@ -232,13 +239,18 @@ export class IdentityContactService {
           SubprofileVisibility.Open,
           SubprofileVisibility.Network,
         ]),
+        ...PERSONA_CREATOR_ACTIVE_WHERE,
       },
-      select: { id: true, userId: true },
+      select: { id: true, userId: true, linkVisibility: true },
     });
     if (
       !persona ||
       (await isSubprofileUnderTakedown(this.contentModeration, persona.id)) ||
-      (await this.blockFilter.isBlockedEitherWay(viewerUserId, persona.userId))
+      (isCreatorBlockConsulted(persona) &&
+        (await this.blockFilter.isBlockedEitherWay(
+          viewerUserId,
+          persona.userId,
+        )))
     ) {
       throw new NotFoundException('Subprofile not found');
     }

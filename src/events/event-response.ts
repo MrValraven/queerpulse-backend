@@ -1,4 +1,5 @@
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
+import { eventCoverPhotoReference } from '../storage/public-media-reference';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Paginated } from '../common/pagination';
 import type { CropRect } from '../media-crops/crop-rect';
@@ -825,7 +826,14 @@ export function toEventSummary(
     timezone: e.timezone,
     venue: e.venue,
     isOnline: e.isOnline,
-    coverImageUrl: toImageUrl(e.coverImageUrl),
+    // SEC-04: a member storage key names whoever uploaded the cover (the host
+    // or a co-host), so every read gets the event's opaque reference. The
+    // edit flow sends a cover only when the host picks a new one, and the
+    // write interceptor resolves a reference it does send.
+    coverImageUrl: toImageUrlByReference(
+      e.coverImageUrl,
+      eventCoverPhotoReference(e.id),
+    ),
     coverCrop: cropFor(e.coverImageUrl, crops),
     visibility: e.visibility,
     status: e.status,

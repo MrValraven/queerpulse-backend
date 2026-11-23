@@ -867,12 +867,15 @@ export class ListingCoManagersService {
 
     // ONE batched profile lookup covering every member named on the page,
     // seat holders and inviters together. One query at any seat count.
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      ...seats.map((seat) => seat.userId),
-      ...seats
-        .map((seat) => seat.invitedByUserId)
-        .filter((userId): userId is string => userId !== null),
-    ]);
+    const refs = await new MemberLookup(this.profiles).byUserIds(
+      [
+        ...seats.map((seat) => seat.userId),
+        ...seats
+          .map((seat) => seat.invitedByUserId)
+          .filter((userId): userId is string => userId !== null),
+      ],
+      { inactive: 'drop' },
+    );
     return seats.map((seat) =>
       toListingCoManagerDTO(
         seat,

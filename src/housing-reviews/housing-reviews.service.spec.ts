@@ -67,7 +67,7 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
     createQueryBuilder: jest.Mock;
   };
   let listings: { findOne: jest.Mock };
-  let profiles: { find: jest.Mock };
+  let profiles: { find: jest.Mock; exists: jest.Mock };
   let viewings: {
     loadCompletedForReview: jest.Mock;
     loadParticipantViewing: jest.Mock;
@@ -121,7 +121,10 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
         expiresAt: new Date(NOW.getTime() + REVEAL_WINDOW_MS),
       }),
     };
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      exists: jest.fn().mockResolvedValue(true),
+    };
     viewings = {
       loadCompletedForReview: jest.fn(),
       loadParticipantViewing: jest.fn(),
@@ -1011,7 +1014,7 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
       ).resolves.toMatchObject({ isViewerTheLister: false });
     });
 
-    it('does not match a null owner against a null viewer', async () => {
+    it('404s the home of an erased lister for an anonymous reader, and never reads a null owner as the viewer', async () => {
       listings.findOne.mockResolvedValue({
         id: 'listing-1',
         slug: 'benfica-room',
@@ -1021,9 +1024,9 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
         expiresAt: new Date(NOW.getTime() + REVEAL_WINDOW_MS),
       });
 
-      await expect(
-        service.forListing('benfica-room', null),
-      ).resolves.toMatchObject({ isViewerTheLister: false });
+      await expect(service.forListing('benfica-room', null)).rejects.toThrow(
+        new NotFoundException('Housing listing not found'),
+      );
     });
 
     // LOC-F1: the reviews read withholds exactly what the detail read does.
@@ -1035,6 +1038,17 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
       filledAt: new Date(NOW.getTime() - 60_000),
       expiresAt: new Date(NOW.getTime() + REVEAL_WINDOW_MS),
     };
+
+    it('404s the reviews of a home whose lister is no longer an active member', async () => {
+      profiles.exists.mockResolvedValue(false);
+
+      await expect(
+        service.forListing('benfica-room', 'guest-1'),
+      ).rejects.toThrow(new NotFoundException('Housing listing not found'));
+      await expect(
+        service.forListing('benfica-room', 'lister-1'),
+      ).resolves.toMatchObject({ isViewerTheLister: true });
+    });
 
     it('404s a filled home for everyone but its owner', async () => {
       listings.findOne.mockResolvedValue(filledListing);

@@ -13,8 +13,9 @@ import { listenablePersonaSql } from './studio-visibility';
  * these rules, so an artist or a track that stops qualifying drops out of the
  * public payload, the preview stream, the staff list and the owner list at
  * once. They serve public reads, so they carry no viewer and no block filter;
- * a member read that reuses one adds `notBlockedEitherWaySql` on
- * `"<persona>"."user_id"` as `LISTENABLE_ARTIST_SQL` does. Every alias passed
+ * a member read that reuses one adds `notBlockedWithLinkedCreatorSql` on the
+ * persona alias as `LISTENABLE_ARTIST_SQL` does, which binds a linked
+ * persona's creator alone (SEC-02). Every alias passed
  * in is a literal from Studio's own queries; member input only ever reaches
  * bound parameters.
  */
@@ -37,18 +38,13 @@ export type StudioLandingIneligibleReason =
  *  month runs from Lisbon local midnight on the 1st. */
 export const STUDIO_LANDING_EVENT_TIME_ZONE = 'Europe/Lisbon';
 
-/** Contract 1.1: a persona the landing may show. A Studio artist kind, a
- *  listenable persona and a creator whose account is active. */
+/** Contract 1.1: a persona the landing may show. A Studio artist kind and a
+ *  listenable persona, which already needs a creator whose account is
+ *  active (`listenablePersonaSql`, SEC-33). */
 export function landingArtistPersonaSql(personaAlias: string): string {
   const persona = `"${personaAlias}"`;
-  const creator = `"${personaAlias}_creator"`;
   return `(${persona}."kind" IN (${STUDIO_ARTIST_KIND_LIST_SQL})
-    AND ${listenablePersonaSql(personaAlias)}
-    AND EXISTS (
-      SELECT 1 FROM "users" ${creator}
-       WHERE ${creator}."id" = ${persona}."user_id"
-         AND ${creator}."status" = '${UserStatus.Active}'
-    ))`;
+    AND ${listenablePersonaSql(personaAlias)})`;
 }
 
 /** Contract 1.1: a landing persona with at least one live release. The

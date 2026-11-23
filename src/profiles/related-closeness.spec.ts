@@ -143,6 +143,8 @@ describe('sharedCraft', () => {
 const FACTS: ClosenessFacts = {
   ownerVouchersVisible: true,
   theirVouchersVisible: true,
+  ownerNetworkPrivate: false,
+  theirNetworkPrivate: false,
   theyVouchedForOwner: false,
   ownerVouchedForThem: false,
   sharedCommunity: null,
@@ -196,6 +198,29 @@ describe('closenessFor gates', () => {
         ownerVouchersVisible: false,
       }),
     ).toEqual({ kind: 'ownerVouchedFor', value: null });
+  });
+
+  it('drops both vouch chips when the owner keeps their trust network private', () => {
+    expect(
+      closenessFor({
+        ...FACTS,
+        theyVouchedForOwner: true,
+        ownerVouchedForThem: true,
+        ownerNetworkPrivate: true,
+        sharedCommunity: 'Editorial Reading Circle',
+      }),
+    ).toEqual({ kind: 'community', value: 'Editorial Reading Circle' });
+  });
+
+  it('drops both vouch chips when THEY keep their trust network private', () => {
+    expect(
+      closenessFor({
+        ...FACTS,
+        theyVouchedForOwner: true,
+        ownerVouchedForThem: true,
+        theirNetworkPrivate: true,
+      }),
+    ).toBeNull();
   });
 
   it('drops open-to when their profile is not open', () => {

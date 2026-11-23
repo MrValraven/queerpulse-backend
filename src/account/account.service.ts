@@ -13,6 +13,7 @@ import {
   EntityManager,
   IsNull,
   MoreThan,
+  Not,
   Repository,
 } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
@@ -150,9 +151,8 @@ export class AccountService {
     private readonly dataSource: DataSource,
     // Drops live sockets on deactivation/deletion — see revokeAllSessions.
     private readonly eventEmitter: EventEmitter2,
-    // `countAdmins` backs `assertNotSoleAdmin` — the same last-admin guard
-    // `AdminMembersService.updateRole` uses against demotion, reused here
-    // against self-deactivation/self-deletion.
+    // `countOtherActiveAdmins` backs `assertNotSoleAdmin`, the last-admin
+    // guard against self-deactivation/self-deletion (SEC-35).
     private readonly usersService: UsersService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
@@ -244,11 +244,14 @@ export class AccountService {
    * Admin. `AdminMembersService.updateRole` already guards this lockout for
    * role-demotion; this is the more realistic path to the same dead end — a
    * lone admin pausing or erasing their own account through ordinary member
-   * settings, with no other admin left to reverse it. Reads through the
-   * caller's transaction `manager` (via `UsersService.countAdmins`), matching
-   * `updateRole`'s "count inside the same transaction as the write" guard, so
-   * a concurrent action against a different admin can't slip past a stale
-   * count.
+   * settings, with no other admin left to reverse it.
+   *
+   * SEC-35: counts only the OTHER admins who are active
+   * (`UsersService.countOtherActiveAdmins`). An admin already in deletion
+   * grace, deactivated or suspended reaches no admin surface, so counting
+   * them let the last admin who could act request deletion too. The count
+   * runs inside the write's own transaction and locks every active admin row,
+   * so two admins leaving at the same moment queue and the second is refused.
    */
   private async assertNotSoleAdmin(
     manager: EntityManager,
@@ -261,8 +264,11 @@ export class AccountService {
     if (user?.role !== UserRole.Admin) {
       return;
     }
-    const adminCount = await this.usersService.countAdmins(manager);
-    if (adminCount <= 1) {
+    const otherActiveAdmins = await this.usersService.countOtherActiveAdmins(
+      manager,
+      userId,
+    );
+    if (otherActiveAdmins === 0) {
       throw new ConflictException(
         'You’re the only remaining admin. Promote another member to admin before deactivating or deleting your account.',
       );
@@ -830,18 +836,17 @@ export class AccountService {
         'Cannot identify the current session; sign in again and retry',
       );
     }
-    const rows = await this.refreshTokens.find({
-      where: { userId, revokedAt: IsNull() },
-    });
-    const now = new Date();
-    const toRevoke = rows.filter((row) => row.familyId !== currentSessionId);
-    if (toRevoke.length === 0) {
+    // One conditional UPDATE: every live row of every OTHER family, stamped in
+    // a single statement. A read-then-save let a row minted between the read
+    // and the save (a rotation or a grace mint on another device) survive the
+    // sign-out, and could stamp a row another request had already revoked.
+    const result = await this.refreshTokens.update(
+      { userId, revokedAt: IsNull(), familyId: Not(currentSessionId) },
+      { revokedAt: new Date() },
+    );
+    if (!result.affected) {
       return;
     }
-    for (const row of toRevoke) {
-      row.revokedAt = now;
-    }
-    await this.refreshTokens.save(toRevoke);
     this.eventEmitter.emit(USER_SESSION_REVOKED, {
       userId,
     } satisfies UserSessionRevokedEvent);

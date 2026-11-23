@@ -19,6 +19,7 @@ import {
   SubprofileVisibility,
 } from './entities/subprofile.entity';
 import { isSubprofileUnderTakedown } from './subprofile-takedown';
+import { personaNotificationActorId } from './persona-creator-gates';
 
 /**
  * The most followers one publish will ever notify. Mirrors
@@ -211,11 +212,13 @@ export class SubprofileUpdatesService {
             chunk,
             NotificationType.PersonaUpdate,
             payload,
-            // The persona OWNER, for the per-recipient block/mute filter only.
-            // This id never reaches the payload, and `PersonaUpdate` appears
-            // under no key in `ACTOR_PAYLOAD_KEY`, so no follower's bell ever
-            // names the human behind a pseudonymous persona.
-            persona.userId,
+            // The persona OWNER of a LINKED persona, for the per-recipient
+            // block/mute filter only; none for an unlinked persona (SEC-02,
+            // `personaNotificationActorId`). This id never reaches the
+            // payload, and `PersonaUpdate` appears under no key in
+            // `ACTOR_PAYLOAD_KEY`, so no follower's bell ever names the human
+            // behind a pseudonymous persona.
+            personaNotificationActorId(persona),
           ),
         );
       }

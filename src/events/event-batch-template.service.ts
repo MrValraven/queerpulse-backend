@@ -19,9 +19,18 @@ import {
   RunnableListingRef,
 } from '../listings/listing-run-by.service';
 import { EventCohost } from './entities/event-cohost.entity';
-import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import {
+  Event,
+  EventStatus,
+  EventVisibility,
+  GatheringFamily,
+} from './entities/event.entity';
+import { cohostSeatRefusalFor, isHouseAccountId } from './house-music-events';
+import {
+  batchTemplateSpanOf,
   eventBatchTemplateCommunityOnly,
+  eventBatchTemplateHouseMusicHostOnly,
+  eventBatchTemplateNetworkCohost,
   eventBatchTemplateNotFound,
   seededCostKind,
   templateCreateInput,
@@ -64,7 +73,8 @@ export interface ResolvedEventBatchTemplate {
  * batch writes are decided by the same reads and cannot disagree.
  *
  * The caller must host the event or hold an accepted co-host seat on it, and
- * the new events are hosted by the caller: a co-host who starts from the
+ * an event QueerPulse hosts in Music is copied by its host alone. The new
+ * events are hosted by the caller: a co-host who starts from the
  * host's event publishes events of their own. That is why every link the
  * starting event carries is checked again against the caller, as `create`
  * would check it for them.
@@ -106,12 +116,31 @@ export class EventBatchTemplateService {
     // A pending invite lives in `event_cohost_invites` and is no seat yet, so
     // only an accepted `event_cohosts` row counts.
     const isHost = template.hostId === callerId;
+    const isHouseMusicEvent = await this.isHouseMusicEvent(template);
+    // PRD-519 and the R5 ruling: only the host copies QueerPulse's own Music
+    // events here. This tool publishes under the caller's own name and writes
+    // no music audit row, so the people who run them for QueerPulse (the music
+    // manager grant, moderators and admins) add dates from the admin music
+    // tool. They and co-hosts get the named refusal; anyone else gets the 404.
+    const isHouseStaff =
+      isHouseMusicEvent && !isHost && (await this.isHouseMusicStaff(callerId));
     const isCohost =
       !isHost &&
       (await this.cohosts.exists({
         where: { eventId: template.id, userId: callerId },
       }));
-    if (!isHost && !isCohost) throw eventBatchTemplateNotFound();
+    if (!isHost && !isCohost && !isHouseStaff) {
+      throw eventBatchTemplateNotFound();
+    }
+    if (isHouseMusicEvent && !isHost) {
+      throw eventBatchTemplateHouseMusicHostOnly();
+    }
+    // PRD-519: the network tiers follow the host's connections. Copies
+    // hosted by a co-host would follow the co-host's connections instead.
+    const isNetworkTier =
+      template.visibility === EventVisibility.Network ||
+      template.visibility === EventVisibility.ExtendedNetwork;
+    if (isNetworkTier && !isHost) throw eventBatchTemplateNetworkCohost();
     const moderation = await this.contentModeration.stateFor(
       EVENT_MODERATION_SUBJECT_TYPE,
       template.id,
@@ -164,6 +193,19 @@ export class EventBatchTemplateService {
     return toEventBatchTemplateView(
       await this.resolveForCaller(slug, callerId),
     );
+  }
+
+  /** Whether QueerPulse's house account hosts `template` in Music. */
+  private async isHouseMusicEvent(template: Event): Promise<boolean> {
+    if (template.gatheringFamily !== GatheringFamily.Music) return false;
+    return isHouseAccountId(this.events.manager, template.hostId);
+  }
+
+  /** Whether `userId` holds the music manager grant or is a moderator or
+   *  admin: the members `cohostSeatRefusalFor` keeps off house Music seats.
+   *  Read only to name the refusal for them. */
+  private async isHouseMusicStaff(userId: string): Promise<boolean> {
+    return (await cohostSeatRefusalFor(this.events.manager, userId)) !== null;
   }
 
   /**
@@ -273,6 +315,7 @@ export function toEventBatchTemplateView(
     endTime: template.endAt
       ? wallClockTimeOf(template.endAt, template.timezone)
       : null,
+    endDayOffset: batchTemplateSpanOf(template)?.endDayOffset ?? null,
     coverImageUrl: toImageUrl(template.coverImageUrl),
     gatheringFamily: template.gatheringFamily,
     eventType: template.eventType,

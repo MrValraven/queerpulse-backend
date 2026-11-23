@@ -516,6 +516,17 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
+  // Community badges: one staff gift and its short note, filed only by the
+  // member who received it.
+  [ReportSubjectType.CommunityGift]: [
+    'harassment',
+    'hate_speech',
+    'discrimination',
+    'outing',
+    'doxxing',
+    'spam',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

@@ -4,7 +4,7 @@ import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import {
   artistRefFromColumns,
-  notBlockedEitherWaySql,
+  notBlockedWithLinkedCreatorSql,
   personaColumnsFromRow,
   personaColumnsSql,
 } from './studio-discovery-sql';
@@ -21,7 +21,7 @@ import {
   decodeListenCursor,
   encodeListenCursor,
 } from './studio-listening-history';
-import { blockedWithAnyPersonaMemberSql } from './studio-persona-members';
+import { blockedWithAnyLinkedPersonaMemberSql } from './studio-persona-members';
 import { studioTrackArtistIdsSql } from './studio-play-attribution';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
 import { StudioPlaylistEntryTrack } from './studio-playlist-response';
@@ -59,7 +59,7 @@ export const TOP_ARTISTS_SQL = `SELECT ${personaColumnsSql('artist', 'artist')},
    AND "listen"."played_at" >= now() - $2::interval
    AND "artist"."kind"::text = ANY($3::text[])
    AND ${listenablePersonaSql('artist')}
-   AND NOT ${blockedWithAnyPersonaMemberSql('$1', '"artist"."id"')}
+   AND NOT ${blockedWithAnyLinkedPersonaMemberSql('$1', '"artist"."id"')}
  GROUP BY "artist"."id"
  ORDER BY "listen_count" DESC, "latest_played_at" DESC, "artist"."id" ASC
  LIMIT $4`;
@@ -79,7 +79,7 @@ export const TOP_TRACKS_SQL = `SELECT "listen"."track_id" AS "track_id",
  WHERE "listen"."user_id" = $1
    AND "listen"."played_at" >= now() - $2::interval
    AND ${playableTrackSql('track', 'release', 'persona')}
-   AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'top_track_block')}
+   AND ${notBlockedWithLinkedCreatorSql('$1', 'persona', 'top_track_block')}
  GROUP BY "listen"."track_id"
  ORDER BY "listen_count" DESC, "latest_played_at" DESC, "listen"."track_id" ASC
  LIMIT $3`;

@@ -207,6 +207,66 @@ describe('MagazineDeskPresenceGateway', () => {
     });
   });
 
+  // SEC-30: a signed-out or suspended editor stops receiving desk presence
+  // at once, as on the chat, VJ and quizshow gateways.
+  describe('session revocation', () => {
+    async function admitWithSession(
+      socketId: string,
+      sessionId: string | undefined,
+    ): Promise<FakeClient> {
+      jwt.verifyAsync.mockResolvedValueOnce({
+        sub: 'user-1',
+        status: UserStatus.Active,
+        exp: Math.floor(Date.now() / 1000) + 900,
+        sid: sessionId,
+      });
+      const client = makeClient(socketId);
+      await gateway.handleConnection(asClient(client));
+      return client;
+    }
+
+    function attachSockets(clients: FakeClient[]): void {
+      gateway.namespace = {
+        to: jest.fn().mockReturnValue({ emit: roomEmit }),
+        disconnectSockets,
+        sockets: new Map(clients.map((client) => [client.id, client])),
+      } as unknown as Namespace;
+    }
+
+    it('drops only the signed-out device and a socket with no session claim', async () => {
+      const signedOut = await admitWithSession('socket-a', 'family-a');
+      const otherDevice = await admitWithSession('socket-b', 'family-b');
+      const preClaim = await admitWithSession('socket-c', undefined);
+      attachSockets([signedOut, otherDevice, preClaim]);
+
+      gateway.handleSessionRevoked({ userId: 'user-1', sessionId: 'family-a' });
+
+      expect(signedOut.disconnect).toHaveBeenCalledWith(true);
+      expect(preClaim.disconnect).toHaveBeenCalledWith(true);
+      expect(otherDevice.disconnect).not.toHaveBeenCalled();
+    });
+
+    it('drops every socket of the member when no session is named', async () => {
+      const first = await admitWithSession('socket-a', 'family-a');
+      const second = await admitWithSession('socket-b', 'family-b');
+      attachSockets([first, second]);
+
+      gateway.handleSessionRevoked({ userId: 'user-1' });
+
+      expect(first.disconnect).toHaveBeenCalledWith(true);
+      expect(second.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it("leaves another editor's sockets alone", async () => {
+      const client = await admitWithSession('socket-a', 'family-a');
+      attachSockets([client]);
+
+      gateway.handleSessionRevoked({ userId: 'user-2' });
+
+      expect(client.disconnect).not.toHaveBeenCalled();
+    });
+  });
+
   describe('piece:watch cap', () => {
     it('holds the cap under a burst of frames', async () => {
       const client = makeClient('socket-1');

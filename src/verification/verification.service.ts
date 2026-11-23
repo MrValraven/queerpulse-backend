@@ -379,9 +379,10 @@ export class VerificationService {
     // not a lookup per row, so this stays O(1) queries per page.
     const [counts, members] = await Promise.all([
       this.countsByLevel(trimmedQuery),
-      new MemberLookup(this.profiles).byUserIds([
-        ...new Set(rows.map((row) => row.userId)),
-      ]),
+      new MemberLookup(this.profiles).byUserIds(
+        [...new Set(rows.map((row) => row.userId))],
+        { inactive: 'include' },
+      ),
     ]);
 
     return {
@@ -481,7 +482,9 @@ export class VerificationService {
    * so the controller re-loads the ref itself rather than this service
    * reaching back into the HTTP layer's response shape. */
   async getMemberRef(userId: string): Promise<MemberRef | null> {
-    const members = await new MemberLookup(this.profiles).byUserIds([userId]);
+    const members = await new MemberLookup(this.profiles).byUserIds([userId], {
+      inactive: 'include',
+    });
     return members.get(userId) ?? null;
   }
 
@@ -552,6 +555,7 @@ export class VerificationService {
     ];
     const actors = await new MemberLookup(this.profiles).byUserIds(
       actorUserIds,
+      { inactive: 'include' },
     );
 
     return events.map((event) =>
@@ -643,14 +647,17 @@ export class VerificationService {
       // OPS-04 folds the claiming reviewers into the SAME batched lookup the
       // subjects already used, so showing who holds each row costs no extra
       // query at all.
-      new MemberLookup(this.profiles).byUserIds([
-        ...new Set([
-          ...rows.map((row) => row.userId),
-          ...rows
-            .map((row) => row.assignedStaffId)
-            .filter((id): id is string => id !== null),
-        ]),
-      ]),
+      new MemberLookup(this.profiles).byUserIds(
+        [
+          ...new Set([
+            ...rows.map((row) => row.userId),
+            ...rows
+              .map((row) => row.assignedStaffId)
+              .filter((id): id is string => id !== null),
+          ]),
+        ],
+        { inactive: 'include' },
+      ),
     ]);
 
     return {
@@ -712,13 +719,16 @@ export class VerificationService {
     if (!saved) {
       throw new NotFoundException('Verification request not found');
     }
-    const members = await new MemberLookup(this.profiles).byUserIds([
-      ...new Set(
-        [saved.userId, saved.assignedStaffId].filter(
-          (id): id is string => id !== null,
+    const members = await new MemberLookup(this.profiles).byUserIds(
+      [
+        ...new Set(
+          [saved.userId, saved.assignedStaffId].filter(
+            (id): id is string => id !== null,
+          ),
         ),
-      ),
-    ]);
+      ],
+      { inactive: 'include' },
+    );
     return toAdminVerificationRequestDTO(
       saved,
       members.get(saved.userId) ?? null,
@@ -816,7 +826,9 @@ export class VerificationService {
     if (request.assignedStaffId) refUserIds.push(request.assignedStaffId);
 
     const [members, history] = await Promise.all([
-      new MemberLookup(this.profiles).byUserIds([...new Set(refUserIds)]),
+      new MemberLookup(this.profiles).byUserIds([...new Set(refUserIds)], {
+        inactive: 'include',
+      }),
       this.listHistoryDTO(request.userId),
     ]);
 

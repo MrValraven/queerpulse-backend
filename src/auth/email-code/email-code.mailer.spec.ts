@@ -237,6 +237,50 @@ describe('EmailCodeMailer', () => {
     expect(result).toEqual({ delivered: true, emailId: 're_1' });
   });
 
+  // SEC-10: the join-request confirmation code.
+  it.each([
+    ['pt', 'join-pt'],
+    ['en', 'join-en'],
+  ] as const)(
+    'sends the %s join-request template when isJoinRequest is true and it is set',
+    async (locale, expectedTemplateId) => {
+      send.mockResolvedValueOnce(success('re_1'));
+      const mailer = new EmailCodeMailer(
+        buildConfig({
+          ...CONFIGURED_WITH_SIGN_UP,
+          'email.joinRequestTemplateIdEn': 'join-en',
+          'email.joinRequestTemplateIdPt': 'join-pt',
+        }),
+      );
+
+      await mailer.sendSignInCode({ ...EMAIL, locale, isJoinRequest: true });
+
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          template: {
+            id: expectedTemplateId,
+            variables: { code: '123456', minutes: 10 },
+          },
+        }),
+        expect.objectContaining({ idempotencyKey: 'sign-in-code/c1' }),
+      );
+    },
+  );
+
+  it('falls back to the sign-in template when isJoinRequest is true and the join-request template is unset', async () => {
+    send.mockResolvedValueOnce(success('re_1'));
+    const mailer = new EmailCodeMailer(buildConfig(CONFIGURED_WITH_SIGN_UP));
+
+    await mailer.sendSignInCode({ ...EMAIL, isJoinRequest: true });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        template: expect.objectContaining({ id: 'tpl-pt' }) as unknown,
+      }),
+      expect.any(Object),
+    );
+  });
+
   it('names the sign-in variable when isRegistration is true and both templates are unset', async () => {
     const mailer = new EmailCodeMailer(
       buildConfig({ ...CONFIGURED, 'email.signInTemplateIdPt': undefined }),

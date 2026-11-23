@@ -401,9 +401,27 @@ describe('listing team write rules', () => {
       id: SUBPROFILE_ID,
       ownerUserId: 'persona-owner-1',
       isEligible: true,
+      isUnlinked: false,
     });
     expect(sqlOfCall(manager, 0)).toContain(eligiblePersonaSql('persona'));
+    expect(sqlOfCall(manager, 0)).toContain('"persona"."link_visibility"');
     expect(parametersOfCall(manager, 0)).toEqual([SUBPROFILE_ID]);
+  });
+
+  // SEC-02: the link state reaches every team write's block check.
+  it('reads an unlinked persona as unlinked', async () => {
+    manager.query.mockResolvedValueOnce([
+      {
+        id: SUBPROFILE_ID,
+        user_id: 'persona-owner-1',
+        is_eligible: true,
+        link_visibility: 'unlinked',
+      },
+    ]);
+
+    await expect(
+      readPersonaFacts(asManager(manager), SUBPROFILE_ID),
+    ).resolves.toMatchObject({ isUnlinked: true });
   });
 
   it('sees no block between a member and themself or an unowned listing', async () => {

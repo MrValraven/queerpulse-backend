@@ -27,7 +27,7 @@ import {
   restoreWithheldTrackWithin,
 } from './studio-claim-store';
 import { decodeStudioCursor } from './studio-cursor';
-import { notBlockedEitherWaySql } from './studio-discovery-sql';
+import { notBlockedWithLinkedCreatorSql } from './studio-discovery-sql';
 import { toKeysetPage } from './studio-keyset-page';
 import { releasedTrackAudioSql } from './studio-playlist-visibility';
 import { StudioPage } from './studio-response';
@@ -82,7 +82,7 @@ export const FILEABLE_TRACK_SQL = `SELECT "track"."release_id" AS "release_id",
  WHERE "track"."id" = $1
    AND ${releasedTrackAudioSql('track', 'release')}
    AND ${listenablePersonaSql('persona')}
-   AND ${notBlockedEitherWaySql('$2', '"persona"."user_id"', 'claim_block')}`;
+   AND ${notBlockedWithLinkedCreatorSql('$2', 'persona', 'claim_block')}`;
 
 /** `$1` the release, `$2` the member: a row when the member is the
  *  persona's creator or a co-owner. Checked at call time, stored nowhere. */

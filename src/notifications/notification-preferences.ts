@@ -198,6 +198,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Recognition,
   [NotificationType.SubprofileCredit]:
     NotificationPreferenceCategory.Recognition,
+  // Community badges and staff gifts answer to the Recognition switch. Neither
+  // joins the always delivered list.
+  [NotificationType.CommunityBadgeEarned]:
+    NotificationPreferenceCategory.Recognition,
+  [NotificationType.CommunityGiftReceived]:
+    NotificationPreferenceCategory.Recognition,
 
   // --- Personas -------------------------------------------------------------
   [NotificationType.SubprofileInvite]: NotificationPreferenceCategory.Personas,
@@ -500,6 +506,11 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.CommunityRoleChanged,
     NotificationType.CommunityMemberRemoved,
     NotificationType.CommunityOwnershipTransferred,
+    // PRD-514. An ownership offer is a consent request with a 14-day
+    // window, and the decline is the owner's only word on it, so neither is
+    // something a volume switch may swallow.
+    NotificationType.CommunityOwnershipOffered,
+    NotificationType.CommunityOwnershipOfferDeclined,
     NotificationType.CommunityArchived,
     NotificationType.CommunityFrozen,
     NotificationType.CommunityUnfrozen,

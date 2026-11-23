@@ -185,6 +185,11 @@ export class RecognitionService {
    * gets an identical 404 here instead of the member's badges/level. Then
    * delegates with `includePerks = false` so perk state is never leaked to a
    * non-owner (I9).
+   *
+   * Level, XP and badges belong to the full profile (SEC-20): a viewer held
+   * to the limited card (`ProfilesService.canViewFull`: a `network` member
+   * the viewer is not connected to, or a `private` member) is refused with
+   * the typed code `PROFILE_LIMITED`, before any recognition row is read.
    */
   async getBySlug(
     slug: string,
@@ -196,6 +201,15 @@ export class RecognitionService {
       viewerUserId,
       viewerRole,
     );
+    if (!(await this.profilesService.canViewFull(profile, viewerUserId))) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'PROFILE_LIMITED',
+        message:
+          'This member shares their level and badges with their connections only, or keeps them to themself.',
+      });
+    }
     return this.getForUser(profile.userId, false);
   }
 

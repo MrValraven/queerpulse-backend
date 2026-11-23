@@ -4,7 +4,7 @@ import {
   LISTENABLE_ARTIST_SQL,
   STUDIO_ARTIST_KIND_LIST_SQL,
   artistRefFromColumns,
-  notBlockedEitherWaySql,
+  notBlockedWithLinkedCreatorSql,
   personaColumnsFromRow,
   personaColumnsSql,
 } from './studio-discovery-sql';
@@ -42,7 +42,7 @@ export const RELATED_ARTISTS_SQL = `WITH "candidate" AS (
    WHERE "persona"."id" <> $2
      AND "persona"."kind" IN (${STUDIO_ARTIST_KIND_LIST_SQL})
      AND ${listenablePersonaSql('persona')}
-     AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'candidate_block')}
+     AND ${notBlockedWithLinkedCreatorSql('$1', 'persona', 'candidate_block')}
    GROUP BY "persona"."id"
 ),
 "credit_link" AS (

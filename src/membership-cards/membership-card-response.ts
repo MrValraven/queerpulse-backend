@@ -390,23 +390,27 @@ export function toCardVerification(
     photoStyle: CardPhotoStyle;
   },
 ): CardVerificationDTO {
+  // SEC-22. Only a card that is good right now names anyone. A revoked,
+  // expired or paused card, a card of a paused holder and a card of a frozen
+  // community answer with the status alone: a photo of an old card keeps
+  // telling a stranger nothing about who held it or where they belonged. The
+  // empty strings keep the wire shape stable for existing clients.
+  const isActive = status === 'active';
   return {
     status,
-    issuerName: context.issuerName,
-    holderName: context.holderName,
-    role: context.role,
+    issuerName: isActive ? context.issuerName : '',
+    holderName: isActive ? context.holderName : null,
+    role: isActive ? context.role : '',
     serial: card.serial,
     memberSince: card.issuedAt.toISOString(),
-    hasPhoto: context.hasPhoto,
-    holderPronouns: context.holderPronouns,
-    // Both gates in one place, the same way `toMyCard` gates the avatar at the
-    // single boundary it can leave through. `hasPhoto` already carries the
-    // programme switch, the member's card veto, their profile-wide photo
-    // switch and whether they have a face at all;
-    // the status check is this DTO's own, because this is the only card
+    hasPhoto: isActive && context.hasPhoto,
+    holderPronouns: isActive ? context.holderPronouns : null,
+    // `hasPhoto` already carries the programme switch, the member's card veto,
+    // their profile-wide photo switch and whether they have a face at all;
+    // the status check above is this DTO's own, because this is the only card
     // payload handed to someone who is not the holder or the issuer.
     holderPhotoUrl:
-      context.hasPhoto && status === 'active' ? context.holderAvatarUrl : null,
+      isActive && context.hasPhoto ? context.holderAvatarUrl : null,
     photoStyle: context.photoStyle,
   };
 }

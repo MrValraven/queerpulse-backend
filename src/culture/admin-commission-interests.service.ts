@@ -56,7 +56,9 @@ export class AdminCommissionInterestsService {
 
     const memberLookup = new MemberLookup(this.profiles);
     const memberIds = [...new Set(rows.map((row) => row.memberId))];
-    const refsByUserId = await memberLookup.byUserIds(memberIds);
+    const refsByUserId = await memberLookup.byUserIds(memberIds, {
+      inactive: 'include',
+    });
 
     const items: AdminCommissionInterestDTO[] = rows.map((interest) =>
       toAdminCommissionInterestDTO(

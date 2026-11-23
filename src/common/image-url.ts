@@ -1,6 +1,8 @@
 import { InternalServerErrorException, Logger } from '@nestjs/common';
-import { isStorageKey } from '../storage/storage-key';
+import { isStorageKey, storageKeyOwnerId } from '../storage/storage-key';
 import { isMessageAttachmentReference } from '../storage/message-attachment-reference';
+import { mediaReferenceVersion } from '../storage/media-reference-version';
+import { isPublicMediaReference } from '../storage/public-media-reference';
 
 const logger = new Logger('ImageUrl');
 
@@ -20,6 +22,13 @@ const logger = new Logger('ImageUrl');
 // `GET /files/*` route, which serves it by message after authorizing the
 // requester, so the uploader's user id inside the storage key never leaves
 // the server.
+//
+// SEC-01 / SEC-04: a forum photo, a listing gallery or cover photo and a
+// listing review photo shown to a reader who must not learn the uploader are
+// rendered by a fourth kind of value, a public media reference
+// (`forum-posts/<postId>/photos/<index>` and its siblings, see
+// `storage/public-media-reference.ts`). It resolves to the same route, which
+// looks the key up from the row and streams the bytes.
 //
 // Anything that is neither is dropped rather than forwarded. These columns have
 // never validated their input, so a `javascript:` or `data:` URI could have
@@ -63,7 +72,11 @@ export function toImageUrl(value: string | null | undefined): string | null {
   if (!value) {
     return null;
   }
-  if (isStorageKey(value) || isMessageAttachmentReference(value)) {
+  if (
+    isStorageKey(value) ||
+    isMessageAttachmentReference(value) ||
+    isPublicMediaReference(value)
+  ) {
     if (!apiBaseUrl) {
       // Reaching this means a mapper ran before bootstrap wired the base URL.
       // Returning a bare key would render as a broken relative image; failing
@@ -136,4 +149,71 @@ export function messageAttachmentReferenceFromImageUrl(
   }
   const reference = value.slice(filesPrefix.length);
   return isMessageAttachmentReference(reference) ? reference : null;
+}
+
+/**
+ * SEC-01 / SEC-04: the public media reference a WRITE carries, or `null` when
+ * it carries none. An edit form seeded from a read that rendered a photo by
+ * reference (a reviewer editing their own review, say) sends back either the
+ * resolved URL `<apiBaseUrl>/files/<reference>` or the bare reference, and
+ * this collapses both to the reference so `StorageKeyOwnershipInterceptor`
+ * can look the stored key up. Every other value returns `null`.
+ */
+export function publicMediaReferenceFromImageUrl(value: string): string | null {
+  if (isPublicMediaReference(withoutQuery(value))) {
+    return withoutQuery(value);
+  }
+  if (!apiBaseUrl) {
+    return null;
+  }
+  const filesPrefix = `${apiBaseUrl}/files/`;
+  if (!value.startsWith(filesPrefix)) {
+    return null;
+  }
+  // The `?v=` version token every reference URL carries is dropped: it names
+  // the photo's version, and the row is what the write needs.
+  const reference = withoutQuery(value.slice(filesPrefix.length));
+  return isPublicMediaReference(reference) ? reference : null;
+}
+
+/** `value` up to its first `?`. */
+function withoutQuery(value: string): string {
+  const queryStart = value.indexOf('?');
+  return queryStart === -1 ? value : value.slice(0, queryStart);
+}
+
+/**
+ * SEC-04: a stored image value as a PUBLIC read renders it. A member storage
+ * key names its uploader (`<prefix>/<uploaderUserId>/...`), so it is rendered
+ * as `reference`, the opaque name of the row holding it
+ * (`storage/public-media-reference.ts`), dropped to `null` when the row id
+ * could not form one. The URL carries `?v=<token>`, a short HMAC of the
+ * reference and the stored value (`storage/media-reference-version.ts`), so
+ * replacing the photo gives a new URL and one key on two surfaces gets two
+ * tokens. An external URL, or a key that names nobody, passes through
+ * `toImageUrl` unchanged, since it identifies no one.
+ */
+export function toImageUrlByReference(
+  storedValue: string | null | undefined,
+  reference: string | null,
+): string | null {
+  if (!storedValue || storageKeyOwnerId(storedValue) === null) {
+    return toImageUrl(storedValue);
+  }
+  const url = toImageUrl(reference);
+  return url && reference
+    ? `${url}?v=${mediaReferenceVersion(storedValue, reference)}`
+    : null;
+}
+
+/**
+ * `<apiBaseUrl>/files/<key>` for a storage key, or `null` while the base is
+ * not configured (a spec that never bootstraps it). For a write path that
+ * wants a value to look exactly as a read rendered it, which
+ * `storageKeyFromImageUrl` then collapses back.
+ */
+export function filesUrlOrNull(storageKey: string): string | null {
+  return apiBaseUrl && isStorageKey(storageKey)
+    ? `${apiBaseUrl}/files/${storageKey}`
+    : null;
 }

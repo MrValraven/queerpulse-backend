@@ -11,10 +11,11 @@ import {
 } from 'class-validator';
 
 /**
- * Body of the PUBLIC `POST /join-requests`. Unauthenticated, so every field is
- * attacker-controlled and every one is length-capped — the message cap is part
- * of the spam story (throttle by IP + one open request per email + bounded
- * payload), not just hygiene.
+ * The join-request form. `POST /auth/email-code/join-request/verify` takes it
+ * without `email` (plus the code) and files it under the address the code was
+ * sent to (SEC-10). Unauthenticated, so every field is attacker-controlled and
+ * every one is length-capped: the message cap is part of the spam story with
+ * the per-address code cap, the IP throttle and one open request per email.
  */
 export class CreateMembershipJoinRequestDto {
   @IsString()

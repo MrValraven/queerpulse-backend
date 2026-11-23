@@ -3,6 +3,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { SavedKind } from '../saved/entities/saved-item.entity';
 import { SavedService } from '../saved/saved.service';
+import { personaCreatorActiveSql } from '../subprofiles/persona-creator-gates';
 import {
   ClaimedReleaseRow,
   RELEASE_ALERT_CLAIM_SQL,
@@ -11,6 +12,10 @@ import {
   RELEASE_REMINDERS_DISCARD_SQL,
   StudioReleaseAlertsListener,
 } from './studio-release-alerts.listener';
+import {
+  listenablePersonaSql,
+  listenablePersonaStateSql,
+} from './studio-visibility';
 
 const RELEASE_ID = 'd1000000-0000-4000-8000-000000000001';
 const PERSONA_ID = 'd2000000-0000-4000-8000-000000000001';
@@ -26,6 +31,7 @@ const claimedRow: ClaimedReleaseRow = {
   subprofile_name: 'Night Shift',
   subprofile_slug_or_handle: 'night-shift',
   owner_user_id: OWNER_ID,
+  link_visibility: 'linked',
   reminder_user_ids: [],
 };
 
@@ -156,6 +162,26 @@ describe('StudioReleaseAlertsListener', () => {
     );
   });
 
+  // SEC-02: an unlinked persona's reminder holders and followers hear
+  // whoever they blocked, so a missing alert cannot test who runs it.
+  it('exempts an unlinked persona from the creator block on reminder holders', () => {
+    expect(RELEASE_ALERT_RECIPIENTS_SQL).toContain(
+      '"unlinked_persona"."id" = $1',
+    );
+    expect(RELEASE_LATER_DROP_REMINDERS_SQL).toContain(
+      '"unlinked_persona"."id" = "dropped"."subprofile_id"',
+    );
+  });
+
+  it('sends an unlinked persona alert with no owner to block-filter against', async () => {
+    respond([{ ...claimedRow, link_visibility: 'unlinked' }], followerIds(2));
+
+    await listener.handleReleasePublished({ releaseId: RELEASE_ID });
+
+    expect(createForRecipients).toHaveBeenCalledTimes(1);
+    expect(createForRecipients.mock.calls[0]?.[3]).toBeUndefined();
+  });
+
   it('tells followers in chunks of 500, filtered under the persona owner', async () => {
     const followers = followerIds(1200);
     respond([claimedRow], followers);
@@ -249,6 +275,18 @@ describe('StudioReleaseAlertsListener', () => {
     expect(RELEASE_ALERT_CLAIM_SQL).toContain('FROM "claimed"');
     expect(RELEASE_REMINDERS_DISCARD_SQL).toContain(
       `"release"."status" = 'published'`,
+    );
+  });
+
+  // SEC-33: a creator's account pause, suspension or erasure grace hides the
+  // release without discarding its Notify me reminders, since it can end.
+  it('keeps the reminders of a persona that fails only on its creator account', () => {
+    expect(RELEASE_REMINDERS_DISCARD_SQL).toContain(
+      `AND ${listenablePersonaStateSql('discard_persona')}
+        AND NOT ${personaCreatorActiveSql('discard_persona')}`,
+    );
+    expect(RELEASE_REMINDERS_DISCARD_SQL).not.toContain(
+      listenablePersonaSql('discard_persona'),
     );
   });
 

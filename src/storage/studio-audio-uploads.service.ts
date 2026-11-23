@@ -19,6 +19,21 @@ export interface StudioAudioStoredObject extends StoredObject {
   uploadKind: 'studio_audio';
 }
 
+/** The refusals the presign checks answer, in the order they run. */
+type StudioUploadCheckRefusal = Extract<
+  StudioErrorCode,
+  | 'studio_access_required'
+  | 'studio_not_persona_owner'
+  | 'studio_persona_kind_not_allowed'
+>;
+
+/** Why a confirm of a Studio audio key is refused: the Studio grant, the
+ *  key belonging to no persona the caller owns, or the persona kind. */
+export type StudioAudioConfirmRefusal =
+  | 'studio_access_required'
+  | 'upload_not_yours'
+  | 'studio_persona_kind_not_allowed';
+
 interface UploadCheckRow {
   has_grant: boolean;
   persona_kind: string | null;
@@ -73,6 +88,35 @@ export class StudioAudioUploadsService {
     return presigned;
   }
 
+  /**
+   * Why `userId` may not confirm (`POST /uploads/confirm`) the Studio audio
+   * object stored under `storageKey`, or null when they may. The caller must
+   * pass the very checks the presign ran for the persona the key's registry
+   * row names, in the presign's order:
+   *  - no Studio grant: `studio_access_required`, answered before the key is
+   *    looked at, so it says nothing about the key;
+   *  - no registry row, or no membership of that persona: `upload_not_yours`,
+   *    one answer for both, so the refusal never says whether a key exists;
+   *  - a persona kind that cannot upload audio:
+   *    `studio_persona_kind_not_allowed`.
+   * The uploader and every co-owner of the persona pass alike, as each of
+   * them could have presigned the key.
+   */
+  async confirmUploadRefusal(
+    userId: string,
+    storageKey: string,
+  ): Promise<StudioAudioConfirmRefusal | null> {
+    const registration = await this.findRegistration(storageKey);
+    const { refusal } = await this.uploadChecksFor(
+      userId,
+      registration?.subprofileId ?? null,
+    );
+    if (refusal === 'studio_not_persona_owner') {
+      return 'upload_not_yours';
+    }
+    return refusal;
+  }
+
   /** The registry row for a Studio audio key, or null when none names it. */
   findRegistration(storageKey: string): Promise<StudioAudioUpload | null> {
     return this.uploads.findOne({ where: { storageKey } });
@@ -118,10 +162,16 @@ export class StudioAudioUploadsService {
   // One statement answers all three checks and reads the persona kind the
   // cap depends on. An unknown persona reads as "not your persona", so the
   // refusal never confirms a persona id exists.
+  //
+  // A null persona (a confirm whose key has no registry row) still answers
+  // the grant check, and reads as "not your persona" after it.
   private async uploadChecksFor(
     userId: string,
-    subprofileId: string,
-  ): Promise<{ refusal: StudioErrorCode | null; personaKind: string | null }> {
+    subprofileId: string | null,
+  ): Promise<{
+    refusal: StudioUploadCheckRefusal | null;
+    personaKind: string | null;
+  }> {
     const rows: UploadCheckRow[] = await this.uploads.query(
       `SELECT
          EXISTS (

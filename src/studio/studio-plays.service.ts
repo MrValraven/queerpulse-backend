@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { notBlockedEitherWaySql } from './studio-discovery-sql';
+import { notBlockedWithLinkedCreatorSql } from './studio-discovery-sql';
 import { StudioPlayGate } from './studio-play-gate';
 import { describePlayErrorWithoutIds } from './studio-play-log';
 import { StudioPlayMilestonesService } from './studio-play-milestones.service';
@@ -21,7 +21,7 @@ export const PLAY_ELIGIBILITY_SQL = `SELECT COALESCE("preferences"."is_listening
   LEFT JOIN "member_preferences" "preferences" ON "preferences"."user_id" = $2::uuid
  WHERE "track"."id" = $1::uuid
    AND ${playableTrackSql('track', 'release', 'persona')}
-   AND ${notBlockedEitherWaySql('$2::uuid', '"persona"."user_id"', 'play_block')}
+   AND ${notBlockedWithLinkedCreatorSql('$2::uuid', 'persona', 'play_block')}
    AND "release"."type" <> 'podcast'
    AND NOT EXISTS (
      SELECT 1 FROM ${personaMemberUserIdsSql('"release"."subprofile_id"')} "release_member"

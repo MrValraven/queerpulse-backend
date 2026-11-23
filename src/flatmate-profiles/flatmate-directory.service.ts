@@ -5,6 +5,7 @@ import { MemberLookup } from '../common/member-ref';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { normalizePage, PAGE_SIZE, Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -113,6 +114,23 @@ export class FlatmateDirectoryService {
           AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
       )`,
       { flatmateSubjectType: FlatmateDirectoryService.SUBJECT_TYPE },
+    );
+  }
+
+  /**
+   * SEC-34 / PRD-96. Keeps a profile off the board while its owner is
+   * suspended, banned or deactivated: the predicate requires an owner row whose
+   * status is active, in-query for the same reason `excludeModeratedProfiles`
+   * is.
+   */
+  private excludeInactiveOwners(qb: SelectQueryBuilder<FlatmateProfile>): void {
+    qb.andWhere(
+      `EXISTS (
+        SELECT 1 FROM "users" "owner_user"
+        WHERE "owner_user"."id" = p.owner_id
+          AND "owner_user"."status" = :activeOwnerStatus
+      )`,
+      { activeOwnerStatus: UserStatus.Active },
     );
   }
 
@@ -229,6 +247,19 @@ export class FlatmateDirectoryService {
       throw new NotFoundException('Flatmate profile not found');
     }
     const isOwner = profile.ownerId === viewerId;
+    // SEC-34 / PRD-96: a profile whose owner is no longer active 404s for
+    // everyone else, the same withhold browse applies in-query.
+    if (
+      !isOwner &&
+      !(await this.profiles.exists({
+        where: {
+          userId: profile.ownerId,
+          user: { status: UserStatus.Active },
+        },
+      }))
+    ) {
+      throw new NotFoundException('Flatmate profile not found');
+    }
     let match: MatchResult | null = null;
     // `matches` visibility now needs an actual mutual match (ENG-51), and the
     // detail response is the ONLY place the Art.9 fields are served, so this is
@@ -488,6 +519,7 @@ export class FlatmateDirectoryService {
     // + its `getManyAndCount` total, the ranked candidate fetch (so the ranked
     // `total` agrees with the list), and the ranked page's row re-read.
     this.excludeModeratedProfiles(qb);
+    this.excludeInactiveOwners(qb);
     return qb;
   }
 

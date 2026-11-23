@@ -6,7 +6,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, IsNull, Not, Repository } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  IsNull,
+  Not,
+  Repository,
+} from 'typeorm';
 import { AuthService } from '../auth/auth.service';
 import {
   IdentityRelinkCandidate,
@@ -19,7 +27,9 @@ import {
 } from '../account/entities/deletion-request.entity';
 import {
   EmailSuppression,
-  hashSuppressedEmail,
+  suppressionKeyForNewRow,
+  suppressionLookupKeys,
+  suppressionPepper,
 } from '../account/entities/email-suppression.entity';
 import { isUniqueViolation } from '../common/db-errors';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
@@ -93,6 +103,9 @@ export class AdminIdentityService {
     // For `revokeAllForUser` after a re-link. `AuthModule` exports `AuthService`
     // and reaches nothing in this module, so this edge closes no cycle.
     private readonly auth: AuthService,
+    // SEC-14: holds the pepper the suppression list's HMAC keys derive from.
+    // Global, so no module wiring.
+    private readonly config: ConfigService,
   ) {}
 
   /* ── PRD-06: re-link a Google identity ─────────────────────────────────── */
@@ -628,8 +641,12 @@ export class AdminIdentityService {
    * operator infer it from a 404 on the lift would be worse.
    */
   async lookupSuppression(email: string): Promise<EmailSuppressionLookupDTO> {
-    const emailHash = hashSuppressedEmail(email);
-    const row = await this.emailSuppressions.findOne({ where: { emailHash } });
+    const row = await this.emailSuppressions.findOne({
+      where: { emailHash: In(this.suppressionKeysFor(email)) },
+    });
+    // The prefix of the row that matched, so an operator quotes the key the
+    // table actually holds. With no row, the key a new row would get.
+    const emailHash = row?.emailHash ?? this.newSuppressionKeyFor(email);
     return {
       email,
       isSuppressed: row !== null,
@@ -663,19 +680,21 @@ export class AdminIdentityService {
     email: string,
     reason: string,
   ): Promise<EmailSuppressionLiftedDTO> {
-    const emailHash = hashSuppressedEmail(email);
+    const lookupKeys = this.suppressionKeysFor(email);
     const liftedAt = new Date();
 
-    await this.dataSource.transaction(async (manager) => {
+    const emailHash = await this.dataSource.transaction(async (manager) => {
       const row = await manager.findOne(EmailSuppression, {
-        where: { emailHash },
+        where: { emailHash: In(lookupKeys) },
       });
       if (!row) {
         throw new NotFoundException(
           'That address is not on the suppression list.',
         );
       }
-      await manager.delete(EmailSuppression, { id: row.id });
+      // Every key the address may sit under goes, so a legacy SHA-256 row and
+      // a peppered HMAC row for the same address cannot leave one behind.
+      await manager.delete(EmailSuppression, { emailHash: In(lookupKeys) });
       await this.writeAudit(manager, {
         actorUserId,
         // No `targetUserId`: the account this row protected was erased, which
@@ -684,8 +703,9 @@ export class AdminIdentityService {
         targetUserId: null,
         targetName: null,
         action: 'email_suppression_lifted',
-        note: `suppression ${emailHash.slice(0, SUPPRESSION_HASH_PREFIX_LENGTH)} (added ${row.createdAt.toISOString()}, reason ${row.reason}) · ${reason}`,
+        note: `suppression ${row.emailHash.slice(0, SUPPRESSION_HASH_PREFIX_LENGTH)} (added ${row.createdAt.toISOString()}, reason ${row.reason}) · ${reason}`,
       });
+      return row.emailHash;
     });
 
     this.logger.warn(
@@ -698,6 +718,19 @@ export class AdminIdentityService {
       emailHashPrefix: emailHash.slice(0, SUPPRESSION_HASH_PREFIX_LENGTH),
       liftedAt: liftedAt.toISOString(),
     };
+  }
+
+  /**
+   * SEC-14: rows are keyed on a peppered HMAC since that change and on a bare
+   * SHA-256 before it, so a lookup or a lift asks for both keys.
+   */
+  private suppressionKeysFor(email: string): string[] {
+    return suppressionLookupKeys(email, suppressionPepper(this.config));
+  }
+
+  /** The key `AccountDeletionProcessorService` would write for this address. */
+  private newSuppressionKeyFor(email: string): string {
+    return suppressionKeyForNewRow(email, suppressionPepper(this.config));
   }
 
   /* ── shared ────────────────────────────────────────────────────────────── */

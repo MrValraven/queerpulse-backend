@@ -30,6 +30,7 @@ import {
   IdentityRelinkCandidateStatus,
 } from './entities/identity-relink-candidate.entity';
 import { EmailCodeRefusedError } from './email-code/email-code-refusal';
+import { EMAIL_CODE_UNKNOWN_CHALLENGE_ATTEMPTS_LEFT } from './email-code/email-code.constants';
 import { SECURITY_NEW_SIGN_IN } from './security.events';
 import { fileStudioAccessRequestForInvite } from '../studio/studio-access-request-filing';
 
@@ -47,6 +48,8 @@ const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
 
 interface RepoMock {
   findOne: jest.Mock;
+  /** Backs the grace mint's live-row read on the family (SEC-09). */
+  find: jest.Mock;
   update: jest.Mock;
   create: jest.Mock;
   save: jest.Mock;
@@ -72,6 +75,10 @@ interface UsersMock {
 function buildMocks() {
   const repo: RepoMock = {
     findOne: jest.fn(),
+    // The grace mint asks whether the family still holds a live row. One by
+    // default: the race winner's row, which is what a real two-client race
+    // leaves behind. The SEC-09 tests empty it.
+    find: jest.fn().mockResolvedValue([{ id: 'newer-row' }]),
     // Every update resolves an UpdateResult-shaped object with `affected`.
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     create: jest.fn((v: Record<string, unknown>) => v),
@@ -424,6 +431,165 @@ describe('AuthService.rotateRefreshToken', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
       userId: 'u1',
+    });
+  });
+
+  describe('grace mint after the session was ended (SEC-09)', () => {
+    interface StoredRefreshRow {
+      id: string;
+      userId: string;
+      familyId: string;
+      tokenHash: string;
+      sessionStartedAt: Date;
+      expiresAt: Date;
+      revokedAt: Date | null;
+      replacedBy: string | null;
+    }
+    interface RefreshRowWhere {
+      tokenHash?: string;
+      id?: string;
+      familyId?: string;
+      userId?: string;
+    }
+
+    /**
+     * A two-row family the moment after a legitimate rotation: the parent was
+     * rotated one second ago (inside the grace window) and the child is the
+     * live row the member's client now holds. `parentExpiresAt` moves the
+     * parent's own expiry.
+     */
+    function rotatedFamily(
+      parentExpiresAt: Date = new Date(Date.now() + 60_000),
+    ): StoredRefreshRow[] {
+      return [
+        {
+          id: 'parent-row',
+          userId: 'u1',
+          familyId: 'fam-1',
+          tokenHash: sha256('parent-token'),
+          sessionStartedAt: new Date('2026-08-01T10:00:00Z'),
+          expiresAt: parentExpiresAt,
+          revokedAt: new Date(Date.now() - 1_000),
+          replacedBy: 'child-row',
+        },
+        {
+          id: 'child-row',
+          userId: 'u1',
+          familyId: 'fam-1',
+          tokenHash: sha256('child-token'),
+          sessionStartedAt: new Date('2026-08-01T10:00:00Z'),
+          expiresAt: new Date(Date.now() + 60_000),
+          revokedAt: null,
+          replacedBy: null,
+        },
+      ];
+    }
+
+    /**
+     * Backs the repository with `rows`. Every update these paths make is
+     * conditional on `revoked_at IS NULL`, so the store stamps live rows only,
+     * which is exactly the behaviour SEC-09 is about: a revoke never touches
+     * the already-rotated parent.
+     */
+    function installRefreshStore(rows: StoredRefreshRow[]): void {
+      const matches = (row: StoredRefreshRow, where: RefreshRowWhere) =>
+        (where.tokenHash === undefined || row.tokenHash === where.tokenHash) &&
+        (where.id === undefined || row.id === where.id) &&
+        (where.familyId === undefined || row.familyId === where.familyId) &&
+        (where.userId === undefined || row.userId === where.userId);
+      mocks.repo.findOne.mockImplementation(
+        (options: { where: RefreshRowWhere }) =>
+          Promise.resolve(
+            rows.find((row) => matches(row, options.where)) ?? null,
+          ),
+      );
+      mocks.repo.update.mockImplementation(
+        (where: RefreshRowWhere, patch: Partial<StoredRefreshRow>) => {
+          const live = rows.filter(
+            (row) => row.revokedAt === null && matches(row, where),
+          );
+          for (const row of live) {
+            Object.assign(row, patch);
+          }
+          return Promise.resolve({ affected: live.length });
+        },
+      );
+      mocks.repo.find.mockImplementation(
+        (options: { where: { familyId: string } }) =>
+          Promise.resolve(
+            rows
+              .filter(
+                (row) =>
+                  row.familyId === options.where.familyId &&
+                  row.revokedAt === null &&
+                  row.expiresAt.getTime() > Date.now(),
+              )
+              .map((row) => ({ id: row.id })),
+          ),
+      );
+    }
+
+    it('still absorbs the race while the family holds a live row', async () => {
+      installRefreshStore(rotatedFamily());
+
+      await expect(
+        service.rotateRefreshToken('parent-token', 'agent'),
+      ).resolves.toEqual({ accessToken: 'signed', refreshToken: 'signed' });
+      expect(mocks.repo.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a grace refresh after logout and answers it as reuse', async () => {
+      const rows = rotatedFamily();
+      installRefreshStore(rows);
+
+      // The member signs out on the device holding the live child token.
+      await expect(service.revokeRefreshToken('child-token')).resolves.toBe(
+        'u1',
+      );
+      mocks.events.emit.mockClear();
+
+      // Someone holding a copy of the parent presents it inside the window.
+      await expect(
+        service.rotateRefreshToken('parent-token', 'agent'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      // Nothing was minted, so the signed-out session stays dead.
+      expect(mocks.repo.save).not.toHaveBeenCalled();
+      expect(rows.every((row) => row.revokedAt !== null)).toBe(true);
+      // Answered as reuse: every session revoked and the sockets dropped.
+      expect(mocks.repo.update).toHaveBeenLastCalledWith(
+        expect.objectContaining({ userId: 'u1' }),
+        expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
+      );
+      expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
+        userId: 'u1',
+      });
+    });
+
+    it('refuses a grace refresh after sign out everywhere', async () => {
+      const rows = rotatedFamily();
+      installRefreshStore(rows);
+
+      await service.revokeAllForUser('u1');
+
+      await expect(
+        service.rotateRefreshToken('parent-token', 'agent'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(mocks.repo.save).not.toHaveBeenCalled();
+      expect(rows.every((row) => row.revokedAt !== null)).toBe(true);
+    });
+
+    it('refuses a grace refresh once the parent is past its expiry', async () => {
+      installRefreshStore(rotatedFamily(new Date(Date.now() - 1_000)));
+
+      await expect(
+        service.rotateRefreshToken('parent-token', 'agent'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(mocks.repo.save).not.toHaveBeenCalled();
+      expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+      expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
+        userId: 'u1',
+      });
     });
   });
 
@@ -1249,7 +1415,8 @@ describe('AuthService.signInWithVerifiedEmail', () => {
     expect(mocks.users.createEmailUser).not.toHaveBeenCalled();
   });
 
-  it('refuses a system account with code_incorrect and attemptsLeft 4', async () => {
+  // Reads like a first wrong try on a real challenge, which allows 3 tries (SEC-11).
+  it('refuses a system account with code_incorrect and attemptsLeft 2', async () => {
     mocks.users.findByEmailForSignIn.mockResolvedValue({
       id: 'house',
       status: UserStatus.Active,
@@ -1263,8 +1430,9 @@ describe('AuthService.signInWithVerifiedEmail', () => {
     expect(refusal).toBeInstanceOf(EmailCodeRefusedError);
     expect((refusal as EmailCodeRefusedError).getResponse()).toMatchObject({
       reason: 'code_incorrect',
-      attemptsLeft: 4,
+      attemptsLeft: EMAIL_CODE_UNKNOWN_CHALLENGE_ATTEMPTS_LEFT,
     });
+    expect(EMAIL_CODE_UNKNOWN_CHALLENGE_ATTEMPTS_LEFT).toBe(2);
     expect(mocks.relinkCandidates.exists).not.toHaveBeenCalled();
   });
 

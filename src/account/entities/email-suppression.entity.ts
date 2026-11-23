@@ -6,7 +6,9 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
-import { createHash } from 'node:crypto';
+import type { ConfigService } from '@nestjs/config';
+import { createHash, createHmac } from 'node:crypto';
+import { normalizeEmailIdentifier } from '../../ban-evasion/ban-evasion.hash';
 
 /**
  * The email suppression list the delete-account UI promises: "Your email
@@ -28,14 +30,22 @@ import { createHash } from 'node:crypto';
  * answers the only question we ever ask of it ("is *this* address suppressed?")
  * without retaining the address.
  *
- * Honest limitation: email addresses are a low-entropy, enumerable space, so a
- * bare hash is not strong anonymization against an attacker who already holds a
- * candidate address and wants to confirm it. It is not meant to be — it removes
- * bulk-readable PII at rest, which is the risk that actually applies to a dump
- * of this table. A keyed HMAC with a secret from config would raise that bar;
- * it is not done here because the key would then be a new piece of
- * lose-it-and-the-list-is-dead state, which is a deployment decision rather
- * than a code one.
+ * SEC-14: new rows are keyed on a PEPPERED HMAC (`suppressionKeyForNewRow`).
+ * Email addresses are a low-entropy, enumerable space, so the unsalted SHA-256
+ * the table started with let anyone holding a read of it confirm that a given
+ * person once had an account and erased it, by hashing the candidate address.
+ * The HMAC needs the server-side pepper (`BAN_EVASION_PEPPER`, the same
+ * write-once secret `ban-evasion.hash.ts` keys on, domain-separated so the two
+ * tables never share a digest), which never sits in the database.
+ *
+ * Rows written before SEC-14 keep their SHA-256 key; there is no data
+ * migration, since the plaintext needed to re-key them is gone by design.
+ * Every lookup therefore asks for both keys (`suppressionLookupKeys`).
+ *
+ * With no pepper configured, new rows fall back to the SHA-256 key. A
+ * suppression list that silently stops recording is the worse failure: the
+ * erased member's address would become free to re-register. Rotating the
+ * pepper orphans every HMAC row in the same way, so it stays write-once.
  */
 @Entity('email_suppression')
 export class EmailSuppression {
@@ -62,7 +72,78 @@ export class EmailSuppression {
  * Note this does NOT strip gmail-style dots or `+tags`: those are
  * provider-specific rules, and silently suppressing `a+b@gmail.com` because
  * `a@gmail.com` left would block an address the member never asked us to block.
+ *
+ * This is the LEGACY key (unsalted SHA-256). New rows take
+ * `suppressionKeyForNewRow`; this stays exported so lookups still match rows
+ * written before SEC-14.
  */
 export function hashSuppressedEmail(email: string): string {
-  return createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
+  return createHash('sha256')
+    .update(normalizeEmailIdentifier(email))
+    .digest('hex');
+}
+
+/**
+ * Domain label mixed into the pepper before it keys the suppression HMAC. The
+ * ban-evasion store hashes the same normalized address under the same pepper,
+ * so without this the two tables would hold identical digests and could be
+ * joined row for row.
+ */
+const SUPPRESSION_HMAC_CONTEXT = 'qp:email-suppression:v1';
+
+/**
+ * The peppered key (SEC-14): HMAC-SHA256 of the normalized address under a
+ * key derived from the pepper for this table alone. Null without a pepper.
+ */
+export function hmacSuppressedEmail(
+  email: string,
+  pepper: string | null | undefined,
+): string | null {
+  if (!pepper) return null;
+  const tableKey = createHmac('sha256', pepper)
+    .update(SUPPRESSION_HMAC_CONTEXT)
+    .digest();
+  return createHmac('sha256', tableKey)
+    .update(normalizeEmailIdentifier(email))
+    .digest('hex');
+}
+
+/**
+ * The key a NEW suppression row is written under: the peppered HMAC, or the
+ * legacy SHA-256 when no pepper is configured (see the entity doc for why a
+ * weaker key beats no row).
+ */
+export function suppressionKeyForNewRow(
+  email: string,
+  pepper: string | null | undefined,
+): string {
+  return hmacSuppressedEmail(email, pepper) ?? hashSuppressedEmail(email);
+}
+
+/**
+ * Every key an address may be stored under: the peppered HMAC (when a pepper
+ * is configured) and the legacy SHA-256. Query with `In(...)` so rows written
+ * on either side of SEC-14 both match.
+ */
+export function suppressionLookupKeys(
+  email: string,
+  pepper: string | null | undefined,
+): string[] {
+  const peppered = hmacSuppressedEmail(email, pepper);
+  const legacy = hashSuppressedEmail(email);
+  return peppered ? [peppered, legacy] : [legacy];
+}
+
+/**
+ * The pepper the suppression keys use, read from config. `banEvasion.pepper`
+ * is registered by `BanEvasionModule`'s `forFeature`; the raw env name is the
+ * fallback so a reader in a module that loads before it still sees the value.
+ */
+export function suppressionPepper(
+  config: Pick<ConfigService, 'get'>,
+): string | undefined {
+  return (
+    config.get<string>('banEvasion.pepper') ??
+    config.get<string>('BAN_EVASION_PEPPER')
+  );
 }

@@ -81,6 +81,20 @@ describe('ProfilesService mutual voucher count: the privacy gate', () => {
     expect(count).toBeNull();
   });
 
+  it('returns null without reading the voucher graph when the member keeps their trust network private (SEC-17)', async () => {
+    const harness = buildHarness();
+    harness.getNamedVoucherIds.mockResolvedValue(['voucher-1']);
+    harness.acceptedConnectionsAmong.mockResolvedValue(new Set(['voucher-1']));
+
+    const count = await harness.countFor(
+      memberProfile({ privateNetwork: true }),
+      'viewer-1',
+    );
+
+    expect(count).toBeNull();
+    expect(harness.getNamedVoucherIds).not.toHaveBeenCalled();
+  });
+
   it('does not even read the voucher graph when the roster is hidden', async () => {
     const harness = buildHarness();
 

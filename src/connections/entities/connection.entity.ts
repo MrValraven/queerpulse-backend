@@ -101,8 +101,9 @@ export class Connection {
   @Column({ type: 'uuid', nullable: true })
   introducedBy!: string | null;
 
-  // Set when the target is `private`-visibility: the request is allowed through
-  // but recorded for later moderation. Persist-only (not surfaced in responses).
+  // Legacy marker from when requests to a `private` member were allowed through
+  // and recorded. New requests to a private member are refused (PRD-506), so
+  // new rows write false. Persist-only (not surfaced in responses).
   @Column({ type: 'boolean', default: false })
   flagged!: boolean;
 

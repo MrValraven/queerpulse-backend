@@ -1,4 +1,5 @@
 import { EntityManager, In } from 'typeorm';
+import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import { ListingCoManagerStatus } from './entities/listing-co-manager.entity';
 import {
@@ -119,12 +120,16 @@ export interface TeamPersonaFacts {
   id: string;
   ownerUserId: string;
   isEligible: boolean;
+  /** SEC-02: an unlinked persona answers every listing alike, so no team
+   *  write consults a block with its owner. */
+  isUnlinked: boolean;
 }
 
 interface TeamPersonaFactsRow {
   id: string;
   user_id: string;
   is_eligible: boolean;
+  link_visibility?: string;
 }
 
 export async function readPersonaFacts(
@@ -132,7 +137,7 @@ export async function readPersonaFacts(
   subprofileId: string,
 ): Promise<TeamPersonaFacts | null> {
   const rows = await manager.query<TeamPersonaFactsRow[]>(
-    `SELECT "persona"."id", "persona"."user_id",
+    `SELECT "persona"."id", "persona"."user_id", "persona"."link_visibility",
             (${eligiblePersonaSql('persona')}) AS "is_eligible"
        FROM "subprofiles" "persona"
       WHERE "persona"."id" = $1`,
@@ -146,6 +151,7 @@ export async function readPersonaFacts(
     id: row.id,
     ownerUserId: row.user_id,
     isEligible: row.is_eligible === true,
+    isUnlinked: row.link_visibility === SubprofileLinkVisibility.Unlinked,
   };
 }
 

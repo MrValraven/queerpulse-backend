@@ -356,7 +356,7 @@ sign-in stays off; email codes cover local sign-in).
 | `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | 48 random bytes each, base64, guaranteed distinct (boot requires 32+ characters and two different values) |
 | `CARD_SIGNING_PRIVATE_KEY`, `CARD_SIGNING_PUBLIC_KEY` | a fresh Ed25519 key pair as PEM, stored on one double-quoted line with `\n` escapes (dotenv expands them) |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | a fresh P-256 pair in base64url, the format `npx web-push generate-vapid-keys` prints; `VAPID_SUBJECT` keeps `mailto:hello@queerpulse.example` |
-| `BAN_EVASION_PEPPER` | 32 random bytes, hex |
+| `BAN_EVASION_PEPPER` | 32 random bytes, hex. Write-once: the ban-evasion signals and the erased-account email suppression list are both keyed on it, so rotating or unsetting it lets erased addresses register again |
 | `EMAIL_CODE_DEV_LOG` | `true`: email sign-in codes are logged by the API and never sent |
 | `DATABASE_URL` | the `.env.example` URL with its port set to `QP_POSTGRES_PORT` (default 5432) |
 | `AWS_*` with MinIO running or about to start | `AWS_ENDPOINT_URL=http://localhost:9000`, `AWS_DEFAULT_REGION=us-east-1`, `AWS_S3_BUCKET_NAME=queerpulse-dev`, `AWS_ACCESS_KEY_ID=queerpulse`, `AWS_SECRET_ACCESS_KEY=queerpulse-dev-secret`, `AWS_S3_FORCE_PATH_STYLE=true` |

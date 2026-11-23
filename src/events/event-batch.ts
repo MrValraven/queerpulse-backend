@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import type {
@@ -149,6 +150,13 @@ export interface EventBatchTemplateView {
   startTime: string;
   /** `HH:mm` in `timezone`, null when the starting event has no end. */
   endTime: string | null;
+  /**
+   * PRD-518: how many calendar days after its start day the starting event
+   * ends, on `timezone`'s clock (`batchTemplateSpanOf`). Null when it has no
+   * end. A row whose end is still `endTime` keeps this span, so the page
+   * reads "ends N days later" from it.
+   */
+  endDayOffset: number | null;
   /** Display URL (`toImageUrl`) for the preview. The page does not send it
    *  back; the batch reads the stored cover server-side. */
   coverImageUrl: string | null;
@@ -266,6 +274,9 @@ function padTwoDigits(value: number): string {
  * its end out takes the shared end. An end at or before the start on the
  * clock falls on the next calendar day, the wizard's `schedulePair.ts` rule,
  * so 23:00 to 02:00 is a late night and 21:00 to 21:00 is a full day.
+ * When the end is still the starting event's own end, the starting event's
+ * calendar span (`templateSpan`) applies, so a weekend event keeps its
+ * weekend.
  *
  * Each wall time goes through `instantForWallClock`, which lands a time the
  * spring clock change skips one hour later and takes the first of a repeated
@@ -278,6 +289,7 @@ export function resolveBatchRowSchedule(
   row: Pick<EventBatchRowDto, 'date' | 'startTime' | 'endTime'>,
   shared: Pick<EventBatchSharedDto, 'startTime' | 'endTime'>,
   timeZone: string,
+  templateSpan: BatchTemplateSpan | null = null,
 ): BatchRowSchedule {
   const startTime = row.startTime ?? shared.startTime;
   const endTime =
@@ -288,12 +300,49 @@ export function resolveBatchRowSchedule(
   );
   if (endTime === null) return { startAt, endAt: null };
   // `HH:mm` strings compare in clock order, both being zero-padded.
-  const endDayOffset = endTime <= startTime ? 1 : 0;
+  const clockEndDayOffset = endTime <= startTime ? 1 : 0;
+  // PRD-518: an end the host left as the starting event's own keeps that
+  // event's calendar span, so a weekend festival stays a weekend. A changed
+  // end reads on the clock alone, as before.
+  const endDayOffset =
+    templateSpan !== null &&
+    templateSpan.endDayOffset > clockEndDayOffset &&
+    endTime === templateSpan.endTime
+      ? templateSpan.endDayOffset
+      : clockEndDayOffset;
   const endAt = instantForWallClock(
     wallClockOn(row.date, endTime, endDayOffset),
     timeZone,
   );
   return { startAt, endAt };
+}
+
+/**
+ * How far the starting event's end sits from its start on `timeZone`'s
+ * calendar: the wall clock end time and the number of calendar days after the
+ * start day. Null when the starting event has no end.
+ */
+export interface BatchTemplateSpan {
+  endTime: string;
+  endDayOffset: number;
+}
+
+export function batchTemplateSpanOf(
+  template: Pick<Event, 'startAt' | 'endAt' | 'timezone'>,
+): BatchTemplateSpan | null {
+  if (!template.endAt) return null;
+  const startDay = wallClockAt(template.startAt, template.timezone);
+  const endDay = wallClockAt(template.endAt, template.timezone);
+  const millisecondsPerDay = 24 * 60 * 60 * 1000;
+  const endDayOffset = Math.round(
+    (Date.UTC(endDay.year, endDay.month, endDay.day) -
+      Date.UTC(startDay.year, startDay.month, startDay.day)) /
+      millisecondsPerDay,
+  );
+  return {
+    endTime: wallClockTimeOf(template.endAt, template.timezone),
+    endDayOffset: Math.max(endDayOffset, 0),
+  };
 }
 
 /**
@@ -533,6 +582,31 @@ export function eventBatchTemplateCommunityOnly(
     code: 'EVENT_BATCH_TEMPLATE_COMMUNITY_ONLY',
     message: `The event you started from is only for members of ${audience}, and only its moderators can post events there.`,
     communityName,
+  });
+}
+
+/** 403: the starting event is one QueerPulse hosts in Music, and only its
+ *  host may copy it here. A co-host seat or a staff role does not carry that
+ *  right: the copies would go out under the caller's own name with no music
+ *  audit row, so staff add dates from the admin music tool. */
+export function eventBatchTemplateHouseMusicHostOnly(): ForbiddenException {
+  return new ForbiddenException({
+    statusCode: 403,
+    code: 'EVENT_BATCH_TEMPLATE_HOUSE_MUSIC_HOST_ONLY',
+    message:
+      'This event is hosted by QueerPulse in Music, so only its host can copy it here. QueerPulse staff can add dates from Music events in Admin.',
+  });
+}
+
+/** 403: the starting event is limited to the host's network and the caller is
+ *  a co-host. The copies would reach the co-host's own connections, which
+ *  widens or changes who sees them. */
+export function eventBatchTemplateNetworkCohost(): ForbiddenException {
+  return new ForbiddenException({
+    statusCode: 403,
+    code: 'EVENT_BATCH_TEMPLATE_NETWORK_COHOST',
+    message:
+      "This event is limited to the host's network, so only the host can copy it.",
   });
 }
 

@@ -35,6 +35,9 @@ export class PlatformLogController {
   @ApiOkResponse({ description: 'One page of log entries.' })
   @Get()
   list(@Query() query: PlatformLogQuery, @CurrentUser() user: CurrentUserData) {
-    return this.platformLog.list(query, { role: user.role });
+    return this.platformLog.list(query, {
+      role: user.role,
+      userId: user.userId,
+    });
   }
 }

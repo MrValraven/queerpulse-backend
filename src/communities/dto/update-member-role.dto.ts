@@ -5,9 +5,10 @@ import { RosterRole } from '../entities/community-member.entity';
  * Body of `PATCH /communities/:slug/members/:memberSlug`.
  *
  * `owner` is deliberately NOT an accepted value: ownership is a property of
- * the community (`Community.ownerId`), not something the roster route may
- * hand out, and ownership moves through `POST /communities/:slug/transfer`
- * instead. Rejecting it at the DTO means the service's owner invariants can
+ * the community (`Community.ownerId`) that the roster route has no power to
+ * hand out. It moves only when a member accepts an ownership offer
+ * (`POST /communities/:slug/ownership-offer`, PRD-514). Rejecting it at the
+ * DTO means the service's owner invariants can
  * never be reached by a well-formed request in the first place (defence in
  * depth: the service enforces them regardless).
  *

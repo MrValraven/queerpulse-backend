@@ -1,7 +1,7 @@
 import { ExecutionContext } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleAuthGuard } from './google-auth.guard';
-import { decodeOAuthState } from '../oauth-state';
+import { decodeOAuthState, encodeOAuthState } from '../oauth-state';
 import { OAuthCallbackError } from '../errors/oauth-callback.error';
 import { OAuthProfileError } from '../errors/oauth-profile.error';
 
@@ -23,9 +23,12 @@ function outboundContext(
   } as unknown as ExecutionContext;
 }
 
-function callbackContext(query: Record<string, unknown>): ExecutionContext {
+function callbackContext(
+  query: Record<string, unknown>,
+  cookies?: Record<string, string>,
+): ExecutionContext {
   return {
-    switchToHttp: () => ({ getRequest: () => ({ query }) }),
+    switchToHttp: () => ({ getRequest: () => ({ query, cookies }) }),
   } as unknown as ExecutionContext;
 }
 
@@ -139,6 +142,22 @@ describe('GoogleAuthGuard.getAuthenticateOptions', () => {
     );
     expect(opts).toEqual({});
   });
+
+  it('hands the minted nonce to the strategy for the PKCE challenge on the outbound leg (SEC-15)', () => {
+    const res = { cookie: jest.fn() };
+    const opts = makeGuard().getAuthenticateOptions(outboundContext({}, res));
+    const [, cookieNonce] = res.cookie.mock.calls[0] as [string, string];
+
+    expect(opts.pkceNonce).toBe(cookieNonce);
+  });
+
+  it('hands the nonce cookie to the strategy for the PKCE verifier on the callback leg (SEC-15)', () => {
+    const opts = makeGuard().getAuthenticateOptions(
+      callbackContext({ state: 'abc', code: 'xyz' }, { oauth_state: 'n-1' }),
+    );
+
+    expect(opts).toEqual({ pkceNonce: 'n-1' });
+  });
 });
 
 describe('GoogleAuthGuard.handleRequest', () => {
@@ -203,6 +222,66 @@ describe('GoogleAuthGuard.handleRequest', () => {
       fail('expected throw');
     } catch (e) {
       expect((e as OAuthCallbackError).code).toBe('oauth_failed');
+    }
+  });
+
+  it('names a lapsed nonce cookie invalid_state when the code exchange fails', () => {
+    const state = encodeOAuthState({ nonce: 'n-1' });
+    try {
+      makeGuard().handleRequest(
+        new Error('Failed to obtain access token'),
+        null,
+        null,
+        callbackContext({ state, code: 'xyz' }),
+      );
+      fail('expected throw');
+    } catch (e) {
+      expect((e as OAuthCallbackError).code).toBe('invalid_state');
+    }
+  });
+
+  it('names a nonce cookie from another attempt invalid_state', () => {
+    const state = encodeOAuthState({ nonce: 'n-1' });
+    try {
+      makeGuard().handleRequest(
+        new Error('Failed to obtain access token'),
+        null,
+        null,
+        callbackContext({ state, code: 'xyz' }, { oauth_state: 'n-2' }),
+      );
+      fail('expected throw');
+    } catch (e) {
+      expect((e as OAuthCallbackError).code).toBe('invalid_state');
+    }
+  });
+
+  it('keeps oauth_failed when the nonce matches and the exchange still fails', () => {
+    const state = encodeOAuthState({ nonce: 'n-1' });
+    try {
+      makeGuard().handleRequest(
+        new Error('Failed to obtain access token'),
+        null,
+        null,
+        callbackContext({ state, code: 'xyz' }, { oauth_state: 'n-1' }),
+      );
+      fail('expected throw');
+    } catch (e) {
+      expect((e as OAuthCallbackError).code).toBe('oauth_failed');
+    }
+  });
+
+  it("keeps Google's own error code over a lapsed nonce", () => {
+    const state = encodeOAuthState({ nonce: 'n-1' });
+    try {
+      makeGuard().handleRequest(
+        null,
+        null,
+        null,
+        callbackContext({ state, error: 'admin_policy_enforced' }),
+      );
+      fail('expected throw');
+    } catch (e) {
+      expect((e as OAuthCallbackError).code).toBe('admin_policy_enforced');
     }
   });
 

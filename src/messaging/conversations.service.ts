@@ -84,6 +84,7 @@ import {
   notModeratedMessagePredicate,
   withinLeftAtCeilingPredicate,
 } from './message-visibility-predicates';
+import { insideAbsenceGapPredicate } from './group-absence-gap';
 import { inviteLinkUsageFields } from './group-invite-link-usage';
 import { DEFAULT_LIMIT, MAX_LIMIT } from './messaging.constants';
 import { MessagingCoreService } from './messaging-core.service';
@@ -239,6 +240,7 @@ export class ConversationsService {
             )
             AND ${notModeratedMessagePredicate('message')}
             AND ${withinLeftAtCeilingPredicate('message.created_at', 'participant')}
+            AND NOT ${insideAbsenceGapPredicate('message.created_at', 'participant')}
             AND ${notFromBlockedGroupMemberPredicate('message', ':userId')}),
         (SELECT conversation.created_at FROM conversations conversation
           WHERE conversation.id = participant.conversation_id)
@@ -269,6 +271,7 @@ export class ConversationsService {
               AND message.deleted_at IS NULL
               AND message.created_at > participant.cleared_at
               AND ${withinLeftAtCeilingPredicate('message.created_at', 'participant')}
+              AND NOT ${insideAbsenceGapPredicate('message.created_at', 'participant')}
               AND ${notFromBlockedGroupMemberPredicate('message', ':userId')}
           )
         )`,
@@ -851,6 +854,9 @@ export class ConversationsService {
               profileByUser,
               userId,
               privacyByUser,
+              // SEC-26: `blockedCounterparts` already covers every group
+              // member on this page, so the roster needs no second read.
+              blockedCounterparts,
               nameOptions,
             )
           : [];

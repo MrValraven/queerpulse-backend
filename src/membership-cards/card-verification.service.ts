@@ -95,9 +95,14 @@ export class CardVerificationService {
     // the verification or make a stranger at a door wait for a second write.
     this.scanLog.record(card.id, status);
 
-    const membership = await this.members.findOne({
-      where: { communityId: community.id, userId: card.userId },
-    });
+    // A card that is not good right now names nobody (SEC-22), so the role
+    // lookup is skipped for it.
+    const membership =
+      status === 'active'
+        ? await this.members.findOne({
+            where: { communityId: community.id, userId: card.userId },
+          })
+        : null;
 
     // The holder's profile-wide "Show your photo" switch, through the same
     // gate the issuer roster applies, so the door and the roster agree: once

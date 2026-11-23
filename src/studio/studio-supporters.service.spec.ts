@@ -3,7 +3,14 @@ import { DataSource, In, Repository } from 'typeorm';
 import { SubprofileSocialLink } from '../subprofiles/entities/subprofile-social-link.entity';
 import { SubprofileFollowersService } from '../subprofiles/subprofile-followers.service';
 import { Profile } from '../users/entities/profile.entity';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
 import { StudioOwnershipService } from './studio-ownership.service';
+import {
+  blockedWithAnyPersonaMemberSql,
+  chosenPersonaShownToOthersSql,
+  personaIdentityBlockedBySql,
+  personaMemberUserIdsSql,
+} from './studio-persona-members';
 import {
   MEMBER_PERSONAS_SQL,
   OPTED_IN_COUNT_SQL,
@@ -713,6 +720,45 @@ describe('StudioSupportersService', () => {
       expect(OPTED_IN_COUNT_SQL).toContain(
         '"supporter"."is_hidden" IS NOT TRUE',
       );
+    });
+
+    // SEC-02 ruling on C1: a listener shown as an unlinked persona stays on
+    // the list whoever behind the artist they blocked, so the list cannot
+    // tell the artist's members who runs that persona.
+    it('skips the member block for a listener shown as an unlinked persona', () => {
+      const unlinkedArm = unlinkedPersonaByIdSql(
+        '"supporter"."shown_as_subprofile_id"',
+      );
+      const memberBlock = blockedWithAnyPersonaMemberSql(
+        '"listener"."user_id"',
+        '$1',
+      );
+      for (const sql of [TOP_SUPPORTERS_SQL, OPTED_IN_COUNT_SQL]) {
+        expect(sql).toContain(unlinkedArm);
+        expect(sql).toContain(`OR NOT ${memberBlock}`);
+        expect(sql).not.toContain(`AND NOT ${memberBlock}`);
+      }
+    });
+
+    it('keeps the identity block of the chosen persona itself', () => {
+      for (const sql of [TOP_SUPPORTERS_SQL, OPTED_IN_COUNT_SQL]) {
+        expect(sql).toContain(
+          `AND NOT ${personaIdentityBlockedBySql(
+            personaMemberUserIdsSql('$1'),
+            '"supporter"."shown_as_subprofile_id"',
+          )}`,
+        );
+      }
+    });
+
+    // SEC-33: a chosen persona whose creator is suspended, banned, paused or
+    // pending erasure leaves the list, as its public page does.
+    it('needs an active creator behind the chosen persona', () => {
+      for (const sql of [TOP_SUPPORTERS_SQL, OPTED_IN_COUNT_SQL]) {
+        expect(sql).toContain(
+          chosenPersonaShownToOthersSql('"supporter"."shown_as_subprofile_id"'),
+        );
+      }
     });
 
     it('offers only personas the owner side would show in the picker', () => {

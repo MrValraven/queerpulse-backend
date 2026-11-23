@@ -11,6 +11,7 @@ import { ReportsModule } from '../reports/reports.module';
 import { MessageEvidenceHoldSweepService } from './message-evidence-hold-sweep.service';
 import { PreferencesModule } from '../preferences/preferences.module';
 import { SocialModule } from '../social/social.module';
+import { Block } from '../social/entities/block.entity';
 import { StickersModule } from '../stickers/stickers.module';
 import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
@@ -69,6 +70,10 @@ import { MessagingService } from './messaging.service';
       // `AuthModule` -> `PushModule` -> `ChatModule` -> `MessagingModule`.
       ModAuditLog,
       Report,
+      // SEC-19: `MessageRequestsService` reads whether a requester placed a
+      // block themselves, to name it. Registered as an entity only, the same
+      // overlap TypeORM permits for `ModAuditLog` and `Report` above.
+      Block,
     ]),
     UsersModule,
     ConnectionsModule,

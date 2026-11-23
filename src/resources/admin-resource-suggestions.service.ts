@@ -91,7 +91,9 @@ export class AdminResourceSuggestionsService {
 
     const memberLookup = new MemberLookup(this.profiles);
     const memberIds = [...new Set(rows.map((row) => row.memberId))];
-    const refsByUserId = await memberLookup.byUserIds(memberIds);
+    const refsByUserId = await memberLookup.byUserIds(memberIds, {
+      inactive: 'include',
+    });
 
     const items = rows.map((suggestion) =>
       toAdminResourceSuggestionDTO(
@@ -205,7 +207,9 @@ export class AdminResourceSuggestionsService {
     await this.notifyMemberOfDecision(suggestion, listing);
 
     const memberLookup = new MemberLookup(this.profiles);
-    const refsByUserId = await memberLookup.byUserIds([suggestion.memberId]);
+    const refsByUserId = await memberLookup.byUserIds([suggestion.memberId], {
+      inactive: 'include',
+    });
 
     return toAdminResourceSuggestionDTO(
       suggestion,
@@ -286,7 +290,9 @@ export class AdminResourceSuggestionsService {
     }
 
     const memberLookup = new MemberLookup(this.profiles);
-    const refsByUserId = await memberLookup.byUserIds([saved.memberId]);
+    const refsByUserId = await memberLookup.byUserIds([saved.memberId], {
+      inactive: 'include',
+    });
 
     return toAdminResourceSuggestionDTO(
       saved,

@@ -315,11 +315,14 @@ describe('BarterService', () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('refuses a blocked pair before taking the lock', async () => {
+    it('answers a blocked pair with the listing 404 before taking the lock (SEC-19)', async () => {
       blockFilter.isBlockedEitherWay.mockResolvedValue(true);
       await expect(
         service.createProposal(LISTING_ID, PROPOSER_ID, dto),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toMatchObject({
+        status: 404,
+        response: { message: 'Listing not found' },
+      });
       expect(managerFindOne).not.toHaveBeenCalled();
     });
 

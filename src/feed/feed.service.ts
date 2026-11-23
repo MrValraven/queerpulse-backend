@@ -19,6 +19,7 @@ import {
 import { ownRosterRowCountsSql } from '../communities/subcommunity-rules';
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
+import { directoryTierClause } from '../profiles/member-directory.query';
 import {
   Event,
   EventStatus,
@@ -304,7 +305,8 @@ function affinityFactsOf(
   // ENG-417: an anonymous or official thread shows no author on its card, so
   // it scores with no author at all. That keeps the `connection` reason (and
   // the author's name it would print as the reason subject) off a masked
-  // thread. `dropBlocked` still reads `candidate.authorId`, the real author.
+  // thread. `candidate.authorId` is the real author on a named thread and
+  // null on an anonymous one (see the `forum_thread` candidate source).
   if (candidate.type === 'forum_thread') {
     const thread = candidate.row as ForumThread;
     if (thread.isAnonymous || thread.isOfficial) {
@@ -1192,7 +1194,12 @@ export class FeedService {
           id: row.id,
           createdAt: row.createdAt,
           type: 'forum_thread' as const,
-          authorId: row.authorId,
+          // Coordinator ruling (the SEC-02 class): an anonymous, non-official
+          // thread's author is hidden, so `dropBlocked` must not drop it for
+          // a viewer who blocked or muted that member; a missing card would
+          // confirm who wrote it. A null author passes that filter. The row
+          // keeps the real `authorId` for the card's own checks.
+          authorId: row.isAnonymous && !row.isOfficial ? null : row.authorId,
           row,
         }));
       }
@@ -1421,6 +1428,14 @@ export class FeedService {
         // "Hide my profile from this person": directional, so it drops the
         // row only for the viewer the member hid from.
         this.hiddenFrom.excludeHiddenFrom(qb, viewerId, '"p"."user_id"');
+        // The directory's visibility tier (PRD-504), the same clause
+        // `ProfilesService.directoryBaseQuery` applies: a `private` member is
+        // announced to nobody else, and a `network` member only to their
+        // direct accepted connections.
+        qb.andWhere(directoryTierClause(), {
+          directoryViewerId: viewerId,
+          directoryAcceptedStatus: ConnectionStatus.Accepted,
+        });
 
         if (joinedSince) {
           // PRD-168: "New this week" means this week. Bounding the source
@@ -2270,9 +2285,11 @@ export class FeedService {
       if (reason === 'membership') {
         reasonSubject = community?.name ?? null;
       } else if (reason === 'connection') {
-        reasonSubject = author
-          ? `${author.firstName} ${author.lastName}`.trim()
-          : null;
+        // PRD-507: the anonymous stand-in has no name to explain a reason with.
+        reasonSubject =
+          author && !author.isInactiveMember
+            ? `${author.firstName} ${author.lastName}`.trim()
+            : null;
       } else if (reason === 'topic') {
         reasonSubject = ranking.topicByCandidate.get(key) ?? null;
       }

@@ -32,7 +32,7 @@ export class PublicProfilesController {
    * routes carrying a `@Feature(...)` tag, so neither needs anything here.
    *
    * ---------------------------------------------------------------------------
-   * THROTTLE: 30 requests / 60s, keyed BY IP
+   * THROTTLE: 30 requests / 60s, keyed BY IP for anonymous callers
    * ---------------------------------------------------------------------------
    * Slugs are usernames derived from real names, so they are guessable and this
    * endpoint is inherently enumerable: a scraper can walk plausible handles and
@@ -40,13 +40,11 @@ export class PublicProfilesController {
    * community. That is the threat, and it is a safety threat, not a capacity
    * one.
    *
-   * IP is the only key available — an anonymous caller has no user to track.
-   * `HttpThrottlerGuard` does not override `getTracker`, so it inherits
-   * `ThrottlerGuard`'s default, which is `req.ip` (verified in
-   * @nestjs/throttler 6.5.0); `main.ts` sets `trust proxy` to 1, so behind the
-   * expected single proxy that resolves to the real client address rather than
-   * the proxy's. `UserPresignThrottlerGuard` exists precisely because it needed
-   * to override that default; this route wants it.
+   * The global `HttpThrottlerGuard` keys a request carrying a validly signed
+   * access cookie by member and every other request by `req.ip`, the
+   * `ThrottlerGuard` default. An anonymous scraper has no member to key on, so
+   * it is counted per IP. `main.ts` sets `trust proxy` to 1, so behind the
+   * expected single proxy `req.ip` is the real client address.
    *
    * 30/min is well below the global 120/60s default and cuts a single-address
    * scraper from ~172k to ~43k probes a day, while leaving real browsing

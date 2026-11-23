@@ -279,9 +279,22 @@ describe('ListingTeamMemberLinksService', () => {
     it('flags a listing hidden from the public and never carries a user id', async () => {
       const harness = buildHarness();
       harness.world.invitesReceived = [makeRow()];
+      harness.world.listings = [
+        makeListing({
+          photoGallery: [
+            {
+              image: 'https://images.example.com/bar.jpg',
+              alt: '',
+              caption: '',
+            },
+          ],
+        }),
+      ];
       harness.world.liveListingIds = [];
       const list = await harness.service.list(USER_ID);
       expect(list.invitesReceived[0]?.isListingLive).toBe(false);
+      // Its cover reference would 404, so the card goes without one.
+      expect(list.invitesReceived[0]?.listing.coverPhoto).toBeNull();
       const wire = JSON.stringify(list);
       expect(wire).not.toContain(USER_ID);
       expect(wire).not.toContain('inviting-user-1');

@@ -71,6 +71,7 @@ describe('StudioReleaseRemindersService', () => {
       queryBuilder,
       VIEWER_ID,
       '"persona"."user_id"',
+      { unless: `"persona"."link_visibility" = 'unlinked'` },
     );
   });
 

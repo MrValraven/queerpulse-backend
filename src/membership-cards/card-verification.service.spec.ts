@@ -228,6 +228,25 @@ describe('CardVerificationService.verify', () => {
     },
   );
 
+  // SEC-22
+  it('names no holder or community for a holder whose account is paused', async () => {
+    const { service, users } = makeService();
+    users.findOne.mockResolvedValue({
+      firstName: 'Rita',
+      lastName: 'V',
+      pronouns: 'she/her',
+      avatarUrl: HOLDER_AVATAR,
+      photoVisible: true,
+      user: { status: UserStatus.Deactivated },
+    });
+    const result = await service.verify('good.token');
+    expect(result?.status).toBe('suspended');
+    expect(result?.holderName).toBeNull();
+    expect(result?.issuerName).toBe('');
+    expect(result?.role).toBe('');
+    expect(result?.holderPronouns).toBeNull();
+  });
+
   it('hands a door no face for a holder whose account is suspended', async () => {
     const { service, programs, users } = makeService();
     programs.findOne.mockResolvedValue({

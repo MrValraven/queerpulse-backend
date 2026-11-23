@@ -229,7 +229,9 @@ export class AdminCreatorDraftRowsService {
             [kind, await this.loadKind(kind, kindIds)] as const,
         ),
       ),
-      new MemberLookup(this.profiles).byUserIds(ownerIds),
+      new MemberLookup(this.profiles).byUserIds(ownerIds, {
+        inactive: 'include',
+      }),
     ]);
     const loadedByKind = new Map(loadedEntries);
     const rows: AdminCreatorDraftRow[] = [];

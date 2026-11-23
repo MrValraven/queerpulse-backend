@@ -30,6 +30,8 @@ import {
   playlistOwnerIsActiveSql,
   viewerEditsPlaylistSql,
 } from './studio-playlist-visibility';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
+import { unlinkedPersonaCreditStandsSql } from './studio-discovery-sql';
 
 /** The parameter every fileable read binds to the caller. */
 export const FOLDER_VIEWER_PARAMETER = 'folderViewerId';
@@ -261,10 +263,13 @@ export class StudioPlaylistFoldersService {
     queryBuilder.andWhere(PLAYLIST_FILEABLE_BY_MEMBER_SQL, {
       [FOLDER_VIEWER_PARAMETER]: userId,
     });
+    // SEC-02: a playlist credited to an unlinked persona is exempt from the
+    // block with its owner (`unlinkedPersonaCreditStandsSql`).
     this.blockFilter.excludeBlocked(
       queryBuilder,
       userId,
       '"playlist"."user_id"',
+      { unless: unlinkedPersonaCreditStandsSql('playlist') },
     );
     // Binds `blockFilterActorId` to the same caller as the call above.
     this.blockFilter.excludeBlocked(
@@ -272,10 +277,11 @@ export class StudioPlaylistFoldersService {
       userId,
       creditPersonaCreatorIdSql('playlist'),
       {
-        unless: personaCreatorBlockExemptSql(
+        // SEC-02: a credited unlinked persona is exempt too.
+        unless: `(${personaCreatorBlockExemptSql(
           'playlist',
           FOLDER_VIEWER_PARAMETER,
-        ),
+        )} OR ${unlinkedPersonaByIdSql('"playlist"."credit_subprofile_id"')})`,
       },
     );
   }

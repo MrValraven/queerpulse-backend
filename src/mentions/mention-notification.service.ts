@@ -828,6 +828,8 @@ export class MentionNotificationService {
         crossPosted: true,
         publishedAt: true,
         reviewState: true,
+        isAnonymous: true,
+        isOfficial: true,
       },
     });
     if (!thread) {
@@ -837,7 +839,12 @@ export class MentionNotificationService {
       thread,
       candidateUserIds,
     );
-    if (!gateReaders.size || thread.authorId === null) {
+    // The hidden author of an anonymous, non-official thread is not checked
+    // against the readers: a block of that member changing who hears about
+    // the thread would confirm who wrote it (coordinator ruling, the SEC-02
+    // class; the thread read skips the same check, `ForumThreadsService`).
+    const isAuthorHidden = thread.isAnonymous && !thread.isOfficial;
+    if (!gateReaders.size || thread.authorId === null || isAuthorHidden) {
       return gateReaders;
     }
     const blockedUserIds = await this.blockFilter.blockedUserIds(

@@ -1,4 +1,9 @@
 import { EntityManager } from 'typeorm';
+import {
+  AbsenceGapSeat,
+  insideAbsenceGapPredicate,
+  isInsideAbsenceGap,
+} from './group-absence-gap';
 import { buildReplyTo, MessageResponse } from './message-response';
 
 /**
@@ -52,18 +57,24 @@ export async function readGroupJoinHistoryFloor(
  * (`mailboxStaffHistoryFloorCoversPredicate`) covers direct threads alone;
  * the two never overlap. The subquery alias is lowercase and quoted at every
  * reference. Compose it as `NOT ...` to keep only what the seat may see.
+ *
+ * SEC-25: it also holds inside the seat's absence gap
+ * (`insideAbsenceGapPredicate`), the stretch a re-seated member was away
+ * for, so quotes, reactions, pins, stars, forwards, downloads, reports and
+ * live frames treat a message posted while they were away exactly like one
+ * posted before they first joined. Only group seats ever carry a gap.
  */
 export function groupJoinHistoryFloorCoversPredicate(
   createdAtExpression: string,
   seatAlias: string,
 ): string {
-  return `(${seatAlias}.history_floor_at IS NOT NULL
+  return `((${seatAlias}.history_floor_at IS NOT NULL
     AND ${createdAtExpression} <= ${seatAlias}.history_floor_at
     AND EXISTS (
       SELECT 1 FROM "conversations" "join_floor_group"
       WHERE "join_floor_group"."id" = ${seatAlias}.conversation_id
         AND "join_floor_group"."kind" = 'group'
-    ))`;
+    )) OR ${insideAbsenceGapPredicate(createdAtExpression, seatAlias)})`;
 }
 
 /**
@@ -77,12 +88,13 @@ export function isCoveredByGroupJoinHistoryFloor(
   seat: {
     historyFloorAt: Date | null | undefined;
     isGroupConversation: boolean;
-  },
+  } & Partial<AbsenceGapSeat>,
 ): boolean {
   return (
-    seat.isGroupConversation &&
-    seat.historyFloorAt != null &&
-    createdAt.getTime() <= seat.historyFloorAt.getTime()
+    (seat.isGroupConversation &&
+      seat.historyFloorAt != null &&
+      createdAt.getTime() <= seat.historyFloorAt.getTime()) ||
+    isInsideAbsenceGap(createdAt, seat)
   );
 }
 

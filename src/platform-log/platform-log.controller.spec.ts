@@ -11,7 +11,7 @@ describe('PlatformLogController', () => {
     ]);
   });
 
-  it('passes the query and the caller role to the service', async () => {
+  it('passes the query, the caller role and the caller id to the service', async () => {
     const page = { data: [], pageInfo: { nextCursor: null, hasMore: false } };
     const service = { list: jest.fn().mockResolvedValue(page) };
     const controller = new PlatformLogController(
@@ -28,7 +28,7 @@ describe('PlatformLogController', () => {
     );
     expect(service.list).toHaveBeenCalledWith(
       { range: 'week' },
-      { role: 'moderator' },
+      { role: 'moderator', userId: 'staff-1' },
     );
     expect(result).toBe(page);
   });

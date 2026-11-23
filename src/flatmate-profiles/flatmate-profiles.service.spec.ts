@@ -62,7 +62,7 @@ describe('FlatmateProfilesService', () => {
     save: jest.Mock;
     remove: jest.Mock;
   };
-  let profiles: { find: jest.Mock; findOne: jest.Mock };
+  let profiles: { find: jest.Mock; findOne: jest.Mock; exists: jest.Mock };
   let messaging: { deliverEnquiry: jest.Mock };
   let verification: {
     requireLevel: jest.Mock;
@@ -80,7 +80,11 @@ describe('FlatmateProfilesService', () => {
       save: jest.fn((row: unknown) => Promise.resolve(row)),
       remove: jest.fn().mockResolvedValue(undefined),
     };
-    profiles = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(),
+      exists: jest.fn().mockResolvedValue(true),
+    };
     messaging = {
       deliverEnquiry: jest.fn().mockResolvedValue({ conversationId: 'conv-1' }),
     };
@@ -198,6 +202,16 @@ describe('FlatmateProfilesService', () => {
         hidden: true,
         removed: false,
       });
+
+      await expect(
+        service.sayHello('sam-flatmate', 'sender', { body: 'hi' }),
+      ).rejects.toThrow(NotFoundException);
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('404s a profile whose owner is no longer an active member', async () => {
+      flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'owner-1' }));
+      profiles.exists.mockResolvedValue(false);
 
       await expect(
         service.sayHello('sam-flatmate', 'sender', { body: 'hi' }),

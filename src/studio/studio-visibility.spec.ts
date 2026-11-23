@@ -1,7 +1,9 @@
+import { personaCreatorActiveSql } from '../subprofiles/persona-creator-gates';
 import { StudioReleaseStatus } from './entities/studio-release.entity';
 import {
   isReleaseWithdrawnForListeners,
   listenablePersonaSql,
+  listenablePersonaStateSql,
   previewablePersonaSql,
   withdrawnReleaseSql,
 } from './studio-visibility';
@@ -31,6 +33,35 @@ describe('listenablePersonaSql', () => {
 
   it('quotes the alias it is given', () => {
     expect(listenablePersonaSql('artist')).toContain(`"artist"."status"`);
+  });
+
+  // SEC-33: a suspended, banned, paused or erasure-pending creator's persona
+  // leaves every listener read, as `/p/<handle>` answers 404.
+  it('needs the persona creator account to be active', () => {
+    expect(predicate).toContain(personaCreatorActiveSql('persona'));
+    expect(predicate).toContain(`"persona_creator"."id" = "persona"."user_id"`);
+    expect(predicate).toContain(`"persona_creator"."status" = 'active'`);
+  });
+
+  it('is the persona state rule plus the creator account rule', () => {
+    expect(predicate).toContain(listenablePersonaStateSql('persona'));
+  });
+});
+
+describe('listenablePersonaStateSql', () => {
+  const predicate = listenablePersonaStateSql('persona');
+
+  it('keeps the persona rules', () => {
+    expect(predicate).toContain(`"persona"."status" = 'published'`);
+    expect(predicate).toContain(`"persona"."removed_at" IS NULL`);
+    expect(predicate).toContain(`"persona"."handle" IS NOT NULL`);
+    expect(predicate).toContain(`"persona"."visibility" = 'open'`);
+    expect(predicate).toContain(`= "persona"."id"::text`);
+  });
+
+  it('leaves the creator account out', () => {
+    expect(predicate).not.toContain(personaCreatorActiveSql('persona'));
+    expect(predicate).not.toContain('"users"');
   });
 });
 

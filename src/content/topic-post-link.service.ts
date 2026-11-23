@@ -122,10 +122,13 @@ export class TopicPostLinkService {
           this.topicPosts.create({
             topicId: topic.id,
             forumThreadId: thread.id,
-            // The real writer even under a masked byline: `TopicsService.listPosts`
-            // reads this column for block/mute filtering only, and no response
-            // field carries it.
-            authorId: thread.authorId,
+            // `TopicsService.listPosts` reads this column for block/mute
+            // filtering only, and no response field carries it. An anonymous,
+            // non-official thread stores NULL: its writer is hidden, so no
+            // row keyed on them may exist for a filter or a later reader to
+            // match. An official thread keeps its staff writer.
+            authorId:
+              thread.isAnonymous && !thread.isOfficial ? null : thread.authorId,
             authorName,
             authorInitials,
             authorTone,
@@ -167,6 +170,7 @@ export class TopicPostLinkService {
           threadTitle: thread.title,
           authorId: thread.authorId,
           isAuthorMasked: authorMask !== null,
+          isAuthorAnonymous: authorMask === 'anonymous',
         };
         this.eventEmitter.emit(TOPIC_POST_LINKED, event);
       }

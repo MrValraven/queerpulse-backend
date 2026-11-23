@@ -156,6 +156,40 @@ export function csv(raw: string | undefined): string[] {
 const OPEN_PROFILE_CLAUSE = `"p"."visibility" = '${ProfileVisibility.Open}'`;
 
 /**
+ * Which rows the directory and the global search Members tab may list for a
+ * viewer at all, by the profile owner's visibility tier (PRD-504):
+ *
+ *  - `open`: everyone.
+ *  - `network`: the owner's direct accepted connections, in either direction
+ *    (the same rule `ProfilesService.canViewFull` grants the full profile on).
+ *  - `private`: nobody else. The settings copy promises "Profile not visible
+ *    in search", and this clause is what makes it true.
+ *
+ * The viewer always finds themself, whatever their own tier. Binds
+ * `:directoryViewerId` and `:directoryAcceptedStatus`; the tier values are
+ * literal enum values like `OPEN_PROFILE_CLAUSE`.
+ *
+ * `alias` is the `Profile` alias of the caller's query (default `p`, the
+ * directory's). It is spliced into raw SQL, so pass a fixed alias written in
+ * code. Call at most once per query builder (fixed parameter names).
+ */
+export function directoryTierClause(alias = 'p'): string {
+  const profile = `"${alias}"`;
+  return `(${profile}."visibility" = '${ProfileVisibility.Open}'
+    OR ${profile}."user_id" = :directoryViewerId
+    OR (${profile}."visibility" = '${ProfileVisibility.Network}' AND EXISTS (
+      SELECT 1 FROM "connections" "directory_connection"
+       WHERE "directory_connection"."status" = :directoryAcceptedStatus
+         AND (
+           ("directory_connection"."requester_id" = :directoryViewerId
+             AND "directory_connection"."addressee_id" = ${profile}."user_id")
+           OR ("directory_connection"."addressee_id" = :directoryViewerId
+             AND "directory_connection"."requester_id" = ${profile}."user_id")
+         )
+    )))`;
+}
+
+/**
  * Rows whose bio a directory viewer may read, and so may be searched and
  * ranked on (ENG-438). The same `open` gate `toMemberCard` applies before it
  * borrows a bio for the card blurb: a `network`/`private` member's bio sits

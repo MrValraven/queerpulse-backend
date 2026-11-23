@@ -174,9 +174,10 @@ export class RoadmapAdminService {
     actor: RoadmapActor | undefined,
   ): Promise<string> {
     if (!actor) return SYSTEM_ACTOR_LABEL;
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      actor.actorId,
-    ]);
+    const refs = await new MemberLookup(this.profiles).byUserIds(
+      [actor.actorId],
+      { inactive: 'include' },
+    );
     return (
       this.nameOf(refs.get(actor.actorId)) ??
       actor.actorLabel ??
@@ -203,7 +204,9 @@ export class RoadmapAdminService {
           .filter((actorId): actorId is string => actorId !== null),
       ),
     ];
-    const refs = await new MemberLookup(this.profiles).byUserIds(actorIds);
+    const refs = await new MemberLookup(this.profiles).byUserIds(actorIds, {
+      inactive: 'include',
+    });
     const labels = new Map<string, string>();
     for (const row of rows) {
       labels.set(
@@ -277,6 +280,7 @@ export class RoadmapAdminService {
         this.deps.find({ where: { itemId: item.id } }),
         new MemberLookup(this.profiles).byUserIds(
           item.ownerId ? [item.ownerId] : [],
+          { inactive: 'include' },
         ),
       ]);
     return {
@@ -361,9 +365,10 @@ export class RoadmapAdminService {
       .map((item) => item.ownerId)
       .filter((ownerId): ownerId is string => ownerId !== null);
     const teamUserIds = teamRows.map((member) => member.userId);
-    const nameRefs = await new MemberLookup(this.profiles).byUserIds([
-      ...new Set([...ownerIds, ...teamUserIds]),
-    ]);
+    const nameRefs = await new MemberLookup(this.profiles).byUserIds(
+      [...new Set([...ownerIds, ...teamUserIds])],
+      { inactive: 'include' },
+    );
 
     const items = allItems.map((item) =>
       toAdminItemDTO(item, {
@@ -1141,6 +1146,7 @@ export class RoadmapAdminService {
     const teamRows = await this.team.find({ order: { sortOrder: 'ASC' } });
     const nameRefs = await new MemberLookup(this.profiles).byUserIds(
       teamRows.map((member) => member.userId),
+      { inactive: 'include' },
     );
     return teamRows.map((member) =>
       toTeamMemberDTO(member, this.nameOf(nameRefs.get(member.userId)) ?? ''),
@@ -1162,9 +1168,10 @@ export class RoadmapAdminService {
       }
       throw error;
     }
-    const nameRefs = await new MemberLookup(this.profiles).byUserIds([
-      member.userId,
-    ]);
+    const nameRefs = await new MemberLookup(this.profiles).byUserIds(
+      [member.userId],
+      { inactive: 'include' },
+    );
     const resolvedName = this.nameOf(nameRefs.get(member.userId));
     await this.audit(
       actor,
@@ -1192,9 +1199,10 @@ export class RoadmapAdminService {
       }
       throw error;
     }
-    const nameRefs = await new MemberLookup(this.profiles).byUserIds([
-      saved.userId,
-    ]);
+    const nameRefs = await new MemberLookup(this.profiles).byUserIds(
+      [saved.userId],
+      { inactive: 'include' },
+    );
     const resolvedName = this.nameOf(nameRefs.get(saved.userId));
     await this.audit(
       actor,
@@ -1205,9 +1213,10 @@ export class RoadmapAdminService {
 
   async deleteTeamMember(id: string, actor?: RoadmapActor): Promise<void> {
     const member = await this.loadTeamMemberOr404(id);
-    const nameRefs = await new MemberLookup(this.profiles).byUserIds([
-      member.userId,
-    ]);
+    const nameRefs = await new MemberLookup(this.profiles).byUserIds(
+      [member.userId],
+      { inactive: 'include' },
+    );
     const name = this.nameOf(nameRefs.get(member.userId)) ?? member.userId;
     // Removing a roster row is scoped to `roadmap_team_members` only. Items
     // this person owns keep their `ownerId` (and so their `ownerName`) —

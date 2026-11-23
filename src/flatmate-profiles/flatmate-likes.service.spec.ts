@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Profile } from '../users/entities/profile.entity';
 import {
   FlatmateLike,
   FlatmateLikeDecision,
@@ -45,6 +46,7 @@ describe('FlatmateLikesService', () => {
   let service: FlatmateLikesService;
   let likes: { upsert: jest.Mock; exists: jest.Mock };
   let flatmates: { findOne: jest.Mock };
+  let profiles: { exists: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
 
@@ -54,6 +56,7 @@ describe('FlatmateLikesService', () => {
       exists: jest.fn().mockResolvedValue(false),
     };
     flatmates = { findOne: jest.fn().mockResolvedValue(null) };
+    profiles = { exists: jest.fn().mockResolvedValue(true) };
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
@@ -64,6 +67,7 @@ describe('FlatmateLikesService', () => {
         FlatmateLikesService,
         { provide: getRepositoryToken(FlatmateLike), useValue: likes },
         { provide: getRepositoryToken(FlatmateProfile), useValue: flatmates },
+        { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: ContentModerationService, useValue: contentModeration },
       ],
@@ -79,6 +83,16 @@ describe('FlatmateLikesService', () => {
       await expect(
         service.decide('viewer-1', 'ghost', FlatmateLikeDecision.Like),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s a profile whose owner is no longer active, and records no decision', async () => {
+      flatmates.findOne.mockResolvedValue(makeFlatmate());
+      profiles.exists.mockResolvedValue(false);
+
+      await expect(
+        service.decide('viewer-1', 'sam-flatmate', FlatmateLikeDecision.Like),
+      ).rejects.toThrow(NotFoundException);
+      expect(likes.upsert).not.toHaveBeenCalled();
     });
 
     it('rejects a decision on your own profile', async () => {

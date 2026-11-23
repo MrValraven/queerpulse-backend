@@ -1,3 +1,4 @@
+import { personaCreatorActiveSql } from '../subprofiles/persona-creator-gates';
 import {
   ADMIN_SPOTLIGHT_ARTIST_SEARCH_SQL,
   ADMIN_SPOTLIGHT_SQL,
@@ -25,9 +26,15 @@ describe('Studio spotlight staff SQL', () => {
     expect(ADMIN_SPOTLIGHT_ARTIST_SEARCH_SQL).toContain('handle');
     expect(ADMIN_SPOTLIGHT_ARTIST_SEARCH_SQL).toContain("ESCAPE '\\'");
     expect(ADMIN_SPOTLIGHT_ARTIST_SEARCH_SQL).toContain(' LIKE ');
-    expect(ADMIN_SPOTLIGHT_ARTIST_SEARCH_SQL).not.toMatch(
-      /"user_id"|first_name|last_name|"profiles"/,
+    // SEC-33: the creator gate reads the owner id once, as an EXISTS on the
+    // account status. Search columns and selected columns stay persona only.
+    const creatorGate = personaCreatorActiveSql('persona');
+    expect(ADMIN_SPOTLIGHT_ARTIST_SEARCH_SQL.split(creatorGate)).toHaveLength(
+      2,
     );
+    expect(
+      ADMIN_SPOTLIGHT_ARTIST_SEARCH_SQL.replace(creatorGate, ''),
+    ).not.toMatch(/"user_id"|first_name|last_name|"profiles"|"users"/);
   });
 
   it('ranks positions 1..n per slot on the wire', () => {

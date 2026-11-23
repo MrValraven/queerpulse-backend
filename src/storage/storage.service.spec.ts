@@ -697,6 +697,119 @@ describe('StorageService', () => {
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
+
+    // Open item A: `POST /uploads/confirm` reads a Studio audio key's leading
+    // bytes against the type its extension stands for.
+    describe('inspectStoredObject', () => {
+      let send: jest.SpiedFunction<S3Client['send']>;
+      const M4A_KEY = STUDIO_KEY.replace('.mp3', '.m4a');
+      const MP3_ID3 = Uint8Array.from([
+        0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x76, 0, 0, 0, 0,
+        0, 0,
+      ]);
+      const M4A_FTYP = Uint8Array.from([
+        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20,
+        0x00, 0x00, 0x02, 0x00,
+      ]);
+      const HTML_BYTES = Uint8Array.from(
+        Array.from('<!DOCTYPE html><', (letter) => letter.charCodeAt(0)),
+      );
+
+      function answerWith(prefixBytes: Uint8Array): void {
+        send = jest.spyOn(S3Client.prototype, 'send').mockResolvedValue({
+          Body: { transformToByteArray: () => Promise.resolve(prefixBytes) },
+        } as never);
+      }
+
+      afterEach(() => {
+        send.mockRestore();
+      });
+
+      it('passes an MP3 and an M4A, reading the first sixty-four bytes', async () => {
+        answerWith(MP3_ID3);
+        await expect(
+          buildService().inspectStoredObject(STUDIO_KEY),
+        ).resolves.toBe('valid');
+        const [command] = send.mock.calls[0] as unknown as [GetObjectCommand];
+        expect(command.input).toEqual({
+          Bucket: 'queerpulse-prod',
+          Key: STUDIO_KEY,
+          Range: 'bytes=0-63',
+        });
+        send.mockRestore();
+        answerWith(M4A_FTYP);
+        await expect(buildService().inspectStoredObject(M4A_KEY)).resolves.toBe(
+          'valid',
+        );
+      });
+
+      it('finds an MP3 frame header behind padding in the bytes read', async () => {
+        answerWith(
+          Uint8Array.from([
+            ...new Array<number>(30).fill(0),
+            0xff,
+            0xfb,
+            0x90,
+            0x64,
+            ...new Array<number>(30).fill(0),
+          ]),
+        );
+        await expect(
+          buildService().inspectStoredObject(STUDIO_KEY),
+        ).resolves.toBe('valid');
+      });
+
+      it('keeps the sixteen byte read for a VJ clip', async () => {
+        answerWith(
+          Uint8Array.from([
+            0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f,
+            0x6d, 0x00, 0x00, 0x02, 0x00,
+          ]),
+        );
+        await expect(
+          buildService().inspectStoredObject(
+            'vj-clips/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp4',
+          ),
+        ).resolves.toBe('valid');
+        const [command] = send.mock.calls[0] as unknown as [GetObjectCommand];
+        expect(command.input).toEqual(
+          expect.objectContaining({ Range: 'bytes=0-15' }),
+        );
+      });
+
+      it('names bytes of another type stored under an audio key a mismatch', async () => {
+        answerWith(HTML_BYTES);
+        await expect(
+          buildService().inspectStoredObject(STUDIO_KEY),
+        ).resolves.toBe('mismatch');
+        send.mockRestore();
+        answerWith(MP3_ID3);
+        await expect(buildService().inspectStoredObject(M4A_KEY)).resolves.toBe(
+          'mismatch',
+        );
+      });
+
+      it('answers missing when nothing was stored under the key', async () => {
+        send = jest.spyOn(S3Client.prototype, 'send').mockRejectedValue(
+          Object.assign(new Error('NoSuchKey'), {
+            name: 'NoSuchKey',
+          }) as never,
+        );
+        await expect(
+          buildService().inspectStoredObject(STUDIO_KEY),
+        ).resolves.toBe('missing');
+      });
+
+      it('names a kept-copy key, which confirm never reads, a mismatch without a read', async () => {
+        send = jest.spyOn(S3Client.prototype, 'send');
+        await expect(
+          buildService().inspectStoredObject(
+            'studio-kept-audio/66666666-7777-4888-9999-000000000000.mp3',
+          ),
+        ).resolves.toBe('mismatch');
+        expect(send).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('copyObjectToStudioLandingScope', () => {

@@ -178,7 +178,9 @@ export class BanEvasionEscalationsService {
             select: { id: true, slug: true, name: true },
           })
         : Promise.resolve([]),
-      new MemberLookup(this.profiles).byUserIds(memberUserIds),
+      new MemberLookup(this.profiles).byUserIds(memberUserIds, {
+        inactive: 'include',
+      }),
       this.banEvasion.assessUsers(subjectUserIds),
     ]);
 

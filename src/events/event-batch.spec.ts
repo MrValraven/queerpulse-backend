@@ -10,6 +10,7 @@ import {
 } from './entities/event.entity';
 import {
   EVENT_BATCH_COPIED_FIELDS,
+  batchTemplateSpanOf,
   composeBatchEventInput,
   eventBatchDateInPast,
   eventBatchDateTooFar,
@@ -245,6 +246,63 @@ describe('lastAllowedBatchDate', () => {
     expect(
       lastAllowedBatchDate(new Date('2028-02-29T12:00:00.000Z'), LISBON),
     ).toBe('2029-02-28');
+  });
+});
+
+describe('batchTemplateSpanOf and multi-day batch rows (PRD-518)', () => {
+  // A festival from Friday 18:00 to Sunday 12:00 in Lisbon (UTC+1 in winter).
+  const festival = {
+    startAt: new Date('2026-11-06T18:00:00.000Z'),
+    endAt: new Date('2026-11-08T12:00:00.000Z'),
+    timezone: LISBON,
+  };
+
+  it('reads the calendar days between the start and the end', () => {
+    expect(batchTemplateSpanOf(festival)).toEqual({
+      endTime: '12:00',
+      endDayOffset: 2,
+    });
+  });
+
+  it('is null for an event with no end', () => {
+    expect(batchTemplateSpanOf({ ...festival, endAt: null })).toBeNull();
+  });
+
+  it('keeps the span on every copied date while the end is unchanged', () => {
+    const span = batchTemplateSpanOf(festival);
+    const schedule = resolveBatchRowSchedule(
+      { date: '2026-12-04' },
+      { startTime: '18:00', endTime: '12:00' },
+      LISBON,
+      span,
+    );
+    expect(schedule.startAt.toISOString()).toBe('2026-12-04T18:00:00.000Z');
+    expect(schedule.endAt?.toISOString()).toBe('2026-12-06T12:00:00.000Z');
+  });
+
+  it('reads a changed end on the clock alone', () => {
+    const schedule = resolveBatchRowSchedule(
+      { date: '2026-12-04' },
+      { startTime: '18:00', endTime: '23:00' },
+      LISBON,
+      batchTemplateSpanOf(festival),
+    );
+    expect(schedule.endAt?.toISOString()).toBe('2026-12-04T23:00:00.000Z');
+  });
+
+  it('keeps an overnight event overnight', () => {
+    const overnight = {
+      startAt: new Date('2026-11-07T21:00:00.000Z'),
+      endAt: new Date('2026-11-08T02:00:00.000Z'),
+      timezone: LISBON,
+    };
+    const schedule = resolveBatchRowSchedule(
+      { date: '2026-12-05' },
+      { startTime: '21:00', endTime: '02:00' },
+      LISBON,
+      batchTemplateSpanOf(overnight),
+    );
+    expect(schedule.endAt?.toISOString()).toBe('2026-12-06T02:00:00.000Z');
   });
 });
 

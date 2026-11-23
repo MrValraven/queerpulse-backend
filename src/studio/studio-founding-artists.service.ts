@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
   artistRefFromColumns,
-  notBlockedEitherWaySql,
+  notBlockedWithLinkedCreatorSql,
   personaColumnsFromRow,
   personaColumnsSql,
 } from './studio-discovery-sql';
@@ -18,7 +18,7 @@ export const FOUNDING_ARTISTS_SQL = `SELECT ${personaColumnsSql('persona', 'arti
   FROM "studio_founding_artists" "founding"
   INNER JOIN "subprofiles" "persona" ON "persona"."id" = "founding"."subprofile_id"
  WHERE ${landingArtistPersonaSql('persona')}
-   AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'founding_block')}
+   AND ${notBlockedWithLinkedCreatorSql('$1', 'persona', 'founding_block')}
  ORDER BY "founding"."position" ASC, "founding"."id" ASC`;
 
 /**

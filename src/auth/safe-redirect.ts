@@ -142,3 +142,21 @@ export function reauthFailureUrl(
   target.hash = new URLSearchParams({ reauthError: code }).toString();
   return target.toString();
 }
+
+/**
+ * Where a failed Google round trip lands (PRD-502). A step-up reauth goes back
+ * to the page it started from with `#reauthError=<code>`, because the member's
+ * session is untouched; every other attempt goes to the sign-in page with
+ * `?error=<code>`. `state` may come from an unverified callback query: it only
+ * picks between two same-origin landings, and `redirect` still passes
+ * `safeRedirectPath`.
+ */
+export function oauthFailureUrl(
+  state: { reauth?: boolean; redirect?: string },
+  frontendUrl: string,
+  code: string,
+): string {
+  return state.reauth
+    ? reauthFailureUrl(state.redirect, frontendUrl, code)
+    : signInErrorUrl(frontendUrl, code);
+}

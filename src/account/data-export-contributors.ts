@@ -67,6 +67,13 @@ import {
 } from './data-export-contributors-quizshow';
 import { PersonaPostsExportContributor } from './data-export-contributors-persona-posts';
 import {
+  CommunityBadgesExportContributor,
+  CommunityEventsAttendedExportContributor,
+  CommunityGiftsReceivedExportContributor,
+  CommunityGiftsSentExportContributor,
+} from './data-export-contributors-community-badges';
+import { CommunityOwnershipOffersExportContributor } from './data-export-contributors-community-ownership';
+import {
   StudioAccessRequestExportContributor,
   StudioCopyrightClaimsExportContributor,
   StudioListeningExportContributor,
@@ -267,6 +274,9 @@ export const EXPORT_WITHHELD_TEXT_KEYS: Partial<
   [NotificationType.EventAnnouncement]: ['body'],
   // Studio v3: the first words of a persona's post, written by the persona.
   [NotificationType.PersonaPost]: ['excerpt'],
+  // Community badges: the sender's note on a gift. The gift rows in
+  // `communityGiftsReceived` carry it to the recipient already.
+  [NotificationType.CommunityGiftReceived]: ['note'],
 };
 
 /**
@@ -1131,5 +1141,12 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   QuizshowPlaysExportContributor,
   // Pulse Live: the games the member owns, with their questions
   QuizshowGamesExportContributor,
+  // Community badges: the member's earned badges, their events attended tally, and the gifts they received and sent.
+  CommunityBadgesExportContributor,
+  CommunityEventsAttendedExportContributor,
+  CommunityGiftsReceivedExportContributor,
+  CommunityGiftsSentExportContributor,
+  // PRD-514: the ownership offers the member received or made.
+  CommunityOwnershipOffersExportContributor,
   MediaExportContributor,
 ] as const;

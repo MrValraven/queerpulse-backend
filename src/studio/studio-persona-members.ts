@@ -1,3 +1,7 @@
+import {
+  personaCreatorActiveSql,
+  unlinkedPersonaByIdSql,
+} from '../subprofiles/persona-creator-gates';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from '../subprofiles/subprofile-takedown';
 
 /**
@@ -41,6 +45,21 @@ export function blockedWithAnyPersonaMemberSql(
 }
 
 /**
+ * SEC-02: `blockedWithAnyPersonaMemberSql` for a read the LISTENER sees. True
+ * only when the persona is linked and the user is blocked either way with
+ * any of its members. An unlinked persona answers every listener alike, so a
+ * block cannot test who runs it. Owner-side reads (a dashboard hiding a
+ * supporter its owners blocked) keep `blockedWithAnyPersonaMemberSql`.
+ */
+export function blockedWithAnyLinkedPersonaMemberSql(
+  userIdExpression: string,
+  personaIdExpression: string,
+): string {
+  return `(NOT ${unlinkedPersonaByIdSql(personaIdExpression)}
+    AND ${blockedWithAnyPersonaMemberSql(userIdExpression, personaIdExpression)})`;
+}
+
+/**
  * Ruling 4: true when any blocker in `blockerUserIdsSql` (a parenthesised list
  * with one `user_id` column, such as `personaMemberUserIdsSql('$1')` or
  * `($2::uuid)`) blocked the persona's identity. The block is direct when
@@ -68,10 +87,13 @@ export function personaIdentityBlockedBySql(
 }
 
 /**
- * Owner side only: a chosen persona that is removed or under a moderator
- * takedown (the `listenablePersonaSql` moderation rule) drops the supporter
- * until they pick a new identity; a private or draft one still shows. Shared by
- * the listen supporters and the supporter wall.
+ * A chosen persona that is removed or under a moderator takedown (the
+ * `listenablePersonaSql` moderation rule) drops the supporter until they
+ * pick a new identity; a private or draft one still shows. The buyer's own
+ * reads use it as it stands (downloads, the kept-tracks unlink, the
+ * identity picker and wall state); the lists other people read (the listen
+ * supporters, the supporter wall) use `chosenPersonaShownToOthersSql`, which
+ * adds the creator account rule.
  */
 export function chosenPersonaShowableSql(
   chosenPersonaIdExpression: string,
@@ -90,4 +112,23 @@ export function chosenPersonaShowableSql(
              )
         )
    )`;
+}
+
+/**
+ * SEC-33: `chosenPersonaShowableSql` for a list other people read (the
+ * supporter wall, the top listeners and their count). The chosen persona
+ * also needs a creator whose account is active, as every public persona
+ * read does (`personaCreatorActiveSql`). The buyer's own reads (downloads,
+ * the identity picker) keep `chosenPersonaShowableSql`, so a purchase keeps
+ * working whatever happens to a co-owner's account.
+ */
+export function chosenPersonaShownToOthersSql(
+  chosenPersonaIdExpression: string,
+): string {
+  return `(${chosenPersonaShowableSql(chosenPersonaIdExpression)}
+   AND EXISTS (
+     SELECT 1 FROM "subprofiles" "shown_persona_creator_gate"
+      WHERE "shown_persona_creator_gate"."id" = ${chosenPersonaIdExpression}
+        AND ${personaCreatorActiveSql('shown_persona_creator_gate')}
+   ))`;
 }

@@ -284,9 +284,10 @@ export class StudioClaimsAdminService {
       this.catalog.staffSummariesByReleaseId([
         ...new Set(claims.map((claim) => claim.releaseId)),
       ]),
-      new MemberLookup(this.profiles).byUserIds([
-        ...new Set(claims.map((claim) => claim.claimantId)),
-      ]),
+      new MemberLookup(this.profiles).byUserIds(
+        [...new Set(claims.map((claim) => claim.claimantId))],
+        { inactive: 'include' },
+      ),
     ]);
     return claims.flatMap((claim) => {
       const releaseSummary = summaries.get(claim.releaseId);

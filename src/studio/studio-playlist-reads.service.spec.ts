@@ -1,4 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
+import { MemberLookup } from '../common/member-ref';
 import { FindOperator, In, Repository } from 'typeorm';
 import {
   resetImageUrlBaseForTesting,
@@ -38,6 +39,8 @@ import {
 } from './studio-playlist-visibility';
 import { StudioReleaseCard } from './studio-response';
 import { withdrawnReleaseSql } from './studio-visibility';
+import { unlinkedPersonaByIdSql } from '../subprofiles/persona-creator-gates';
+import { unlinkedPersonaCreditStandsSql } from './studio-discovery-sql';
 
 const OWNER_ID = 'e1000000-0000-4000-8000-000000000001';
 const OWNER_SLUG = 'ana-silva';
@@ -210,9 +213,11 @@ describe('StudioPlaylistReadsService', () => {
     tracks = { createQueryBuilder: jest.fn(() => queryBuilderMock()) };
     subprofiles = {
       find: jest.fn().mockResolvedValue([]),
-      findOne: jest
-        .fn()
-        .mockResolvedValue({ id: PERSONA_ID, userId: PERSONA_CREATOR_ID }),
+      findOne: jest.fn().mockResolvedValue({
+        id: PERSONA_ID,
+        userId: PERSONA_CREATOR_ID,
+        linkVisibility: 'linked',
+      }),
     };
     profiles = {
       find: jest.fn().mockResolvedValue([ownerProfile]),
@@ -268,7 +273,7 @@ describe('StudioPlaylistReadsService', () => {
   const personaCreatorFilterCall = [
     creditPersonaCreatorIdSql('playlist'),
     {
-      unless: personaCreatorBlockExemptSql('playlist', 'blockFilterActorId'),
+      unless: `(${personaCreatorBlockExemptSql('playlist', 'blockFilterActorId')} OR ${unlinkedPersonaByIdSql('"playlist"."credit_subprofile_id"')})`,
     },
   ];
 
@@ -369,9 +374,28 @@ describe('StudioPlaylistReadsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(subprofiles.findOne).toHaveBeenCalledWith({
         where: { id: PERSONA_ID },
-        select: { id: true, userId: true },
+        select: { id: true, userId: true, linkVisibility: true },
       });
       expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+        VIEWER_ID,
+        PERSONA_CREATOR_ID,
+      );
+    });
+
+    // SEC-02: a playlist credited to an unlinked persona answers every viewer
+    // alike, whoever they blocked, so a 404 cannot test who runs the persona.
+    it('opens a playlist credited to an unlinked persona whatever the viewer blocked', async () => {
+      standingPersonaPlaylist();
+      subprofiles.findOne.mockResolvedValue({
+        id: PERSONA_ID,
+        userId: PERSONA_CREATOR_ID,
+        linkVisibility: 'unlinked',
+      });
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      const view = await service.getPlaylist(VIEWER_ID, PLAYLIST_ID);
+      expect(view.credit.persona?.name).toBe('Night Shift');
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalledWith(
         VIEWER_ID,
         PERSONA_CREATOR_ID,
       );
@@ -569,6 +593,7 @@ describe('StudioPlaylistReadsService', () => {
         playable,
         VIEWER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -613,6 +638,7 @@ describe('StudioPlaylistReadsService', () => {
         withdrawn,
         OWNER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -704,6 +730,7 @@ describe('StudioPlaylistReadsService', () => {
           queryBuilder,
           VIEWER_ID,
           '"persona"."user_id"',
+          { unless: `"persona"."link_visibility" = 'unlinked'` },
         );
       }
     });
@@ -783,10 +810,12 @@ describe('StudioPlaylistReadsService', () => {
       expect(predicatesOf(listing)).toContain(
         publiclyListedPlaylistSql('playlist'),
       );
+      // SEC-02: the owner block exempts a standing unlinked persona credit.
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         listing,
         VIEWER_ID,
         '"playlist"."user_id"',
+        { unless: unlinkedPersonaCreditStandsSql('playlist') },
       );
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         listing,
@@ -1407,9 +1436,9 @@ describe('StudioPlaylistReadsService', () => {
       ]);
 
       expect([...people.keys()]).toEqual([EDITOR_ID]);
-      expect(profiles.find).toHaveBeenCalledWith({
-        where: { userId: In([EDITOR_ID]) },
-      });
+      expect(profiles.find).toHaveBeenCalledWith(
+        MemberLookup.findOptionsFor([EDITOR_ID]),
+      );
 
       users.find.mockClear();
       expect((await service.peopleByUserIds([])).size).toBe(0);

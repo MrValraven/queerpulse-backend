@@ -16,6 +16,7 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { FlatmateProfile } from '../flatmate-profiles/entities/flatmate-profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import {
@@ -48,8 +49,13 @@ import {
   listenablePersonaSql,
   withdrawnReleaseSql,
 } from '../studio/studio-visibility';
+import {
+  unlinkedPersonaByIdSql,
+  unlinkedPersonaSql,
+} from '../subprofiles/persona-creator-gates';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { toSavedId } from './saved-ref.util';
+import { unlinkedPersonaCreditStandsSql } from '../studio/studio-discovery-sql';
 
 /** The subject columns availability resolution reads off a saved item. */
 export type SavedSubjectRef = Pick<SavedItem, 'subjectType' | 'subjectId'>;
@@ -371,10 +377,14 @@ export class SavedAvailabilityService {
       'thread.slug IN (:...slugs)',
       { slugs },
     );
+    // The hidden author of an anonymous, non-official thread passes: a saved
+    // thread turning unavailable for a viewer who blocked that member would
+    // confirm who wrote it (coordinator ruling, the SEC-02 class; the forum's
+    // own list uses `THREAD_AUTHOR_FILTER_COLUMN_SQL` the same way).
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
-      '"thread"."author_id"',
+      `CASE WHEN "thread"."is_anonymous" AND NOT "thread"."is_official" THEN NULL ELSE "thread"."author_id" END`,
     );
     // A cross-posted thread passes the community gate outright (PRD-407), as
     // it does in `loadOr404`: its author chose to show it to the whole forum.
@@ -527,6 +537,20 @@ export class SavedAvailabilityService {
           OR "housing"."owner_id" = :savedViewerId
         )`,
         { savedViewerId: viewerId },
+      )
+      // SEC-34: the detail route 404s a home whose lister is suspended, banned
+      // or deactivated (the owner still reaches their own), so the saved card
+      // stops reading available too.
+      .andWhere(
+        `(
+          "housing"."owner_id" = :savedViewerId
+          OR EXISTS (
+            SELECT 1 FROM "users" "lister_user"
+            WHERE "lister_user"."id" = "housing"."owner_id"
+              AND "lister_user"."status" = :activeListerStatus
+          )
+        )`,
+        { activeListerStatus: UserStatus.Active },
       );
     // A block either way 404s the detail route, so the saved card reads
     // unavailable too. One predicate inside the same statement.
@@ -554,10 +578,20 @@ export class SavedAvailabilityService {
     viewerId: SavedViewerId,
   ): Promise<string[]> {
     if (viewerId === null) return [];
-    const queryBuilder = this.queryBuilderFor(
-      FlatmateProfile,
-      'flatmate',
-    ).where('flatmate.slug IN (:...slugs)', { slugs });
+    const queryBuilder = this.queryBuilderFor(FlatmateProfile, 'flatmate')
+      .where('flatmate.slug IN (:...slugs)', { slugs })
+      // SEC-34: the detail route 404s a profile whose owner is not active.
+      .andWhere(
+        `(
+          "flatmate"."owner_id" = :savedViewerId
+          OR EXISTS (
+            SELECT 1 FROM "users" "owner_user"
+            WHERE "owner_user"."id" = "flatmate"."owner_id"
+              AND "owner_user"."status" = :activeOwnerStatus
+          )
+        )`,
+        { savedViewerId: viewerId, activeOwnerStatus: UserStatus.Active },
+      );
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
@@ -682,21 +716,26 @@ export class SavedAvailabilityService {
         )`,
         { savedPlaylistViewerId: viewerId },
       );
+    // SEC-02: a playlist credited to an unlinked persona is exempt from the
+    // block with its owner (`unlinkedPersonaCreditStandsSql`).
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       '"playlist"."user_id"',
+      { unless: unlinkedPersonaCreditStandsSql('playlist') },
     );
     // Binds `blockFilterActorId` to the same viewer as the call above.
+    // SEC-02: a credited UNLINKED persona is exempt too, so a block with its
+    // creator cannot test who runs it.
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
       creditPersonaCreatorIdSql('playlist'),
       {
-        unless: personaCreatorBlockExemptSql(
+        unless: `(${personaCreatorBlockExemptSql(
           'playlist',
           'savedPlaylistViewerId',
-        ),
+        )} OR ${unlinkedPersonaByIdSql('"playlist"."credit_subprofile_id"')})`,
       },
     );
     return this.subjectKeys(queryBuilder, 'playlist.id');
@@ -744,9 +783,10 @@ export class SavedAvailabilityService {
     this.applyStudioGrantAndBlocks(queryBuilder, viewerId);
   }
 
-  // The viewer half of every Studio card rule: a Studio grant, and no block
-  // either way with the persona's creator. Expects the persona joined as
-  // `persona`.
+  // The viewer half of every Studio card rule: a Studio grant, and for a
+  // linked persona no block either way with its creator. An unlinked persona
+  // answers every viewer alike, so a block cannot test who runs it (SEC-02).
+  // Expects the persona joined as `persona`.
   private applyStudioGrantAndBlocks<Subject extends ObjectLiteral>(
     queryBuilder: SelectQueryBuilder<Subject>,
     viewerId: string,
@@ -762,6 +802,7 @@ export class SavedAvailabilityService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
   }
 

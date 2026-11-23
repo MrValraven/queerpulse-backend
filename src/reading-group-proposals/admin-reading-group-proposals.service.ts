@@ -120,7 +120,9 @@ export class AdminReadingGroupProposalsService {
 
     const memberLookup = new MemberLookup(this.profiles);
     const memberIds = [...new Set(rows.map((row) => row.memberId))];
-    const refsByUserId = await memberLookup.byUserIds(memberIds);
+    const refsByUserId = await memberLookup.byUserIds(memberIds, {
+      inactive: 'include',
+    });
 
     const items: AdminReadingGroupProposalDTO[] = rows.map((proposal) =>
       toAdminReadingGroupProposalDTO(
@@ -284,7 +286,9 @@ export class AdminReadingGroupProposalsService {
     proposal: ReadingGroupProposal,
   ): Promise<AdminReadingGroupProposalDTO> {
     const memberLookup = new MemberLookup(this.profiles);
-    const refsByUserId = await memberLookup.byUserIds([proposal.memberId]);
+    const refsByUserId = await memberLookup.byUserIds([proposal.memberId], {
+      inactive: 'include',
+    });
     return toAdminReadingGroupProposalDTO(
       proposal,
       refsByUserId.get(proposal.memberId) ?? null,

@@ -139,6 +139,9 @@ function makeRouting(
         })),
       ),
     ),
+    // SEC-02: the unlinked-persona mailbox read. Every mailbox here is a
+    // listing, so it never matches.
+    manager: { query: jest.fn(() => Promise.resolve([])) },
   };
   const requests = new MessageRequestsService(
     {} as never,

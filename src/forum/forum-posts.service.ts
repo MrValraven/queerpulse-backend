@@ -45,6 +45,12 @@ import {
   forumThreadVisibleSql,
 } from './forum-threads.service';
 import {
+  POST_AUTHOR_FILTER_COLUMN_SQL,
+  THREAD_AUTHOR_FILTER_COLUMN_SQL,
+} from './forum-author-filter';
+
+export { POST_AUTHOR_FILTER_COLUMN_SQL } from './forum-author-filter';
+import {
   DEFAULT_REPLY_SORT,
   ReplySort,
   applyReplyOrder,
@@ -236,6 +242,20 @@ function dedupePostsById(posts: ForumPost[]): ForumPost[] {
   return unique;
 }
 
+/**
+ * SEC-05: whether a reply by `replierId` is the author of an anonymous,
+ * non-official thread writing inside it. Such a reply wears the thread's
+ * masked byline (`toForumPostResponse`), so its notifications name nobody.
+ */
+export function isAnonymousAuthorReply(
+  thread: Pick<ForumThread, 'isAnonymous' | 'isOfficial' | 'authorId'>,
+  replierId: string,
+): boolean {
+  return (
+    thread.isAnonymous && !thread.isOfficial && thread.authorId === replierId
+  );
+}
+
 @Injectable()
 export class ForumPostsService {
   constructor(
@@ -346,21 +366,22 @@ export class ForumPostsService {
       // reached every member whose search matched a word in it.
       .andWhere(forumThreadVisibleSql('"t"'));
 
-    // Post author: blocked either way, or muted by the viewer.
-    this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
+    // Post author: blocked either way, or muted by the viewer. The hidden
+    // author of an anonymous thread passes (`POST_AUTHOR_FILTER_COLUMN_SQL`).
+    this.blockFilter.excludeHidden(qb, viewerId, POST_AUTHOR_FILTER_COLUMN_SQL);
 
     // Thread author: same rule, expressed inline because `excludeHidden` binds
     // one fixed parameter name and can only be called once per query builder.
     qb.andWhere(
       `NOT EXISTS (
         SELECT 1 FROM "blocks" "__thread_author_block"
-        WHERE ("__thread_author_block"."blocker_id" = :searchViewerId AND "__thread_author_block"."blocked_id" = "t"."author_id")
-           OR ("__thread_author_block"."blocked_id" = :searchViewerId AND "__thread_author_block"."blocker_id" = "t"."author_id")
+        WHERE ("__thread_author_block"."blocker_id" = :searchViewerId AND "__thread_author_block"."blocked_id" = ${THREAD_AUTHOR_FILTER_COLUMN_SQL})
+           OR ("__thread_author_block"."blocked_id" = :searchViewerId AND "__thread_author_block"."blocker_id" = ${THREAD_AUTHOR_FILTER_COLUMN_SQL})
       )
       AND NOT EXISTS (
         SELECT 1 FROM "mutes" "__thread_author_mute"
         WHERE "__thread_author_mute"."muter_id" = :searchViewerId
-          AND "__thread_author_mute"."muted_id" = "t"."author_id"
+          AND "__thread_author_mute"."muted_id" = ${THREAD_AUTHOR_FILTER_COLUMN_SQL}
       )`,
       { searchViewerId: viewerId },
     );
@@ -553,7 +574,11 @@ export class ForumPostsService {
     // muted author's thread is still reachable by direct navigation (see
     // `ForumThreadsService.loadOr404`), but their posts stay silenced, which is
     // exactly what a mute means, and `opAvailable` is how the client is told.
-    this.blockFilter.excludeHidden(rootsQb, user.userId, '"p"."author_id"');
+    this.blockFilter.excludeHidden(
+      rootsQb,
+      user.userId,
+      POST_AUTHOR_FILTER_COLUMN_SQL,
+    );
 
     const {
       rows: rootRows,
@@ -625,8 +650,16 @@ export class ForumPostsService {
     });
     if (!opPost) return { opPost: null, isOpVisible: false };
 
+    // The hidden author of an anonymous, non-official thread is not checked
+    // for any viewer: `opAvailable: false` would confirm who wrote it, and
+    // `listPosts` already lets the opening post through for everyone by the
+    // same rule (`POST_AUTHOR_FILTER_COLUMN_SQL`). A moderator still reads
+    // the real author through their own moderation tools.
+    const isAuthorMaskedForViewer = thread.isAnonymous && !thread.isOfficial;
     const [hiddenAuthorIds, moderationStates] = await Promise.all([
-      this.blockFilter.hiddenUserIds(user.userId, [opPost.authorId]),
+      isAuthorMaskedForViewer
+        ? Promise.resolve(new Set<string>())
+        : this.blockFilter.hiddenUserIds(user.userId, [opPost.authorId]),
       this.contentModeration.statesForAnyType(ForumPostsService.SUBJECT_TYPES, [
         opPost.id,
       ]),
@@ -730,7 +763,11 @@ export class ForumPostsService {
     const qb = this.posts
       .createQueryBuilder('p')
       .where('p.id IN (:...descendantIds)', { descendantIds });
-    this.blockFilter.excludeHidden(qb, user.userId, '"p"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      user.userId,
+      POST_AUTHOR_FILTER_COLUMN_SQL,
+    );
     applyReplyOrder(qb, sort);
     return qb.getMany();
   }
@@ -750,7 +787,11 @@ export class ForumPostsService {
     const qb = this.posts
       .createQueryBuilder('p')
       .where('p.id = :acceptedPostId', { acceptedPostId });
-    this.blockFilter.excludeHidden(qb, user.userId, '"p"."author_id"');
+    this.blockFilter.excludeHidden(
+      qb,
+      user.userId,
+      POST_AUTHOR_FILTER_COLUMN_SQL,
+    );
     return qb.getOne();
   }
 
@@ -883,11 +924,22 @@ export class ForumPostsService {
       return created;
     });
 
+    // SEC-05: a reply the author of an anonymous thread writes inside it
+    // wears the masked byline on every read, so no notification it fires may
+    // name them either. The payload then carries no `actorId` (the bell row
+    // resolves no actor and the push reads "Someone", for every recipient)
+    // and the `MASKED_ACTOR_PAYLOAD_KEY` flag, which keeps that member's
+    // block or mute from deciding who is told: a missing notification would
+    // confirm who the hidden author is (coordinator ruling, the SEC-02 class).
+    const replyActorPayload: { actorId?: string; isActorMasked?: true } =
+      isAnonymousAuthorReply(thread, user.userId)
+        ? { isActorMasked: true }
+        : { actorId: user.userId };
     const mentionNotifiedUserIds = await this.mentions.notify(
       body,
       user.userId,
       {
-        actorId: user.userId,
+        ...replyActorPayload,
         source: 'forum',
         threadSlug,
         postId: saved.id,
@@ -904,7 +956,7 @@ export class ForumPostsService {
     // notify/double-push the same person for the same reply.
     if (parentPost && !mentionNotifiedUserIds.has(parentPost.authorId)) {
       await this.mentions.notifyParentReply(parentPost.authorId, user.userId, {
-        actorId: user.userId,
+        ...replyActorPayload,
         source: 'forum',
         threadSlug,
         postId: saved.id,
@@ -925,7 +977,7 @@ export class ForumPostsService {
       !mentionNotifiedUserIds.has(threadAuthorId)
     ) {
       await this.mentions.notifyThreadReply(threadAuthorId, user.userId, {
-        actorId: user.userId,
+        ...replyActorPayload,
         source: 'forum',
         threadSlug,
         postId: saved.id,
@@ -948,6 +1000,7 @@ export class ForumPostsService {
       saved.id,
       user.userId,
       alreadyNotified,
+      replyActorPayload,
     );
 
     const authors = await new MemberLookup(this.profiles).byUserIds([
@@ -966,8 +1019,10 @@ export class ForumPostsService {
       viewerOf(user),
       undefined,
       thread.acceptedPostId,
-      // A reply is never the OP, so there is no byline to mask here.
-      null,
+      // A reply is never the OP, but a reply the author of an anonymous
+      // thread writes inside it wears the masked byline (SEC-05), so the echo
+      // agrees with every later read of the same reply.
+      thread,
       photoRows.get(saved.id) ?? [],
     );
   }
@@ -999,6 +1054,9 @@ export class ForumPostsService {
     postId: string,
     actorId: string,
     alreadyNotified: Set<string>,
+    // `{ actorId }`, or the masked-actor flag for a reply the author of an
+    // anonymous thread wrote inside it (SEC-05), which names nobody.
+    actorPayload: { actorId?: string; isActorMasked?: true },
   ): Promise<void> {
     const subscriberIds = await this.subscriptions.subscriberIdsToNotify(
       thread.id,
@@ -1018,7 +1076,7 @@ export class ForumPostsService {
         subscriberId,
         actorId,
         {
-          actorId,
+          ...actorPayload,
           source: 'forum',
           threadSlug: thread.slug,
           postId,
@@ -1157,14 +1215,22 @@ export class ForumPostsService {
     if (post.deletedAt) {
       throw new NotFoundException('Post not found');
     }
-    await this.threadsService.loadByIdOr404(post.threadId, userId);
+    const thread = await this.threadsService.loadByIdOr404(
+      post.threadId,
+      userId,
+    );
 
     if (post.authorId === userId) {
       throw new ForbiddenException('You cannot upvote your own post');
     }
 
+    // A post by the hidden author of an anonymous thread is voted on without
+    // the block check: a refusal would confirm who wrote it.
+    const isMaskedAuthorPost = isAnonymousAuthorReply(thread, post.authorId);
     const [isBlocked, moderationStates] = await Promise.all([
-      this.blockFilter.isBlockedEitherWay(userId, post.authorId),
+      isMaskedAuthorPost
+        ? Promise.resolve(false)
+        : this.blockFilter.isBlockedEitherWay(userId, post.authorId),
       this.contentModeration.statesForAnyType(ForumPostsService.SUBJECT_TYPES, [
         post.id,
       ]),
@@ -1438,7 +1504,15 @@ export class ForumPostsService {
       // on the one read that returns it alone.
       this.posts.manager.findOne(ForumThread, {
         where: { id: post.threadId },
-        select: ['id', 'acceptedPostId', 'isOfficial', 'isAnonymous'],
+        // `authorId` too (SEC-05): a reply the author of an anonymous thread
+        // wrote inside it wears the thread's masked byline.
+        select: [
+          'id',
+          'acceptedPostId',
+          'isOfficial',
+          'isAnonymous',
+          'authorId',
+        ],
       }),
       // Rides the same parallel batch as everything else this mapper needs, so
       // a single-post echo still costs one round of queries rather than one

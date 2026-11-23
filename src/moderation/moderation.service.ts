@@ -1,6 +1,7 @@
 import {
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -60,7 +61,7 @@ import { formatReportReference } from '../reports/report-reference';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
-import { ModAuditService } from './mod-audit.service';
+import { AuditFeedViewer, ModAuditService } from './mod-audit.service';
 import { statusForAction } from './mod-action-status';
 import {
   appealAlreadyDecided,
@@ -87,7 +88,14 @@ import {
   isWithinAppealFilingWindow,
 } from './appeal-window';
 import { ListAppealsQuery, ModAppealsTab } from './dto/list-appeals.query';
-import { ReportSubjectResolverService } from './report-subject-resolver.service';
+import {
+  ReportSubjectResolution,
+  ReportSubjectResolverService,
+} from './report-subject-resolver.service';
+import {
+  isSubjectBySnapshotOrAuthor,
+  reportAboutActorRefusal,
+} from './report-about-actor';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   ACCOUNT_REINSTATED,
@@ -223,6 +231,28 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * One report a bulk action could not apply. `reason` is the refusal's
+ * sentence as before; `code` is its machine-readable reason when the refusal
+ * carried one (SEC-31's `REPORT_ABOUT_ACTOR`, the enforcement-target codes),
+ * so the queue can name it in the moderator's language. Additive: a client
+ * reading `reason` alone is unaffected.
+ */
+export interface BulkActionFailure {
+  id: string;
+  reason: string;
+  code?: string;
+}
+
+/** The `code` on a coded `HttpException` body, or null. */
+function refusalCodeOf(error: unknown): string | null {
+  if (!(error instanceof HttpException)) return null;
+  const body = error.getResponse();
+  if (typeof body !== 'object' || body === null) return null;
+  const code: unknown = Reflect.get(body, 'code');
+  return typeof code === 'string' && code.length > 0 ? code : null;
+}
+
+/**
  * Facade over the moderation queue/detail/appeals read+action paths. The two
  * cohesive clusters it once owned inline now live in dedicated services —
  * audit-log write/read + actor-name resolution in {@link ModAuditService}, and
@@ -330,6 +360,10 @@ export class ModerationService {
       // PRD-443: `HousingGroupsService.listVisibleListings` and its enquiry
       // path both skip a group room with a hidden or removed row.
       ReportSubjectType.GroupListing,
+      // A community gift has no hidden state: `removeCommunityGiftOnTakedown`
+      // (called from `ContentModerationService.applyAction`) removes it for
+      // either takedown action.
+      ReportSubjectType.CommunityGift,
     ]);
 
   // The actions that produce a member-facing outcome the sanctioned member
@@ -449,10 +483,21 @@ export class ModerationService {
       ModerationService.keysetForSort(query.sort),
     );
 
+    // SEC-31: a staff member never sees a report about themselves or their
+    // own content in the queue, so neither the reporter's name nor the
+    // controls to close it reach the person reported. Dropped AFTER paging so
+    // the cursor (taken from the last fetched row) still advances past them;
+    // a page can come back shorter than `limit` with `hasMore` still true.
+    // Every other staff member sees these rows unchanged.
+    await this.releaseAssignmentsHeldBySubject(rows);
+    const visibleRows = actorId
+      ? await this.withoutReportsAboutActor(rows, actorId)
+      : rows;
+
     const [items, counts, clusters] = await Promise.all([
-      this.toRows(rows),
+      this.toRows(visibleRows),
       this.computeCounts(),
-      this.clustersFor(rows),
+      this.clustersFor(visibleRows),
     ]);
 
     return { data: items, pageInfo: { nextCursor, hasMore }, counts, clusters };
@@ -496,10 +541,53 @@ export class ModerationService {
   }
 
   // GET /mod/reports/:id — includes the `detail{...}` block the drawer
-  // renders (I6).
-  async getById(id: string): Promise<ModReportDTO> {
+  // renders (I6). `actorId` is always passed by `ModerationController`; it is
+  // optional only like `list`'s, for callers with no staff member behind them.
+  // SEC-31: a report about the caller is refused with a reason code.
+  async getById(id: string, actorId?: string): Promise<ModReportDTO> {
     const report = await this.findReportOrThrow(id);
+    await this.releaseAssignmentsHeldBySubject([report]);
+    if (actorId) await this.assertReportNotAboutActor(report, actorId);
     return this.toRow(report, true);
+  }
+
+  /**
+   * SEC-31: a report claimed by the very staff member it turns out to be
+   * about (claimed before the rule existed, or before a later filing or a
+   * team change made them its subject) is released the next time it is read,
+   * so it sits in nobody's "Assigned to me" and a colleague can claim it.
+   * Batched per assignee; the UPDATE is guarded on the assignee still being
+   * that person, and the rows in hand are updated to match.
+   */
+  private async releaseAssignmentsHeldBySubject(
+    reports: Report[],
+  ): Promise<void> {
+    const reportsByAssignee = new Map<string, Report[]>();
+    for (const report of reports) {
+      if (!report.assignedModeratorId) continue;
+      const held = reportsByAssignee.get(report.assignedModeratorId) ?? [];
+      held.push(report);
+      reportsByAssignee.set(report.assignedModeratorId, held);
+    }
+    for (const [assigneeId, heldReports] of reportsByAssignee) {
+      const aboutAssignee = await this.reportIdsAboutActor(
+        heldReports,
+        assigneeId,
+      );
+      if (!aboutAssignee.size) continue;
+      await this.reports
+        .createQueryBuilder()
+        .update(Report)
+        .set({ assignedModeratorId: null, assignedAt: null })
+        .where('id IN (:...releasedIds)', { releasedIds: [...aboutAssignee] })
+        .andWhere('assigned_moderator_id = :assigneeId', { assigneeId })
+        .execute();
+      for (const report of heldReports) {
+        if (!aboutAssignee.has(report.id)) continue;
+        report.assignedModeratorId = null;
+        report.assignedAt = null;
+      }
+    }
   }
 
   // PATCH /mod/reports/:id — one moderator action against one report. Maps
@@ -766,6 +854,11 @@ export class ModerationService {
     // same pattern as `HousingModerationGuard`/`PlatformLockdownGuard`.
     const role = actorRole as UserRole;
     if (role === UserRole.Moderator || role === UserRole.Admin) {
+      // SEC-31: the platform-staff twin of the community-mod own-content check
+      // below, and wider than it: a staff member may take NO action on a
+      // report about themselves or their own content, `escalate` included,
+      // because every action here also hands them the full report back.
+      await this.assertReportNotAboutActor(report, actorId);
       return true;
     }
 
@@ -823,6 +916,252 @@ export class ModerationService {
 
     throw new ForbiddenException(
       "Requires a moderator or admin role, or ownership/moderation of the report's community to dismiss, remove or escalate it.",
+    );
+  }
+
+  /**
+   * SEC-31: whether ONE report is about `actorId`: a `member` report naming
+   * them, or a report on something they authored, as the shared subject
+   * resolver reads the author (a post's writer, a message's sender, a
+   * listing's or identity's owner, a group's seated owner, and so on).
+   *
+   * Platform staff had no such check, so a reported moderator or admin could
+   * read the reporter's name on a non-anonymous report about themselves and
+   * close it. The community-mod carve-out already refused its own-content
+   * case; this is the same rule for staff, applied to reading as well as
+   * acting.
+   *
+   * An ambiguous `review` subject names one of its two authors (see
+   * `ReportSubjectResolution.isAuthorAmbiguous`). A match on that candidate
+   * still counts here: they are a party to the exchange either way, and the
+   * cost of a false match is only that a colleague handles the report.
+   *
+   * LONE STAFF. Nothing here yields when no other staff member exists. The
+   * report stays in the queue for every Moderator and Admin who is not its
+   * subject, and the moment a second staff member is appointed it is in front
+   * of them with its SLA clock still running. Showing it to its own subject
+   * because nobody else is around would undo the whole protection, and the
+   * reporter's name is the thing being protected.
+   */
+  async isReportAboutActor(report: Report, actorId: string): Promise<boolean> {
+    if (ModerationService.namesActorAsMember(report, actorId)) return true;
+    const [resolution, staffUserIdsByReportId] = await Promise.all([
+      this.subjectResolver.resolve(report),
+      this.businessStaffUserIdsByReportId([report]),
+    ]);
+    return ModerationService.isSubjectOfReport(
+      report,
+      resolution,
+      staffUserIdsByReportId.get(report.id) ?? [],
+      actorId,
+    );
+  }
+
+  /** Throws {@link reportAboutActorRefusal} when the report is about `actorId`. */
+  async assertReportNotAboutActor(
+    report: Report,
+    actorId: string,
+  ): Promise<void> {
+    if (await this.isReportAboutActor(report, actorId)) {
+      throw reportAboutActorRefusal();
+    }
+  }
+
+  /**
+   * Batched {@link isReportAboutActor} for a page: the ids of the reports in
+   * `reports` that are about `actorId`, in one resolver pass and one staff
+   * lookup per business subject type (see
+   * {@link businessStaffUserIdsByReportId}), so a queue page or a 5000-row
+   * audit export never runs a query per report. Public so the other staff
+   * read paths (the audit feed, a member's page) apply the very same rule.
+   */
+  async reportIdsAboutActor(
+    reports: Report[],
+    actorId: string,
+  ): Promise<Set<string>> {
+    const aboutActor = new Set<string>();
+    if (!reports.length) return aboutActor;
+    const [resolutions, staffUserIdsByReportId] = await Promise.all([
+      this.subjectResolver.resolveMany(reports),
+      this.businessStaffUserIdsByReportId(reports),
+    ]);
+    for (const report of reports) {
+      if (
+        ModerationService.isSubjectOfReport(
+          report,
+          resolutions.get(report.id),
+          staffUserIdsByReportId.get(report.id) ?? [],
+          actorId,
+        )
+      ) {
+        aboutActor.add(report.id);
+      }
+    }
+    return aboutActor;
+  }
+
+  /**
+   * The rule behind {@link isReportAboutActor}, given the report's subject
+   * resolution and its business staff. `actorId` is the report's subject
+   * when any of these name them:
+   *
+   *  - a `member` report filed against their user id;
+   *  - the resolver's author of the reported thing;
+   *  - when the resolver finds no author (the content was deleted after the
+   *    filing), the filing-time snapshot (`snapshotSubjectUserIds`);
+   *  - for a business or persona, everyone who staffs it: the mailbox staff
+   *    of a reported identity, and the owner, co-managers, team or co-owners
+   *    of a reported listing, company or persona
+   *    ({@link businessStaffUserIdsByReportId}). A business is answered for
+   *    by a team, the same reasoning the report notifications listener
+   *    applies when it keeps a business's own staff off a report's fan-out.
+   */
+  private static isSubjectOfReport(
+    report: Report,
+    resolution: ReportSubjectResolution | undefined,
+    staffUserIds: string[],
+    actorId: string,
+  ): boolean {
+    if (ModerationService.namesActorAsMember(report, actorId)) return true;
+    if (
+      isSubjectBySnapshotOrAuthor(
+        resolution?.authorUserId,
+        report.evidence,
+        actorId,
+      )
+    ) {
+      return true;
+    }
+    const normalizedActorId = actorId.toLowerCase();
+    return staffUserIds.some(
+      (staffUserId) => staffUserId.toLowerCase() === normalizedActorId,
+    );
+  }
+
+  /**
+   * Everyone who staffs the business or persona each report is about, keyed
+   * by report id, read without creating anything:
+   *
+   *  - `identity`: the reported mailbox identity itself.
+   *  - `listing` / `business`, `company`, `subprofile`: that entity's existing
+   *    mailbox identity, found for every such report on the page in ONE
+   *    statement per subject type, addressed the way the subject resolver
+   *    addresses each (slug, and uuid or slug for a persona).
+   *
+   * Then `IdentitiesService.staffUserIds` once per DISTINCT identity (the
+   * owner plus co-managers, team or co-owners). An entity with no identity
+   * row yet answers nobody here, and the resolver's owner still covers it.
+   * A page with no business subject runs no query at all.
+   */
+  private async businessStaffUserIdsByReportId(
+    reports: Report[],
+  ): Promise<Map<string, string[]>> {
+    const identityIdByReportId = new Map<string, string>();
+    for (const report of reports) {
+      if (
+        report.subjectType === ReportSubjectType.Identity &&
+        UUID_RE.test(report.subjectId)
+      ) {
+        identityIdByReportId.set(report.id, report.subjectId.toLowerCase());
+      }
+    }
+
+    const lookups: Array<{
+      subjectTypes: ReportSubjectType[];
+      sql: string;
+    }> = [
+      {
+        subjectTypes: [ReportSubjectType.Listing, ReportSubjectType.Business],
+        sql: `SELECT l.slug AS "slugKey", NULL::text AS "idKey", i.id AS "identityId"
+                FROM identities i
+                JOIN listings l ON l.id = i.listing_id
+               WHERE l.slug = ANY($1::varchar[])`,
+      },
+      {
+        subjectTypes: [ReportSubjectType.Company],
+        sql: `SELECT c.slug AS "slugKey", NULL::text AS "idKey", i.id AS "identityId"
+                FROM identities i
+                JOIN companies c ON c.id = i.company_id
+               WHERE c.slug = ANY($1::varchar[])`,
+      },
+      {
+        subjectTypes: [ReportSubjectType.Subprofile],
+        sql: `SELECT s.slug AS "slugKey", s.id::text AS "idKey", i.id AS "identityId"
+                FROM identities i
+                JOIN subprofiles s ON s.id = i.subprofile_id
+               WHERE s.slug = ANY($1::varchar[])
+                  OR s.id::text = ANY($1::varchar[])`,
+      },
+    ];
+    await Promise.all(
+      lookups.map(async ({ subjectTypes, sql }) => {
+        const typedReports = reports.filter((report) =>
+          subjectTypes.includes(report.subjectType),
+        );
+        if (!typedReports.length) return;
+        const subjectKeys = [
+          ...new Set(
+            typedReports.flatMap((report) => [
+              report.subjectId,
+              report.subjectId.toLowerCase(),
+            ]),
+          ),
+        ];
+        const rows = await this.dataSource.query<
+          { slugKey?: unknown; idKey?: unknown; identityId?: unknown }[]
+        >(sql, [subjectKeys]);
+        for (const report of typedReports) {
+          const match = rows.find(
+            (row) =>
+              row.slugKey === report.subjectId ||
+              row.idKey === report.subjectId.toLowerCase(),
+          );
+          if (typeof match?.identityId === 'string') {
+            identityIdByReportId.set(report.id, match.identityId);
+          }
+        }
+      }),
+    );
+
+    const staffByIdentityId = new Map<string, string[]>();
+    await Promise.all(
+      [...new Set(identityIdByReportId.values())].map(async (identityId) => {
+        staffByIdentityId.set(
+          identityId,
+          await this.identities.staffUserIds(identityId),
+        );
+      }),
+    );
+    const staffUserIdsByReportId = new Map<string, string[]>();
+    for (const [reportId, identityId] of identityIdByReportId) {
+      staffUserIdsByReportId.set(
+        reportId,
+        staffByIdentityId.get(identityId) ?? [],
+      );
+    }
+    return staffUserIdsByReportId;
+  }
+
+  /** `reports` with every report about `actorId` taken out, order kept. */
+  private async withoutReportsAboutActor(
+    reports: Report[],
+    actorId: string,
+  ): Promise<Report[]> {
+    const aboutActor = await this.reportIdsAboutActor(reports, actorId);
+    if (!aboutActor.size) return reports;
+    return reports.filter((report) => !aboutActor.has(report.id));
+  }
+
+  /**
+   * A `member` report filed by user id names the actor directly, with no
+   * lookup. Checked before the resolver so the match holds even when the
+   * profile row is missing and the resolver answers nothing. A member report
+   * filed by profile slug is matched through the resolver's `authorUserId`.
+   */
+  private static namesActorAsMember(report: Report, actorId: string): boolean {
+    return (
+      report.subjectType === ReportSubjectType.Member &&
+      report.subjectId.toLowerCase() === actorId.toLowerCase()
     );
   }
 
@@ -1103,15 +1442,20 @@ export class ModerationService {
     dto: ModBulkActionDto,
   ): Promise<{
     updated: string[];
-    failed: { id: string; reason: string }[];
+    failed: BulkActionFailure[];
   }> {
     const rows = await this.reports.find({ where: { id: In(dto.ids) } });
     if (!rows.length) return { updated: [], failed: [] };
 
     const status = statusForAction(dto.action);
+    // SEC-31: the bulk route is platform-staff only, so every row gets the
+    // same own-report check the single-report path runs, resolved for the
+    // whole selection in one pass. A report about the caller lands in
+    // `failed` with the coded refusal's sentence and the rest still apply.
+    const reportIdsAboutActor = await this.reportIdsAboutActor(rows, actorId);
 
     const updated: string[] = [];
-    const failed: { id: string; reason: string }[] = [];
+    const failed: BulkActionFailure[] = [];
     // Each report paired with its enforcement result, so the post-commit pass
     // can revoke sessions AND notify the right member with the right expiry —
     // only for the reports that actually committed.
@@ -1131,6 +1475,9 @@ export class ModerationService {
 
     for (const report of rows) {
       try {
+        if (reportIdsAboutActor.has(report.id)) {
+          throw reportAboutActorRefusal();
+        }
         // Same state machine as the single-report path (BE-COM-03). A report
         // already `resolved` is terminal, and a mixed selection that happens
         // to include one must not silently re-enforce against its subject —
@@ -1230,9 +1577,11 @@ export class ModerationService {
         outcomes.push({ report, enforceResult, auditLogId });
         updated.push(report.id);
       } catch (error) {
+        const code = refusalCodeOf(error);
         failed.push({
           id: report.id,
           reason: error instanceof Error ? error.message : 'Unknown error',
+          ...(code ? { code } : {}),
         });
       }
     }
@@ -1611,22 +1960,59 @@ export class ModerationService {
   }
 
   // GET /mod/reports/audit?reportId= — the immutable trail for one report,
-  // oldest first. Delegates to `ModAuditService`.
-  auditTrail(reportId: string): Promise<AuditEntryDTO[]> {
+  // oldest first. Delegates to `ModAuditService`. SEC-31: refused with a
+  // reason code when the report is about the caller (`actorId` is always
+  // passed by `ModerationController`); an unknown id still answers the empty
+  // trail it always did.
+  async auditTrail(
+    reportId: string,
+    actorId?: string,
+  ): Promise<AuditEntryDTO[]> {
+    if (actorId) {
+      const report = await this.reports.findOne({ where: { id: reportId } });
+      if (report) await this.assertReportNotAboutActor(report, actorId);
+    }
     return this.audit.auditTrail(reportId);
   }
 
   // GET /mod/audit — the global, cross-report moderation audit feed for the
   // admin governance "Audit" tab. Delegates to `ModAuditService`.
-  auditFeed(query: AuditFeedQuery): Promise<AuditFeedResponseDTO> {
-    return this.audit.auditFeed(query);
+  // SEC-31: `actorId` (always passed by `ModerationController`) keeps every
+  // row tied to a report about the viewer out of their feed; see
+  // `auditFeedViewer`.
+  auditFeed(
+    query: AuditFeedQuery,
+    actorId?: string,
+  ): Promise<AuditFeedResponseDTO> {
+    return this.audit.auditFeed(query, this.auditFeedViewer(actorId));
   }
 
   // GET /mod/audit.csv — the same filtered audit feed rendered as a CSV
   // attachment for the governance "Audit" tab's export (P3-8). Delegates to
   // `ModAuditService`.
-  auditFeedCsv(query: AuditFeedQuery): Promise<string> {
-    return this.audit.auditFeedCsv(query);
+  auditFeedCsv(query: AuditFeedQuery, actorId?: string): Promise<string> {
+    return this.audit.auditFeedCsv(query, this.auditFeedViewer(actorId));
+  }
+
+  /**
+   * SEC-31: the audit feed's viewer, carrying this service's own
+   * {@link reportIdsAboutActor} rule. `ModAuditService` excludes in SQL the
+   * rows it can decide alone (a sanction targeting the viewer, a `member`
+   * report against them) and asks this for the rest, one page of report ids
+   * at a time. Public for the platform log (`GET /admin/log`), the second
+   * staff reader of `mod_audit_logs`, which applies the very same rule.
+   */
+  auditFeedViewer(actorId?: string): AuditFeedViewer | undefined {
+    if (!actorId) return undefined;
+    return {
+      userId: actorId,
+      reportIdsAboutViewer: async (reportIds) => {
+        const pageReports = await this.reports.find({
+          where: { id: In(reportIds) },
+        });
+        return this.reportIdsAboutActor(pageReports, actorId);
+      },
+    };
   }
 
   /**
@@ -1653,11 +2039,22 @@ export class ModerationService {
    * with the same millisecond-precision contract behind it, rather than a
    * second pagination scheme that could drift from it.
    */
-  async listAppeals(query: ListAppealsQuery = {}): Promise<ModAppealsResponse> {
+  async listAppeals(
+    query: ListAppealsQuery = {},
+    actorId?: string,
+  ): Promise<ModAppealsResponse> {
     const tab: ModAppealsTab = query.tab ?? 'awaiting';
     const now = new Date();
 
     const qb = this.appeals.createQueryBuilder('a');
+    // SEC-31: a staff member's own appeals (against a decision about them)
+    // stay out of their queue; `reviewAppeal` refuses them too. In SQL, so
+    // paging stays exact. `actorId` is always passed by the controller.
+    if (actorId) {
+      qb.andWhere('(a.appellantId IS NULL OR a.appellantId <> :viewerUserId)', {
+        viewerUserId: actorId,
+      });
+    }
     if (tab === 'awaiting') {
       qb.andWhere('a.status = :awaiting', { awaiting: AppealStatus.Awaiting });
     } else {
@@ -2189,6 +2586,12 @@ export class ModerationService {
     if (!appeal) {
       throw new NotFoundException('Appeal not found');
     }
+    // SEC-31: an appeal is the appellant's own case against a decision about
+    // them, so its appellant may not decide it. Same coded refusal as every
+    // other report-about-you route.
+    if (appeal.appellantId !== null && appeal.appellantId === actorId) {
+      throw reportAboutActorRefusal();
+    }
     // This first check is only a fast, friendly reject for an already-decided
     // appeal — the authoritative guard is the conditional `update` inside the
     // transaction below, which is what actually makes the decision atomic.
@@ -2599,6 +3002,9 @@ export class ModerationService {
     assign: boolean,
   ): Promise<ModReportDTO> {
     const report = await this.findReportOrThrow(id);
+    // SEC-31: claiming a report about yourself puts it in your own "Assigned
+    // to me" view and keeps colleagues off it, so it is refused like opening it.
+    await this.assertReportNotAboutActor(report, actorId);
     const currentAssignee = report.assignedModeratorId;
     // `actorRole` is a JWT claim, typed `string` on `CurrentUserData` — the
     // widening says so, rather than implying the two are the same enum.
@@ -2756,10 +3162,12 @@ export class ModerationService {
    * The predicate is a grouped semi-join on `(subject_type, subject_id)` over
    * every UNRESOLVED report, with the same two thresholds
    * `CommunityAutoFreezeService.isReportPileUp` uses (see the constants at the
-   * top of this file). A reporter with no account counts as their own distinct
-   * person via the `COALESCE(..., 'anon:' || id)` trick that file established,
-   * so a wave of account-less reports is still visible as a wave rather than
-   * collapsing to one.
+   * top of this file). Distinct people are counted as
+   * `COUNT(DISTINCT reporter_id)`, the same count
+   * `CommunityAutoFreezeService.distinctOpenReporterCount` takes: a signed-out
+   * report has no reporter to tell apart, so it counts toward the volume
+   * threshold alone. One person filing signed out from
+   * several networks therefore cannot pass as a crowd.
    */
   private applySurgeFilter(qb: SelectQueryBuilder<Report>): void {
     qb.andWhere(
@@ -2769,7 +3177,7 @@ export class ModerationService {
         WHERE sibling.status IN (:...surgeOpenStatuses)
         GROUP BY sibling.subject_type, sibling.subject_id
         HAVING COUNT(*) >= :surgeMinOpen
-          AND COUNT(DISTINCT COALESCE(sibling.reporter_id::text, 'anon:' || sibling.id::text)) >= :surgeMinReporters
+          AND COUNT(DISTINCT sibling.reporter_id) >= :surgeMinReporters
       )`,
       {
         surgeOpenStatuses: [ReportStatus.Open, ReportStatus.Escalated],
@@ -2816,7 +3224,7 @@ export class ModerationService {
       `SELECT subject_type AS "subjectType",
               subject_id AS "subjectId",
               COUNT(*)::int AS "openCount",
-              COUNT(DISTINCT COALESCE(reporter_id::text, 'anon:' || id::text))::int AS "distinctReporterCount",
+              COUNT(DISTINCT reporter_id)::int AS "distinctReporterCount",
               COUNT(*) FILTER (WHERE sla_due_at < now())::int AS "overdueCount",
               MIN(CASE severity::text
                     WHEN 'emergency' THEN 0

@@ -92,6 +92,10 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // The offering admin, resolved for the member's bell so the offer has a
   // face on it.
   [NotificationType.ListingOwnerOffer]: 'actorId',
+  // PRD-514. The owner offering the community, and the member who declined
+  // it, each resolved so the row has a face on it.
+  [NotificationType.CommunityOwnershipOffered]: 'actorId',
+  [NotificationType.CommunityOwnershipOfferDeclined]: 'actorId',
   [NotificationType.SubprofileInvite]: 'invitedByUserId',
   [NotificationType.SubprofileCoOwnerJoined]: 'joinedUserId',
   [NotificationType.MagazinePieceMessage]: 'authorId',
@@ -201,6 +205,9 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // passes no `actorId` argument to `create`, so a mute never silences either.
   [NotificationType.CulturalTaskAssigned]: 'assignedById',
   [NotificationType.CulturalTaskBatchAssigned]: 'assignedById',
+  // The sender of a community gift. The emit passes `actorId`, so a mute
+  // silences the row and a block hides it. The badge notice has no actor.
+  [NotificationType.CommunityGiftReceived]: 'senderId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -246,6 +253,8 @@ const COMMON_PAYLOAD_KEYS: readonly string[] = [
  * is `persona_post`, whose `excerpt` is public post text the wire contract
  * mandates, already cut to 80 characters. Raw acting-member user ids are
  * likewise not forwarded: the actor is resolved into `actor` separately.
+ * The community gift `note` is forwarded because the recipient is the person it
+ * was written to.
  */
 const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
   {
@@ -870,6 +879,10 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'communityName',
       'youAreNowOwner',
     ],
+    // PRD-514. `communitySlug` rides along in `COMMON_PAYLOAD_KEYS` for the
+    // deep link; the name is for the copy.
+    [NotificationType.CommunityOwnershipOffered]: ['communityName'],
+    [NotificationType.CommunityOwnershipOfferDeclined]: ['communityName'],
     [NotificationType.CommunityArchived]: ['communityName'],
     [NotificationType.CommunityFrozen]: ['communityName'],
     [NotificationType.CommunityUnfrozen]: ['communityName'],
@@ -1238,6 +1251,22 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'listingName',
       'listingRef',
       'reason',
+    ],
+    // Community badges. `communitySlug` rides in `COMMON_PAYLOAD_KEYS`. The
+    // badge fields are display tokens for the bell copy and icon.
+    [NotificationType.CommunityBadgeEarned]: [
+      'communityName',
+      'badgeId',
+      'badgeName',
+      'starterKey',
+      'iconKey',
+      'tint',
+    ],
+    [NotificationType.CommunityGiftReceived]: [
+      'communityName',
+      'giftId',
+      'giftKey',
+      'note',
     ],
   };
 

@@ -187,6 +187,17 @@ export enum ReportSubjectType {
   //
   // Backed by `AddQuizshowGameReportSubject1837000000000`.
   QuizshowGame = 'quizshow_game',
+
+  // Community badges. ONE staff gift (`community_gifts`), addressed by the
+  // gift's uuid; only its recipient may file (anyone else, or a malformed id,
+  // gets 404 `gift_not_found`). Resolved by `ReportSubjectResolverService` to
+  // the sender, with the note (or the gift key) as the excerpt. Platform
+  // moderation only: the subject is absent from every community routing list,
+  // so it sends no `community_report_filed` and never counts toward community
+  // auto-freeze. A takedown sets `removed_at`, which every gift read honours.
+  //
+  // Backed by `AddCommunityBadges1840700000000`.
+  CommunityGift = 'community_gift',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

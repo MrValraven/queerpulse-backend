@@ -39,7 +39,7 @@ import { RemoveMemberQuery } from './dto/remove-member.query';
 import { ReplyDto } from './dto/reply.dto';
 import { ListCommunityPostsQuery } from './dto/list-community-posts.query';
 import { RosterQuery } from './dto/roster.query';
-import { TransferOwnershipDto } from './dto/transfer-ownership.dto';
+import { CreateOwnershipOfferDto } from './dto/create-ownership-offer.dto';
 import { TriageCommunityJoinRequestDto } from './dto/triage-join-request.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateCommunityMemberRoleDto } from './dto/update-member-role.dto';
@@ -317,28 +317,81 @@ export class CommunitiesController {
     return this.communitiesService.unfreeze(slug, user.userId);
   }
 
-  @Post(':slug/transfer')
-  @HttpCode(HttpStatus.OK)
+  // PRD-514. Ownership moves only when the member offered it accepts, through
+  // `MeCommunityOwnershipOffersController`. These three routes are the
+  // owner's half: make, read and cancel the single open offer.
+  @Post(':slug/ownership-offer')
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @ApiOperation({
-    summary: 'Transfer ownership to another member (owner only).',
+    summary:
+      'Offer ownership to another member of the roster (owner only). Nothing moves until they accept.',
   })
-  @ApiOkResponse({ description: 'The community detail under the new owner.' })
+  @ApiCreatedResponse({
+    description:
+      'The open offer. It lapses after 14 days and the owner can cancel it until it is answered.',
+  })
   @ApiBadRequestResponse({
     description:
-      'Self-transfer, or a transfer to the house account, is not allowed.',
+      'OWNERSHIP_OFFER_SELF, OWNERSHIP_OFFER_ALREADY_OWNER or OWNERSHIP_OFFER_HOUSE_ACCOUNT.',
   })
-  @ApiForbiddenResponse({ description: 'Only the owner may transfer.' })
-  @ApiNotFoundResponse({ description: 'No such community or member.' })
-  transfer(
+  @ApiForbiddenResponse({ description: 'Only the owner may offer it.' })
+  @ApiNotFoundResponse({
+    description:
+      'No such community, or OWNERSHIP_OFFER_MEMBER_NOT_FOUND for a member who is not on its roster.',
+  })
+  @ApiConflictResponse({
+    description:
+      'OWNERSHIP_OFFER_OPEN: the community already has an open offer. OWNERSHIP_OFFER_OWNER_CHANGED: it changed hands meanwhile.',
+  })
+  offerOwnership(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Body() dto: TransferOwnershipDto,
+    @Body() dto: CreateOwnershipOfferDto,
   ) {
-    return this.communitiesService.transferOwnership(
+    return this.communitiesService.offerOwnership(
       slug,
       user.userId,
       dto.memberSlug,
     );
+  }
+
+  @Get(':slug/ownership-offer')
+  @ApiOperation({
+    summary: 'The open ownership offer on this community (owner only).',
+  })
+  @ApiOkResponse({
+    description: 'The open offer, or null when the community has none.',
+  })
+  @ApiForbiddenResponse({ description: 'Only the owner may read it.' })
+  @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
+  getOpenOwnershipOffer(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.communitiesService.getOpenOwnershipOffer(slug, user.userId);
+  }
+
+  @Delete(':slug/ownership-offer')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Cancel the open ownership offer (owner only). The member is not notified.',
+  })
+  @ApiOkResponse({ description: 'The offer, now cancelled.' })
+  @ApiForbiddenResponse({ description: 'Only the owner may cancel it.' })
+  @ApiNotFoundResponse({
+    description:
+      'No such community, or OWNERSHIP_OFFER_NOT_FOUND when it has no open offer.',
+  })
+  @ApiConflictResponse({
+    description:
+      'OWNERSHIP_OFFER_ANSWERED: the member accepted or declined the offer first, or the caller made an offer the member has since accepted.',
+  })
+  cancelOwnershipOffer(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.communitiesService.cancelOwnershipOffer(slug, user.userId);
   }
 
   @Get(':slug/posts')

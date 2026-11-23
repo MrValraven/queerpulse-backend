@@ -26,7 +26,8 @@ const VIEWER: CurrentUserData = {
  */
 describe('SubprofilePublicReadService.resolveReadablePersona', () => {
   let persona: Partial<Subprofile> | null;
-  let subprofiles: { findOne: jest.Mock };
+  // `exists` is the SEC-33 creator-active read. Active by default.
+  let subprofiles: { findOne: jest.Mock; exists: jest.Mock };
   let membership: { isMember: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
@@ -42,7 +43,10 @@ describe('SubprofilePublicReadService.resolveReadablePersona', () => {
       linkVisibility: SubprofileLinkVisibility.Unlinked,
       removedAt: null,
     };
-    subprofiles = { findOne: jest.fn(() => Promise.resolve(persona)) };
+    subprofiles = {
+      findOne: jest.fn(() => Promise.resolve(persona)),
+      exists: jest.fn().mockResolvedValue(true),
+    };
     membership = { isMember: jest.fn().mockResolvedValue(false) };
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
@@ -124,7 +128,7 @@ describe('SubprofilePublicReadService.resolveReadablePersona', () => {
     ).resolves.toEqual(expect.objectContaining({ isOwner: false }));
   });
 
-  it('answers a plain 404 under a takedown and across a block', async () => {
+  it('answers a plain 404 under a takedown, and across a block for a linked persona', async () => {
     contentModeration.stateFor.mockResolvedValueOnce({
       hidden: true,
       removed: false,
@@ -132,7 +136,32 @@ describe('SubprofilePublicReadService.resolveReadablePersona', () => {
     await expect(
       service.resolveReadablePersona(PERSONA_ID, VIEWER),
     ).rejects.toEqual(notFound);
+    persona = { ...persona, linkVisibility: SubprofileLinkVisibility.Linked };
     blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+    await expect(
+      service.resolveReadablePersona(PERSONA_ID, VIEWER),
+    ).rejects.toEqual(notFound);
+  });
+
+  // SEC-02: the wall posts of an unlinked persona read the same for a viewer
+  // who blocked its creator, so a block cannot test who runs it.
+  it('reads an unlinked persona the same whether or not the viewer and its creator are blocked', async () => {
+    blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+    await expect(
+      service.resolveReadablePersona(PERSONA_ID, VIEWER),
+    ).resolves.toEqual(expect.objectContaining({ isOwner: false }));
+    expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+  });
+
+  // SEC-33: a persona whose creator is not active is gone for every reader
+  // but its owners, signed-out visitors included.
+  it('answers a plain 404 when the creator is not active', async () => {
+    subprofiles.exists.mockResolvedValue(false);
+
+    await expect(
+      service.resolveReadablePersona(PERSONA_ID, undefined),
+    ).rejects.toEqual(notFound);
     await expect(
       service.resolveReadablePersona(PERSONA_ID, VIEWER),
     ).rejects.toEqual(notFound);

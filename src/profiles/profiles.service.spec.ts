@@ -11,9 +11,15 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
+import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import {
+  communityAvatarPhotoReference,
+  communityCoverPhotoReference,
+} from '../storage/public-media-reference';
+import { mediaReferenceVersion } from '../storage/media-reference-version';
 import { StorageService } from '../storage/storage.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { HiddenFromService } from '../social/hidden-from.service';
@@ -22,6 +28,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { truncateAtWord } from './directory-blurb';
+import { directoryTierClause } from './member-directory.query';
 import { MemberSort } from './dto/list-members.query';
 import { Activity } from './entities/activity.entity';
 import {
@@ -55,6 +62,9 @@ const qbStub = () => {
     'andWhere',
     'orderBy',
     'addOrderBy',
+    // The featured-community pins read their live roster sizes in one grouped
+    // count query.
+    'groupBy',
     'setParameters',
     // Singular, and distinct from `setParameters` above: the facet count
     // queries bind one parameter per filter clause as they build the select.
@@ -71,6 +81,8 @@ const qbStub = () => {
   qb.getRawOne = jest.fn().mockResolvedValue(undefined);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
   return qb as Record<string, jest.Mock> & {
+    // Typed calls, so a test can search the predicates without a cast.
+    andWhere: jest.Mock<unknown, unknown[]>;
     getMany: jest.Mock;
     getRawMany: jest.Mock;
     getRawOne: jest.Mock;
@@ -109,6 +121,8 @@ describe('ProfilesService.getBySlug visibility', () => {
   let boardPosts: { find: jest.Mock };
   let boardResponses: { find: jest.Mock; createQueryBuilder?: jest.Mock };
   let contentModeration: { statesForAnyType: jest.Mock };
+  // Captured so the featured-communities test below can hand it rows.
+  let featuredCommunities: { createQueryBuilder: jest.Mock };
   const findEmpty = () => ({ find: jest.fn().mockResolvedValue([]) });
 
   const profile = (overrides = {}): Profile =>
@@ -189,6 +203,7 @@ describe('ProfilesService.getBySlug visibility', () => {
       ...findEmpty(),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
+    featuredCommunities = { createQueryBuilder: jest.fn(() => qbStub()) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ProfilesService,
@@ -214,7 +229,7 @@ describe('ProfilesService.getBySlug visibility', () => {
         },
         {
           provide: getRepositoryToken(ProfileFeaturedCommunity),
-          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+          useValue: featuredCommunities,
         },
         {
           provide: getRepositoryToken(Community),
@@ -471,6 +486,115 @@ describe('ProfilesService.getBySlug visibility', () => {
     // loadRelated short-circuits: profiles.createQueryBuilder is only ever
     // called for related members, so with no tags/location it is never called.
     expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  describe('loadRelated location gate (SEC-08)', () => {
+    it("never matches on the owner's location when they hid their neighbourhood", async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({
+          tags: [],
+          location: 'Arroios',
+          hoodVisible: false,
+          visibility: ProfileVisibility.Open,
+        }),
+      );
+      await service.getBySlug('jo', 'viewer-1');
+      // No tags and no readable location: there is nothing left to match on.
+      expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('matches a shown location only against members who show theirs', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({
+          tags: [],
+          location: 'Arroios',
+          hoodVisible: true,
+          visibility: ProfileVisibility.Open,
+        }),
+      );
+      const qb = qbStub();
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getBySlug('jo', 'viewer-1');
+
+      const andWhereCalls: unknown[][] = qb.andWhere.mock.calls;
+      const matchCall = andWhereCalls.find(
+        ([clause]) =>
+          typeof clause === 'string' && clause.includes('p.location = :loc'),
+      );
+      expect(matchCall?.[0]).toContain('"p"."hood_visible" = true');
+      expect(matchCall?.[1]).toMatchObject({ loc: 'Arroios' });
+    });
+  });
+
+  describe('featured community images', () => {
+    const COMMUNITY_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+    const UPLOADER_ID = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+    const COVER_KEY = `community-covers/${UPLOADER_ID}/cccccccc-3333-4333-8333-cccccccccccc.jpg`;
+    const AVATAR_KEY = `community-avatars/${UPLOADER_ID}/dddddddd-4444-4444-8444-dddddddddddd.png`;
+
+    afterEach(() => {
+      resetImageUrlBaseForTesting();
+    });
+
+    it("serves an uploaded cover and avatar by the community's reference, so no uploader id reaches the URL", async () => {
+      setImageUrlBase('https://api.test');
+      profiles.findOne.mockResolvedValue(
+        profile({ visibility: ProfileVisibility.Open }),
+      );
+      const qb = qbStub();
+      qb.getRawMany.mockResolvedValue([
+        {
+          communityId: COMMUNITY_ID,
+          slug: 'zine-club',
+          name: 'Zine Club',
+          tagline: 'Paper and glue',
+          type: 'interest',
+          role: 'member',
+          tags: [],
+          coverImageUrl: COVER_KEY,
+          avatarImageUrl: AVATAR_KEY,
+          activeThisWeek: 0,
+        },
+      ]);
+      featuredCommunities.createQueryBuilder.mockReturnValue(qb);
+
+      const res = await service.getBySlug('jo', 'viewer-1');
+      if (res.limited) {
+        throw new Error('expected the full profile for an open member');
+      }
+      const [pin] = res.featuredCommunities;
+      const coverReference = communityCoverPhotoReference(COMMUNITY_ID);
+      const avatarReference = communityAvatarPhotoReference(COMMUNITY_ID);
+
+      // The version token HMACs the reference with the stored key, so a new
+      // upload busts the cache while the URL names only the community.
+      expect(pin?.coverImageUrl).toBe(
+        `https://api.test/files/${coverReference}?v=${mediaReferenceVersion(COVER_KEY, coverReference ?? '')}`,
+      );
+      expect(pin?.avatarImageUrl).toBe(
+        `https://api.test/files/${avatarReference}?v=${mediaReferenceVersion(AVATAR_KEY, avatarReference ?? '')}`,
+      );
+      expect(pin?.coverImageUrl).not.toContain(UPLOADER_ID);
+      expect(pin?.avatarImageUrl).not.toContain(UPLOADER_ID);
+    });
+  });
+
+  describe('loadRelated visibility tier (PRD-504)', () => {
+    it("applies the directory's tier clause with the viewer's id", async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ tags: ['queer'], visibility: ProfileVisibility.Open }),
+      );
+      const qb = qbStub();
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getBySlug('jo', 'viewer-1');
+
+      expect(qb.andWhere).toHaveBeenCalledWith(directoryTierClause(), {
+        directoryViewerId: 'viewer-1',
+        directoryAcceptedStatus: ConnectionStatus.Accepted,
+      });
+    });
   });
 
   describe('loadRelated photoVisible gate', () => {
@@ -1020,9 +1144,9 @@ describe('ProfilesService.getBySlug visibility', () => {
         'viewer-1',
         '"p"."user_id"',
       );
-      const predicates = (
-        qb.andWhere as jest.Mock<unknown, unknown[]>
-      ).mock.calls.map((call: unknown[]) => String(call[0]));
+      const predicates = qb.andWhere.mock.calls.map((call: unknown[]) =>
+        String(call[0]),
+      );
       // The 24h hide and the moderator takedown.
       expect(
         predicates.some((predicate) => predicate.includes('hidden_until')),
@@ -1113,6 +1237,24 @@ describe('ProfilesService.getBySlug visibility', () => {
   });
 
   describe('searchMembers', () => {
+    it("applies the visibility-tier clause bound to the viewer's id (PRD-504)", async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({}, 'viewer-1');
+
+      const andWhereCalls: unknown[][] = qb.andWhere.mock.calls;
+      const tierCall = andWhereCalls.find(
+        ([clause]) =>
+          typeof clause === 'string' && clause.includes('directory_connection'),
+      );
+      expect(tierCall?.[1]).toEqual({
+        directoryViewerId: 'viewer-1',
+        directoryAcceptedStatus: 'accepted',
+      });
+    });
+
     it('drops moderator-taken-down members in SQL, keyed by slug or user id (ENG-437)', async () => {
       const qb = qbStub();
       qb.getManyAndCount.mockResolvedValue([[], 0]);
@@ -1120,9 +1262,7 @@ describe('ProfilesService.getBySlug visibility', () => {
 
       await service.searchMembers({}, 'viewer-1');
 
-      const andWhereCalls: unknown[][] = (
-        qb.andWhere as jest.Mock<unknown, unknown[]>
-      ).mock.calls;
+      const andWhereCalls: unknown[][] = qb.andWhere.mock.calls;
       const takedownCall = andWhereCalls.find(
         (call: unknown[]) =>
           typeof call[0] === 'string' && call[0].includes('content_moderation'),
@@ -1157,9 +1297,7 @@ describe('ProfilesService.getBySlug visibility', () => {
       // `directoryBaseQuery`.
       expect(builders.length).toBeGreaterThan(1);
       for (const qb of builders) {
-        const hasTakedownGate = (
-          qb.andWhere as jest.Mock<unknown, unknown[]>
-        ).mock.calls.some(
+        const hasTakedownGate = qb.andWhere.mock.calls.some(
           (call: unknown[]) =>
             typeof call[0] === 'string' &&
             call[0].includes('content_moderation'),
@@ -1189,9 +1327,7 @@ describe('ProfilesService.getBySlug visibility', () => {
 
       await service.searchMembers({ query: 'sao' }, 'viewer-1');
 
-      const andWhereCalls: unknown[][] = (
-        qb.andWhere as jest.Mock<unknown, unknown[]>
-      ).mock.calls;
+      const andWhereCalls: unknown[][] = qb.andWhere.mock.calls;
       const searchCall = andWhereCalls.find(
         (call: unknown[]) =>
           typeof call[0] === 'string' &&

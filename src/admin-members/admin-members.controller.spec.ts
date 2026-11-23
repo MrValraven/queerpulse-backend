@@ -27,34 +27,55 @@ describe('AdminMembersController', () => {
     controller = module.get(AdminMembersController);
   });
 
-  it('GET / delegates to the service with the parsed query', async () => {
+  it('GET / delegates to the service with the parsed query and the viewer', async () => {
     const query: ListAdminMembersQuery = { page: 2, filter: 'verified' };
     const listResult = { items: [], total: 0, page: 2, pageSize: 20 };
     service.list.mockResolvedValue(listResult);
+    const viewer: CurrentUserData = {
+      userId: 'user-admin',
+      email: 'admin@example.com',
+      status: 'active',
+      role: 'admin',
+    };
 
-    const result = await controller.list(query);
+    const result = await controller.list(query, viewer);
 
-    expect(service.list).toHaveBeenCalledWith(query);
+    expect(service.list).toHaveBeenCalledWith(query, 'user-admin');
     expect(result).toBe(listResult);
   });
 
-  it("GET /flagged delegates to the service's listFlagged with no arguments", async () => {
+  it("GET /flagged delegates to the service's listFlagged with the viewer", async () => {
     const flaggedMembers = [{ slug: 'flagged-member' }];
     service.listFlagged.mockResolvedValue(flaggedMembers);
+    const viewer: CurrentUserData = {
+      userId: 'user-admin',
+      email: 'admin@example.com',
+      status: 'active',
+      role: 'admin',
+    };
 
-    const result = await controller.listFlagged();
+    const result = await controller.listFlagged(viewer);
 
-    expect(service.listFlagged).toHaveBeenCalledWith();
+    expect(service.listFlagged).toHaveBeenCalledWith('user-admin');
     expect(result).toBe(flaggedMembers);
   });
 
-  it('GET /:id delegates to the service with the id param', async () => {
+  it('GET /:id delegates to the service with the id param and the viewer', async () => {
     const memberDetail = { slug: 'ines-martins' };
     service.getMember.mockResolvedValue(memberDetail);
+    const viewer: CurrentUserData = {
+      userId: 'user-admin',
+      email: 'admin@example.com',
+      status: 'active',
+      role: 'admin',
+    };
 
-    const result = await controller.getMember('ines-martins');
+    const result = await controller.getMember(viewer, 'ines-martins');
 
-    expect(service.getMember).toHaveBeenCalledWith('ines-martins');
+    expect(service.getMember).toHaveBeenCalledWith(
+      'ines-martins',
+      'user-admin',
+    );
     expect(result).toBe(memberDetail);
   });
 

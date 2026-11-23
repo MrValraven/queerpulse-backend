@@ -5,7 +5,10 @@ import { AccessTier } from '../communities/entities/community.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { TopicPost } from './entities/topic-post.entity';
 import { Topic } from './entities/topic.entity';
-import { TopicsService } from './topics.service';
+import {
+  TOPIC_POST_AUTHOR_FILTER_COLUMN_SQL,
+  TopicsService,
+} from './topics.service';
 
 describe('TopicsService', () => {
   let service: TopicsService;
@@ -236,21 +239,32 @@ describe('TopicsService', () => {
       });
     });
 
-    it('applies the block/mute filter in-query against the author column', async () => {
+    it('applies the block/mute filter in-query against the masked author column', async () => {
       topics.findOne.mockResolvedValue(healthcare);
       const qb = makeQueryBuilder([post]);
       topicPosts.createQueryBuilder.mockReturnValue(qb);
 
       await service.listPosts('healthcare', VIEWER_ID, undefined, undefined);
 
-      // Raw, already-quoted snake_case column per `BlockFilterService`'s
-      // splicing contract, written as SQL in place of a TypeORM camelCase
-      // property path.
+      // Raw SQL per `BlockFilterService`'s splicing contract.
       expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
         qb,
         VIEWER_ID,
-        '"tp"."author_id"',
+        TOPIC_POST_AUTHOR_FILTER_COLUMN_SQL,
       );
+    });
+
+    it('compares NULL for a row linked to an anonymous, non-official thread', () => {
+      // A block or mute of the hidden writer must leave the row in place, so
+      // the expression goes NULL when the linked thread is anonymous and not
+      // official, and falls back to the stored author everywhere else.
+      const sql = TOPIC_POST_AUTHOR_FILTER_COLUMN_SQL.replace(/\s+/g, ' ');
+      expect(sql).toContain(
+        '"masked_topic_thread"."id" = "tp"."forum_thread_id"',
+      );
+      expect(sql).toContain('AND "masked_topic_thread"."is_anonymous"');
+      expect(sql).toContain('AND NOT "masked_topic_thread"."is_official"');
+      expect(sql).toMatch(/THEN NULL ELSE "tp"\."author_id" END$/);
     });
 
     it('listPosts drops a row whose thread sits in a private community', async () => {

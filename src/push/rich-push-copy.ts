@@ -182,6 +182,12 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
   'push:listingOwnerOffer.title': 'Oferta de propriedade',
   'push:listingOwnerOffer.body':
     '{name} ofereceu-te a propriedade de {listingName}.',
+  'push:communityOwnershipOffered.title': 'Oferta de gestão',
+  'push:communityOwnershipOffered.body':
+    '{name} ofereceu-te a gestão de {communityName}.',
+  'push:communityOwnershipOfferDeclined.title': 'Oferta recusada',
+  'push:communityOwnershipOfferDeclined.body':
+    '{name} recusou a tua oferta de {communityName}.',
   'push:goTogether.pairInvite.title': 'Vamos juntes',
   'push:goTogether.pairInvite.body': '{name} quer ir contigo a um convívio',
   'push:goTogether.groupReady.title': 'Vamos juntes',

@@ -14,6 +14,7 @@ import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import {
   HousingListing,
   HousingListingStatus,
@@ -604,6 +605,21 @@ export class HousingReviewsService {
       viewerUserId !== null &&
       listing.ownerId !== null &&
       (await this.blockFilter.isBlockedEitherWay(viewerUserId, listing.ownerId))
+    ) {
+      throw new NotFoundException('Housing listing not found');
+    }
+    // SEC-34: a lister who is suspended, banned or deactivated takes the home
+    // off the board, so its reviews 404 for everyone but the lister too. A home
+    // with no lister at all (an erased account) 404s as the detail route does.
+    if (
+      !isOwner &&
+      (listing.ownerId === null ||
+        !(await this.profiles.exists({
+          where: {
+            userId: listing.ownerId,
+            user: { status: UserStatus.Active },
+          },
+        })))
     ) {
       throw new NotFoundException('Housing listing not found');
     }

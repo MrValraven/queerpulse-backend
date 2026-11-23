@@ -861,6 +861,7 @@ describe('SubprofilesService', () => {
   let credits: {
     computeNewlyCreditedHandles: jest.Mock;
     emitSubprofileCreditNotifications: jest.Mock;
+    assertNoOwnerCreditOnUnlinked: jest.Mock;
   };
   let publicRead: {
     resolveHandles: jest.Mock;
@@ -1177,6 +1178,7 @@ describe('SubprofilesService', () => {
     credits = {
       computeNewlyCreditedHandles: jest.fn().mockResolvedValue([]),
       emitSubprofileCreditNotifications: jest.fn().mockResolvedValue(undefined),
+      assertNoOwnerCreditOnUnlinked: jest.fn().mockResolvedValue(undefined),
     };
 
     // Shared Contract gate (removed -> private -> members_only -> ok),
@@ -5921,7 +5923,7 @@ describe('SubprofilesService', () => {
       // ENG-447: the pseudonymous persona answers under a fresh id, so no id
       // the named persona exposed leads to it.
       describe('the fresh id an unlink issues', () => {
-        const REKEY_SQL = `UPDATE "subprofiles" SET "id" = $1 WHERE "id" = $2`;
+        const REKEY_SQL = `UPDATE "subprofiles" SET "id" = $1, "created_at" = now(), "updated_at" = now() WHERE "id" = $2`;
         const UUID_PATTERN =
           /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
         const rekeyCallIndex = () =>
@@ -5957,6 +5959,33 @@ describe('SubprofilesService', () => {
 
           expect(generationAtCommit).toEqual([generationBefore + 1]);
           expect(studioLandingMemoGeneration()).toBe(generationBefore + 2);
+        });
+
+        // SEC-07: neither the row's creation time nor a set availability
+        // stamp carries the named persona's exact time across the unlink.
+        it('restarts created_at and a set availability stamp at the unlink', async () => {
+          const namedEraStamp = new Date('2026-01-01T00:00:00.000Z');
+          subprofiles.findOne.mockResolvedValue(
+            makeSubprofile({
+              linkVisibility: SubprofileLinkVisibility.Linked,
+              status: SubprofileStatus.Published,
+              handle: 'robin-nightform',
+              createdAt: namedEraStamp,
+              availabilityUpdatedAt: namedEraStamp,
+            }),
+          );
+
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          const saved = savedSubprofile();
+          expect(saved.createdAt.getTime()).toBeGreaterThan(
+            namedEraStamp.getTime(),
+          );
+          expect(saved.availabilityUpdatedAt?.getTime()).toBeGreaterThan(
+            namedEraStamp.getTime(),
+          );
         });
 
         it('moves the row to a new id after the cut, and saves and answers under it', async () => {

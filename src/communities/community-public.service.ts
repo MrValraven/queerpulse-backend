@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, MoreThanOrEqual, Repository } from 'typeorm';
+import { visibleMemberUserId } from './community-visible-member';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import {
@@ -16,7 +17,12 @@ import {
   EventStatus,
   EventVisibility,
 } from '../events/entities/event.entity';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import {
+  communityAvatarPhotoReference,
+  communityCoverPhotoReference,
+  eventCoverPhotoReference,
+} from '../storage/public-media-reference';
 import { VolunteeringService } from '../volunteering/volunteering.service';
 import {
   CommunityGateCardResponse,
@@ -576,7 +582,11 @@ export class CommunityPublicService {
       visibility: EventVisibility.Public,
     };
     const [memberCount, nextGathering] = await Promise.all([
-      this.members.count({ where: { communityId: community.id } }),
+      // Active, unhidden members only, the same rule as the roster
+      // (`visibleMemberUserId`).
+      this.members.count({
+        where: { communityId: community.id, userId: visibleMemberUserId() },
+      }),
       this.events.findOne({
         // A gathering that is UNDERWAY is still the next one, matching
         // browse's 'upcoming' predicate in `EventsService.list`. Find-options
@@ -634,8 +644,16 @@ export class CommunityPublicService {
       isOnline: community.isOnline,
       languages: community.languages ?? [],
       memberCount,
-      avatarImageUrl: toImageUrl(community.avatarImageUrl),
-      coverImageUrl: toImageUrl(community.coverImageUrl),
+      // SEC-04: member uploads name their uploader, so this signed-out page
+      // renders the community's opaque references (`toImageUrlByReference`).
+      avatarImageUrl: toImageUrlByReference(
+        community.avatarImageUrl,
+        communityAvatarPhotoReference(community.id),
+      ),
+      coverImageUrl: toImageUrlByReference(
+        community.coverImageUrl,
+        communityCoverPhotoReference(community.id),
+      ),
       nextGathering: nextGathering
         ? {
             slug: nextGathering.slug,
@@ -693,7 +711,10 @@ export class CommunityPublicService {
       neighbourhood: gathering.neighbourhood,
       eventType: gathering.eventType,
       cost: gathering.cost,
-      coverImageUrl: toImageUrl(gathering.coverImageUrl),
+      coverImageUrl: toImageUrlByReference(
+        gathering.coverImageUrl,
+        eventCoverPhotoReference(gathering.id),
+      ),
       goingCount: gathering.showAttendeeCount
         ? (goingCounts.get(gathering.id) ?? 0)
         : null,

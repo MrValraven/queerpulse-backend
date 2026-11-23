@@ -42,6 +42,7 @@ interface PersonaFactsRow {
   id: string;
   user_id: string;
   is_eligible: boolean;
+  link_visibility?: string;
 }
 
 interface PersonaRow {
@@ -478,6 +479,23 @@ describe('ListingTeamService', () => {
         [USER_ID, PERSONA_OWNER_ID],
         [PERSONA_OWNER_ID, LISTING_OWNER_ID],
       ]);
+    });
+
+    // SEC-02: an unlinked persona is invited whoever blocked whom, so the
+    // invite cannot test who runs it.
+    it('invites an unlinked persona the same whether or not its owner and the caller are blocked', async () => {
+      scenario.isBlocked = true;
+      scenario.personaFacts = {
+        id: PERSONA_ID,
+        user_id: PERSONA_OWNER_ID,
+        is_eligible: true,
+        link_visibility: 'unlinked',
+      };
+
+      await expect(
+        service.invite(LISTING_REF, USER_ID, { subprofileId: PERSONA_ID }),
+      ).resolves.toMatchObject({ status: 'pending' });
+      expect(queriesContaining('AS "is_blocked"')).toHaveLength(0);
     });
 
     it('answers persona not found when the persona row is gone at the lock', async () => {
@@ -938,6 +956,24 @@ describe('ListingTeamService', () => {
       });
       expect(manager.update).not.toHaveBeenCalled();
       expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    // SEC-02: an unlinked persona's request is approved whoever blocked whom.
+    it('approves an unlinked persona the same across a block with its owner', async () => {
+      scenario.teamRow = teamRow({});
+      scenario.listingOwnerId = LISTING_OWNER_ID;
+      scenario.isBlocked = true;
+      scenario.personaFacts = {
+        id: PERSONA_ID,
+        user_id: PERSONA_OWNER_ID,
+        is_eligible: true,
+        link_visibility: 'unlinked',
+      };
+
+      await expect(
+        service.approve(LISTING_REF, USER_ID, 'member-1', {}),
+      ).resolves.toMatchObject({ status: 'accepted' });
+      expect(queriesContaining('AS "is_blocked"')).toHaveLength(0);
     });
 
     it('answers link not found when the persona row is gone at the lock', async () => {
@@ -1487,6 +1523,10 @@ describe('ListingTeamService', () => {
     expect(sql).toContain(`"persona"."handle" ILIKE $5 ESCAPE '\\'`);
     expect(sql).toContain(notBlockedEitherWaySql('$4', '"persona"."user_id"'));
     expect(sql).toContain(notBlockedEitherWaySql('$6', '"persona"."user_id"'));
+    // SEC-02: both creator blocks bind a linked persona alone.
+    expect(sql).toContain(
+      `("persona"."link_visibility" = 'unlinked' OR (${notBlockedEitherWaySql('$4', '"persona"."user_id"')}`,
+    );
     expect(sql).toContain('lower($3)');
     expect(sql).toContain('LIMIT 20');
     expect(sql).toContain('ON "owner_profile"."user_id" = "persona"."user_id"');

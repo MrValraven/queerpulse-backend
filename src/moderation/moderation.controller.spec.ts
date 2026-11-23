@@ -51,14 +51,14 @@ describe('ModerationController', () => {
     expect(service.list).toHaveBeenCalledWith(query, actor.userId);
   });
 
-  it('reads the audit trail for a reportId', async () => {
-    await controller.audit({ reportId: 'report-1' });
-    expect(service.auditTrail).toHaveBeenCalledWith('report-1');
+  it('reads the audit trail for a reportId as the current actor', async () => {
+    await controller.audit(actor, { reportId: 'report-1' });
+    expect(service.auditTrail).toHaveBeenCalledWith('report-1', actor.userId);
   });
 
-  it('gets one report by id', async () => {
-    await controller.getReport('report-1');
-    expect(service.getById).toHaveBeenCalledWith('report-1');
+  it('gets one report by id as the current actor', async () => {
+    await controller.getReport(actor, 'report-1');
+    expect(service.getById).toHaveBeenCalledWith('report-1', actor.userId);
   });
 
   it('acts on a report as the current actor, passing their role through for the service to authorize', async () => {
@@ -96,8 +96,11 @@ describe('ModerationController', () => {
     // TS-11: the route takes a query now (awaiting/decided + overdue +
     // cursor), and the controller passes the whole DTO through the way
     // `listReports` does.
-    await controller.listAppeals({ tab: 'decided' });
-    expect(service.listAppeals).toHaveBeenCalledWith({ tab: 'decided' });
+    await controller.listAppeals(actor, { tab: 'decided' });
+    expect(service.listAppeals).toHaveBeenCalledWith(
+      { tab: 'decided' },
+      actor.userId,
+    );
   });
 
   it('reviews an appeal as the current actor', async () => {

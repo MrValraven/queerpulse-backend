@@ -8,6 +8,8 @@ const EMAIL_VARIABLES = [
   'RESEND_SIGNIN_TEMPLATE_ID_PT',
   'RESEND_SIGNUP_TEMPLATE_ID_EN',
   'RESEND_SIGNUP_TEMPLATE_ID_PT',
+  'RESEND_JOIN_REQUEST_TEMPLATE_ID_EN',
+  'RESEND_JOIN_REQUEST_TEMPLATE_ID_PT',
   'RESEND_WELCOME_TEMPLATE_ID_EN',
   'RESEND_WELCOME_TEMPLATE_ID_PT',
   'EMAIL_CODE_SECRET',
@@ -70,6 +72,18 @@ describe('email config', () => {
     });
     expect(withSignIn.signUpTemplateIdEn).toBeUndefined();
     expect(withSignIn.enabled).toBe(true);
+  });
+
+  it('reads the join-request template ids without changing enabled', () => {
+    const config = loadWith({
+      NODE_ENV: 'production',
+      RESEND_API_KEY: 're_test_key',
+      RESEND_JOIN_REQUEST_TEMPLATE_ID_EN: 'join-en',
+      RESEND_JOIN_REQUEST_TEMPLATE_ID_PT: 'join-pt',
+    });
+    expect(config.joinRequestTemplateIdEn).toBe('join-en');
+    expect(config.joinRequestTemplateIdPt).toBe('join-pt');
+    expect(config.enabled).toBe(false);
   });
 
   it('is enabled in production when the key and both template ids are set', () => {

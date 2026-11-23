@@ -20,6 +20,11 @@ import {
 } from './entities/subprofile.entity';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { lockEngageablePersonaWithin } from './subprofile-engagement-lock';
+import {
+  PERSONA_CREATOR_ACTIVE_WHERE,
+  isCreatorBlockConsulted,
+  memberShownOnPeopleListSql,
+} from './persona-creator-gates';
 import { EndorserView } from './subprofile-response';
 import { isSubprofileUnderTakedown } from './subprofile-takedown';
 import {
@@ -223,10 +228,14 @@ export class SubprofileEndorsementsService {
     // In-query block filtering (mirrors `directory()`) so `LIMIT` counts only
     // visible rows and `count` reflects the viewer's actually-visible total,
     // not the raw active tally.
+    // SEC-21: an endorser who is paused, suspended, pending erasure or
+    // hidden for 24 hours leaves this list as they leave every other people
+    // list, from the count too.
     const qb = this.endorsements
       .createQueryBuilder('se')
       .where('se.subprofileId = :id', { id })
-      .andWhere('se.withdrawnAt IS NULL');
+      .andWhere('se.withdrawnAt IS NULL')
+      .andWhere(memberShownOnPeopleListSql('"se"."endorser_id"'));
     this.blockFilter.excludeBlocked(qb, viewerId, '"se"."endorser_id"');
     qb.orderBy('se.createdAt', 'DESC');
 
@@ -320,9 +329,10 @@ export class SubprofileEndorsementsService {
   }
 
   // Fetches a persona by id AND enforces it is publicly endorsable: published,
-  // Open visibility, not owner-removed, not under a moderator takedown, and not
-  // block-either-way between `userId` (the endorser/viewer) and the persona's
-  // owner. Mirrors the gate `getByHandle` applies.
+  // Open visibility, live (no owner removal), an active creator, free of any
+  // moderator takedown, and for a linked persona not block-either-way between
+  // `userId` (the endorser/viewer) and the persona's creator. Mirrors the gate
+  // `getByHandle` applies.
   private async resolveEndorsablePersona(
     userId: string,
     id: string,
@@ -341,6 +351,8 @@ export class SubprofileEndorsementsService {
         // owner each time) and keep reading the endorser list through
         // `listEndorsers`, which funnels through this same gate.
         removedAt: IsNull(),
+        // SEC-33: a persona whose creator is not active is unreachable too.
+        ...PERSONA_CREATOR_ACTIVE_WHERE,
       },
     });
     if (!persona) {
@@ -352,7 +364,13 @@ export class SubprofileEndorsementsService {
     if (await isSubprofileUnderTakedown(this.contentModeration, persona.id)) {
       throw new NotFoundException('Subprofile not found');
     }
-    if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {
+    // A block with the creator closes a LINKED persona alone. An unlinked
+    // persona takes an endorsement from anyone, so a refusal can never say
+    // who runs it (SEC-02, `isCreatorBlockConsulted`).
+    if (
+      isCreatorBlockConsulted(persona) &&
+      (await this.blockFilter.isBlockedEitherWay(userId, persona.userId))
+    ) {
       throw new NotFoundException('Subprofile not found');
     }
     return persona;

@@ -4,7 +4,10 @@ import { DataSource } from 'typeorm';
 import { runWithConcurrency } from '../common/run-with-concurrency';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
-import { RELEASE_ALERT_RECIPIENTS_SQL } from './studio-release-alerts.listener';
+import {
+  RELEASE_ALERT_RECIPIENTS_SQL,
+  blockActorIdFor,
+} from './studio-release-alerts.listener';
 import { listenablePersonaSql } from './studio-visibility';
 import { STUDIO_LIMITS } from './studio.constants';
 import {
@@ -22,6 +25,8 @@ export interface ClaimedEpisodeRow {
   subprofile_name: string;
   subprofile_slug_or_handle: string;
   owner_user_id: string;
+  /** SEC-02: an unlinked persona's alerts consult no block with its owner. */
+  link_visibility: string;
 }
 
 interface RecipientRow {
@@ -65,7 +70,8 @@ export const EPISODE_ALERT_CLAIM_SQL = `WITH "claimed" AS (
               "persona"."slug"
             ) AS "subprofile_name",
             COALESCE("persona"."handle", "persona"."slug") AS "subprofile_slug_or_handle",
-            "persona"."user_id" AS "owner_user_id"
+            "persona"."user_id" AS "owner_user_id",
+            "persona"."link_visibility"::text AS "link_visibility"
 )
 SELECT "claimed".* FROM "claimed"`;
 
@@ -76,8 +82,9 @@ SELECT "claimed".* FROM "claimed"`;
  * at 5000) with no reminder holders, chunks of 500 handed to
  * `NotificationsService.createForRecipients` (block, mute and the
  * `persona_follows` preference filtered inside it), three chunks in flight,
- * push riding each chunk's batch event. The persona owner's id goes to
- * `createForRecipients` for block and mute filtering only; the payload names
+ * push riding each chunk's batch event. For a LINKED persona the owner's id
+ * goes to `createForRecipients` for block and mute filtering only; an
+ * unlinked persona passes none (`blockActorIdFor`, SEC-02). The payload names
  * the persona, the show and the episode.
  *
  * Best effort and post-commit: the episode is already out, so nothing here
@@ -163,7 +170,7 @@ export class StudioEpisodeAlertsListener {
           chunk,
           NotificationType.StudioEpisodePublished,
           payload,
-          claimed.owner_user_id,
+          blockActorIdFor(claimed),
         ),
       );
     }

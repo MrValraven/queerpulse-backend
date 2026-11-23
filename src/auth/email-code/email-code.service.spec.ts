@@ -30,13 +30,18 @@ interface RequesterStats {
   latest: Date | null;
 }
 interface AddressStats {
-  count: number;
-  oldest: Date | null;
+  sharedCount: number;
+  sharedOldest: Date | null;
+  trustedCount: number;
+  trustedOldest: Date | null;
 }
-interface GuessStats {
-  total: number;
-  oldest: Date | null;
-}
+
+const NO_ADDRESS_SENDS: AddressStats = {
+  sharedCount: 0,
+  sharedOldest: null,
+  trustedCount: 0,
+  trustedOldest: null,
+};
 
 const challengeRow = (
   overrides: Partial<EmailSignInChallenge> = {},
@@ -52,6 +57,7 @@ const challengeRow = (
   consumedAt: null,
   supersededAt: null,
   createdAt: new Date('2026-10-26T11:55:00Z'),
+  isTrustedSend: false,
   ...overrides,
 });
 
@@ -77,7 +83,6 @@ describe('EmailCodeService', () => {
   let events: string[];
   let requesterStats: RequesterStats;
   let addressStats: AddressStats;
-  let guessStats: GuessStats;
   let row: EmailSignInChallenge | null;
   let manager: { query: jest.Mock; getRepository: jest.Mock };
   let managerRepository: {
@@ -103,8 +108,7 @@ describe('EmailCodeService', () => {
     jest.useFakeTimers().setSystemTime(NOW);
     events = [];
     requesterStats = { count: 0, oldest: null, latest: null };
-    addressStats = { count: 0, oldest: null };
-    guessStats = { total: 0, oldest: null };
+    addressStats = { ...NO_ADDRESS_SENDS };
     row = challengeRow();
 
     managerRepository = {
@@ -120,8 +124,6 @@ describe('EmailCodeService', () => {
         if (sql.includes('pg_advisory_xact_lock')) return Promise.resolve([]);
         if (sql.includes('requester_hash'))
           return Promise.resolve([requesterStats]);
-        if (sql.includes('failed_attempts'))
-          return Promise.resolve([guessStats]);
         return Promise.resolve([addressStats]);
       }),
       getRepository: jest.fn(() => managerRepository),
@@ -291,8 +293,10 @@ describe('EmailCodeService', () => {
         EmailSignInChallengePurpose.SignIn,
         new Date('2026-10-26T11:45:00.000Z'),
       ]);
+      // Counted per purpose, so anonymous sign-in requests leave reauth codes alone.
       expect(addressCall?.[1]).toEqual([
         'sam@example.com',
+        EmailSignInChallengePurpose.SignIn,
         new Date('2026-10-25T12:00:00.000Z'),
       ]);
     });
@@ -351,7 +355,11 @@ describe('EmailCodeService', () => {
     });
 
     it('answers too_many_codes after 30 codes to the address in 24 hours', async () => {
-      addressStats = { count: 30, oldest: new Date('2026-10-25T13:00:00Z') };
+      addressStats = {
+        ...NO_ADDRESS_SENDS,
+        sharedCount: 30,
+        sharedOldest: new Date('2026-10-25T13:00:00Z'),
+      };
 
       const refusal = await refusalOf(issue());
 
@@ -497,8 +505,297 @@ describe('EmailCodeService', () => {
     });
   });
 
+  // SEC-10: the code an applicant types before a join request is filed.
+  describe('issueJoinRequestChallenge', () => {
+    const issueJoin = (rawEmail = 'sam@example.com') =>
+      service.issueJoinRequestChallenge({
+        rawEmail,
+        requesterKey: 'cookie-1',
+        locale: 'pt',
+      });
+
+    it('stores a join_request challenge bound to the requester and sends the join-request email', async () => {
+      await issueJoin(' Sam@Example.com ');
+
+      expect(insertedRow()).toEqual(
+        expect.objectContaining({
+          purpose: EmailSignInChallengePurpose.JoinRequest,
+          email: 'sam@example.com',
+          userId: null,
+          requesterHash: sha256('cookie-1'),
+        }),
+      );
+      expect(mailer.sendSignInCode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: 'sam@example.com',
+          locale: 'pt',
+          isJoinRequest: true,
+        }),
+      );
+    });
+
+    it('answers every address alike: it looks up no account and always sends', async () => {
+      users.findByEmailForSignIn.mockResolvedValue({ isSystem: true });
+
+      const issued = await issueJoin();
+
+      expect(users.findByEmailForSignIn).not.toHaveBeenCalled();
+      expect(mailer.sendSignInCode).toHaveBeenCalledTimes(1);
+      expect(issued).toEqual({
+        challengeId: insertedRow().id,
+        expiresAt: new Date('2026-10-26T12:10:00Z'),
+        resendAvailableAt: new Date('2026-10-26T12:01:00Z'),
+      });
+    });
+
+    it('counts the address send cap under the join_request purpose', async () => {
+      await issueJoin();
+
+      const calls = manager.query.mock.calls as unknown[][];
+      const addressCount = calls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          !call[0].includes('requester_hash') &&
+          !call[0].includes('pg_advisory_xact_lock'),
+      );
+      expect(addressCount?.[1]).toEqual(
+        expect.arrayContaining([
+          'sam@example.com',
+          EmailSignInChallengePurpose.JoinRequest,
+        ]),
+      );
+    });
+
+    it('answers too_many_codes after 10 join-request codes to the address in 24 hours', async () => {
+      addressStats = {
+        ...NO_ADDRESS_SENDS,
+        sharedCount: 10,
+        sharedOldest: new Date('2026-10-25T13:00:00Z'),
+      };
+
+      const refusal = await refusalOf(issueJoin());
+
+      expect(refusal.reason).toBe('too_many_codes');
+      expect(managerRepository.insert).not.toHaveBeenCalled();
+      expect(mailer.sendSignInCode).not.toHaveBeenCalled();
+    });
+
+    it('still issues a sign-in code at 10 sends, under the wider sign-in cap', async () => {
+      addressStats = {
+        ...NO_ADDRESS_SENDS,
+        sharedCount: 10,
+        sharedOldest: new Date('2026-10-25T13:00:00Z'),
+      };
+
+      const issued = await issue();
+
+      expect(issued).toEqual(
+        expect.objectContaining({ challengeId: insertedRow().id }),
+      );
+      expect(mailer.sendSignInCode).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses an undeliverable address before any query', async () => {
+      const refusal = await refusalOf(issueJoin('nope'));
+
+      expect(refusal.reason).toBe('email_invalid');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses a sign-in challenge typed back as a join-request code', async () => {
+      row = challengeRow({ purpose: EmailSignInChallengePurpose.SignIn });
+
+      const refusal = await refusalOf(
+        verify('123456', { purpose: EmailSignInChallengePurpose.JoinRequest }),
+      );
+
+      expect(refusal.reason).toBe('code_incorrect');
+    });
+
+    it('verifies a join-request code and hands back the address it was sent to', async () => {
+      row = challengeRow({ purpose: EmailSignInChallengePurpose.JoinRequest });
+
+      await expect(
+        verify('123456', { purpose: EmailSignInChallengePurpose.JoinRequest }),
+      ).resolves.toEqual({ email: 'sam@example.com', userId: null });
+    });
+  });
+
+  // SEC-11: a browser that verified a code for the address draws on a reserved
+  // allowance a stranger without its cookie cannot spend.
+  describe('trusted-requester allowance', () => {
+    const issueWithToken = (
+      trustedRequesterToken: string | undefined,
+      rawEmail = 'sam@example.com',
+    ) =>
+      service.issueSignInChallenge({
+        rawEmail,
+        requesterKey: 'cookie-1',
+        locale: 'en',
+        trustedRequesterToken,
+      });
+
+    const issueJoinWithToken = (trustedRequesterToken: string | undefined) =>
+      service.issueJoinRequestChallenge({
+        rawEmail: 'sam@example.com',
+        requesterKey: 'cookie-1',
+        locale: 'en',
+        trustedRequesterToken,
+      });
+
+    const sharedCapSpent = (sharedCount: number): AddressStats => ({
+      ...NO_ADDRESS_SENDS,
+      sharedCount,
+      sharedOldest: new Date('2026-10-25T13:00:00Z'),
+    });
+
+    it('records an untrusted send against the shared cap', async () => {
+      await issueWithToken(undefined);
+
+      expect(insertedRow().isTrustedSend).toBe(false);
+    });
+
+    it('records a trusted send against the reserved allowance', async () => {
+      const token = service.mintTrustedRequesterToken('sam@example.com');
+
+      await issueWithToken(token);
+
+      expect(insertedRow().isTrustedSend).toBe(true);
+    });
+
+    it('issues a code to a trusted browser after strangers spend the shared cap', async () => {
+      addressStats = sharedCapSpent(30);
+      const token = service.mintTrustedRequesterToken('Sam@Example.com');
+
+      await issueWithToken(token, ' SAM@example.com ');
+
+      expect(insertedRow().isTrustedSend).toBe(true);
+      expect(mailer.sendSignInCode).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the shared cap once the reserved allowance is spent', async () => {
+      addressStats = {
+        ...NO_ADDRESS_SENDS,
+        sharedCount: 5,
+        sharedOldest: new Date('2026-10-25T13:00:00Z'),
+        trustedCount: 10,
+        trustedOldest: new Date('2026-10-25T14:00:00Z'),
+      };
+      const token = service.mintTrustedRequesterToken('sam@example.com');
+
+      await issueWithToken(token);
+
+      expect(insertedRow().isTrustedSend).toBe(false);
+    });
+
+    it('caps the reserved allowance at 10: with both buckets spent it answers too_many_codes at the earlier reopening', async () => {
+      addressStats = {
+        sharedCount: 30,
+        sharedOldest: new Date('2026-10-25T15:00:00Z'),
+        trustedCount: 10,
+        trustedOldest: new Date('2026-10-25T14:00:00Z'),
+      };
+      const token = service.mintTrustedRequesterToken('sam@example.com');
+
+      const refusal = await refusalOf(issueWithToken(token));
+
+      expect(refusal.reason).toBe('too_many_codes');
+      expect(refusal.getStatus()).toBe(429);
+      expect(refusal.getResponse()).toEqual({
+        reason: 'too_many_codes',
+        message: 'too_many_codes',
+        retryAt: '2026-10-26T14:00:00.000Z',
+      });
+      expect(managerRepository.insert).not.toHaveBeenCalled();
+      expect(mailer.sendSignInCode).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, () => string | undefined]>([
+      ['no cookie', () => undefined],
+      ['a malformed cookie', () => 'sam@example.com'],
+      [
+        'a cookie for another address',
+        () => service.mintTrustedRequesterToken('lee@example.com'),
+      ],
+      [
+        'a cookie with a forged expiry',
+        () => {
+          const [, mac] = service
+            .mintTrustedRequesterToken('sam@example.com')
+            .split('.');
+          return `99999999999.${mac}`;
+        },
+      ],
+      [
+        'a cookie with a forged signature',
+        () => {
+          const [expiry] = service
+            .mintTrustedRequesterToken('sam@example.com')
+            .split('.');
+          return `${expiry}.${'A'.repeat(43)}`;
+        },
+      ],
+      [
+        'an expired cookie',
+        () => {
+          jest.setSystemTime(new Date('2026-07-01T12:00:00Z'));
+          const token = service.mintTrustedRequesterToken('sam@example.com');
+          jest.setSystemTime(NOW);
+          return token;
+        },
+      ],
+    ])(
+      'treats %s as untrusted: the spent shared cap answers too_many_codes',
+      async (_label, tokenFor) => {
+        addressStats = sharedCapSpent(30);
+
+        const refusal = await refusalOf(issueWithToken(tokenFor()));
+
+        expect(refusal.getResponse()).toEqual({
+          reason: 'too_many_codes',
+          message: 'too_many_codes',
+          retryAt: '2026-10-26T13:00:00.000Z',
+        });
+        expect(managerRepository.insert).not.toHaveBeenCalled();
+      },
+    );
+
+    it('gives join-request codes a reserve of 5 beside the shared cap of 10', async () => {
+      const token = service.mintTrustedRequesterToken('sam@example.com');
+      addressStats = {
+        ...sharedCapSpent(10),
+        trustedCount: 4,
+        trustedOldest: new Date('2026-10-25T14:00:00Z'),
+      };
+      await issueJoinWithToken(token);
+      expect(insertedRow().isTrustedSend).toBe(true);
+
+      addressStats = {
+        ...sharedCapSpent(10),
+        trustedCount: 5,
+        trustedOldest: new Date('2026-10-25T14:00:00Z'),
+      };
+      const refusal = await refusalOf(issueJoinWithToken(token));
+      expect(refusal.reason).toBe('too_many_codes');
+    });
+
+    it('runs the same queries for trusted and untrusted requests', async () => {
+      const sqlOf = () =>
+        (manager.query.mock.calls as [string, unknown[]][]).map(([sql]) => sql);
+      await issueWithToken(undefined);
+      const untrustedQueries = sqlOf();
+      manager.query.mockClear();
+
+      await issueWithToken(
+        service.mintTrustedRequesterToken('sam@example.com'),
+      );
+
+      expect(sqlOf()).toEqual(untrustedQueries);
+    });
+  });
+
   describe('verifyChallenge', () => {
-    it('answers code_incorrect with attemptsLeft 4 for a challenge id that is not a uuid, without a query', async () => {
+    it('answers code_incorrect with attemptsLeft 2 for a challenge id that is not a uuid, without a query', async () => {
       const refusal = await refusalOf(
         verify('123456', { challengeId: 'not-a-uuid' }),
       );
@@ -508,7 +805,7 @@ describe('EmailCodeService', () => {
       expect(refusal.getResponse()).toEqual({
         reason: 'code_incorrect',
         message: 'code_incorrect',
-        attemptsLeft: 4,
+        attemptsLeft: 2,
       });
       expect(dataSource.transaction).not.toHaveBeenCalled();
       expect(manager.query).not.toHaveBeenCalled();
@@ -528,7 +825,7 @@ describe('EmailCodeService', () => {
 
       expect(refusal.reason).toBe('code_incorrect');
       expect(refusal.getResponse()).toEqual(
-        expect.objectContaining({ attemptsLeft: 4 }),
+        expect.objectContaining({ attemptsLeft: 2 }),
       );
       expect(managerRepository.update).not.toHaveBeenCalled();
     });
@@ -560,7 +857,7 @@ describe('EmailCodeService', () => {
         {
           consumedAt: new Date('2026-10-26T11:58:00Z'),
           supersededAt: new Date('2026-10-26T11:59:00Z'),
-          failedAttempts: 5,
+          failedAttempts: 3,
           expiresAt: new Date('2026-10-26T11:59:59Z'),
         },
       ],
@@ -568,13 +865,13 @@ describe('EmailCodeService', () => {
         'code_replaced',
         {
           supersededAt: new Date('2026-10-26T11:59:00Z'),
-          failedAttempts: 5,
+          failedAttempts: 3,
           expiresAt: new Date('2026-10-26T11:59:59Z'),
         },
       ],
       [
         'code_used_up',
-        { failedAttempts: 5, expiresAt: new Date('2026-10-26T11:59:59Z') },
+        { failedAttempts: 3, expiresAt: new Date('2026-10-26T11:59:59Z') },
       ],
       ['code_expired', { expiresAt: new Date('2026-10-26T11:59:59Z') }],
     ])(
@@ -590,20 +887,13 @@ describe('EmailCodeService', () => {
       },
     );
 
-    it('answers too_many_attempts (429) with retryAt once the address has 50 wrong guesses in 24 hours', async () => {
-      guessStats = { total: 50, oldest: new Date('2026-10-25T18:00:00Z') };
+    it('reads no address-wide guess total before comparing the code', async () => {
+      await verify('123456');
 
-      const refusal = await refusalOf(verify('123456'));
-
-      expect(refusal.reason).toBe('too_many_attempts');
-      expect(refusal.getStatus()).toBe(429);
-      expect(refusal.getResponse()).toEqual(
-        expect.objectContaining({ retryAt: '2026-10-26T18:00:00.000Z' }),
+      const sqlRun = manager.query.mock.calls.map(
+        (call: unknown[]) => call[0] as string,
       );
-      expect(managerRepository.update).not.toHaveBeenCalled();
-      expect(warnSpy).toHaveBeenCalledWith(
-        `Sign-in code refused: reason=too_many_attempts challengeId=${CHALLENGE_ID}`,
-      );
+      expect(sqlRun.some((sql) => sql.includes('failed_attempts'))).toBe(false);
     });
 
     it('accepts the right code without consuming it or counting a try', async () => {
@@ -625,7 +915,7 @@ describe('EmailCodeService', () => {
     });
 
     it('counts a wrong code inside the transaction and throws after it commits', async () => {
-      row = challengeRow({ failedAttempts: 2 });
+      row = challengeRow({ failedAttempts: 1 });
 
       const refusal = await refusalOf(verify('654321'));
 
@@ -635,11 +925,11 @@ describe('EmailCodeService', () => {
       });
       expect(managerRepository.update).toHaveBeenCalledWith(
         { id: CHALLENGE_ID },
-        { failedAttempts: 3 },
+        { failedAttempts: 2 },
       );
       expect(refusal.reason).toBe('code_incorrect');
       expect(refusal.getResponse()).toEqual(
-        expect.objectContaining({ attemptsLeft: 2 }),
+        expect.objectContaining({ attemptsLeft: 1 }),
       );
       expect(events).toEqual([
         'transaction:start',
@@ -652,14 +942,14 @@ describe('EmailCodeService', () => {
       await expect(transactionResult).resolves.toBeDefined();
     });
 
-    it('answers code_used_up on the fifth wrong code', async () => {
-      row = challengeRow({ failedAttempts: 4 });
+    it('answers code_used_up on the third wrong code', async () => {
+      row = challengeRow({ failedAttempts: 2 });
 
       const refusal = await refusalOf(verify('654321'));
 
       expect(managerRepository.update).toHaveBeenCalledWith(
         { id: CHALLENGE_ID },
-        { failedAttempts: 5 },
+        { failedAttempts: 3 },
       );
       expect(refusal.reason).toBe('code_used_up');
       expect(warnSpy).toHaveBeenCalledWith(
@@ -676,7 +966,7 @@ describe('EmailCodeService', () => {
       );
       expect(refusal.reason).toBe('code_incorrect');
       expect(refusal.getResponse()).toEqual(
-        expect.objectContaining({ attemptsLeft: 4 }),
+        expect.objectContaining({ attemptsLeft: 2 }),
       );
     });
   });

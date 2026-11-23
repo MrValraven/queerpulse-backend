@@ -1067,12 +1067,18 @@ export class ConversationsController {
     return result;
   }
 
+  // SEC-27: a reaction goes out live to every participant, so a member under
+  // a moderation restriction cannot add one. Removing their own stays open.
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Post(':id/messages/:messageId/reactions')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Add an emoji reaction to a message' })
   @ApiCreatedResponse({ description: 'The reaction was recorded.' })
   @ApiBadRequestResponse({ description: 'Invalid reaction key.' })
-  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiForbiddenResponse({
+    description:
+      'The caller is not a participant, or is under a moderation restriction (code ACCOUNT_RESTRICTED).',
+  })
   @ApiNotFoundResponse({
     description: 'The conversation or message was not found.',
   })
@@ -1150,8 +1156,11 @@ export class ConversationsController {
     return this.messagingService.hideMessageForMe(id, messageId, user.userId);
   }
 
+  // SEC-27: an edit rewrites a message every participant already has, live,
+  // so a member under a moderation restriction cannot edit.
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Patch(':id/messages/:messageId')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Edit a message body (author only, within the 15-minute window)',
   })
@@ -1159,7 +1168,7 @@ export class ConversationsController {
   @ApiBadRequestResponse({ description: 'Invalid body.' })
   @ApiForbiddenResponse({
     description:
-      'The caller is not the author, or the edit window has expired.',
+      'The caller is not the author, the edit window has expired, or the caller is under a moderation restriction (code ACCOUNT_RESTRICTED).',
   })
   @ApiNotFoundResponse({
     description: 'The message was not found (or has been deleted).',

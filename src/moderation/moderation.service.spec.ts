@@ -184,7 +184,7 @@ describe('ModerationService', () => {
   let adminQueueNotifications: { announce: jest.Mock };
   // Task 21 review M3: resolves an `identity` report's business display name
   // for the queue.
-  let identities: { describeIdentities: jest.Mock };
+  let identities: { describeIdentities: jest.Mock; staffUserIds: jest.Mock };
   // ENG-486: an overturned `ban` emits `ACCOUNT_REINSTATED` post-commit.
   let eventEmit: jest.Mock;
 
@@ -276,6 +276,9 @@ describe('ModerationService', () => {
     // (none of them an `identity` subject) is unaffected.
     identities = {
       describeIdentities: jest.fn().mockResolvedValue(new Map()),
+      // SEC-31: the staff of a reported business or persona. Nobody by
+      // default, so no pre-existing test's actor is ever one of them.
+      staffUserIds: jest.fn().mockResolvedValue([]),
     };
 
     // Defaults to "nothing resolved", so a `warn` or a `suspend` on a content
@@ -2407,6 +2410,15 @@ describe('ModerationService', () => {
 
     // The overdue filter is meaningless on the decided tab and must not narrow
     // it: a decided appeal has no window left to be outside of.
+    // SEC-31: a staff member's own appeals stay out of their queue.
+    it("leaves the viewer's own appeals out of their queue", async () => {
+      await service.listAppeals({}, 'staff-1');
+      expect(appealsQb.andWhere).toHaveBeenCalledWith(
+        '(a.appellantId IS NULL OR a.appellantId <> :viewerUserId)',
+        { viewerUserId: 'staff-1' },
+      );
+    });
+
     it('ignores the overdue filter on the decided tab', async () => {
       await service.listAppeals({ tab: 'decided', filter: 'overdue' });
       expect(appealsQb.andWhere).not.toHaveBeenCalledWith(
@@ -2773,6 +2785,20 @@ describe('ModerationService', () => {
           note: 'n/a',
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // SEC-31: an appeal is the appellant's own case.
+    it('refuses the appellant their own appeal with the coded refusal', async () => {
+      appeals.findOne.mockResolvedValue(baseAppeal({ appellantId: 'staff-1' }));
+      await expect(
+        service.reviewAppeal('appeal-1', 'staff-1', {
+          decision: 'overturn',
+          note: 'n/a',
+        }),
+      ).rejects.toMatchObject({
+        response: { code: 'REPORT_ABOUT_ACTOR' },
+      });
+      expect(auditLogs.findOne).not.toHaveBeenCalled();
     });
 
     it('rejects reviewing an already-decided appeal', async () => {
@@ -3292,14 +3318,21 @@ describe('ModerationService', () => {
       });
 
       it('never notifies a moderator acting on their own report', async () => {
-        // The reported member IS the actor (edge case) — no self-notification.
-        await service.actOnReport('report-1', 'user-1', UserRole.Moderator, {
-          action: 'warn',
-          reasonCode: 'harassment',
-          note: 'n',
+        // The reported member IS the actor. SEC-31 refuses the action with the
+        // coded refusal before any enforcement, so no outcome notification
+        // can reach them either.
+        await expect(
+          service.actOnReport('report-1', 'user-1', UserRole.Moderator, {
+            action: 'warn',
+            reasonCode: 'harassment',
+            note: 'n',
+          }),
+        ).rejects.toMatchObject({
+          response: { code: 'REPORT_ABOUT_ACTOR' },
         });
 
         expect(memberCall()).toBeUndefined();
+        expect(reports.save).not.toHaveBeenCalled();
       });
     });
 
@@ -3538,6 +3571,8 @@ describe('ModerationService', () => {
         {
           id: 'report-2',
           reason: matchStringContaining('post'),
+          // SEC-31 follow-up: a coded refusal carries its code into failed[].
+          code: 'ENFORCEMENT_TARGET_UNRESOLVED',
         },
       ]);
       // The report that DID commit still enforces in full — the failed sibling
@@ -4488,7 +4523,11 @@ describe('ModerationService', () => {
 
         expect(result.updated).toEqual(['report-1']);
         expect(result.failed).toEqual([
-          { id: 'report-2', reason: matchStringContaining('nothing to hide') },
+          {
+            id: 'report-2',
+            reason: matchStringContaining('nothing to hide'),
+            code: 'CONTENT_ACTION_UNSUPPORTED',
+          },
         ]);
         expect(applyContentAction).toHaveBeenCalledTimes(1);
       });

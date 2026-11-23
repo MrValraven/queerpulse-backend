@@ -41,14 +41,22 @@ export const PURCHASE_ALERT_SQL = `SELECT "purchase"."id" AS "purchase_id",
  WHERE "purchase"."id" = $1
    AND "purchase"."status"::text = $2`;
 
-/** `$1` a persona. Every member who holds a Studio grant, no member left
- *  out, since the alert carries no actor. */
+/** `$1` a persona, `$2` the buyer or NULL. Every member who holds a Studio
+ *  grant, except a member blocked either way with the buyer (SEC-02): a
+ *  buyer can claim from an unlinked persona whoever blocked whom, and that
+ *  member must not hear of a claim by someone they blocked. A NULL buyer
+ *  leaves nobody out. */
 export const PURCHASE_ALERT_RECIPIENTS_SQL = `SELECT "member"."user_id" AS "user_id"
   FROM "subprofile_members" "member"
  WHERE "member"."subprofile_id" = $1
    AND EXISTS (
      SELECT 1 FROM "studio_access_grants" "member_grant"
       WHERE "member_grant"."user_id" = "member"."user_id"
+   )
+   AND NOT EXISTS (
+     SELECT 1 FROM "blocks" "claim_alert_block"
+      WHERE ("claim_alert_block"."blocker_id" = "member"."user_id" AND "claim_alert_block"."blocked_id" = $2::uuid)
+         OR ("claim_alert_block"."blocked_id" = "member"."user_id" AND "claim_alert_block"."blocker_id" = $2::uuid)
    )
  ORDER BY "member"."user_id" ASC`;
 
@@ -65,8 +73,9 @@ interface PurchaseAlertRow {
 
 /**
  * Studio purchases: the four payment notifications (contract section 8).
- * The claim reaches the persona's members that hold a Studio grant; the
- * confirmation, the decline and the expiry reach the buyer. None of them
+ * The claim reaches the persona's members that hold a Studio grant, less any
+ * member blocked either way with the buyer; the confirmation, the decline
+ * and the expiry reach the buyer. None of them
  * carries an `actorId`, so neither a mute nor a later block silences a
  * payment record. The buyer is never named in a payload and the decline
  * note stays out of it.
@@ -90,7 +99,10 @@ export class StudioPurchaseAlertsListener {
       if (!purchase.subprofile_id) {
         return;
       }
-      const recipientIds = await this.membersOf(purchase.subprofile_id);
+      const recipientIds = await this.membersOf(
+        purchase.subprofile_id,
+        purchase.buyer_user_id,
+      );
       if (!recipientIds.length) {
         return;
       }
@@ -184,10 +196,13 @@ export class StudioPurchaseAlertsListener {
     }
   }
 
-  private async membersOf(subprofileId: string): Promise<string[]> {
+  private async membersOf(
+    subprofileId: string,
+    buyerUserId: string | null,
+  ): Promise<string[]> {
     const rows: { user_id: string }[] = await this.dataSource.query(
       PURCHASE_ALERT_RECIPIENTS_SQL,
-      [subprofileId],
+      [subprofileId, buyerUserId],
     );
     return rows.map((row) => row.user_id);
   }

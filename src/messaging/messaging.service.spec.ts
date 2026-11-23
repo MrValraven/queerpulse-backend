@@ -1,17 +1,21 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, FindOperator, QueryFailedError } from 'typeorm';
+import { DataSource, FindOperator, IsNull, QueryFailedError } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { encodeCursor } from '../common/cursor-pagination';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Block } from '../social/entities/block.entity';
+import { HiddenFromService } from '../social/hidden-from.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
@@ -237,6 +241,9 @@ describe('MessagingService', () => {
     blockedUserIds: jest.Mock;
     excludeBlocked: jest.Mock;
   };
+  // SEC-19: the one-way read `messageRequest` names the requester's own
+  // block with. Default: the requester blocked nobody.
+  let blocks: { exist: jest.Mock };
   let emitter: { emit: jest.Mock };
   let reactions: {
     find: jest.Mock;
@@ -335,6 +342,7 @@ describe('MessagingService', () => {
       // unless a test overrides this.
       acceptedSinceByCounterpart: jest.fn().mockResolvedValue(new Map()),
     };
+    blocks = { exist: jest.fn().mockResolvedValue(false) };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
       // The inbox drops threads whose counterpart is blocked either way, in
@@ -444,15 +452,38 @@ describe('MessagingService', () => {
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         // `MessageRequestsService` reads staff account status for mailbox
-        // enquiries, which no test in this file sends.
+        // enquiries, which no test in this file sends, and (SEC-19) the
+        // recipient's own status before a message request: every recipient
+        // here is an active member.
         {
           provide: getRepositoryToken(User),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
+          useValue: {
+            find: jest.fn().mockResolvedValue([]),
+            findOne: jest.fn(
+              ({
+                where,
+              }: {
+                where: { id: string };
+              }): Promise<Pick<User, 'id' | 'status'>> =>
+                Promise.resolve({ id: where.id, status: UserStatus.Active }),
+            ),
+          },
         },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
         { provide: ConnectionsService, useValue: connections },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: getRepositoryToken(Block), useValue: blocks },
+        // SEC-19: the profile read's hide and takedown gates `messageRequest`
+        // applies. Default: nobody hidden, nothing taken down.
+        {
+          provide: HiddenFromService,
+          useValue: { isHiddenFrom: jest.fn().mockResolvedValue(false) },
+        },
+        {
+          provide: ContentModerationService,
+          useValue: { statesFor: jest.fn().mockResolvedValue(new Map()) },
+        },
         { provide: UsersService, useValue: usersService },
         {
           provide: MediaCropService,
@@ -2175,14 +2206,35 @@ describe('MessagingService', () => {
   });
 
   describe('messageRequest', () => {
-    it('rejects when either party has blocked the other', async () => {
+    it('answers a block the recipient placed with the profile read 404', async () => {
       profiles.findOne.mockResolvedValueOnce({ userId: 'them', slug: 'them' });
       blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
-      await expect(
-        service.messageRequest('me', 'them', 'hi there'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      const request = service.messageRequest('me', 'them', 'hi there');
+      await expect(request).rejects.toBeInstanceOf(NotFoundException);
+      await expect(request).rejects.toThrow('Member not found');
       expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
       expect(connections.areConnected).not.toHaveBeenCalled();
+      expect(connections.requestConnection).not.toHaveBeenCalled();
+    });
+
+    it('names a block the requester placed with its own code', async () => {
+      profiles.findOne.mockResolvedValueOnce({ userId: 'them', slug: 'them' });
+      blocks.exist.mockResolvedValueOnce(true);
+      const request = service.messageRequest('me', 'them', 'hi there');
+      await expect(request).rejects.toBeInstanceOf(ConflictException);
+      await expect(request).rejects.toMatchObject({
+        response: {
+          code: 'UNBLOCK_TO_CONTACT',
+          message: 'Unblock this member before sending a request',
+        },
+      });
+      expect(blocks.exist).toHaveBeenCalledWith({
+        where: {
+          blockerId: 'me',
+          blockedId: 'them',
+          matchedConversationId: IsNull(),
+        },
+      });
       expect(connections.requestConnection).not.toHaveBeenCalled();
     });
 

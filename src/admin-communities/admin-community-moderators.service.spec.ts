@@ -36,6 +36,8 @@ function makeMember(overrides: Partial<CommunityMember> = {}): CommunityMember {
     rulesAcceptedAt: null,
     rulesVersionAccepted: null,
     welcomeSeenAt: null,
+    wornBadgeId: null,
+    eventsAttendedCount: 0,
     ...overrides,
   };
 }

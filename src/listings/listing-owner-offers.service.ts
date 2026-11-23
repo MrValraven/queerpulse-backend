@@ -481,7 +481,7 @@ export class ListingOwnerOffersService {
     if (offer.offeredByUserId) userIds.push(offer.offeredByUserId);
     const refs: Map<string, MemberRef> = await new MemberLookup(
       this.profiles,
-    ).byUserIds(userIds);
+    ).byUserIds(userIds, { inactive: 'include' });
     return toListingOwnerOfferDTO(
       offer,
       listing,

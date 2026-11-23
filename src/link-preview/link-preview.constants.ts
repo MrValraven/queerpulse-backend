@@ -55,3 +55,18 @@ export const UNFURL_URL_LIMIT = 150;
  * of time the rest of the product has already taught them.
  */
 export const UNFURL_WINDOW_SECONDS = 60;
+
+/**
+ * SEC-23: the version-neutral route that serves a link preview's image
+ * (`GET /link-preview-images/<token>`). Version-neutral because the address is
+ * minted server-side from the API origin (`apiUrlFor`), as `GET /files/*` and
+ * the matched chat avatars are.
+ */
+export const LINK_PREVIEW_IMAGE_ROUTE = 'link-preview-images';
+
+/**
+ * How long a reader's browser may reuse a preview image. The address names
+ * one image URL for good, so an hour of private caching saves the reader a
+ * round trip on every scroll back without letting a shared cache hold it.
+ */
+export const LINK_PREVIEW_IMAGE_CACHE_CONTROL = 'private, max-age=3600';

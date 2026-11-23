@@ -20,6 +20,7 @@ import {
   STUDIO_EPISODE_PUBLISHED,
   StudioEpisodePublishedEvent,
 } from './studio.events';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 /** One card of the "New episodes" shelf. */
 export interface StudioEpisodeFeedItem {
@@ -122,6 +123,7 @@ export class StudioEpisodesService {
       queryBuilder,
       viewerId,
       '"persona"."user_id"',
+      { unless: unlinkedPersonaSql('persona') },
     );
     const rows = await queryBuilder
       .orderBy('track.publishedAt', 'DESC')

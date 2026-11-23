@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -39,7 +40,8 @@ import { PersonaStorageKey } from '../storage/entities/persona-storage-key.entit
 import { isPersonaScopedKey } from '../storage/storage-key';
 import {
   EmailSuppression,
-  hashSuppressedEmail,
+  suppressionKeyForNewRow,
+  suppressionPepper,
 } from './entities/email-suppression.entity';
 import {
   DeletionRequest,
@@ -107,6 +109,9 @@ export class AccountDeletionProcessorService {
     // per-prefix listing cannot find them. `StorageModule` exports it and
     // `AccountModule` already imports `StorageModule`.
     private readonly studioAudioUploads: StudioAudioUploadsService,
+    // SEC-14: holds the pepper the suppression row's HMAC key is derived from
+    // (`suppressionKeyForNewRow`). Global, so no module wiring.
+    private readonly config: ConfigService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -355,7 +360,7 @@ export class AccountDeletionProcessorService {
 
     await this.dataSource.transaction(async (manager) => {
       // `addSelect('user.email')` re-includes the `select: false` email column:
-      // the suppression row is keyed on `hashSuppressedEmail(user.email)`, so an
+      // the suppression row is keyed on `suppressionKeyForNewRow(user.email)`, so an
       // unloaded email here would hash `undefined` and let the erased account
       // silently re-register on the same address.
       const user = await manager
@@ -381,7 +386,12 @@ export class AccountDeletionProcessorService {
         .insert()
         .into(EmailSuppression)
         .values({
-          emailHash: hashSuppressedEmail(user.email),
+          // SEC-14: the peppered HMAC key. Lookups also accept the legacy
+          // SHA-256 key older rows carry (`suppressionLookupKeys`).
+          emailHash: suppressionKeyForNewRow(
+            user.email,
+            suppressionPepper(this.config),
+          ),
           reason: 'account_deleted',
         })
         .orIgnore()

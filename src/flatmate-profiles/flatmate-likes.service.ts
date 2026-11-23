@@ -7,6 +7,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import {
   FlatmateLike,
   FlatmateLikeDecision,
@@ -32,6 +34,8 @@ export class FlatmateLikesService {
     private readonly likes: Repository<FlatmateLike>,
     @InjectRepository(FlatmateProfile)
     private readonly flatmates: Repository<FlatmateProfile>,
+    // Read-only: whether the profile owner's account is still active (SEC-34).
+    @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly blockFilter: BlockFilterService,
     // A profile under a `flatmate` takedown is not decidable from the deck.
     private readonly contentModeration: ContentModerationService,
@@ -67,6 +71,17 @@ export class FlatmateLikesService {
       slug,
     );
     if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Flatmate profile not found');
+    }
+    // SEC-34: browse drops a profile whose owner is suspended, banned or
+    // deactivated, so a decision on it by slug answers the same 404.
+    const isOwnerActive = await this.profiles.exists({
+      where: {
+        userId: target.ownerId,
+        user: { status: UserStatus.Active },
+      },
+    });
+    if (!isOwnerActive) {
       throw new NotFoundException('Flatmate profile not found');
     }
 

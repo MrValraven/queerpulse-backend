@@ -22,6 +22,13 @@ import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { lockEngageablePersonaWithin } from './subprofile-engagement-lock';
 import {
+  PERSONA_CREATOR_ACTIVE_WHERE,
+  isCreatorBlockConsulted,
+  memberShownOnPeopleListSql,
+  personaCreatorActiveSql,
+  unlinkedPersonaSql,
+} from './persona-creator-gates';
+import {
   Subprofile,
   SubprofileStatus,
   SubprofileVisibility,
@@ -198,9 +205,15 @@ export class SubprofileFollowersService {
     );
     const safePage = Math.max(page ?? 1, 1);
 
+    // SEC-21: a follower whose account is paused, suspended or pending
+    // erasure, or who chose "Hide me for 24 hours", leaves this list as they
+    // leave every other people list (`memberShownOnPeopleListSql`, shared
+    // with the endorsers list). Both halves are `EXISTS` predicates so no
+    // join reaches `skip`/`take`, and `count` drops them too.
     const qb = this.followers
       .createQueryBuilder('sf')
-      .where('sf.subprofileId = :id', { id });
+      .where('sf.subprofileId = :id', { id })
+      .andWhere(memberShownOnPeopleListSql('"sf"."follower_id"'));
     this.blockFilter.excludeBlocked(qb, viewerId, '"sf"."follower_id"');
     qb.orderBy('sf.createdAt', 'DESC');
 
@@ -248,13 +261,14 @@ export class SubprofileFollowersService {
    * makes the button mean something (PRD-208).
    *
    * REPEATS THE PUBLIC-READ GATE, IN QUERY. A followed persona can be
-   * unpublished, made private, owner-removed, taken down by a moderator, or
-   * belong to somebody the viewer has since blocked, and a follow row survives
-   * all five. Every one of those states is filtered in SQL rather than after
-   * the fetch, so `total` and the page boundary count only rows the viewer may
-   * actually see; filtering post-fetch would report a total that includes
-   * withheld personas and hand back short pages. The predicates are the same
-   * five `resolveFollowablePersona` applies to the WRITE path, so a persona you
+   * unpublished, made private, owner-removed, taken down by a moderator, lose
+   * its active creator, or (a linked one) belong to somebody the viewer has
+   * since blocked, and a follow row survives all six. Every one of those
+   * states is filtered in SQL before the page is cut, so `total` and the
+   * page boundary count only rows the viewer may actually see; filtering
+   * post-fetch would report a total that includes withheld personas and hand
+   * back short pages. The predicates are the same six
+   * `resolveFollowablePersona` applies to the WRITE path, so a persona you
    * can no longer follow is a persona you can no longer see here either.
    *
    * The takedown predicate is spelled here rather than borrowed from
@@ -308,8 +322,14 @@ export class SubprofileFollowersService {
             AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
         )`,
         { subprofileSubjectType: SUBPROFILE_MODERATION_SUBJECT_TYPE },
-      );
-    this.blockFilter.excludeBlocked(pageQuery, viewerId, '"sp"."user_id"');
+      )
+      // SEC-33: a persona whose creator is not active is withheld.
+      .andWhere(personaCreatorActiveSql());
+    // A block with the creator withholds a LINKED persona alone: an unlinked
+    // one answers every viewer alike (SEC-02).
+    this.blockFilter.excludeBlocked(pageQuery, viewerId, '"sp"."user_id"', {
+      unless: unlinkedPersonaSql(),
+    });
 
     const total = await pageQuery.getCount();
     if (total === 0) {
@@ -411,9 +431,10 @@ export class SubprofileFollowersService {
   }
 
   // Fetches a persona by id AND enforces it is publicly followable: published,
-  // Open visibility, not owner-removed, not under a moderator takedown, and not
-  // block-either-way between `userId` (the follower/viewer) and the persona's
-  // owner. Mirrors the gate `getByHandle` applies.
+  // Open visibility, live (no owner removal), an active creator, free of any
+  // moderator takedown, and for a linked persona not block-either-way between
+  // `userId` (the follower/viewer) and the persona's creator. Mirrors the gate
+  // `getByHandle` applies.
   private async resolveFollowablePersona(
     userId: string,
     id: string,
@@ -431,6 +452,8 @@ export class SubprofileFollowersService {
         // the page before the removal kept the uuid and could go on following
         // it, firing a notification at the owner each time.
         removedAt: IsNull(),
+        // SEC-33: a persona whose creator is not active is unreachable too.
+        ...PERSONA_CREATOR_ACTIVE_WHERE,
       },
     });
     if (!persona) {
@@ -448,7 +471,13 @@ export class SubprofileFollowersService {
         message: 'Subprofile not found',
       });
     }
-    if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {
+    // A block with the creator closes a LINKED persona alone. An unlinked
+    // persona takes a follow from anyone, so a refused follow can never say
+    // who runs it (SEC-02, `isCreatorBlockConsulted`).
+    if (
+      isCreatorBlockConsulted(persona) &&
+      (await this.blockFilter.isBlockedEitherWay(userId, persona.userId))
+    ) {
       throw new NotFoundException({
         code: PERSONA_NOT_FOLLOWABLE_CODE,
         message: 'Subprofile not found',

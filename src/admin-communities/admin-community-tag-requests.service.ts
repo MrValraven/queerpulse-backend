@@ -79,6 +79,7 @@ export class AdminCommunityTagRequestsService {
         isPlatformStaffReader
           ? [...new Set(rows.map((row) => row.requestedByUserId))]
           : [],
+        { inactive: 'include' },
       ),
     ]);
 
@@ -144,6 +145,7 @@ export class AdminCommunityTagRequestsService {
     // a caller who reached this on the `communities` grant.
     const requestersByUserId = await new MemberLookup(this.profiles).byUserIds(
       isPlatformStaffReader ? [saved.requestedByUserId] : [],
+      { inactive: 'include' },
     );
 
     return toAdminCommunityTagRequestDTO(

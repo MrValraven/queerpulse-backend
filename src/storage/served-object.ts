@@ -38,6 +38,10 @@ const CONTENT_TYPE_BY_EXTENSION: Readonly<Record<string, string>> =
 // signatures).
 export const MAGIC_BYTE_PREFIX_LENGTH = 16;
 
+// Studio audio reads more: an MP3 may carry padding or junk ahead of its
+// first frame header, so its check scans this many leading bytes for one.
+export const AUDIO_MAGIC_BYTE_PREFIX_LENGTH = 64;
+
 /**
  * The content type a storage key must be served as, derived from the key's
  * extension (the extension is server-minted at upload from the validated
@@ -142,9 +146,12 @@ function looksLikeTextPrefix(bytes: Uint8Array): boolean {
  * The magic-byte check is the server-side backstop for M2: uploads go straight
  * to the bucket via a presigned PUT (the backend never sees the bytes), so a
  * modified client can PUT arbitrary bytes under an allowed content type. A
- * `.png` key whose bytes are actually HTML/JS or a GPS-EXIF-laden original, or
- * a `.pdf` key that is really an executable, is caught here before the object
- * is ever served.
+ * `.png` key whose bytes are actually HTML/JS, or a `.pdf` key that is really
+ * an executable, is caught here before the object is ever served.
+ *
+ * This checks the SIGNATURE alone. It says nothing about metadata: an
+ * untouched camera JPEG carries a valid signature. The GPS check is
+ * {@link jpegCarriesGpsLocation} (SEC-43).
  *
  * `null` content type (unknown extension) yields `false` — the caller treats an
  * unrecognised type as not-validated and 404s, since only the known image and
@@ -228,9 +235,71 @@ export function magicBytesMatchContentType(
         bytes[2] === 0xdf &&
         bytes[3] === 0xa3
       );
+    case 'audio/mpeg':
+      // Studio audio: an ID3v2 tag at byte 0, or a Layer III frame header
+      // anywhere in the bytes read (an encoder may pad ahead of the first
+      // frame). The attach parse stays the authoritative check; this one
+      // only refuses what can be no MP3 at all.
+      return hasId3v2Tag(bytes) || hasMpegLayer3FrameHeader(bytes);
+    case 'audio/mp4':
+      // Studio audio (`.m4a`): any ISO base media `ftyp` box except the
+      // QuickTime `qt  ` brand, the rule `video/mp4` uses. Encoders write
+      // many brands (`M4A `, `mp42`, `isom`, `3gp4`, `dash`, `iso5`), and the
+      // attach parse checks the codec itself.
+      return hasFtypBox(bytes) && !isQuickTimeBrand(bytes);
     default:
       return false;
   }
+}
+
+// `ID3` followed by a major version of 2, 3 or 4 (ID3v2.2 to ID3v2.4).
+function hasId3v2Tag(bytes: Uint8Array): boolean {
+  const majorVersion = bytes[3];
+  return (
+    bytes[0] === 0x49 &&
+    bytes[1] === 0x44 &&
+    bytes[2] === 0x33 &&
+    majorVersion !== undefined &&
+    majorVersion >= 2 &&
+    majorVersion <= 4
+  );
+}
+
+// Whether an MPEG audio Layer III frame header starts at any offset of
+// `bytes`.
+function hasMpegLayer3FrameHeader(bytes: Uint8Array): boolean {
+  for (let offset = 0; offset + 3 <= bytes.length; offset += 1) {
+    if (isMpegLayer3FrameHeaderAt(bytes, offset)) return true;
+  }
+  return false;
+}
+
+// An MPEG audio frame header for Layer III at `offset`: 11 sync bits, a
+// version that is not the reserved `01`, layer bits `01`, a bitrate index
+// that is not the invalid `1111` and a sample rate index that is not the
+// reserved `11`. An ADTS AAC stream shares the sync bits and carries layer
+// `00`, so it fails.
+function isMpegLayer3FrameHeaderAt(bytes: Uint8Array, offset: number): boolean {
+  const secondByte = bytes[offset + 1];
+  const thirdByte = bytes[offset + 2];
+  if (
+    bytes[offset] !== 0xff ||
+    secondByte === undefined ||
+    thirdByte === undefined
+  )
+    return false;
+  const hasSyncBits = (secondByte & 0xe0) === 0xe0;
+  const versionBits = (secondByte >> 3) & 0x03;
+  const layerBits = (secondByte >> 1) & 0x03;
+  const bitrateIndex = (thirdByte >> 4) & 0x0f;
+  const sampleRateIndex = (thirdByte >> 2) & 0x03;
+  return (
+    hasSyncBits &&
+    versionBits !== 0x01 &&
+    layerBits === 0x01 &&
+    bitrateIndex !== 0x0f &&
+    sampleRateIndex !== 0x03
+  );
 }
 
 function hasFtypBox(bytes: Uint8Array): boolean {
@@ -254,4 +323,116 @@ export function isQuickTimeBrand(bytes: Uint8Array): boolean {
     bytes[10] === 0x20 &&
     bytes[11] === 0x20
   );
+}
+
+// SEC-43: how many leading bytes a JPEG's metadata check reads. EXIF lives in
+// an APP1 segment, which encoders write right after the start-of-image marker
+// (after an optional APP0/JFIF segment), and one segment is at most 64 KiB,
+// so for an ordinary camera file these bytes hold the IFD0 directory that
+// points at a GPS block.
+//
+// Known gaps, accepted because a browser upload is re-encoded and carries no
+// metadata at all, so only a client that skipped that step reaches them:
+//  - an APP1 that starts after the first 64 KiB (behind large APPn segments)
+//    is not read;
+//  - location written as XMP (an APP1 with an `http://ns.adobe.com/xap/`
+//    header) is not parsed, only the EXIF GPS pointer;
+//  - PNG (`eXIf` chunk) and WebP (`EXIF` chunk) metadata is not checked.
+export const JPEG_METADATA_PREFIX_LENGTH = 64 * 1024;
+
+// The IFD0 tag whose presence means the file carries a GPS block
+// (`GPSInfoIFDPointer`, EXIF 2.3 section 4.6.3).
+const GPS_IFD_POINTER_TAG = 0x8825;
+
+// `Exif\0\0`, the identifier every EXIF APP1 segment opens with.
+const EXIF_IDENTIFIER = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
+
+/**
+ * SEC-43: whether a JPEG's leading bytes carry an EXIF GPS block, meaning the
+ * IFD0 directory of an EXIF APP1 segment holds the GPS IFD pointer tag.
+ *
+ * Uploads go straight to the bucket through a presigned PUT, so the server
+ * cannot strip metadata. The browser re-encodes every upload (`stripMetadata`
+ * in the frontend upload helper), which drops EXIF entirely, so a file that
+ * still carries a GPS block came from a client that skipped that step. The
+ * serve route refuses it and `POST /uploads/confirm` names the cause.
+ *
+ * Walks the marker segments from the start-of-image marker up to the start of
+ * scan, reading each APP1 segment that opens with the EXIF identifier. A
+ * segment or directory that runs past the bytes read is ignored. `false` for
+ * anything that is not a JPEG.
+ */
+export function jpegCarriesGpsLocation(bytes: Uint8Array): boolean {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    return false;
+  }
+  let offset = 2;
+  while (offset + 4 <= bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      return false;
+    }
+    const marker = bytes[offset + 1]!;
+    // Fill bytes: a run of 0xFF before the real marker.
+    if (marker === 0xff) {
+      offset += 1;
+      continue;
+    }
+    // Start of scan or end of image: no metadata segment follows.
+    if (marker === 0xda || marker === 0xd9) {
+      return false;
+    }
+    const segmentLength = (bytes[offset + 2]! << 8) | bytes[offset + 3]!;
+    if (segmentLength < 2) {
+      return false;
+    }
+    const segmentStart = offset + 4;
+    const segmentEnd = offset + 2 + segmentLength;
+    if (
+      marker === 0xe1 &&
+      exifSegmentHasGpsPointer(
+        bytes.subarray(segmentStart, Math.min(segmentEnd, bytes.length)),
+      )
+    ) {
+      return true;
+    }
+    offset = segmentEnd;
+  }
+  return false;
+}
+
+/** Whether an APP1 segment's payload is EXIF whose IFD0 holds the GPS
+ *  pointer tag. */
+function exifSegmentHasGpsPointer(payload: Uint8Array): boolean {
+  const hasExifIdentifier = EXIF_IDENTIFIER.every(
+    (byte, index) => payload[index] === byte,
+  );
+  if (!hasExifIdentifier) {
+    return false;
+  }
+  const tiff = payload.subarray(EXIF_IDENTIFIER.length);
+  if (tiff.length < 8) {
+    return false;
+  }
+  // Byte order: `II` little endian, `MM` big endian.
+  const isLittleEndian = tiff[0] === 0x49 && tiff[1] === 0x49;
+  const isBigEndian = tiff[0] === 0x4d && tiff[1] === 0x4d;
+  if (!isLittleEndian && !isBigEndian) {
+    return false;
+  }
+  const view = new DataView(tiff.buffer, tiff.byteOffset, tiff.byteLength);
+  const ifdOffset = view.getUint32(4, isLittleEndian);
+  if (ifdOffset + 2 > tiff.length) {
+    return false;
+  }
+  const entryCount = view.getUint16(ifdOffset, isLittleEndian);
+  for (let entry = 0; entry < entryCount; entry += 1) {
+    const entryOffset = ifdOffset + 2 + entry * 12;
+    if (entryOffset + 2 > tiff.length) {
+      return false;
+    }
+    if (view.getUint16(entryOffset, isLittleEndian) === GPS_IFD_POINTER_TAG) {
+      return true;
+    }
+  }
+  return false;
 }

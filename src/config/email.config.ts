@@ -18,6 +18,11 @@ export const DEFAULT_RESEND_FROM = 'QueerPulse <hello@queerpulse.com>';
 // the same variables as the sign-in template. With one unset, that locale falls
 // back to the sign-in template. These never change `enabled`.
 //
+// The code an applicant types to confirm the address on a join request
+// (SEC-10) uses its own pair of template ids (RESEND_JOIN_REQUEST_TEMPLATE_ID_EN
+// / _PT), again with the variables `code` and `minutes`. With one unset, that
+// locale falls back to the sign-in template. These never change `enabled`.
+//
 // The welcome email a reviewer sends to an approved applicant uses its own
 // pair of template ids (RESEND_WELCOME_TEMPLATE_ID_EN / _PT). It is available
 // for a locale when RESEND_API_KEY and that locale's template id are set, and
@@ -32,6 +37,10 @@ export default registerAs('email', () => {
   const signInTemplateIdPt = process.env.RESEND_SIGNIN_TEMPLATE_ID_PT;
   const signUpTemplateIdEn = process.env.RESEND_SIGNUP_TEMPLATE_ID_EN;
   const signUpTemplateIdPt = process.env.RESEND_SIGNUP_TEMPLATE_ID_PT;
+  const joinRequestTemplateIdEn =
+    process.env.RESEND_JOIN_REQUEST_TEMPLATE_ID_EN;
+  const joinRequestTemplateIdPt =
+    process.env.RESEND_JOIN_REQUEST_TEMPLATE_ID_PT;
   const welcomeTemplateIdEn = process.env.RESEND_WELCOME_TEMPLATE_ID_EN;
   const welcomeTemplateIdPt = process.env.RESEND_WELCOME_TEMPLATE_ID_PT;
   const isResendConfigured = Boolean(
@@ -47,6 +56,8 @@ export default registerAs('email', () => {
     signInTemplateIdPt,
     signUpTemplateIdEn,
     signUpTemplateIdPt,
+    joinRequestTemplateIdEn,
+    joinRequestTemplateIdPt,
     welcomeTemplateIdEn,
     welcomeTemplateIdPt,
     codeSecret: process.env.EMAIL_CODE_SECRET,

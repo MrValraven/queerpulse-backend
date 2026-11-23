@@ -111,7 +111,9 @@ export class InquiriesService {
   ): Promise<Map<string, MemberRef>> {
     const ids = [...new Set(handlerIds.filter((id): id is string => !!id))];
     if (ids.length === 0) return new Map<string, MemberRef>();
-    return new MemberLookup(this.profiles).byUserIds(ids);
+    return new MemberLookup(this.profiles).byUserIds(ids, {
+      inactive: 'include',
+    });
   }
 
   /**

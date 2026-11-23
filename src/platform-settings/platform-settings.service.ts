@@ -345,6 +345,7 @@ export class PlatformSettingsService {
   ): Promise<Map<string, MemberRef>> {
     return new MemberLookup(this.profiles).byUserIds(
       presentActorIds(rows.map((row) => row.actorId)),
+      { inactive: 'include' },
     );
   }
 }

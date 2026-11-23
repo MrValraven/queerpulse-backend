@@ -20,6 +20,7 @@ import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
@@ -49,6 +50,11 @@ import {
 /** The content-moderation subject type housing listings are filed under,
  * keyed by slug (`HousingDirectoryService.SUBJECT_TYPE`). */
 const HOUSING_MODERATION_SUBJECT = 'housing';
+
+/** Machine reason on the 400 `complete()` answers before the accepted slot has
+ * come round. The frontend maps it to its own line. */
+export const HOUSING_VIEWING_NOT_HAPPENED_YET_CODE =
+  'housing_viewing_not_happened_yet';
 
 /** The statuses a viewing is still open in: something the two people may yet
  * act on, and something a block, a filled home or a deleted home calls off. */
@@ -403,9 +409,13 @@ export class HousingViewingsService {
       viewing.acceptedSlot === null ||
       viewing.acceptedSlot.getTime() > Date.now()
     ) {
-      throw new BadRequestException(
-        'This viewing has not happened yet — you can mark it completed once the agreed time has passed',
-      );
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'Bad Request',
+        message:
+          'This viewing has not happened yet. You can mark it completed once the agreed time has passed',
+        code: HOUSING_VIEWING_NOT_HAPPENED_YET_CODE,
+      });
     }
     viewing.status = HousingViewingStatus.Completed;
     // PRD-240 deliberately emits NOTHING here, and it is the only transition
@@ -698,9 +708,9 @@ export class HousingViewingsService {
 
   /** ENG-468. A block either way between the two participants freezes the
    * viewing for both: the block listener cancels it, and this refuses any
-   * answer that races in before the listener runs. Both sides already hold
-   * this viewing (it lists in their own `listMine`), so the 403 reveals no
-   * home they could not already see; LOC-F1's 404 covers the request only. */
+   * answer that races in before the listener runs. The refusal is the 404 a
+   * member who is gone gets, the same hidden state the rest of the platform
+   * shows across a block, so neither side learns a block is the cause. */
   private async assertNotBlocked(viewing: HousingViewing): Promise<void> {
     if (
       await this.blockFilter.isBlockedEitherWay(
@@ -708,20 +718,31 @@ export class HousingViewingsService {
         viewing.listerId,
       )
     ) {
-      throw new ForbiddenException('You cannot contact this member');
+      throw new NotFoundException('Member not found');
     }
   }
 
   /** ENG-471. True while the home can still be booked: live, unfilled,
-   * unexpired, present and clear of a moderator takedown. The same rules the
-   * public detail read applies before it shows the home to anyone else. */
+   * unexpired, present, clear of a moderator takedown and listed by an active
+   * member. The same rules the public detail read applies before it shows the
+   * home to anyone else. */
   private async isOnBoard(listing: HousingListing): Promise<boolean> {
     if (!this.isListedAndCurrent(listing)) return false;
     const moderation = await this.contentModeration.stateFor(
       HOUSING_MODERATION_SUBJECT,
       listing.slug,
     );
-    return !moderation.hidden && !moderation.removed;
+    if (moderation.hidden || moderation.removed) return false;
+    // SEC-34: a home whose lister is suspended, banned or deactivated is off the
+    // board. A home with no lister at all (an erased account) passes here and
+    // `request` refuses it with its own message.
+    if (listing.ownerId === null) return true;
+    return this.profiles.exists({
+      where: {
+        userId: listing.ownerId,
+        user: { status: UserStatus.Active },
+      },
+    });
   }
 
   /** The row-level half of `isOnBoard`: live, unfilled, unexpired and present.

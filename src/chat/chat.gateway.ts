@@ -1537,6 +1537,28 @@ export class ChatGateway
   }
 
   /**
+   * SEC-26: the `user:<id>` rooms of the group members blocked either way
+   * with `actorUserId`, for the `read`, `message:delivered` and `reaction`
+   * relays. Same rule and scope as `typing` (ENG-402, PRD-354): a group
+   * alone, since a block already refuses a direct thread and nobody is
+   * blocked out of the official thread. Any other audience yields none.
+   */
+  private async groupBlockedActorRooms(
+    audience: LiveThreadAudience,
+    conversationId: string,
+    actorUserId: string,
+  ): Promise<string[]> {
+    if (audience.shape !== 'personal' || !audience.isGroup) {
+      return [];
+    }
+    const { blockedUserIds } = await this.loadGroupSenderAudience(
+      conversationId,
+      actorUserId,
+    );
+    return [...blockedUserIds].map((blockedUserId) => `user:${blockedUserId}`);
+  }
+
+  /**
    * ENG-402: the group members blocked either way with the author of the
    * edited message `messageId`. `MessageUpdatedEvent` carries the hydrated
    * response, which names no author user id, so the row's `senderId` is read
@@ -1716,9 +1738,16 @@ export class ChatGateway
         );
         return;
       }
+      // SEC-26: in a group, a member blocked either way with the reader
+      // never sees their read watermark, matching `typing`.
+      const blockedRooms = await this.groupBlockedActorRooms(
+        audience,
+        payload.conversationId,
+        payload.userId,
+      );
       this.namespace
         ?.to(payload.conversationId)
-        .except(excludedUserRooms)
+        .except([...excludedUserRooms, ...blockedRooms])
         .emit('read', {
           ...payload,
           // PRD-423: the reader's per-chat key in a matched chat.
@@ -1747,6 +1776,7 @@ export class ChatGateway
     // see `relayMailboxReceipt`. Wrapped like `handleMessageRead`: the
     // watermark is already committed, so a failure costs a stale tick.
     let personalAudience: LiveThreadAudience | undefined;
+    let deliveredBlockedRooms: string[] | undefined;
     try {
       const audience = await this.loadLiveThreadAudience(
         payload.conversationId,
@@ -1771,6 +1801,13 @@ export class ChatGateway
         return;
       }
       personalAudience = audience;
+      // SEC-26: a member blocked either way with the recipient who acked
+      // never sees their delivered tick, matching `typing`.
+      deliveredBlockedRooms = await this.groupBlockedActorRooms(
+        audience,
+        payload.conversationId,
+        payload.userId,
+      );
     } catch (err) {
       this.logger.error(
         `Failed to relay a delivered receipt: ${
@@ -1783,11 +1820,14 @@ export class ChatGateway
     // `userId` (the recipient who acked) + `deliveredAt` to advance its
     // one-check → two-check tick. `deliveredAt` is a Date here; socket.io
     // serialises it to an ISO string on the wire (as with `read`'s lastReadAt).
-    this.namespace?.to(payload.conversationId).emit('message:delivered', {
-      ...payload,
-      // PRD-423: the recipient's per-chat key in a matched chat.
-      userId: frameMemberRef(personalAudience, payload.userId),
-    });
+    this.namespace
+      ?.to(payload.conversationId)
+      .except(deliveredBlockedRooms ?? [])
+      .emit('message:delivered', {
+        ...payload,
+        // PRD-423: the recipient's per-chat key in a matched chat.
+        userId: frameMemberRef(personalAudience, payload.userId),
+      });
   }
 
   @OnEvent(MESSAGE_REACTION)
@@ -1803,6 +1843,7 @@ export class ChatGateway
     // Task 13e: staff see each colleague's reaction, and the customer sees
     // the business react once, see `relayMailboxReaction`.
     let personalAudience: LiveThreadAudience | undefined;
+    let reactionExcludedRooms: string[] | undefined;
     try {
       const audience = await this.loadLiveThreadAudience(
         payload.conversationId,
@@ -1825,6 +1866,26 @@ export class ChatGateway
         return;
       }
       personalAudience = audience;
+      // SEC-26: in a group, a member blocked either way with the reactor
+      // never sees their reaction, matching `typing`. SEC-25: nor does a
+      // member whose join floor or absence gap covers the message.
+      const [blockedRooms, flooredUserIds] = await Promise.all([
+        this.groupBlockedActorRooms(
+          audience,
+          payload.conversationId,
+          payload.userId,
+        ),
+        audience.shape === 'personal' && audience.isGroup
+          ? this.messagingCore.loadGroupJoinFlooredUserIds(
+              payload.conversationId,
+              payload.messageId,
+            )
+          : Promise.resolve(new Set<string>()),
+      ]);
+      reactionExcludedRooms = [
+        ...blockedRooms,
+        ...[...flooredUserIds].map((flooredUserId) => `user:${flooredUserId}`),
+      ];
     } catch (err) {
       this.logger.error(
         `Failed to relay a reaction: ${
@@ -1833,11 +1894,14 @@ export class ChatGateway
       );
       return;
     }
-    this.namespace?.to(payload.conversationId).emit('reaction', {
-      ...payload,
-      // PRD-423: the reactor's per-chat key in a matched chat.
-      userId: frameMemberRef(personalAudience, payload.userId),
-    });
+    this.namespace
+      ?.to(payload.conversationId)
+      .except(reactionExcludedRooms ?? [])
+      .emit('reaction', {
+        ...payload,
+        // PRD-423: the reactor's per-chat key in a matched chat.
+        userId: frameMemberRef(personalAudience, payload.userId),
+      });
   }
 
   @OnEvent(MESSAGE_DELETED)
@@ -1944,6 +2008,7 @@ export class ChatGateway
     frame: unknown,
     aboutMessage?: { messageId: string; shouldIncludeDeletedMessage: boolean },
   ): Promise<void> {
+    let groupFlooredRooms: string[] | undefined;
     try {
       const audience = await this.loadLiveThreadAudience(conversationId);
       if (audience.shape === 'closed') {
@@ -1971,6 +2036,17 @@ export class ChatGateway
         );
         return;
       }
+      // SEC-25: in a group, a frame about one message (its pin, its delete)
+      // skips every member whose join floor or absence gap covers it, the
+      // members the thread never shows that message to.
+      if (aboutMessage && audience.isGroup) {
+        groupFlooredRooms = [
+          ...(await this.messagingCore.loadGroupJoinFlooredUserIds(
+            conversationId,
+            aboutMessage.messageId,
+          )),
+        ].map((flooredUserId) => `user:${flooredUserId}`);
+      }
     } catch (err) {
       this.logger.error(
         `Failed to relay ${event}: ${
@@ -1979,7 +2055,10 @@ export class ChatGateway
       );
       return;
     }
-    this.namespace?.to(conversationId).emit(event, frame);
+    this.namespace
+      ?.to(conversationId)
+      .except(groupFlooredRooms ?? [])
+      .emit(event, frame);
   }
 
   /**

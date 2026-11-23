@@ -22,6 +22,8 @@ const alertRow = {
   requesting_subprofile_id: 'persona-requesting',
   requesting_persona_name: 'Night Shift',
   requesting_persona_handle: 'night-shift',
+  requesting_link_visibility: 'linked',
+  credited_link_visibility: 'linked',
   track_id: 'track-1',
   track_title: 'Opening',
   release_id: 'release-1',
@@ -116,6 +118,42 @@ describe('StudioCreditAlertsListener', () => {
         role: 'cover-art',
       },
       ACCEPTING_MEMBER,
+    );
+  });
+
+  // SEC-02: an unlinked acting persona passes no member to filter against,
+  // so a request or acceptance that vanished on a block cannot test who
+  // runs it.
+  it('passes no actor when the requesting or the accepting persona is unlinked', async () => {
+    query.mockImplementation((sql: string) =>
+      Promise.resolve(
+        sql === CREDIT_ALERT_SQL
+          ? [
+              {
+                ...alertRow,
+                requesting_link_visibility: 'unlinked',
+                credited_link_visibility: 'unlinked',
+              },
+            ]
+          : [{ user_id: CREDITED_OWNER }],
+      ),
+    );
+
+    await listener.handleCreditRequested({
+      creditId: CREDIT_ID,
+      requestingUserId: REQUESTING_MEMBER,
+    });
+    await listener.handleCreditAccepted({
+      creditId: CREDIT_ID,
+      acceptingUserId: ACCEPTING_MEMBER,
+    });
+
+    expect(notifications.createForRecipients).toHaveBeenCalledTimes(2);
+    for (const call of notifications.createForRecipients.mock.calls) {
+      expect((call as unknown[])[3]).toBeUndefined();
+    }
+    expect(CREDIT_ALERT_SQL).toContain(
+      '"requesting"."link_visibility"::text AS "requesting_link_visibility"',
     );
   });
 

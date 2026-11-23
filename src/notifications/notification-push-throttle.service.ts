@@ -4,14 +4,16 @@ import { Injectable } from '@nestjs/common';
  * A per-recipient, per-bucket rate limiter for the PUSH channel only.
  *
  * ---------------------------------------------------------------------------
- * STATUS: BUILT, CORRECT, AND CURRENTLY WIRED TO NOTHING. Read this first.
+ * STATUS: WIRED (PRD-512). Read this first.
  * ---------------------------------------------------------------------------
- * `NotificationsModule` provides and exports it, and no code in this repo
- * calls `allowedRecipients` today. `PushNotificationListener` (the intended
- * consumer, and the only place in the codebase where a push is actually sent)
- * does not use it yet. The docstring below describes what it is FOR. It
- * describes nothing the platform currently does, and no behaviour anywhere may
- * be described as throttled until the listener adopts it.
+ * `NotificationsModule` provides and exports it, and its one caller is
+ * `PushNotificationListener`, the only place in the codebase where a
+ * notification push is sent. The listener calls `allowedRecipients` once per
+ * notification batch, after quiet hours and before any per-type handler, with
+ * the bucket `push-fatigue:<bundleKey>` (`bundleKeyFor`) and
+ * `PUSH_FATIGUE_WINDOW_MS`. A type with no bundle key is never throttled.
+ * The in-app row is written before that event fires, so the contract below
+ * holds.
  *
  * ONE CALLER TRIED AND WAS REMOVED, which is worth recording because the
  * lesson is in the contract at the bottom of this comment.
@@ -70,9 +72,20 @@ export class NotificationPushThrottleService {
     userIds: string[],
     bucketKey: string,
     windowMs: number,
+    /**
+     * PRD-512: a caller that mints one bucket per subject (the push fatigue
+     * cap's `push-fatigue:<bundleKey>`) names the shared prefix here, so the
+     * entries of every bucket in that family are pruned against `windowMs`,
+     * the family's one window. Without it a subject asked about once was
+     * never asked about again and its entries stayed in the map for good.
+     */
+    bucketFamilyPrefix?: string,
   ): string[] {
     const now = Date.now();
     this.pruneExpired(now, bucketKey, windowMs);
+    if (bucketFamilyPrefix) {
+      this.pruneExpiredFamily(now, bucketFamilyPrefix, windowMs);
+    }
     const allowed: string[] = [];
     for (const userId of new Set(userIds)) {
       const key = `${userId}:${bucketKey}`;
@@ -84,6 +97,33 @@ export class NotificationPushThrottleService {
       allowed.push(userId);
     }
     return allowed;
+  }
+
+  /** How many (recipient, bucket) entries the map holds, so a caller or a
+   *  spec can confirm the pruning keeps it bounded. */
+  trackedEntryCount(): number {
+    return this.lastPushAtByKey.size;
+  }
+
+  /**
+   * PRD-512: drop the expired entries of EVERY bucket whose key starts with
+   * `bucketFamilyPrefix`. Safe in the way `pruneExpired`'s scoping requires:
+   * a family shares one window (its caller passes the same `windowMs` for
+   * every bucket it mints), so no other caller's window is applied here.
+   */
+  private pruneExpiredFamily(
+    now: number,
+    bucketFamilyPrefix: string,
+    windowMs: number,
+  ): void {
+    for (const [key, lastPushAt] of this.lastPushAtByKey) {
+      if (!key.slice(key.indexOf(':') + 1).startsWith(bucketFamilyPrefix)) {
+        continue;
+      }
+      if (now - lastPushAt >= windowMs) {
+        this.lastPushAtByKey.delete(key);
+      }
+    }
   }
 
   /**
@@ -100,7 +140,8 @@ export class NotificationPushThrottleService {
    * invisible with a single caller and a genuine bug the moment there are two,
    * so the fix belongs here rather than in a future caller's head. Entries for
    * other buckets are left alone; they are pruned when their own bucket is
-   * next asked about, which is the only moment their window is known.
+   * next asked about, which is the only moment their window is known, or
+   * when a caller names their family prefix.
    */
   private pruneExpired(now: number, bucketKey: string, windowMs: number): void {
     for (const [key, lastPushAt] of this.lastPushAtByKey) {

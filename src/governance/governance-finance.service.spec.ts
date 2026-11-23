@@ -3,6 +3,7 @@ import { DataSource, Not } from 'typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Profile } from '../users/entities/profile.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { GovernanceFinanceService } from './governance-finance.service';
 import { GovernanceFinanceChange } from './entities/governance-finance-change.entity';
 import {
@@ -601,5 +602,73 @@ describe('GovernanceFinanceService', () => {
         service.openQuarter({ quarter: '2026-Q3' }, 'admin-1'),
       ).rejects.toThrow(ConflictException);
     });
+  });
+});
+
+// PRD-507. The admin change log is staff tooling: an editor whose account is
+// paused still shows by name there, so the team can see who made a change.
+describe('GovernanceFinanceService.listChanges and inactive editors', () => {
+  interface ProfilesStandIn {
+    find: jest.Mock;
+  }
+  interface ChangesStandIn {
+    find: jest.Mock;
+  }
+
+  it('names a paused editor in the admin change log', async () => {
+    const profiles: ProfilesStandIn = {
+      find: jest.fn().mockResolvedValue([
+        Object.assign(new Profile(), {
+          userId: 'paused-editor',
+          slug: 'paused-editor',
+          firstName: 'Paused',
+          lastName: 'Editor',
+          pronouns: null,
+          avatarUrl: null,
+          photoVisible: true,
+          user: Object.assign(new User(), {
+            id: 'paused-editor',
+            status: UserStatus.Deactivated,
+          }),
+        }),
+      ]),
+    };
+    const changes: ChangesStandIn = {
+      find: jest.fn().mockResolvedValue([
+        Object.assign(new GovernanceFinanceChange(), {
+          id: 'change-1',
+          actorId: 'paused-editor',
+          reportId: 'r1',
+          field: 'mrr',
+          oldValue: null,
+          newValue: '10',
+          note: null,
+          createdAt: new Date('2026-11-01T00:00:00.000Z'),
+        }),
+      ]),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        GovernanceFinanceService,
+        {
+          provide: getRepositoryToken(GovernanceFinanceReport),
+          useValue: { findOne: jest.fn(), find: jest.fn() },
+        },
+        {
+          provide: getRepositoryToken(GovernanceFinanceChange),
+          useValue: changes,
+        },
+        { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: DataSource, useValue: { transaction: jest.fn() } },
+      ],
+    }).compile();
+    const service = module.get(GovernanceFinanceService);
+
+    const [change] = await service.listChanges(20, 0);
+
+    expect(change?.actor).toEqual(
+      expect.objectContaining({ slug: 'paused-editor', firstName: 'Paused' }),
+    );
+    expect(change?.actor?.isInactiveMember).toBeUndefined();
   });
 });

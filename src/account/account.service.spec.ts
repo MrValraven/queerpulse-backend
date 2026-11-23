@@ -8,7 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull, Not } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -61,11 +61,11 @@ describe('AccountService', () => {
   let users: {
     u1: { id: string; status: UserStatus; role?: UserRole };
   } & Record<string, { id: string; status: UserStatus; role?: UserRole }>;
-  // The sole-admin guard counts admins through `UsersService.countAdmins`,
-  // inside the caller's transaction. Two by default, so the ordinary
-  // deactivate/delete flows are never the last-admin case; the guard's own
-  // test drops the count to one.
-  let usersService: { countAdmins: jest.Mock };
+  // The sole-admin guard counts the OTHER active admins through
+  // `UsersService.countOtherActiveAdmins`, inside the caller's transaction.
+  // One by default, so the ordinary deactivate/delete flows are never the
+  // last-admin case; the guard's own test drops the count to zero.
+  let usersService: { countOtherActiveAdmins: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
   let dataSource: { transaction: jest.Mock; query: jest.Mock };
   let events: { emit: jest.Mock };
@@ -144,7 +144,7 @@ describe('AccountService', () => {
     };
 
     users = { u1: { id: 'u1', status: UserStatus.Active } };
-    usersService = { countAdmins: jest.fn().mockResolvedValue(2) };
+    usersService = { countOtherActiveAdmins: jest.fn().mockResolvedValue(1) };
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
@@ -538,7 +538,9 @@ describe('AccountService', () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       users.u1.role = UserRole.Admin;
-      usersService.countAdmins.mockResolvedValue(1);
+      // SEC-35: the other admin row may exist but sits in deletion grace, so
+      // it is not an active admin and does not count.
+      usersService.countOtherActiveAdmins.mockResolvedValue(0);
 
       await expect(
         service.deactivate('u1', { reauthToken: 'tok' }),
@@ -554,7 +556,7 @@ describe('AccountService', () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       users.u1.role = UserRole.Admin;
-      usersService.countAdmins.mockResolvedValue(2);
+      usersService.countOtherActiveAdmins.mockResolvedValue(1);
 
       await expect(
         service.deactivate('u1', { reauthToken: 'tok' }),
@@ -1256,83 +1258,37 @@ describe('AccountService', () => {
     });
 
     it('revokeOtherSessions revokes every live session EXCEPT the caller own', async () => {
-      refreshTokens.find.mockResolvedValue([
-        {
-          id: 'rt-current',
-          familyId: 'fam-current',
-          userId: 'u1',
-          revokedAt: null,
-        },
-        {
-          id: 'rt-other-1',
-          familyId: 'fam-other-1',
-          userId: 'u1',
-          revokedAt: null,
-        },
-        {
-          id: 'rt-other-2',
-          familyId: 'fam-other-2',
-          userId: 'u1',
-          revokedAt: null,
-        },
-      ]);
+      refreshTokens.update.mockResolvedValue({ affected: 2 });
 
       await service.revokeOtherSessions('u1', 'fam-current');
 
-      // Exactly the two non-current rows are saved with a revokedAt stamp; the
-      // current session is left intact so the caller stays signed in here.
-      expect(refreshTokens.save).toHaveBeenCalledTimes(1);
-      const [saved] = refreshTokens.save.mock.calls[0] as [
-        Array<{ id: string; revokedAt: Date }>,
-      ];
-      expect(saved.map((r) => r.id).sort()).toEqual([
-        'rt-other-1',
-        'rt-other-2',
-      ]);
-      for (const r of saved) {
-        expect(r.revokedAt).toEqual(expect.any(Date));
-      }
-    });
-
-    it('revokeOtherSessions keeps every row of the caller own session', async () => {
-      // Two live rows, one family: the caller's browser after a rotation race.
-      // Matching on the row id alone would have revoked the sibling and left
-      // this device one rotation away from a spurious "session expired".
-      refreshTokens.find.mockResolvedValue([
-        {
-          id: 'rt-current',
-          familyId: 'fam-current',
-          userId: 'u1',
-          revokedAt: null,
-        },
-        {
-          id: 'rt-sibling',
-          familyId: 'fam-current',
-          userId: 'u1',
-          revokedAt: null,
-        },
-      ]);
-
-      await service.revokeOtherSessions('u1', 'fam-current');
-
+      // One conditional UPDATE over every live row of every OTHER family, so
+      // a row minted between a read and a write cannot survive the sign-out.
+      expect(refreshTokens.update).toHaveBeenCalledTimes(1);
+      expect(refreshTokens.update).toHaveBeenCalledWith(
+        { userId: 'u1', revokedAt: IsNull(), familyId: Not('fam-current') },
+        { revokedAt: expect.any(Date) as unknown },
+      );
+      expect(refreshTokens.find).not.toHaveBeenCalled();
       expect(refreshTokens.save).not.toHaveBeenCalled();
     });
 
+    it('revokeOtherSessions keeps every row of the caller own session', async () => {
+      // Two live rows can share one family: the caller's browser after a
+      // rotation race. The statement excludes the caller's FAMILY, so neither
+      // sibling is touched; matching on the row id alone would have revoked one.
+      refreshTokens.update.mockResolvedValue({ affected: 0 });
+
+      await service.revokeOtherSessions('u1', 'fam-current');
+
+      expect(refreshTokens.update).toHaveBeenCalledWith(
+        expect.objectContaining({ familyId: Not('fam-current') }),
+        expect.anything(),
+      );
+    });
+
     it('revokeOtherSessions drops live sockets too', async () => {
-      refreshTokens.find.mockResolvedValue([
-        {
-          id: 'rt-current',
-          familyId: 'fam-current',
-          userId: 'u1',
-          revokedAt: null,
-        },
-        {
-          id: 'rt-other-1',
-          familyId: 'fam-other-1',
-          userId: 'u1',
-          revokedAt: null,
-        },
-      ]);
+      refreshTokens.update.mockResolvedValue({ affected: 1 });
 
       await service.revokeOtherSessions('u1', 'fam-current');
 
@@ -1342,17 +1298,9 @@ describe('AccountService', () => {
     });
 
     it('revokeOtherSessions with no live others is a no-op', async () => {
-      refreshTokens.find.mockResolvedValue([
-        {
-          id: 'rt-current',
-          familyId: 'fam-current',
-          userId: 'u1',
-          revokedAt: null,
-        },
-      ]);
+      refreshTokens.update.mockResolvedValue({ affected: 0 });
 
       await service.revokeOtherSessions('u1', 'fam-current');
-      expect(refreshTokens.save).not.toHaveBeenCalled();
       // Nothing was revoked, so nothing should be disconnected either.
       expect(events.emit).not.toHaveBeenCalled();
     });

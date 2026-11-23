@@ -73,7 +73,9 @@ export interface AdminMemberCardDTO {
   /** The member's platform role (`member` / `moderator` / `admin`), so the
    *  admin roster can show and manage it without a second fetch. */
   role: UserRole;
-  openReportCount: number;
+  /** Open and escalated reports about the member. SEC-31: null on the
+   *  viewer's own row, where the count is withheld (as `getMember` does). */
+  openReportCount: number | null;
   joinedAt: string;
   tagline: string | null;
   communities: string[];
@@ -179,7 +181,7 @@ export function toAdminMemberCard(input: {
     joinedAt: Date;
   };
   role: UserRole;
-  openReportCount: number;
+  openReportCount: number | null;
   communities: string[];
   vouchCount: number;
   vouchedBy: VouchAvatarDTO[];

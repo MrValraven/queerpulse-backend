@@ -91,13 +91,14 @@ export class IntakesController {
    *
    * Declared BEFORE `@Get()` so Nest matches this two-segment path first.
    *
-   * Throttled 20/hour, keyed by IP through `HttpThrottlerGuard`'s inherited
-   * default tracker — the same figure and the same reasoning as
-   * `GET /join-requests/status`. The code carries 256 bits, so throttling is
-   * not what makes guessing infeasible; it is here so an unauthenticated read
-   * that touches the database is not free amplification. Looser than the 8/min
-   * on submit because reloading a status page is a normal thing for one person
-   * to do repeatedly, and someone waiting on a report about harm will.
+   * Throttled 20/hour by the global `HttpThrottlerGuard`, which keys anonymous
+   * requests by client IP and signed-in ones by member: the same figure and
+   * the same reasoning as `GET /join-requests/status`. The code carries 256
+   * bits, so throttling is not what makes guessing infeasible; it is here so
+   * an unauthenticated read that touches the database is not free
+   * amplification. Looser than the 8/min on submit because reloading a status
+   * page is a normal thing for one person to do repeatedly, and someone
+   * waiting on a report about harm will.
    *
    * ONE 404 FOR EVERY FAILURE — unknown code, well-formed code that was never
    * issued, a code minted for some other intake kind. A response that

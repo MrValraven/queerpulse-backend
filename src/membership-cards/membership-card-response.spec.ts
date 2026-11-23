@@ -273,6 +273,31 @@ describe('toCardVerification', () => {
     expect(dto.photoStyle).toBe('mono');
   });
 
+  // SEC-22. A photo of an old card must not keep naming its holder.
+  it.each(['revoked', 'expired', 'suspended'] as const)(
+    'names no holder, community, role or pronouns on a %s card',
+    (status) => {
+      const dto = toCardVerification(card(), status, {
+        issuerName: 'Azores Queer',
+        holderName: 'Rita V',
+        role: 'owner',
+        hasPhoto: true,
+        holderPronouns: 'she/her',
+        holderAvatarUrl: CREST_KEY,
+        photoStyle: 'color',
+      });
+      expect(dto.status).toBe(status);
+      expect(dto.holderName).toBeNull();
+      expect(dto.issuerName).toBe('');
+      expect(dto.role).toBe('');
+      expect(dto.holderPronouns).toBeNull();
+      expect(dto.holderPhotoUrl).toBeNull();
+      expect(dto.hasPhoto).toBe(false);
+      expect(JSON.stringify(dto)).not.toContain('Rita');
+      expect(JSON.stringify(dto)).not.toContain('Azores');
+    },
+  );
+
   it('carries a null holder name through for the client to localize', () => {
     const dto = toCardVerification(card(), 'active', {
       issuerName: 'Azores Queer',

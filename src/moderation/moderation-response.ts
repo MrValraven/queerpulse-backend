@@ -215,10 +215,11 @@ export interface ModReportClusterDTO {
   /** Open + escalated reports about this subject, platform-wide. */
   openCount: number;
   /**
-   * How many different members are behind them. An account-less reporter
-   * counts as their own distinct person rather than being collapsed into one
-   * "anonymous" bucket, mirroring
-   * `CommunityAutoFreezeService.distinctOpenReporterCount`.
+   * How many different signed-in members are behind them, counted as
+   * `COUNT(DISTINCT reporter_id)` exactly like
+   * `CommunityAutoFreezeService.distinctOpenReporterCount`. A signed-out
+   * report counts toward `openCount` and adds nobody here, because there is
+   * no reporter on it to tell one person from another.
    */
   distinctReporterCount: number;
   /** How many of those reports are already past their SLA window. */

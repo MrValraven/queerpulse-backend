@@ -1,12 +1,20 @@
 import { Injectable } from '@nestjs/common';
+import { apiUrlFor } from '../common/image-url';
 import { runWithConcurrency } from '../common/run-with-concurrency';
 import {
   isOwnOriginStudioUrl,
   studioShareOrigins,
 } from '../studio/studio-share-link';
-import { MAX_BATCH_URLS } from './link-preview.constants';
+import {
+  LINK_PREVIEW_IMAGE_ROUTE,
+  MAX_BATCH_URLS,
+} from './link-preview.constants';
+import {
+  isSignableImageUrl,
+  signLinkPreviewImageToken,
+} from './link-preview-image-token';
 import { LinkPreviewResponse, emptyPreview } from './link-preview.response';
-import { parseOpenGraph } from './og-parse';
+import { parseOpenGraph, type ParsedOpenGraph } from './og-parse';
 import { safeFetchHtml } from './ssrf';
 
 interface CacheEntry {
@@ -45,7 +53,7 @@ export class LinkPreviewService {
     // SSRF-declined, unreachable, non-HTML, or over cap → an empty card. The
     // client renders nothing; we cache the miss so we don't retry every render.
     const preview = fetched
-      ? parseOpenGraph(fetched.html, fetched.finalUrl)
+      ? toResponse(parseOpenGraph(fetched.html, fetched.finalUrl))
       : emptyPreview(url);
 
     this.writeCache(url, preview);
@@ -111,4 +119,21 @@ export class LinkPreviewService {
     }
     this.cache.set(url, { value, expiresAt: Date.now() + this.ttlMs });
   }
+}
+
+/**
+ * SEC-23: the card that leaves the server. The page's `og:image` becomes a
+ * signed address on this API (`LinkPreviewImageController`), so a reader's
+ * browser loads the image from QueerPulse and the host the sender chose never
+ * sees the reader. An image URL too long to sign is dropped with the image.
+ */
+function toResponse(parsed: ParsedOpenGraph): LinkPreviewResponse {
+  const { imageSourceUrl, ...fields } = parsed;
+  const imageUrl =
+    imageSourceUrl && isSignableImageUrl(imageSourceUrl)
+      ? apiUrlFor(
+          `${LINK_PREVIEW_IMAGE_ROUTE}/${signLinkPreviewImageToken(imageSourceUrl)}`,
+        )
+      : null;
+  return { ...fields, imageUrl };
 }

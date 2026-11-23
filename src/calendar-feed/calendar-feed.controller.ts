@@ -109,7 +109,10 @@ export class CalendarFeedController {
       '— the signed `:token` (see `GET /me/calendar-feed-token`) is the credential.',
   })
   @ApiOkResponse({ description: 'text/calendar body.' })
-  @ApiNotFoundResponse({ description: 'The token is invalid or malformed.' })
+  @ApiNotFoundResponse({
+    description:
+      'The token is invalid, malformed or revoked, or its member account is not active.',
+  })
   async serveFeed(
     @Param('token') token: string,
     @Res() response: Response,

@@ -74,7 +74,10 @@ describe('GroupsService matched groups', () => {
   let dataSource: { transaction: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let connectionsService: { acceptedConnectionsAmong: jest.Mock };
-  let blockFilter: { blockedAgainstAnyOf: jest.Mock };
+  let blockFilter: {
+    blockedAgainstAnyOf: jest.Mock;
+    blockedUserIds: jest.Mock;
+  };
   let mediaCropService: { getMany: jest.Mock };
   let preferencesService: {
     getMessagingPrivacyForUsers: jest.Mock;
@@ -218,6 +221,8 @@ describe('GroupsService matched groups', () => {
     };
     blockFilter = {
       blockedAgainstAnyOf: jest.fn().mockResolvedValue(new Set<string>()),
+      // SEC-26: the group roster's blocked-either-way read.
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
     mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
     preferencesService = {
@@ -462,7 +467,9 @@ describe('GroupsService matched groups', () => {
       { id: `p-${MEMBER_B_ID}` },
       expect.objectContaining({
         leftAt: null,
-        clearedAt: departedAt,
+        clearedAt: null,
+        absenceStartedAt: departedAt,
+        absenceEndedAt: new Date('2026-01-31T23:59:59.999Z'),
         role: ConversationRole.Member,
       }),
     );
@@ -485,9 +492,10 @@ describe('GroupsService matched groups', () => {
     expect(preferencesService.getGroupAddPolicyForUsers).not.toHaveBeenCalled();
   });
 
-  // PRD-400: a late joiner reads the matched group from their join onward;
-  // a returning member keeps the resume floor the re-add path always used.
-  it('floors a late joiner seat at its join and leaves a revived seat on its resume floor', async () => {
+  // PRD-400: a late joiner reads the matched group from their join onward.
+  // SEC-25: a returning member keeps their history up to leaving and gets
+  // the stretch they were away for as an absence gap.
+  it('floors a late joiner seat at its join and gives a revived seat an absence gap', async () => {
     const departedAt = new Date('2026-01-15T00:00:00.000Z');
     const joinFloor = new Date('2026-01-31T23:59:59.999Z');
     participants.find.mockResolvedValue([
@@ -518,9 +526,56 @@ describe('GroupsService matched groups', () => {
       manager.update.mock.calls as [unknown, unknown, Record<string, unknown>][]
     ).find(([entity]) => entity === ConversationParticipant);
     expect(revivedWrite?.[2]).toEqual(
-      expect.objectContaining({ clearedAt: departedAt }),
+      expect.objectContaining({
+        clearedAt: null,
+        absenceStartedAt: departedAt,
+        absenceEndedAt: joinFloor,
+      }),
     );
     expect(revivedWrite?.[2]).not.toHaveProperty('historyFloorAt');
+  });
+
+  // SEC-25 fix round 1: a second return keeps the first absence hidden, so
+  // the seat load must carry the gap columns into `reseatHistoryWindow`.
+  it('raises the clear point past an earlier gap when a member returns a second time', async () => {
+    const firstGapStartedAt = new Date('2026-01-05T00:00:00.000Z');
+    const firstGapEndedAt = new Date('2026-01-10T00:00:00.000Z');
+    const departedAgainAt = new Date('2026-01-15T00:00:00.000Z');
+    const joinFloor = new Date('2026-01-31T23:59:59.999Z');
+    participants.find.mockResolvedValue([
+      participantRow({
+        userId: MEMBER_B_ID,
+        leftAt: departedAgainAt,
+        absenceStartedAt: firstGapStartedAt,
+        absenceEndedAt: firstGapEndedAt,
+      }),
+    ]);
+
+    await service.addMatchedMembers(CONVERSATION_ID, HOUSE_ID, [MEMBER_B_ID]);
+
+    expect(participants.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: {
+          id: true,
+          userId: true,
+          leftAt: true,
+          clearedAt: true,
+          absenceStartedAt: true,
+          absenceEndedAt: true,
+          role: true,
+        },
+      }),
+    );
+    expect(manager.update).toHaveBeenCalledWith(
+      ConversationParticipant,
+      { id: `p-${MEMBER_B_ID}` },
+      expect.objectContaining({
+        clearedAt: firstGapEndedAt,
+        absenceStartedAt: departedAgainAt,
+        absenceEndedAt: joinFloor,
+        leftAt: null,
+      }),
+    );
   });
 
   it('refuses addMatchedMembers from anyone but the Owner seat', async () => {

@@ -45,7 +45,13 @@ describe('SubprofileEndorsementsService.endorse', () => {
     update: jest.Mock;
     manager: { transaction: jest.Mock };
   };
-  let subprofiles: { findOne: jest.Mock };
+  // The persona read's options, typed so a test can read its `where`.
+  let subprofiles: {
+    findOne: jest.Mock<
+      Promise<Subprofile | null>,
+      [{ where: Record<string, unknown> }]
+    >;
+  };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
@@ -70,7 +76,11 @@ describe('SubprofileEndorsementsService.endorse', () => {
     transactionManager.getRepository.mockImplementation((entity: unknown) =>
       entity === SubprofileEndorsement ? endorsements : undefined,
     );
-    subprofiles = { findOne: jest.fn().mockResolvedValue(makePersona()) };
+    subprofiles = {
+      findOne: jest
+        .fn<Promise<Subprofile | null>, [{ where: Record<string, unknown> }]>()
+        .mockResolvedValue(makePersona()),
+    };
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
     eventEmitter = { emit: jest.fn() };
     contentModeration = {
@@ -202,5 +212,95 @@ describe('SubprofileEndorsementsService.endorse', () => {
       PERSONA_ID,
     );
     expect(endorsements.insert).not.toHaveBeenCalled();
+  });
+
+  // SEC-02: a block with the creator closes a linked persona alone.
+  it('404s a linked persona across a block with its creator', async () => {
+    blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+    await expect(service.endorse(VISITOR_ID, PERSONA_ID)).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(endorsements.insert).not.toHaveBeenCalled();
+  });
+
+  it('endorses an unlinked persona the same whether or not the visitor and its creator are blocked', async () => {
+    const unlinkedPersona = makePersona({
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    });
+    subprofiles.findOne.mockResolvedValue(unlinkedPersona);
+    transactionManager.findOne.mockResolvedValue(unlinkedPersona);
+    blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+    await expect(service.endorse(VISITOR_ID, PERSONA_ID)).resolves.toEqual({
+      endorsementCount: 1,
+      viewerEndorsed: true,
+    });
+    expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+  });
+
+  // SEC-33: the persona read only matches a persona whose creator is active.
+  it('reads the persona only with an active creator', async () => {
+    await service.endorse(VISITOR_ID, PERSONA_ID);
+
+    expect(subprofiles.findOne.mock.calls[0]?.[0].where).toMatchObject({
+      id: PERSONA_ID,
+      user: { status: 'active' },
+    });
+  });
+});
+
+// SEC-21: the public endorsers list names an endorser only while their
+// account is active and they are not hidden for 24 hours.
+describe('SubprofileEndorsementsService.listEndorsers', () => {
+  interface EndorsersQueryStub {
+    where: jest.Mock;
+    andWhere: jest.Mock;
+    orderBy: jest.Mock;
+    skip: jest.Mock;
+    take: jest.Mock;
+    getCount: jest.Mock;
+    getMany: jest.Mock;
+  }
+
+  it('leaves out endorsers who are not active or are hidden for 24 hours, from the count too', async () => {
+    const queryStub = {} as EndorsersQueryStub;
+    for (const method of [
+      'where',
+      'andWhere',
+      'orderBy',
+      'skip',
+      'take',
+    ] as const) {
+      queryStub[method] = jest.fn().mockReturnValue(queryStub);
+    }
+    queryStub.getCount = jest.fn().mockResolvedValue(0);
+    queryStub.getMany = jest.fn().mockResolvedValue([]);
+    const service = new SubprofileEndorsementsService(
+      { createQueryBuilder: jest.fn().mockReturnValue(queryStub) } as never,
+      {} as never,
+      { find: jest.fn().mockResolvedValue([]) } as never,
+      // The viewer co-owns the persona, so the public gate is skipped.
+      { findOne: jest.fn().mockResolvedValue({ id: 'member-row' }) } as never,
+      { excludeBlocked: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await service.listEndorsers(CREATOR_ID, PERSONA_ID);
+
+    const clauses = queryStub.andWhere.mock.calls.map(([clause]) =>
+      String(clause),
+    );
+    expect(clauses.join('\n')).toContain(
+      `"people_list_user"."id" = "se"."endorser_id"`,
+    );
+    expect(clauses.join('\n')).toContain(
+      `"people_list_user"."status" = 'active'`,
+    );
+    expect(clauses.join('\n')).toContain(
+      `"people_list_profile"."hidden_until" > now()`,
+    );
   });
 });

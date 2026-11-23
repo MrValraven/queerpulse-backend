@@ -2669,6 +2669,58 @@ describe('ListingsService', () => {
       });
     });
 
+    // I5: a menu file is an upload too, so it takes part in the
+    // unchanged-value rule the photos follow.
+    describe('menu file', () => {
+      const FOREIGN_MENU_KEY = FOREIGN_KEY.replace(/^[^/]+/, 'listing-menus');
+
+      it('refuses a new foreign upload introduced as the menu file', async () => {
+        listings.findOne.mockResolvedValue(storedOnlineListing());
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            menu: {
+              sections: [],
+              file: { url: FOREIGN_MENU_KEY, fileName: 'Menu.pdf' },
+              link: '',
+            },
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('passes the menu file the listing already carries', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            menu: {
+              sections: [],
+              file: {
+                url: FOREIGN_MENU_KEY,
+                contentType: 'application/pdf',
+                fileName: 'Menu.pdf',
+              },
+              link: '',
+            },
+          }),
+        );
+
+        let failure: unknown = null;
+        await service
+          .update('QPL-2026-0001', OWNER_ID, {
+            menu: {
+              sections: [],
+              file: { url: FOREIGN_MENU_KEY, fileName: 'Menu.pdf' },
+              link: '',
+            },
+          })
+          .catch((error: unknown) => {
+            failure = error;
+          });
+        // Whatever else the save decides, the foreign-upload rule lets it by.
+        expect(failure).not.toBeInstanceOf(ForbiddenException);
+      });
+    });
+
     describe('shop item photos', () => {
       it('refuses a new foreign upload introduced through a shop item', async () => {
         listings.findOne.mockResolvedValue(storedOnlineListing());

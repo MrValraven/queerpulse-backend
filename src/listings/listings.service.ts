@@ -1840,6 +1840,7 @@ export class ListingsService {
               row.createdByStaffId,
             ]),
           ),
+          { inactive: 'include' },
         );
         // ONE batched crop lookup for every row's gallery photos on the
         // page — never a per-row query.
@@ -2103,7 +2104,9 @@ export class ListingsService {
    * somebody else passes only when the listing already carries it; see the
    * call site in `update` for why every request shape and every stored shape
    * is compared. Shop item photos are uploads too, so both their stored and
-   * incoming keys take part.
+   * incoming keys take part, and so is the menu file (I5): a menu PDF or
+   * photo another member uploaded passes only when the listing already
+   * carries it.
    */
   private assertNoForeignListingPhotoIntroduced(
     listing: Listing,
@@ -2114,12 +2117,14 @@ export class ListingsService {
       dto.photoGallery !== undefined ||
       dto.photos !== undefined ||
       dto.coverPhoto !== undefined ||
-      dto.shopItems !== undefined
+      dto.shopItems !== undefined ||
+      dto.menu !== undefined
     ) {
       const alreadyStoredPhotoKeys = [
         ...galleryImageReferences(listing.photoGallery),
         ...coverImageReferences(listing.coverPhoto),
         ...shopItemImageReferences(listing.shopItems),
+        ...(listing.menu?.file?.url ? [listing.menu.file.url] : []),
         listing.photos?.wide,
         listing.photos?.d1,
         listing.photos?.d2,
@@ -2131,6 +2136,7 @@ export class ListingsService {
         ...(dto.shopItems ?? []).flatMap((item) =>
           item.photo ? [item.photo.image] : [],
         ),
+        ...(dto.menu?.file?.url ? [dto.menu.file.url] : []),
         ...(dto.photos
           ? [dto.photos.wide, dto.photos.d1, dto.photos.d2, dto.photos.vibe]
           : []),
@@ -3189,8 +3195,10 @@ export class ListingsService {
           ),
         );
       } else {
-        // Throws ForbiddenException on a block either way, or BadRequest if
-        // the moderator somehow owns the listing, surfaced to the FE as a
+        // A block either way stops delivery (SEC-19): a block the owner placed
+        // answers 404 "Member not found", and the moderator's own block of
+        // the owner answers 409 UNBLOCK_TO_CONTACT. A moderator who somehow
+        // owns the listing gets a BadRequest. Each is surfaced to the FE as a
         // specific reason. Sent last so nothing can fail after it and strand a
         // duplicate.
         await this.messaging.deliverEnquiry(moderatorUserId, submitterId, body);
@@ -3320,10 +3328,10 @@ export class ListingsService {
     const askerIds = questions
       .map((question) => question.askedBy)
       .filter((id): id is string => Boolean(id));
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      ...actorIds,
-      ...askerIds,
-    ]);
+    const refs = await new MemberLookup(this.profiles).byUserIds(
+      [...actorIds, ...askerIds],
+      { inactive: 'include' },
+    );
 
     const eventDTOs: ListingModerationEventDTO[] = events.map((event) =>
       toListingModerationEventDTO(
@@ -3907,7 +3915,8 @@ export class ListingsService {
     const crops = await this.mediaCropService.getMany(
       galleryImageReferences(nextGallery),
     );
-    return { photoGallery: toGalleryView(listing, crops) };
+    // The framing echo is the owner/editor wire, whose form re-sends each key.
+    return { photoGallery: toGalleryView(listing, crops, 'storage-key') };
   }
 
   /**

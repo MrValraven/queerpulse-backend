@@ -273,7 +273,7 @@ describe('vjError', () => {
     }
     expect(
       new Set(Object.values(VJ_REFUSALS).map(({ message }) => message)).size,
-    ).toBe(52);
+    ).toBe(VJ_REFUSAL_CODES.length);
   });
 
   it('carries the sequences contract 4.3 sentences', () => {

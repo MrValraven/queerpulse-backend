@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import { DataSource, Repository } from 'typeorm';
 import { AccountDeletionProcessorService } from './account-deletion-processor.service';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
@@ -22,6 +23,10 @@ import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { releaseHandleWithin } from '../handles/handles.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { PersonaStorageKey } from '../storage/entities/persona-storage-key.entity';
+import {
+  hashSuppressedEmail,
+  hmacSuppressedEmail,
+} from './entities/email-suppression.entity';
 
 // Step 2d releases erased personas' handles through the registry's own
 // release. Partial mock: every other export stays real.
@@ -90,6 +95,10 @@ describe('AccountDeletionProcessorService storage erasure', () => {
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
   let subprofileMembership: { handOverCreatedPersonasFor: jest.Mock };
   let studioAudioUploads: { deleteObjectsAndForget: jest.Mock };
+  // Backs `suppressionPepper`. No pepper by default (the legacy key path).
+  let config: { get: jest.Mock };
+  // The suppression insert's `values(...)`, so SEC-14 can read the key.
+  let suppressionValues: jest.Mock;
   let service: AccountDeletionProcessorService;
 
   /** Entities whose repository throws, to force a degraded resolution. */
@@ -134,6 +143,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
     // One chainable stub covering both query builders the transaction uses: the
     // `addSelect('user.email')` read and the suppression `insert().orIgnore()`.
     const queryBuilder: Record<string, unknown> = {};
+    suppressionValues = jest.fn().mockReturnValue(queryBuilder);
     Object.assign(queryBuilder, {
       addSelect: jest.fn().mockReturnValue(queryBuilder),
       where: jest.fn().mockReturnValue(queryBuilder),
@@ -142,7 +152,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
         .mockResolvedValue({ id: USER_ID, email: 'member@example.test' }),
       insert: jest.fn().mockReturnValue(queryBuilder),
       into: jest.fn().mockReturnValue(queryBuilder),
-      values: jest.fn().mockReturnValue(queryBuilder),
+      values: suppressionValues,
       orIgnore: jest.fn().mockReturnValue(queryBuilder),
       execute: jest.fn().mockResolvedValue(undefined),
     });
@@ -231,6 +241,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
     studioAudioUploads = {
       deleteObjectsAndForget: jest.fn().mockResolvedValue(undefined),
     };
+    config = { get: jest.fn().mockReturnValue(undefined) };
 
     service = new AccountDeletionProcessorService(
       deletionRequests as unknown as Repository<DeletionRequest>,
@@ -242,7 +253,42 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       new MediaReferenceResolver(dataSource as unknown as DataSource),
       subprofileMembership as unknown as SubprofileMembershipService,
       studioAudioUploads as unknown as StudioAudioUploadsService,
+      config as unknown as ConfigService,
     );
+  });
+
+  describe('email suppression key (SEC-14)', () => {
+    it('writes the suppression row under the peppered HMAC key when a pepper is configured', async () => {
+      config.get.mockImplementation((key: string) =>
+        key === 'banEvasion.pepper' ? 'test-pepper' : undefined,
+      );
+
+      await service.processDueDeletions();
+
+      const pepperedKey = hmacSuppressedEmail(
+        'member@example.test',
+        'test-pepper',
+      );
+      expect(pepperedKey).not.toBeNull();
+      expect(suppressionValues).toHaveBeenCalledWith({
+        emailHash: pepperedKey,
+        reason: 'account_deleted',
+      });
+      expect(suppressionValues).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          emailHash: hashSuppressedEmail('member@example.test'),
+        }),
+      );
+    });
+
+    it('keeps writing a row under the legacy key when no pepper is configured', async () => {
+      await service.processDueDeletions();
+
+      expect(suppressionValues).toHaveBeenCalledWith({
+        emailHash: hashSuppressedEmail('member@example.test'),
+        reason: 'account_deleted',
+      });
+    });
   });
 
   describe('what survives the erasure', () => {

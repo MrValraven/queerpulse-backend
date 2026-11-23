@@ -92,6 +92,16 @@ export enum GovernanceLogAction {
   // Written when a space's access tier is raised to stay at least as strict
   // as its parent's.
   SubcommunityTierRaised = 'subcommunity_tier_raised',
+  // Community badges and staff gifts. Written by `CommunityBadgesService`
+  // (badge_created, badge_updated, badge_deleted) and `CommunityGiftsService`
+  // (gift_sent, gift_removed). `gift_removed` with `adminOverride` comes from a
+  // platform takedown. No row ever carries a gift note. Added by migration
+  // `AddCommunityBadges1840700000000`.
+  BadgeCreated = 'badge_created',
+  BadgeUpdated = 'badge_updated',
+  BadgeDeleted = 'badge_deleted',
+  GiftSent = 'gift_sent',
+  GiftRemoved = 'gift_removed',
 }
 
 /**

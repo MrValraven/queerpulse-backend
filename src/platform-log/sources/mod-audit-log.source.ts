@@ -1,9 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, SelectQueryBuilder } from 'typeorm';
 import { parseCreatorDraftViewedNote } from '../../creator-drafts/creator-draft-audit';
 import { CREATOR_DRAFT_VIEWED_ACTION } from '../../creator-drafts/creator-drafts.constants';
 import { ModAuditLog } from '../../moderation/entities/mod-audit-log.entity';
+import type { AuditFeedViewer } from '../../moderation/mod-audit.service';
+import { excludeAuditRowsAboutViewer } from '../../moderation/mod-audit-viewer-filter';
+import { ModerationService } from '../../moderation/moderation.service';
 import {
   applyPlatformLogWindow,
   compactParams,
@@ -32,7 +35,15 @@ interface ModAuditRow {
   note: string | null;
 }
 
-/** Every staff action in `mod_audit_logs`, split into Moderation and Staff & access. */
+/** The one `ModerationService` method this source reads. */
+export type ModAuditViewerRule = Pick<ModerationService, 'auditFeedViewer'>;
+
+/**
+ * Every staff action in `mod_audit_logs`, split into Moderation and Staff &
+ * access. SEC-31: the viewer never sees a row tied to a case about them, by
+ * the same rule as the governance audit feed (`excludeAuditRowsAboutViewer`
+ * in SQL, then `ModerationService.reportIdsAboutActor` for the rest).
+ */
 @Injectable()
 export class ModAuditLogSource implements PlatformLogSource {
   readonly key = 'mod';
@@ -42,6 +53,8 @@ export class ModAuditLogSource implements PlatformLogSource {
   constructor(
     @InjectRepository(ModAuditLog)
     private readonly auditLogs: Repository<ModAuditLog>,
+    @Inject(ModerationService)
+    private readonly moderation: ModAuditViewerRule,
   ) {}
 
   async fetch(window: SourceWindow): Promise<PlatformLogRawEntry[]> {
@@ -49,6 +62,43 @@ export class ModAuditLogSource implements PlatformLogSource {
     const isStaffWanted = window.categories.includes('staff');
     if (!isModerationWanted && !isStaffWanted) return [];
 
+    const viewer = this.moderation.auditFeedViewer(window.viewerUserId);
+    const wantedRowCount = window.limit + 1;
+    const keptRows: ModAuditRow[] = [];
+    let batchWindow = window;
+    // Rows dropped after SQL leave a short batch, so read on past the last
+    // raw row until the page is full or the table runs out. Stopping early
+    // would let older rows from other sources jump over rows kept here.
+    for (;;) {
+      const rows = await this.queryBuilderFor(batchWindow, {
+        isModerationWanted,
+        isStaffWanted,
+      }).getRawMany<ModAuditRow>();
+      keptRows.push(...(await this.withoutRowsAboutViewer(rows, viewer)));
+      const lastRow = rows[rows.length - 1];
+      if (
+        !lastRow ||
+        rows.length < wantedRowCount ||
+        keptRows.length >= wantedRowCount
+      ) {
+        break;
+      }
+      batchWindow = {
+        ...window,
+        cursor: {
+          occurredAtExact: lastRow.occurred_at_exact,
+          sourceKey: this.key,
+          rowId: lastRow.row_id,
+        },
+      };
+    }
+    return keptRows.slice(0, wantedRowCount).map((row) => this.toEntry(row));
+  }
+
+  private queryBuilderFor(
+    window: SourceWindow,
+    wanted: { isModerationWanted: boolean; isStaffWanted: boolean },
+  ): SelectQueryBuilder<ModAuditLog> {
     const queryBuilder = selectPlatformLogColumns(
       this.auditLogs.createQueryBuilder('e'),
       {
@@ -65,13 +115,13 @@ export class ModAuditLogSource implements PlatformLogSource {
       },
     );
     const staffActions = { modStaffActions: [...MOD_STAFF_ACTIONS] };
-    if (!isStaffWanted) {
+    if (!wanted.isStaffWanted) {
       queryBuilder.andWhere(
         '"e"."action" NOT IN (:...modStaffActions)',
         staffActions,
       );
     }
-    if (!isModerationWanted) {
+    if (!wanted.isModerationWanted) {
       queryBuilder.andWhere(
         '"e"."action" IN (:...modStaffActions)',
         staffActions,
@@ -83,14 +133,36 @@ export class ModAuditLogSource implements PlatformLogSource {
         { memberId: window.memberId },
       );
     }
-    applyPlatformLogWindow(
+    if (window.viewerUserId) {
+      excludeAuditRowsAboutViewer(queryBuilder, 'e', window.viewerUserId);
+    }
+    return applyPlatformLogWindow(
       queryBuilder,
       this.key,
       { timeSql: '"e"."created_at"', idSql: '"e"."id"' },
       window,
     );
-    const rows = await queryBuilder.getRawMany<ModAuditRow>();
-    return rows.map((row) => this.toEntry(row));
+  }
+
+  /** `rows` without those whose report is about the viewer. Order kept. */
+  private async withoutRowsAboutViewer(
+    rows: ModAuditRow[],
+    viewer: AuditFeedViewer | undefined,
+  ): Promise<ModAuditRow[]> {
+    if (!viewer) return rows;
+    const reportIds = [
+      ...new Set(
+        rows
+          .map((row) => row.report_id)
+          .filter((reportId): reportId is string => reportId !== null),
+      ),
+    ];
+    if (!reportIds.length) return rows;
+    const aboutViewer = await viewer.reportIdsAboutViewer(reportIds);
+    if (!aboutViewer.size) return rows;
+    return rows.filter(
+      (row) => row.report_id === null || !aboutViewer.has(row.report_id),
+    );
   }
 
   private toEntry(row: ModAuditRow): PlatformLogRawEntry {

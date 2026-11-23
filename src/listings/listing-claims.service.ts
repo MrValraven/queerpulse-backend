@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -258,7 +259,10 @@ export class ListingClaimsService {
       const claimantIds = rows
         .map((row) => row.claimantId)
         .filter((id): id is string => id !== null);
-      const refs = await new MemberLookup(this.profiles).byUserIds(claimantIds);
+      const refs = await new MemberLookup(this.profiles).byUserIds(
+        claimantIds,
+        { inactive: 'include' },
+      );
 
       // Unreachable given the `EXISTS` above (a listing cannot vanish between
       // the two statements of one page load without also leaving `total`
@@ -309,6 +313,16 @@ export class ListingClaimsService {
       }
       if (current.status !== ListingClaimStatus.Pending) {
         throw new ConflictException('This claim has already been reviewed');
+      }
+      // SEC-37. The review route is open to moderators and directory staff, who
+      // can also file claims. Whoever filed a claim never decides it, in either
+      // direction, so a second reviewer has to approve or decline it.
+      if (current.claimantId === reviewerId) {
+        throw new ForbiddenException({
+          code: 'claim_reviewer_is_claimant',
+          message:
+            'You filed this claim, so another reviewer has to decide it.',
+        });
       }
 
       const listingsRepo = manager.getRepository(Listing);

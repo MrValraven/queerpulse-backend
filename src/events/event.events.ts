@@ -187,6 +187,19 @@ export interface EventDoorChangedEvent {
   organizerUserIds: string[];
 }
 
+export const EVENT_ATTENDEE_CHECKED_IN = 'event.attendee_checked_in';
+
+/**
+ * Emitted after a check-in that changed state (an idempotent repeat and an
+ * undo emit nothing). Feeds community badge evaluation. In-process only and
+ * kept off every socket, because who went is sensitive.
+ */
+export interface EventAttendeeCheckedInEvent {
+  eventId: string;
+  communityId: string | null;
+  userId: string;
+}
+
 /**
  * The `gathering:checkin` socket frame. It goes to each organiser's own
  * `user:<userId>` room and to no other: who went is sensitive, so the frame

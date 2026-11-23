@@ -14,7 +14,6 @@ import {
   IdentityVisibility,
 } from './entities/flatmate-profile.entity';
 
-type RepoMock = Record<string, jest.Mock>;
 type QueryBuilderStub = Record<string, jest.Mock>;
 
 function makeBuilder(terminals: {
@@ -81,15 +80,15 @@ function makeFlatmate(
 
 describe('FlatmateDirectoryService', () => {
   let service: FlatmateDirectoryService;
-  // Declared with the exact method shape (rather than the bare `RepoMock`
-  // index-signature alias) so `flatmates.findOne.mockResolvedValue(...)`-style
-  // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+  // Declared with the exact method shape (no index signature) so
+  // `flatmates.findOne.mockResolvedValue(...)`-style chained access doesn't
+  // see `noUncheckedIndexedAccess`'s `| undefined`.
   let flatmates: {
     findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
     manager: { createQueryBuilder: jest.Mock };
   };
-  let profiles: RepoMock;
+  let profiles: { find: jest.Mock; exists: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeHidden: jest.Mock };
   let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
@@ -102,7 +101,10 @@ describe('FlatmateDirectoryService', () => {
       // The lifestyle tag facets group over a subquery on a bare builder.
       manager: { createQueryBuilder: jest.fn(() => makeBuilder({})) },
     };
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      exists: jest.fn().mockResolvedValue(true),
+    };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
       // In-query severance is a no-op in unit tests (just mutates the builder).
@@ -147,6 +149,19 @@ describe('FlatmateDirectoryService', () => {
 
       expect(result).toMatchObject({ total: 1, page: 1, pageSize: 20 });
       expect(result.items[0]?.matchScore).toBeNull();
+    });
+
+    it('drops profiles whose owner is suspended, banned or deactivated in-query', async () => {
+      flatmates.findOne.mockResolvedValue(null);
+      const builder = makeBuilder({ getManyAndCount: [[makeFlatmate()], 1] });
+      flatmates.createQueryBuilder.mockReturnValue(builder);
+
+      await service.browse('viewer-1', {});
+
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"owner_user"."status" = :activeOwnerStatus'),
+        { activeOwnerStatus: 'active' },
+      );
     });
 
     it('drops moderator-taken-down profiles in-query, so the page and total agree', async () => {
@@ -374,6 +389,15 @@ describe('FlatmateDirectoryService', () => {
       flatmates.findOne.mockResolvedValue(null);
 
       await expect(service.detail('viewer-1', 'ghost')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('404s a non-owner when the profile owner is no longer active', async () => {
+      flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'owner-x' }));
+      profiles.exists.mockResolvedValue(false);
+
+      await expect(service.detail('viewer-1', 'sam-flatmate')).rejects.toThrow(
         NotFoundException,
       );
     });

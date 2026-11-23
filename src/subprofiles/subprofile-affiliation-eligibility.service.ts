@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import { eventCoverPhotoReference } from '../storage/public-media-reference';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import {
   AccessTier,
@@ -323,7 +324,11 @@ export class SubprofileAffiliationEligibilityService {
       targetType: 'event',
       targetSlug: event.slug,
       name: event.title,
-      imageUrl: toImageUrl(event.coverImageUrl),
+      // SEC-04: the cover's key names its uploader; render by reference.
+      imageUrl: toImageUrlByReference(
+        event.coverImageUrl,
+        eventCoverPhotoReference(event.id),
+      ),
       startsAt: event.startAt.toISOString(),
     }));
     return [...communityOptions, ...eventOptions];

@@ -20,7 +20,7 @@ import {
   personaColumnsFromRow,
 } from './studio-discovery-sql';
 import { PERSONA_PAYMENT_METHODS_SQL } from './studio-payment-methods.service';
-import { blockedWithAnyPersonaMemberSql } from './studio-persona-members';
+import { blockedWithAnyLinkedPersonaMemberSql } from './studio-persona-members';
 import {
   STUDIO_PURCHASE_CLAIMED,
   StudioPurchaseEvent,
@@ -93,7 +93,8 @@ function callerPurchaseIdSql(
  * release's; a release offer counts release purchases only), `is_owned` is
  * true when it exists, `pending_purchase_id` is the caller's pending
  * purchase of this exact item, `is_blocked` a block either way with any
- * persona member, `payment_method_count` the persona's methods.
+ * member of a LINKED persona (an unlinked one sells to anyone alike, so a
+ * refusal cannot test who runs it, SEC-02), `payment_method_count` the persona's methods.
  */
 export const OFFER_FACTS_SQL = `SELECT "facts".*,
        ("facts"."owned_purchase_id" IS NOT NULL) AS "is_owned"
@@ -108,7 +109,7 @@ export const OFFER_FACTS_SQL = `SELECT "facts".*,
              StudioPurchaseStatus.Pending,
              `(($2::uuid IS NULL AND "caller_purchase"."release_id" = "release"."id") OR "caller_purchase"."track_id" = $2::uuid)`,
            )} AS "pending_purchase_id",
-           ${blockedWithAnyPersonaMemberSql('$3::uuid', '"release"."subprofile_id"')} AS "is_blocked",
+           ${blockedWithAnyLinkedPersonaMemberSql('$3::uuid', '"release"."subprofile_id"')} AS "is_blocked",
            (SELECT COUNT(*)::int
               FROM "studio_payment_methods" "method"
              WHERE "method"."subprofile_id" = "release"."subprofile_id") AS "payment_method_count"

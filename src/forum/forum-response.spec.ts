@@ -4,6 +4,7 @@ import { ForumThread } from './entities/forum-thread.entity';
 import { ForumThreadFunding } from './entities/forum-thread-funding.entity';
 import {
   hostOfStoredLink,
+  toAuthorSummary,
   toForumPostResponse,
   toForumThreadResponse,
 } from './forum-response';
@@ -617,11 +618,11 @@ describe('toForumPostResponse opening-post byline', () => {
     });
   });
 
-  it('leaves a REPLY in the same thread alone', () => {
+  it('leaves a REPLY by somebody else in the same thread alone', () => {
     // Anonymity is the thread author's choice about their own byline. A reply
-    // is somebody else writing under their own name.
+    // by another member is that member writing under their own name.
     const dto = toForumPostResponse(
-      makePost({ isOp: false }),
+      makePost({ isOp: false, authorId: 'replier-1' }),
       realAuthor,
       0,
       stranger,
@@ -631,6 +632,100 @@ describe('toForumPostResponse opening-post byline', () => {
     );
 
     expect(dto.author.handle).toBe('ava');
+  });
+
+  it("masks the thread author's own reply inside their anonymous thread (SEC-05)", () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: false, authorId: 'author-1' }),
+      realAuthor,
+      0,
+      stranger,
+      undefined,
+      null,
+      anonymous,
+    );
+
+    expect(dto.author).toEqual({
+      handle: '',
+      displayName: 'Anonymous member',
+      avatarUrl: null,
+    });
+    // The reply keeps its OP marker, so readers can follow the conversation.
+    expect(dto.isByThreadAuthor).toBe(true);
+  });
+
+  it("masks the author's own reply for the author too, as the opening post is", () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: false, authorId: 'author-1' }),
+      realAuthor,
+      0,
+      { userId: 'author-1', isModerator: false },
+      undefined,
+      null,
+      anonymous,
+    );
+
+    expect(dto.author.displayName).toBe('Anonymous member');
+    expect(dto.canEdit).toBe(true);
+  });
+
+  it("shows a moderator the real author of the author's own reply", () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: false, authorId: 'author-1' }),
+      realAuthor,
+      0,
+      moderator,
+      undefined,
+      null,
+      anonymous,
+    );
+
+    expect(dto.author.handle).toBe('ava');
+    expect(dto.isByThreadAuthor).toBe(true);
+  });
+
+  it("keeps the author's name on their reply inside an official thread", () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: false, authorId: 'author-1' }),
+      realAuthor,
+      0,
+      stranger,
+      undefined,
+      null,
+      makeThread({ isOfficial: true }),
+    );
+
+    expect(dto.author.handle).toBe('ava');
+    // The OP marker would tie the admin to the platform's byline.
+    expect(dto.isByThreadAuthor).toBe(false);
+  });
+
+  it("marks the official thread author's reply for a moderator", () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: false, authorId: 'author-1' }),
+      realAuthor,
+      0,
+      moderator,
+      undefined,
+      null,
+      makeThread({ isOfficial: true }),
+    );
+
+    expect(dto.isByThreadAuthor).toBe(true);
+  });
+
+  it('drops the OP marker on a tombstoned reply', () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: false, authorId: 'author-1', deletedAt: new Date() }),
+      realAuthor,
+      0,
+      stranger,
+      undefined,
+      null,
+      anonymous,
+    );
+
+    expect(dto.isByThreadAuthor).toBe(false);
   });
 
   it('still shows a moderator the real OP author', () => {
@@ -1032,5 +1127,48 @@ describe('hostOfStoredLink', () => {
 
   it('answers an empty host for a row that no longer parses', () => {
     expect(hostOfStoredLink('not a url')).toBe('');
+  });
+});
+
+// An inactive author (deactivated, suspended or in the deletion grace period)
+// reaches the forum as `MemberLookup`'s placeholder ref.
+describe('toAuthorSummary for an inactive member', () => {
+  const inactiveRef: MemberRef = {
+    slug: '',
+    firstName: '',
+    lastName: '',
+    pronouns: null,
+    avatarUrl: null,
+    isInactiveMember: true,
+  };
+
+  it('carries the flag, keeps the handle empty and never a blank name', () => {
+    expect(toAuthorSummary(inactiveRef)).toEqual({
+      handle: '',
+      displayName: 'Deactivated member',
+      avatarUrl: null,
+      isInactiveMember: true,
+    });
+  });
+
+  it('labels an inactive reply author on the post response', () => {
+    const dto = toForumPostResponse(makePost(), inactiveRef, 0, {
+      userId: 'other-1',
+      isModerator: false,
+    });
+    expect(dto.author.isInactiveMember).toBe(true);
+    expect(dto.author.displayName).not.toBe('');
+  });
+
+  it('leaves the flag off an active author', () => {
+    expect(
+      toAuthorSummary({
+        slug: 'ava',
+        firstName: 'Ava',
+        lastName: 'Lee',
+        pronouns: null,
+        avatarUrl: null,
+      }),
+    ).not.toHaveProperty('isInactiveMember');
   });
 });

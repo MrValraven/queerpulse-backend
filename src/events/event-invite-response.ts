@@ -1,4 +1,5 @@
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import { eventCoverPhotoReference } from '../storage/public-media-reference';
 import { Profile } from '../users/entities/profile.entity';
 import { EventOrganizerView, toOrganizerView } from './event-response';
 import {
@@ -47,7 +48,12 @@ function toInvitedEventView(e: Event): InvitedEventView {
     timezone: e.timezone,
     venue: e.venue,
     isOnline: e.isOnline,
-    coverImageUrl: toImageUrl(e.coverImageUrl),
+    // SEC-04: a member storage key names its uploader, so this public read
+    // renders the row's opaque reference (`toImageUrlByReference`).
+    coverImageUrl: toImageUrlByReference(
+      e.coverImageUrl,
+      eventCoverPhotoReference(e.id),
+    ),
     status: e.status,
     visibility: e.visibility,
   };

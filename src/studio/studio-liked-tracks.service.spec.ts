@@ -395,6 +395,7 @@ describe('StudioLikedTracksService', () => {
       statsQuery,
       VIEWER_ID,
       '"persona"."user_id"',
+      { unless: `"persona"."link_visibility" = 'unlinked'` },
     );
     expect(page.trackCount).toBe(3);
     expect(page.totalDurationSeconds).toBe(612);

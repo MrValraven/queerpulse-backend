@@ -23,6 +23,7 @@ import {
 } from '../events/entities/event.entity';
 import { emptyAccessibilityAnswers } from '../listings/listing-accessibility';
 import { ConnectionsService } from '../connections/connections.service';
+import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { FORUM_THREAD_VISIBLE_SQL } from '../forum/forum-threads.service';
@@ -31,6 +32,7 @@ import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { HiddenFromService } from '../social/hidden-from.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
+import { directoryTierClause } from '../profiles/member-directory.query';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
@@ -355,6 +357,8 @@ const communityMemberDefaults: CommunityMember = {
   rulesAcceptedAt: null,
   rulesVersionAccepted: null,
   welcomeSeenAt: null,
+  wornBadgeId: null,
+  eventsAttendedCount: 0,
   joinedAt: t('2026-07-10T00:00:00.000Z'),
 };
 
@@ -1275,6 +1279,18 @@ describe('FeedService', () => {
         expect.stringContaining('"u"."status" = :active'),
         { active: UserStatus.Active },
       );
+    });
+
+    it('applies the directory visibility-tier rule, so private and unconnected network members are never announced (PRD-504)', async () => {
+      const qb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(directoryTierClause(), {
+        directoryViewerId: 'viewer-1',
+        directoryAcceptedStatus: ConnectionStatus.Accepted,
+      });
     });
 
     it('excludes the viewer\'s own profile from their "people" feed', async () => {
@@ -2475,6 +2491,28 @@ describe('FeedService', () => {
       expect(connectionCall?.[1]).toEqual({
         connectionAuthorIds: ['author-2'],
       });
+    });
+
+    it('keeps an anonymous thread for a viewer who blocked its hidden author', async () => {
+      // Coordinator ruling (the SEC-02 class): a missing card would confirm
+      // who wrote it, so the candidate carries no author into `dropBlocked`.
+      blockFilter.hiddenUserIds.mockResolvedValue(new Set(['author-1']));
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({
+            id: 'thread-anonymous-blocked',
+            authorId: 'author-1',
+            isAnonymous: true,
+          }),
+          baseThread({ id: 'thread-named-blocked', authorId: 'author-1' }),
+        ]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      const ids = page.data.map((item) => item.id);
+      expect(ids).toContain('thread-anonymous-blocked');
+      expect(ids).not.toContain('thread-named-blocked');
     });
 
     it('gives an anonymous thread no connection reason and no reasonSubject', async () => {

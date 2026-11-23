@@ -15,6 +15,7 @@ import {
   toConversationContextMessage,
 } from './report-conversation-context-response';
 import { loadSentAsIdentities } from './sent-as-identity';
+import { reportAboutActorRefusal } from './report-about-actor';
 
 // `reports.subject_id` is a client-supplied `varchar`; `messages.id` is `uuid`.
 const UUID_RE =
@@ -71,10 +72,21 @@ export class ReportConversationContextService {
     const reportedMessage = await this.messages.findOne({
       where: { id: report.subjectId },
       withDeleted: true,
-      select: { id: true, conversationId: true },
+      select: { id: true, conversationId: true, senderId: true },
     });
     if (!reportedMessage) {
       throw this.unavailable();
+    }
+    // SEC-31: the staff member who sent the reported message is the report's
+    // subject (the author `ModerationService.isReportAboutActor` resolves for a
+    // `message`), so they get the queue's coded refusal before any of the
+    // conversation is read, and no viewing row is written. The filing-time
+    // snapshot names the sender when the live row no longer does.
+    const senderId =
+      reportedMessage.senderId ??
+      messageSnapshotFrom(report.evidence)?.senderId;
+    if (senderId && senderId === actorId) {
+      throw reportAboutActorRefusal();
     }
     const { conversationId } = reportedMessage;
 

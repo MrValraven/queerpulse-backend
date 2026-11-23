@@ -20,7 +20,9 @@ import {
   eventBatchTooManyDates,
   eventBatchVenueNotFound,
   lastAllowedBatchDate,
+  batchTemplateSpanOf,
   resolveBatchRowSchedule,
+  type BatchTemplateSpan,
   seededCostKind,
   type BatchRowSchedule,
   type CreatedEventBatch,
@@ -153,7 +155,12 @@ export class EventBatchService {
     );
     const { template } = resolved;
     const venueListing = await this.resolveVenueListing(dto, resolved);
-    const plannedRows = this.planRows(dto, template.timezone, now);
+    const plannedRows = this.planRows(
+      dto,
+      template.timezone,
+      batchTemplateSpanOf(template),
+      now,
+    );
 
     const visibilityReachesVenuePage =
       template.visibility === EventVisibility.Public ||
@@ -272,6 +279,7 @@ export class EventBatchService {
   private planRows(
     dto: CreateEventBatchDto,
     timeZone: string,
+    templateSpan: BatchTemplateSpan | null,
     now: Date,
   ): PlannedBatchRow[] {
     const lastDate = lastAllowedBatchDate(now, timeZone);
@@ -286,7 +294,12 @@ export class EventBatchService {
       if (row.date > lastDate) {
         throw eventBatchDateTooFar(rowIndex, row.date, lastDate);
       }
-      const schedule = resolveBatchRowSchedule(row, dto.shared, timeZone);
+      const schedule = resolveBatchRowSchedule(
+        row,
+        dto.shared,
+        timeZone,
+        templateSpan,
+      );
       const problem = eventScheduleProblem(schedule.startAt, schedule.endAt, {
         rejectPast: true,
         now,

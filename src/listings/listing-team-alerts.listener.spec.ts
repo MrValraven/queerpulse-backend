@@ -39,7 +39,10 @@ const ALLOWLIST: Record<string, string[]> = {
   ],
 };
 
-function teamRow(initiatedBy: 'listing' | 'persona') {
+function teamRow(
+  initiatedBy: 'listing' | 'persona',
+  personaLinkVisibility = 'linked',
+) {
   return {
     id: MEMBER_ID,
     initiated_by: initiatedBy,
@@ -51,6 +54,7 @@ function teamRow(initiatedBy: 'listing' | 'persona') {
     subprofile_id: 'persona-1',
     persona_handle: 'river-ink',
     persona_name: 'River Ink',
+    persona_link_visibility: personaLinkVisibility,
   };
 }
 
@@ -126,6 +130,21 @@ describe('ListingTeamAlertsListener', () => {
       },
       ACTING_USER,
     );
+  });
+
+  // SEC-02: a request from an unlinked persona reaches the listing side with
+  // no member to filter against, so a request that vanished on a block
+  // cannot test who runs it. An invite from the listing side keeps its actor.
+  it('passes no actor when the acting side is an unlinked persona', async () => {
+    teamRows = [teamRow('persona', 'unlinked')];
+
+    await listener.handleRequested(event);
+    await listener.handleInvited(event);
+
+    const actorIds = notifications.createForRecipients.mock.calls.map(
+      (call) => (call as unknown[])[3],
+    );
+    expect(actorIds).toEqual([undefined, ACTING_USER]);
   });
 
   it('sends an acceptance to the starting side with its own link id', async () => {

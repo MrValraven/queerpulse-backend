@@ -153,7 +153,11 @@ describe('ChatGateway delivered receipts', () => {
     gateway = module.get(ChatGateway);
 
     roomEmit = jest.fn();
-    namespaceTo = jest.fn().mockReturnValue({ emit: roomEmit });
+    namespaceTo = jest.fn().mockReturnValue({
+      emit: roomEmit,
+      // SEC-26: the relay excepts group members blocked with the recipient.
+      except: jest.fn().mockReturnValue({ emit: roomEmit }),
+    });
     (gateway as unknown as { namespace: unknown }).namespace = {
       to: namespaceTo,
     };

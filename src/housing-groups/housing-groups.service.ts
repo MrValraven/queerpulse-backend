@@ -21,6 +21,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import {
   Connection,
   ConnectionStatus,
@@ -41,11 +42,16 @@ import {
 } from './entities/group-listing.entity';
 import { CreateHousingGroupDto } from './dto/create-group.dto';
 import { UpdateGroupDto } from './dto/update-group.dto';
+import {
+  describeHousingGroup,
+  describeHousingGroupChanges,
+} from './housing-group-audit-note';
 import { CreateGroupJoinRequestDto } from './dto/create-group-join-request.dto';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
 import { CreateGroupListingEnquiryDto } from './dto/create-group-listing-enquiry.dto';
 import { UpdateGroupListingDto } from './dto/update-group-listing.dto';
 import { HideGroupListingDto } from './dto/hide-group-listing.dto';
+import { DeleteHousingGroupDto } from './dto/delete-housing-group.dto';
 import { SetGroupListingStatusDto } from './dto/set-group-listing-status.dto';
 import { ListGroupJoinRequestsQuery } from './dto/list-group-join-requests.query';
 import { ListGroupListingQueueQuery } from './dto/list-group-listing-queue.query';
@@ -347,6 +353,18 @@ export class HousingGroupsService {
             AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
         )`,
         { groupListingSubjectType: ReportSubjectType.GroupListing },
+      )
+      // SEC-34: a room whose poster is suspended, banned or deactivated leaves
+      // the page and takes no enquiries. A room with no poster row at all (the
+      // old anonymous form, or an erased account) has nobody whose standing
+      // could change, so it stays.
+      .andWhere(
+        `("listing"."posted_by_user_id" IS NULL OR EXISTS (
+          SELECT 1 FROM "users" "poster_user"
+          WHERE "poster_user"."id" = "listing"."posted_by_user_id"
+            AND "poster_user"."status" = :activePosterStatus
+        ))`,
+        { activePosterStatus: UserStatus.Active },
       );
     if (viewerId !== null) {
       this.blockFilter.excludeHidden(
@@ -363,7 +381,10 @@ export class HousingGroupsService {
     return groups.map(toHousingGroupDTO);
   }
 
-  async createGroup(dto: CreateHousingGroupDto): Promise<HousingGroupDTO> {
+  async createGroup(
+    dto: CreateHousingGroupDto,
+    actorId: string,
+  ): Promise<HousingGroupDTO> {
     const existing = await this.groups.findOne({ where: { slug: dto.slug } });
     if (existing) throw new ConflictException('Slug already in use');
     try {
@@ -375,6 +396,13 @@ export class HousingGroupsService {
           screeningQuestions: dto.screeningQuestions ?? [],
         }),
       );
+      // ENG-602: creating a group sets who is let in (screening questions,
+      // access gate) and what is public (published), so it leaves a row.
+      await this.auditStaffAction(
+        actorId,
+        'housing_group_create',
+        `${describeHousingGroup(saved)} created: ${saved.screeningQuestions.length} screening questions, ${saved.norms.length} norms, access gated ${String(saved.isAccessGated)}, published ${String(saved.published)}`,
+      );
       return toHousingGroupDTO(saved);
     } catch (err) {
       if (isUniqueViolation(err)) {
@@ -384,31 +412,65 @@ export class HousingGroupsService {
     }
   }
 
-  async updateGroup(id: string, dto: UpdateGroupDto): Promise<HousingGroupDTO> {
+  async updateGroup(
+    id: string,
+    dto: UpdateGroupDto,
+    actorId: string,
+  ): Promise<HousingGroupDTO> {
     const group = await this.groups.findOne({ where: { id } });
     if (!group) throw new NotFoundException('Group not found');
+    // Read before `Object.assign` overwrites the row, so the note can say what
+    // the update moved (ENG-602).
+    const changes = describeHousingGroupChanges(group, dto);
+    const heading = describeHousingGroup(group);
     Object.assign(group, dto);
+    let saved: HousingGroup;
     try {
-      return toHousingGroupDTO(await this.groups.save(group));
+      saved = await this.groups.save(group);
     } catch (err) {
       if (isUniqueViolation(err)) {
         throw new ConflictException('Slug already in use');
       }
       throw err;
     }
+    await this.auditStaffAction(
+      actorId,
+      'housing_group_update',
+      changes.length
+        ? `${heading} changed: ${changes.join('; ')}`
+        : `${heading} saved with no field changes`,
+    );
+    return toHousingGroupDTO(saved);
   }
 
-  async deleteGroup(id: string, actorId: string): Promise<void> {
+  /**
+   * Deletes a group for good (ENG-602). The delete stays hard: a soft delete
+   * needs a schema change (a `deleted_at` column plus every group read
+   * filtering on it), and the foreign keys from `group_listings` and
+   * `group_join_requests` are `ON DELETE CASCADE`, so the group's listings and
+   * join requests go with it. Because nothing can be restored afterwards, the
+   * caller must give a reason, and the audit note records the reason and how
+   * many listings and join requests the cascade removed.
+   */
+  async deleteGroup(
+    id: string,
+    actorId: string,
+    dto: DeleteHousingGroupDto,
+  ): Promise<void> {
     // Read first so the audit note can still name the group once its row is
     // gone: an id alone points at nothing after the delete.
     const group = await this.groups.findOne({ where: { id } });
     if (!group) throw new NotFoundException('Group not found');
+    const [listingCount, joinRequestCount] = await Promise.all([
+      this.listings.count({ where: { groupId: id } }),
+      this.joinRequests.count({ where: { groupId: id } }),
+    ]);
     const result = await this.groups.delete({ id });
     if (!result.affected) throw new NotFoundException('Group not found');
     await this.auditStaffAction(
       actorId,
       'housing_group_delete',
-      `Housing group ${id} "${group.name}" (${group.slug})`,
+      `${describeHousingGroup(group)} deleted for good, cascade removed ${listingCount} listings and ${joinRequestCount} join requests. Reason: ${dto.reason}`,
     );
   }
 
@@ -1382,7 +1444,9 @@ export class HousingGroupsService {
       ),
     ];
     const refsByUserId = posterIds.length
-      ? await new MemberLookup(this.profiles).byUserIds(posterIds)
+      ? await new MemberLookup(this.profiles).byUserIds(posterIds, {
+          inactive: 'include',
+        })
       : new Map<string, MemberRef>();
 
     const items = rows.map((listing) =>
@@ -1462,9 +1526,10 @@ export class HousingGroupsService {
     listing: GroupListing,
   ): Promise<AdminGroupListingDTO> {
     if (!listing.postedByUserId) return toAdminGroupListingDTO(listing, null);
-    const refsByUserId = await new MemberLookup(this.profiles).byUserIds([
-      listing.postedByUserId,
-    ]);
+    const refsByUserId = await new MemberLookup(this.profiles).byUserIds(
+      [listing.postedByUserId],
+      { inactive: 'include' },
+    );
     return toAdminGroupListingDTO(
       listing,
       refsByUserId.get(listing.postedByUserId) ?? null,

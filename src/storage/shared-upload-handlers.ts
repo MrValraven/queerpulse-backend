@@ -206,10 +206,12 @@ export function allowsStudioLandingScopedKeys(
 
 /** Handlers whose body may carry a VJ key (`vj-clips/...`, `vj-thumbnails/...`,
  *  `vj-previews/...`). The service checks shape, existence and magic bytes
- *  itself. */
+ *  itself. `UploadsController.confirm` checks the caller's VJ access (the
+ *  Admin role or the `vj_operator` grant) before it reads the object. */
 export const VJ_KEY_HANDLERS: ReadonlySet<string> = new Set([
   'AdminVjController.createClip',
   'AdminVjController.setClipPreview',
+  'UploadsController.confirm',
 ]);
 
 /** Whether this controller+handler pair may carry a VJ key. Unknown pairs

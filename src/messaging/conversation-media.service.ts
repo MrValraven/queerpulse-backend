@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, SelectQueryBuilder } from 'typeorm';
 import { ConversationMediaKind } from './dto/list-conversation-media.query';
 import { Message, MessageKind } from './entities/message.entity';
+import { andOutsideAbsenceGap } from './group-absence-gap';
 import {
   decodeMessageHistoryCursor,
   encodeMessageHistoryCursor,
@@ -117,6 +118,9 @@ export class ConversationMediaService {
         leftAt: participant.leftAt.toISOString(),
       });
     }
+    // SEC-25: nothing posted while a re-seated member was away, as in
+    // `getMessages`.
+    andOutsideAbsenceGap(queryBuilder, 'm.created_at', participant);
     // PRD-227 "delete for me", identical to the history predicate.
     queryBuilder.andWhere(
       `NOT EXISTS (

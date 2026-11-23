@@ -62,7 +62,9 @@ export class AdminWriterApplicationsService {
 
     const memberLookup = new MemberLookup(this.profiles);
     const userIds = [...new Set(rows.map((row) => row.userId))];
-    const refsByUserId = await memberLookup.byUserIds(userIds);
+    const refsByUserId = await memberLookup.byUserIds(userIds, {
+      inactive: 'include',
+    });
 
     const items: AdminWriterApplicationDTO[] = rows.map((row) =>
       toAdminWriterApplicationDTO(row, refsByUserId.get(row.userId) ?? null),
@@ -163,9 +165,11 @@ export class AdminWriterApplicationsService {
     }
 
     const memberLookup = new MemberLookup(this.profiles);
-    const ref = (await memberLookup.byUserIds([application.userId])).get(
-      application.userId,
-    );
+    const ref = (
+      await memberLookup.byUserIds([application.userId], {
+        inactive: 'include',
+      })
+    ).get(application.userId);
     return toAdminWriterApplicationDTO(
       {
         ...application,

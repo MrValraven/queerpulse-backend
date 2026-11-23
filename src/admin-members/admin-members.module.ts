@@ -68,8 +68,8 @@ import { AdminMembersService } from './admin-members.service';
     // injects directly for `getVouchCounts`/`getVouchCount`.
     VouchModule,
     // `UsersModule` exports `UsersService`, injected here for the shared
-    // `countAdmins` last-admin guard `updateRole` uses (also used by
-    // `AccountService.deactivate`/`requestDeletion`).
+    // `countOtherActiveAdmins` last-admin guard `updateRole` uses (also used
+    // by `AccountService.deactivate`/`requestDeletion`).
     UsersModule,
     // `AuthService`, for `applyGoogleIdRelink` (the conditional `google_id`
     // write) and `revokeAllForUser` (ending every session after a re-link).

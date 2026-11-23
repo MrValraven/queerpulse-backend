@@ -8,6 +8,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
+import { isSubjectBySnapshotOrAuthor } from '../moderation/report-about-actor';
+import { ReportSubjectResolverService } from '../moderation/report-subject-resolver.service';
 import { MemberLookup } from '../common/member-ref';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
 import {
@@ -304,6 +306,7 @@ export class AdminCommunitiesService {
   async getCommunity(
     slug: string,
     isPlatformStaffReader: boolean,
+    viewerUserId?: string,
   ): Promise<AdminCommunityDetailDTO> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
@@ -326,11 +329,30 @@ export class AdminCommunitiesService {
       this.loadSubcommunitySummaries(community.id),
     ]);
 
+    // SEC-31: the reports about the viewing staff member leave their copy of
+    // the queue; see `reportIdsAboutViewer`.
+    const scopedQueue = this.scopedQueueFor(
+      community,
+      reportScope,
+      now,
+      isPlatformStaffReader,
+    );
+    const reportIdsAboutViewer = viewerUserId
+      ? await this.reportIdsAboutViewer(
+          reportScope.reports.filter((report) =>
+            scopedQueue.some((queueItem) => queueItem.id === report.id),
+          ),
+          viewerUserId,
+        )
+      : new Set<string>();
+
     return toAdminCommunityDetail(
       community,
       aggregatesByCommunityId.get(community.id) ?? emptyCommunityAggregates(),
       moderators,
-      this.scopedQueueFor(community, reportScope, now, isPlatformStaffReader),
+      scopedQueue.filter(
+        (queueItem) => !reportIdsAboutViewer.has(queueItem.id),
+      ),
       reportScope.truncated,
       parentSummary,
       subcommunitySummaries,
@@ -425,6 +447,7 @@ export class AdminCommunitiesService {
       ];
       const memberRefs = await new MemberLookup(this.profiles).byUserIds(
         memberIds,
+        { inactive: 'include' },
       );
       return rows.map((row) =>
         toAdminGovernanceLogEntry(row, memberRefs, isPlatformStaffReader),
@@ -560,7 +583,7 @@ export class AdminCommunitiesService {
         );
       }
     }
-    return this.getCommunity(slug, isPlatformStaffReader);
+    return this.getCommunity(slug, isPlatformStaffReader, actorUserId);
   }
 
   /**
@@ -647,7 +670,7 @@ export class AdminCommunitiesService {
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
     // is always platform staff and reads the full detail.
-    return this.getCommunity(slug, true);
+    return this.getCommunity(slug, true, actorUserId);
   }
 
   /**
@@ -727,7 +750,7 @@ export class AdminCommunitiesService {
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
     // is always platform staff and reads the full detail.
-    return this.getCommunity(slug, true);
+    return this.getCommunity(slug, true, actorUserId);
   }
 
   /**
@@ -809,7 +832,7 @@ export class AdminCommunitiesService {
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
     // is always platform staff and reads the full detail.
-    return this.getCommunity(slug, true);
+    return this.getCommunity(slug, true, actorUserId);
   }
 
   /**
@@ -875,27 +898,27 @@ export class AdminCommunitiesService {
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
     // is always platform staff and reads the full detail.
-    return this.getCommunity(slug, true);
+    return this.getCommunity(slug, true, actorUserId);
   }
 
   /**
    * `POST /admin/communities/:slug/reassign-owner` — hand ownership to any
-   * roster member, admin override of `CommunitiesService.transferOwnership`.
+   * roster member, admin override of `CommunitiesService.offerOwnership`.
    * That method is CURRENT-OWNER-ONLY (`assertOwner`) and therefore can never
    * run on the exact case this endpoint exists for: a community with NO
    * current owner (`ownerId === null`) — there is no owner to be the actor.
    * Reimplemented here directly against the repositories, in a transaction
-   * mirroring `transferOwnership`'s three-write shape (new owner's roster row
+   * mirroring `CommunitiesService.swapOwnerWithin`'s three-write shape (new owner's roster row
    * -> `owner`, `Community.ownerId` -> the target, previous owner's roster
    * row -> `mod` if one existed), plus clearing `needsOwnerReviewAt` — the
    * flag this endpoint is the intended way to resolve.
    *
    *  - Target must already be on this community's roster: 404 otherwise,
-   *    matching `transferOwnership`'s "Member not found" for an unknown
+   *    matching `offerOwnership`'s "Member not found" for an unknown
    *    target (a reassignment is a promotion of an existing member, never a
    *    way to force someone onto the roster).
    *  - The house account can never become an owner — mirrors
-   *    `transferOwnership`'s same guardrail.
+   *    `offerOwnership`'s same guardrail.
    *  - Idempotent: reassigning to the member who already owns the community
    *    is a no-op that skips both the write and the governance-log entry.
    */
@@ -927,7 +950,7 @@ export class AdminCommunitiesService {
       // Already the owner — nothing to change, nothing to log.
       // Admin-only override (empty `@StaffRoles()` on the route), so the
       // caller is always platform staff and reads the full detail.
-      return this.getCommunity(slug, true);
+      return this.getCommunity(slug, true, actorUserId);
     }
 
     const targetUser = await this.users.findOne({
@@ -955,7 +978,7 @@ export class AdminCommunitiesService {
       // Outgoing owner (if any) stays on the roster, demoted to mod — guarded
       // on the row still reading `owner` so this can't double-demote
       // something already moved by a concurrent call. Mirrors
-      // `CommunitiesService.transferOwnership`.
+      // `CommunitiesService.swapOwnerWithin`.
       if (previousOwnerId) {
         const previousOwnerMembership = await membersRepo.findOne({
           where: { communityId: community.id, userId: previousOwnerId },
@@ -980,7 +1003,7 @@ export class AdminCommunitiesService {
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
     // is always platform staff and reads the full detail.
-    return this.getCommunity(slug, true);
+    return this.getCommunity(slug, true, actorUserId);
   }
 
   /**
@@ -1643,6 +1666,7 @@ export class AdminCommunitiesService {
     const memberLookup = new MemberLookup(this.profiles);
     const memberRefsByUserId = await memberLookup.byUserIds(
       moderatorMembers.map((moderatorMember) => moderatorMember.userId),
+      { inactive: 'include' },
     );
 
     const moderators: AdminCommunityModeratorDTO[] = [];
@@ -1667,6 +1691,55 @@ export class AdminCommunitiesService {
       );
     }
     return moderators;
+  }
+
+  /**
+   * SEC-31: which of `reports` are about `viewerUserId`, the same rule
+   * `ModerationService.isReportAboutActor` applies to the platform queue for
+   * this queue's subject types (a post, a reply, an event photo): the
+   * shared resolver's author, falling back to the filing-time snapshot when
+   * the content is gone (`isSubjectBySnapshotOrAuthor`). Batched: one
+   * resolver pass, plus one evidence read for the reports whose author the
+   * resolver could not find (this scan projects `evidence` out).
+   *
+   * The resolver holds only the shared `DataSource` and no state, so it is
+   * built here over this service's own `DataSource` and adds no edge to the
+   * module graph (`ModerationModule` keeps it private).
+   */
+  private async reportIdsAboutViewer(
+    reports: Report[],
+    viewerUserId: string,
+  ): Promise<Set<string>> {
+    const aboutViewer = new Set<string>();
+    if (!reports.length) return aboutViewer;
+    const resolutions = await new ReportSubjectResolverService(
+      this.dataSource,
+    ).resolveMany(reports);
+    const unresolvedIds = reports
+      .filter((report) => !resolutions.get(report.id)?.authorUserId)
+      .map((report) => report.id);
+    const evidenceById = new Map<string, unknown[] | null>();
+    if (unresolvedIds.length) {
+      const evidenceRows = await this.reports.find({
+        where: { id: In(unresolvedIds) },
+        select: { id: true, evidence: true },
+      });
+      for (const evidenceRow of evidenceRows) {
+        evidenceById.set(evidenceRow.id, evidenceRow.evidence);
+      }
+    }
+    for (const report of reports) {
+      if (
+        isSubjectBySnapshotOrAuthor(
+          resolutions.get(report.id)?.authorUserId ?? null,
+          evidenceById.get(report.id) ?? null,
+          viewerUserId,
+        )
+      ) {
+        aboutViewer.add(report.id);
+      }
+    }
+    return aboutViewer;
   }
 
   /** That community's open reports, newest first. `isPlatformStaffReader`

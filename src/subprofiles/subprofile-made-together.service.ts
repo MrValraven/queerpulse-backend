@@ -34,6 +34,10 @@ import {
   visibleSectionSql,
 } from './subprofile-visible-sections-sql';
 import { TATTOO_BODY_PHOTO_SECTIONS } from './tattoo-artist-vocab';
+import {
+  personaCreatorActiveSql,
+  unlinkedPersonaSql,
+} from './persona-creator-gates';
 
 /** How many of the newest qualifying credited items one request scans. */
 export const MADE_TOGETHER_WINDOW = 80;
@@ -110,7 +114,8 @@ export class SubprofileMadeTogetherService {
   /**
    * The newest credited items of eligible authors, in ONE query. The base
    * predicates mirror the directory's (published, open, not removed, no
-   * takedown, a handle, owner not blocked either way) so the window fills
+   * takedown, a handle, an active creator, and for a linked author a creator
+   * not blocked either way) so the window fills
    * with items that can qualify; `pickCards` still re-checks the author with
    * `isCreditablePersona`. `collaborators <> '{}'` matches the partial index
    * `IDX_subprofile_items_credited_recent`.
@@ -148,8 +153,14 @@ export class SubprofileMadeTogetherService {
             AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
         )`,
         { subprofileSubjectType: SUBPROFILE_MODERATION_SUBJECT_TYPE },
-      );
-    this.blockFilter.excludeBlocked(qb, viewerId, '"sp"."user_id"');
+      )
+      // SEC-33: an author whose creator is not active is withheld.
+      .andWhere(personaCreatorActiveSql());
+    // A block with the creator withholds a LINKED author alone: an unlinked
+    // persona answers every viewer alike (SEC-02).
+    this.blockFilter.excludeBlocked(qb, viewerId, '"sp"."user_id"', {
+      unless: unlinkedPersonaSql(),
+    });
     return qb
       .orderBy('item.createdAt', 'DESC')
       .addOrderBy('item.id', 'ASC')

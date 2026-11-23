@@ -154,6 +154,10 @@ export interface RecommendationDTO {
    * missing. Both read the same way on the page: the warning stands, the byline
    * is gone. */
   member: MemberRef | null;
+  /** PRD-507. Set when the author's account is paused, suspended or in the
+   * deletion grace: `name` and `initials` are empty and the client renders
+   * its "[deactivated member]" label. */
+  isInactiveMember?: true;
   /** The recommending MEMBER's real verification level — an honest badge on the
    * recommendation. The landlord themselves is NOT a platform member and never
    * verified with us, so no landlord-level badge is claimed anywhere. */
@@ -232,6 +236,7 @@ export function toRecommendationDTO(
     // on a NULL author.
     tint: tintForKey(rec.authorUserId ?? rec.id),
     member,
+    ...(member?.isInactiveMember ? { isInactiveMember: true as const } : {}),
     verificationLevel,
     stars: rec.stars,
     text: rec.text,

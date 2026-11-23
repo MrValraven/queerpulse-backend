@@ -338,7 +338,9 @@ export class HousingListingModerationService {
     ownerId: string | null,
   ): Promise<string | null> {
     if (ownerId === null) return null;
-    const refs = await new MemberLookup(this.profiles).byUserIds([ownerId]);
+    const refs = await new MemberLookup(this.profiles).byUserIds([ownerId], {
+      inactive: 'include',
+    });
     const ref = refs.get(ownerId);
     return ref ? `${ref.firstName} ${ref.lastName}`.trim() : null;
   }
@@ -412,6 +414,7 @@ export class HousingListingModerationService {
     const moderatorIds = presentActorIds(rows.map((row) => row.decidedById));
     const moderators = await new MemberLookup(this.profiles).byUserIds(
       moderatorIds,
+      { inactive: 'include' },
     );
 
     return rows.map((row) =>

@@ -11,7 +11,7 @@ import { StudioReleaseStatus } from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import {
   PersonaColumns,
-  notBlockedEitherWaySql,
+  notBlockedWithLinkedCreatorSql,
   personaColumnsFromRow,
   personaColumnsSql,
 } from './studio-discovery-sql';
@@ -79,7 +79,7 @@ export const CREDIT_CANDIDATE_SQL = `SELECT ${personaColumnsSql('persona', 'pers
   FROM "subprofiles" "persona"
  WHERE "persona"."handle" = $2
    AND ${listenablePersonaSql('persona')}
-   AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'candidate_block')}
+   AND ${notBlockedWithLinkedCreatorSql('$1', 'persona', 'candidate_block')}
  LIMIT 1`;
 
 /** `$1` a track, `$2` one credit id or null, `$3` the viewer. The editor's
@@ -94,7 +94,7 @@ export const OWNER_CREDIT_ROWS_SQL = `SELECT "credit"."id" AS "id",
        ${personaColumnsSql('persona', 'persona')},
        ${listenablePersonaSql('persona')} AS "is_persona_public",
        (${listenablePersonaSql('persona')}
-         AND ${notBlockedEitherWaySql('$3', '"persona"."user_id"', 'owner_row_block')}) AS "is_persona_linkable"
+         AND ${notBlockedWithLinkedCreatorSql('$3', 'persona', 'owner_row_block')}) AS "is_persona_linkable"
   FROM "studio_persona_credits" "credit"
   INNER JOIN "subprofiles" "persona" ON "persona"."id" = "credit"."subprofile_id"
  WHERE "credit"."track_id" = $1

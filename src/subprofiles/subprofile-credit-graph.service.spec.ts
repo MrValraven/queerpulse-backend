@@ -1,4 +1,4 @@
-import { In } from 'typeorm';
+import { FindOperator, In } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandleOwnerKind } from '../handles/entities/handle.entity';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -6,6 +6,7 @@ import {
   Subprofile,
   SubprofileLinkVisibility,
 } from './entities/subprofile.entity';
+import { memberShownOnPeopleListSql } from './persona-creator-gates';
 import { SubprofileCreditGraphService } from './subprofile-credit-graph.service';
 import type { CreditSubject } from './subprofile-credit-graph';
 import {
@@ -249,5 +250,122 @@ describe('SubprofileCreditGraphService.loadCardCreditsFor', () => {
       ],
     });
     expect(credits.get('sp-unlinked')).toEqual({ count: 0, faces: [] });
+  });
+
+  // SEC-21: a paused, suspended, erasure-pending or 24-hour-hidden member
+  // never loads, so no card or credit names them.
+  it('loads credited members only while the people lists would show them', async () => {
+    outboundRows = [
+      {
+        id: 'item-1',
+        subprofileId: 'sp-linked',
+        collaborators: ['ana'],
+        createdAt: new Date('2026-10-01T00:00:00.000Z'),
+      },
+    ];
+    handleRegistry.find.mockResolvedValue([
+      {
+        name: 'ana',
+        ownerKind: HandleOwnerKind.Profile,
+        userId: 'ana-user',
+        subprofileId: null,
+      },
+    ]);
+
+    const credits = await service.loadCardCreditsFor(
+      [linkedSubject],
+      'viewer-1',
+    );
+
+    expect(profiles.find).toHaveBeenCalledTimes(1);
+    const profileWhere = (
+      profiles.find.mock.calls[0] as [{ where: { userId: unknown } }]
+    )[0].where;
+    expect(profileWhere.userId).toBeInstanceOf(FindOperator);
+    const userIdOperator = profileWhere.userId as FindOperator<string>;
+    expect(Object.values(userIdOperator.objectLiteralParameters ?? {})).toEqual(
+      [['ana-user']],
+    );
+    expect(userIdOperator.getSql?.('Profile.userId')).toContain(
+      memberShownOnPeopleListSql('(Profile.userId)'),
+    );
+    expect(credits.get('sp-linked')).toEqual({ count: 0, faces: [] });
+  });
+
+  // SEC-33: a persona whose creator is not active never loads as a face.
+  it('loads credited personas only with an active creator', async () => {
+    outboundRows = [
+      {
+        id: 'item-1',
+        subprofileId: 'sp-linked',
+        collaborators: ['ember'],
+        createdAt: new Date('2026-10-01T00:00:00.000Z'),
+      },
+    ];
+    handleRegistry.find.mockResolvedValue([
+      {
+        name: 'ember',
+        ownerKind: HandleOwnerKind.Subprofile,
+        userId: null,
+        subprofileId: 'sp-ember',
+      },
+    ]);
+
+    await service.loadCardCreditsFor([linkedSubject], 'viewer-1');
+
+    expect(subprofiles.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: In(['sp-ember']), user: { status: 'active' } },
+      }),
+    );
+  });
+
+  // SEC-02: a credit of an unlinked persona stays whoever the viewer blocked,
+  // so a vanished credit cannot test who runs it.
+  it("keeps an unlinked persona's credit when the viewer and its creator are blocked", async () => {
+    outboundRows = [
+      {
+        id: 'item-1',
+        subprofileId: 'sp-linked',
+        collaborators: ['ember'],
+        createdAt: new Date('2026-10-01T00:00:00.000Z'),
+      },
+    ];
+    handleRegistry.find.mockResolvedValue([
+      {
+        name: 'ember',
+        ownerKind: HandleOwnerKind.Subprofile,
+        userId: null,
+        subprofileId: 'sp-ember',
+      },
+    ]);
+    subprofiles.find.mockResolvedValue([
+      {
+        id: 'sp-ember',
+        handle: 'ember',
+        displayName: 'Ember',
+        avatarUrl: null,
+        accent: null,
+        kind: 'dj',
+        status: 'published',
+        visibility: 'open',
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+        removedAt: null,
+        userId: 'ember-creator',
+      },
+    ]);
+    blockFilter.blockedUserIds.mockResolvedValue(new Set(['ember-creator']));
+
+    const credits = await service.loadCardCreditsFor(
+      [linkedSubject],
+      'viewer-1',
+    );
+
+    expect(credits.get('sp-linked')).toEqual({
+      count: 1,
+      faces: [
+        { kind: 'persona', name: 'Ember', avatarUrl: null, accent: null },
+      ],
+    });
   });
 });

@@ -251,6 +251,7 @@ describe('StudioEpisodesService', () => {
         feed,
         USER_ID,
         '"persona"."user_id"',
+        { unless: `"persona"."link_visibility" = 'unlinked'` },
       );
       expect(feed.orderBy).toHaveBeenCalledWith('track.publishedAt', 'DESC');
       expect(feed.addOrderBy).toHaveBeenCalledWith('track.id', 'DESC');

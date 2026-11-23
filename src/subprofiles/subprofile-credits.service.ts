@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
@@ -7,7 +7,10 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { personaPath } from '../profiles/activity-links';
 import { Profile } from '../users/entities/profile.entity';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
-import { Subprofile } from './entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileLinkVisibility,
+} from './entities/subprofile.entity';
 import {
   SubprofileItem,
   SubprofileSection,
@@ -15,6 +18,12 @@ import {
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { CollaboratorView } from './subprofile-response';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
+import { personaNotificationActorId } from './persona-creator-gates';
+
+// SEC-03: the reason code a section save answers when an unlinked persona
+// credits the member handle of its creator or a co-owner.
+export const UNLINKED_PERSONA_OWNER_CREDIT_CODE =
+  'UNLINKED_PERSONA_OWNER_CREDIT';
 
 // The collaboration-credit side effect of a section save (Personas discovery
 // Phase 5, Moment 6): computing WHICH `@handle`-credited members are NEWLY
@@ -96,13 +105,62 @@ export class SubprofileCreditsService {
     );
   }
 
+  /**
+   * SEC-03: refuses a section save on an UNLINKED persona that credits the
+   * member handle of its creator or a co-owner. Such a credit names a person
+   * who runs the pseudonym, on the pseudonym's own items. The public page
+   * already leaves member credits out, but the item would still carry the
+   * handle, so the save refuses it outright with
+   * `UNLINKED_PERSONA_OWNER_CREDIT` and the offending handle. A linked
+   * persona names its creator anyway and saves as before.
+   *
+   * Two bounded reads, and only when an unlinked persona credits at least
+   * one handle: the member handles among them, and the persona's roster.
+   */
+  async assertNoOwnerCreditOnUnlinked(
+    persona: Pick<Subprofile, 'id' | 'userId' | 'linkVisibility'>,
+    handleNames: string[],
+  ): Promise<void> {
+    if (
+      persona.linkVisibility !== SubprofileLinkVisibility.Unlinked ||
+      !handleNames.length
+    ) {
+      return;
+    }
+    const userIdByHandle = await this.resolveMemberUserIdsByHandle([
+      ...new Set(handleNames),
+    ]);
+    if (!userIdByHandle.size) {
+      return;
+    }
+    const rosterRows = await this.members.find({
+      where: { subprofileId: persona.id },
+      select: { userId: true },
+    });
+    const ownerUserIds = new Set([
+      persona.userId,
+      ...rosterRows.map((row) => row.userId),
+    ]);
+    for (const [handle, userId] of userIdByHandle) {
+      if (ownerUserIds.has(userId)) {
+        throw new BadRequestException({
+          code: UNLINKED_PERSONA_OWNER_CREDIT_CODE,
+          message:
+            'An unlinked persona cannot credit you or a co-owner by your member handle',
+          handle,
+        });
+      }
+    }
+  }
+
   // Notifies each newly-credited handle's member (Personas discovery Phase 5,
   // Moment 6), excluding: handles that don't resolve to a real member's
   // userId, and the persona's own owner/co-owners (crediting yourself/a
-  // fellow co-owner never notifies). Block/mute is honoured via
-  // `notifications.create`'s `actorId` filter, passing the crediting
-  // persona's owner — the same safety gate every other member-driven
-  // notification in this codebase uses.
+  // fellow co-owner never notifies). For a LINKED crediting persona,
+  // block/mute is honoured via `notifications.create`'s `actorId` filter,
+  // passing its owner. An unlinked persona passes none
+  // (`personaNotificationActorId`, SEC-02), so a missing bell cannot test who
+  // runs it.
   async emitSubprofileCreditNotifications(
     sp: Subprofile,
     subprofileId: string,
@@ -140,7 +198,8 @@ export class SubprofileCreditsService {
           itemTitle,
           deepLink,
         },
-        sp.userId,
+        // SEC-02: the creator filters a linked persona's credit alone.
+        personaNotificationActorId(sp),
       );
     }
   }

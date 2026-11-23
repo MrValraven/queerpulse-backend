@@ -646,6 +646,7 @@ export class AdminOverviewService {
     ];
     const memberRefsByUserId = await memberLookup.byUserIds(
       actorAndTargetUserIds,
+      { inactive: 'include' },
     );
 
     return feedCandidates

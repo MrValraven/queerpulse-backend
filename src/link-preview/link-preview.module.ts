@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { LinkPreviewFeatureGuard } from './link-preview-feature.guard';
+import { LinkPreviewImageController } from './link-preview-image.controller';
+import { LinkPreviewImageService } from './link-preview-image.service';
 import { LinkPreviewThrottlerGuard } from './link-preview-throttler.guard';
 import { LinkPreviewController } from './link-preview.controller';
 import { LinkPreviewService } from './link-preview.service';
@@ -15,11 +17,15 @@ import { LinkPreviewService } from './link-preview.service';
  * `RefreshSessionThrottlerGuard`: they resolve under DI either way (
  * `ThrottlerModule` is `@Global()`), so listing them is about making the
  * enhancers visible to anyone reading the module.
+ *
+ * SEC-23: a card's image is served by `LinkPreviewImageController` from a
+ * signed address, so the browser never loads it from the linked host.
  */
 @Module({
-  controllers: [LinkPreviewController],
+  controllers: [LinkPreviewController, LinkPreviewImageController],
   providers: [
     LinkPreviewService,
+    LinkPreviewImageService,
     LinkPreviewFeatureGuard,
     LinkPreviewThrottlerGuard,
   ],

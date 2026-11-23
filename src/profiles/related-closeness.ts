@@ -150,6 +150,12 @@ export interface ClosenessFacts {
   ownerVouchersVisible: boolean;
   /** Whether the related member's voucher roster may be. */
   theirVouchersVisible: boolean;
+  /** The owner turned on "Keep my trust network private" (`privateNetwork`,
+   *  SEC-17): who vouched for them AND who they vouched for are theirs to
+   *  keep, so neither vouch chip may name the pair. */
+  ownerNetworkPrivate: boolean;
+  /** ...and the same toggle on the related member's side. */
+  theirNetworkPrivate: boolean;
   /** A live, non-anonymous vouch from the related member to the owner. */
   theyVouchedForOwner: boolean;
   /** ...and one the other way. */
@@ -177,14 +183,26 @@ export interface ClosenessFacts {
  * silently suppressing the card's chip altogether.
  */
 export function closenessFor(facts: ClosenessFacts): RelatedCloseness | null {
+  // A vouch between the two is a row in BOTH members' trust networks (one
+  // gave it, one received it), so either side keeping theirs private drops
+  // both vouch chips (SEC-17). The card still falls through to a weaker
+  // signal below.
+  const isVouchNameable =
+    !facts.ownerNetworkPrivate && !facts.theirNetworkPrivate;
   return pickCloseness({
     // "X vouched for <owner>" is a row on the OWNER's voucher roster, so the
     // owner's toggle governs whether it may be named...
-    vouchedForOwner: facts.ownerVouchersVisible && facts.theyVouchedForOwner,
+    vouchedForOwner:
+      isVouchNameable &&
+      facts.ownerVouchersVisible &&
+      facts.theyVouchedForOwner,
     // ...and "<owner> vouched for X" is a row on X's roster, so X's toggle
     // governs that one. Hiding your vouchers hides the chips that would have
     // named them one at a time.
-    ownerVouchedFor: facts.theirVouchersVisible && facts.ownerVouchedForThem,
+    ownerVouchedFor:
+      isVouchNameable &&
+      facts.theirVouchersVisible &&
+      facts.ownerVouchedForThem,
     sharedCommunity: facts.sharedCommunity,
     sharedOpenTo: facts.theirProfileOpen
       ? sharedOpenTo(facts.ownerOpenTo, facts.theirOpenTo)

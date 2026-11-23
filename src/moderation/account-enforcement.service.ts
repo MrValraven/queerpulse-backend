@@ -136,7 +136,22 @@ export class AccountEnforcementService {
 
     // Idempotent, matching this codebase's promotion/RSVP/vouch/accept
     // convention: lifting a suspension that is not there is a no-op, not a 409.
-    if (user.status !== UserStatus.Suspended) {
+    //
+    // ENG-601. A suspended member who then paused their own account keeps
+    // `Deactivated` as their live status (see `enforceAgainstUser`), with the
+    // suspension carried by `suspendedUntil` and the open deactivation row's
+    // `previousStatus`. That member is still under the suspension, so the lift
+    // has to clear it and withdraw the ban hold. Returning early would leave
+    // them suspended when they sign in again.
+    const isSuspendedWhileDeactivated =
+      user.status === UserStatus.Deactivated &&
+      (user.suspendedUntil !== null ||
+        (
+          await this.dataSource.getRepository(AccountDeactivation).findOne({
+            where: { userId: user.id, reactivatedAt: IsNull() },
+          })
+        )?.previousStatus === UserStatus.Suspended);
+    if (user.status !== UserStatus.Suspended && !isSuspendedWhileDeactivated) {
       return { userId: user.id, status: user.status };
     }
 
@@ -182,7 +197,14 @@ export class AccountEnforcementService {
     };
     this.eventEmitter.emit(ACCOUNT_REINSTATED, reinstated);
 
-    return { userId: user.id, status: UserStatus.Active };
+    // A member who paused their own account stays paused (`restoreUser` keeps
+    // `Deactivated`), so the answer names the status they really hold now.
+    return {
+      userId: user.id,
+      status: isSuspendedWhileDeactivated
+        ? UserStatus.Deactivated
+        : UserStatus.Active,
+    };
   }
 
   /**

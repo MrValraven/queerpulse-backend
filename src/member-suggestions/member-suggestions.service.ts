@@ -14,6 +14,7 @@ import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
+import { directoryTierClause } from '../profiles/member-directory.query';
 import { listedDisciplines, listedProfessions } from '../profiles/professions';
 import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import { MemberSuggestionDismissal } from './entities/member-suggestion-dismissal.entity';
@@ -485,6 +486,16 @@ export class MemberSuggestionsService {
     // "Hide me for 24 hours" removes a member from every viewer's directory
     // results; it must remove them from every viewer's suggestions too.
     qb.andWhere('("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())');
+    // The directory's visibility-tier rule (PRD-504), the same clause
+    // `ProfilesService.directoryBaseQuery` applies: a `private` member is
+    // listed to nobody else, and a `network` member only to their direct
+    // accepted connections. A candidate here never holds a connection row
+    // with the viewer (see the next gate), so in practice only `open`
+    // profiles are suggested.
+    qb.andWhere(directoryTierClause(), {
+      directoryViewerId: viewerUserId,
+      directoryAcceptedStatus: ConnectionStatus.Accepted,
+    });
     // Any connection row at all, in either direction and at any status: see
     // the class docstring on why declined and blocked count.
     qb.andWhere(

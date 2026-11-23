@@ -101,7 +101,7 @@ describe('PlatformLogService', () => {
     for (let page = 0; page < 10; page += 1) {
       const result = await service.list(
         { limit: 2, cursor },
-        { role: 'admin' },
+        { role: 'admin', userId: 'staff-viewer' },
         NOW,
       );
       seen.push(...result.data.map((entry) => entry.id));
@@ -123,7 +123,11 @@ describe('PlatformLogService', () => {
       [fakeSource('mod', [rawEntry('mod', 'm1', TIED)])],
       profiles,
     );
-    const result = await service.list({}, { role: 'admin' }, NOW);
+    const result = await service.list(
+      {},
+      { role: 'admin', userId: 'staff-viewer' },
+      NOW,
+    );
     expect(result.pageInfo).toEqual({ nextCursor: null, hasMore: false });
   });
 
@@ -137,7 +141,11 @@ describe('PlatformLogService', () => {
       ],
       profiles,
     );
-    const result = await service.list({ limit: 1 }, { role: 'admin' }, NOW);
+    const result = await service.list(
+      { limit: 1 },
+      { role: 'admin', userId: 'staff-viewer' },
+      NOW,
+    );
     expect(
       decodePlatformLogCursor(result.pageInfo.nextCursor ?? undefined),
     ).toEqual({
@@ -160,20 +168,20 @@ describe('PlatformLogService', () => {
 
     const membersOnly = await service.list(
       { categories: ['members'] },
-      { role: 'moderator' },
+      { role: 'moderator', userId: 'staff-viewer' },
       NOW,
     );
     expect(membersOnly.data).toEqual([]);
     expect(memberSource.fetch).not.toHaveBeenCalled();
 
-    await service.list({}, { role: 'moderator' }, NOW);
+    await service.list({}, { role: 'moderator', userId: 'staff-viewer' }, NOW);
     expect(memberSource.fetch).not.toHaveBeenCalled();
     expect(reviewSource.fetch.mock.calls[0]?.[0]).toMatchObject({
       staffRowsOnly: true,
     });
   });
 
-  it('passes the member filter, range and category list to every source', async () => {
+  it('passes the member filter, range, category list and viewer to every source', async () => {
     const source = fakeSource('mod', [], {
       categories: ['moderation', 'staff'],
     });
@@ -184,7 +192,7 @@ describe('PlatformLogService', () => {
         range: 'week',
         memberId: '5b0c3a52-1d7e-4f43-9a35-2f6d0b7e1a01',
       },
-      { role: 'admin' },
+      { role: 'admin', userId: 'staff-viewer' },
       NOW,
     );
     expect(source.fetch.mock.calls[0]?.[0]).toMatchObject({
@@ -193,13 +201,18 @@ describe('PlatformLogService', () => {
       since: new Date('2026-09-28T15:00:00Z'),
       staffRowsOnly: false,
       limit: 30,
+      viewerUserId: 'staff-viewer',
     });
   });
 
   it('caps the page size at 50', async () => {
     const source = fakeSource('mod', []);
     const service = new PlatformLogService([source], profiles);
-    await service.list({ limit: 500 }, { role: 'admin' }, NOW);
+    await service.list(
+      { limit: 500 },
+      { role: 'admin', userId: 'staff-viewer' },
+      NOW,
+    );
     expect(source.fetch.mock.calls[0]?.[0]).toMatchObject({ limit: 50 });
   });
 });

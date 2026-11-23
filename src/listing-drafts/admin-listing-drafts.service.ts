@@ -50,7 +50,9 @@ export class AdminListingDraftsService {
     return paginate(draftsQuery, page, async (rows) => {
       if (!rows.length) return [];
       const ownerIds = [...new Set(rows.map((row) => row.userId))];
-      const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
+      const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds, {
+        inactive: 'include',
+      });
       return rows.map((row) =>
         toAdminListingDraftDTO(row, refs.get(row.userId) ?? null),
       );
@@ -67,9 +69,10 @@ export class AdminListingDraftsService {
   async getOne(id: string): Promise<AdminListingDraftDetailDTO> {
     const draft = await this.listingDrafts.findOne({ where: { id } });
     if (!draft) throw new NotFoundException('Listing draft not found');
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      draft.userId,
-    ]);
+    const refs = await new MemberLookup(this.profiles).byUserIds(
+      [draft.userId],
+      { inactive: 'include' },
+    );
     return toAdminListingDraftDetailDTO(draft, refs.get(draft.userId) ?? null);
   }
 }

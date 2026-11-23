@@ -25,11 +25,20 @@ export interface PublicInviteView {
   expiresAt: string | null;
   validForDays: number | null;
   memberCount: number;
-  inviter: PublicInviterView;
+  // SEC-13: the inviter's card, their note and their vouch go out only while
+  // the invite can still be used: status 'valid' AND an active inviter. A
+  // revoked, used or expired invite, or one from a member who has left or been
+  // suspended, answers with `inviter`, `note` and `vouch` all null, so a
+  // member who revoked a misdirected link withdraws their name and words with
+  // it, and a deactivated member stops being shown on every link they sent.
+  inviter: PublicInviterView | null;
   // Whether the member who sent this invite is still active. `false` lets the
-  // landing page distinguish "the person who invited you is no longer here" from
-  // a plain invalid/expired code — the `status` union stays unchanged. Signup
-  // will reject an inactive-inviter redemption with `invite_inviter_inactive`.
+  // landing page tell "the person who invited you is no longer here" apart from
+  // a plain invalid or expired code while the `status` union stays as it is.
+  // Signup rejects an inactive-inviter redemption with
+  // `invite_inviter_inactive`. Only a 'valid' invite carries the real value;
+  // every other status answers true, so a dead link reveals nothing about
+  // whether its sender has left or been suspended.
   inviterActive: boolean;
   note: string | null;
   vouch: string | null;
@@ -133,7 +142,8 @@ export function toMyInviteView(
 
 // Builds the limited, non-sensitive payload returned by GET /invites/:code.
 // Reachable by anyone holding the link, so it exposes only public profile
-// fields — never emails, ids, or other inviter data.
+// fields (no emails, ids or other inviter data), and the inviter's identity,
+// note and vouch only on a usable invite (see `PublicInviteView.inviter`).
 export function toPublicInviteView(
   invite: Invite,
   inviter: User | null,
@@ -141,12 +151,15 @@ export function toPublicInviteView(
   now: Date,
   isInviterAmbassador: boolean,
 ): PublicInviteView {
-  const profile = inviter?.profile;
-  // "Member since <year>" — prefer the year they became active, falling back to
-  // account creation for any legacy record missing activated_at.
-  const memberSince = inviter
-    ? String((inviter.activatedAt ?? inviter.createdAt).getUTCFullYear())
-    : undefined;
+  const status = resolveInviteStatus(invite, now);
+  // Only an active member can meaningfully be "your inviter": a missing row
+  // (erased) or any non-active status reads as inactive.
+  const isInviterActive = inviter?.status === UserStatus.Active;
+  // The inviter's account state goes out only on a 'valid' invite, the one
+  // case where it decides whether the link still works. A revoked, used or
+  // expired invite already names its own state, so it always answers true and
+  // says nothing about whether the sender has since left or been suspended.
+  const inviterActive = status === 'valid' ? isInviterActive : true;
   // The configured validity window (created_at → expires_at), in whole days,
   // for the static "Valid for N days" badge.
   const validForDays = invite.expiresAt
@@ -154,26 +167,42 @@ export function toPublicInviteView(
         (invite.expiresAt.getTime() - invite.createdAt.getTime()) / DAY_MS,
       )
     : null;
+  const isUsable = status === 'valid' && isInviterActive;
 
   return {
     code: invite.code,
-    status: resolveInviteStatus(invite, now),
+    status,
     expiresAt: invite.expiresAt ? invite.expiresAt.toISOString() : null,
     validForDays,
     memberCount,
-    inviter: {
-      slug: profile?.slug ?? '',
-      firstName: profile?.firstName ?? '',
-      lastName: profile?.lastName ?? '',
-      avatarUrl: toImageUrl(profile?.avatarUrl),
-      ...(memberSince ? { memberSince } : {}),
-      isAmbassador: isInviterAmbassador,
-    },
-    // Only an active member can meaningfully be "your inviter" — a missing row
-    // (erased) or any non-active status reads as inactive.
-    inviterActive: inviter?.status === UserStatus.Active,
-    note: invite.note ?? null,
-    vouch: invite.vouch ?? null,
+    inviter: isUsable
+      ? toPublicInviterView(inviter, isInviterAmbassador)
+      : null,
+    inviterActive,
+    note: isUsable ? (invite.note ?? null) : null,
+    vouch: isUsable ? (invite.vouch ?? null) : null,
+  };
+}
+
+// The inviter's public card. Called only for a usable invite, whose inviter
+// is an active member with a loaded profile.
+function toPublicInviterView(
+  inviter: User | null,
+  isInviterAmbassador: boolean,
+): PublicInviterView {
+  const profile = inviter?.profile;
+  // "Member since <year>": the year they became active, falling back to
+  // account creation for any legacy record missing activated_at.
+  const memberSince = inviter
+    ? String((inviter.activatedAt ?? inviter.createdAt).getUTCFullYear())
+    : undefined;
+  return {
+    slug: profile?.slug ?? '',
+    firstName: profile?.firstName ?? '',
+    lastName: profile?.lastName ?? '',
+    avatarUrl: toImageUrl(profile?.avatarUrl),
+    ...(memberSince ? { memberSince } : {}),
+    isAmbassador: isInviterAmbassador,
   };
 }
 

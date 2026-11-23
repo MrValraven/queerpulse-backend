@@ -163,12 +163,16 @@ describe('loadPublicTeam', () => {
     expect(parameters).toEqual([LISTING_ID, 'viewer-1']);
   });
 
-  it('drops a persona whose owner has a block either way with a signed-in viewer', async () => {
+  it('drops a linked persona whose owner has a block either way with a signed-in viewer', async () => {
     await load({ isActiveMember: false, userId: 'viewer-1' });
 
     const { sql, parameters } = teamQuery();
     expect(sql).toContain(anonymousVisiblePersonaSql('persona'));
     expect(sql).toContain(notBlockedEitherWaySql('$2', '"persona"."user_id"'));
+    // SEC-02: an unlinked persona stays whoever the viewer blocked.
+    expect(sql).toContain(
+      `("persona"."link_visibility" = 'unlinked' OR ${notBlockedEitherWaySql('$2', '"persona"."user_id"')})`,
+    );
     expect(parameters).toEqual([LISTING_ID, 'viewer-1']);
   });
 

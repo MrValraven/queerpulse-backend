@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CommunityOwnerReviewService } from './community-owner-review.service';
@@ -89,6 +89,8 @@ describe('CommunityOwnerReviewService', () => {
     rulesAcceptedAt: null,
     rulesVersionAccepted: null,
     welcomeSeenAt: null,
+    wornBadgeId: null,
+    eventsAttendedCount: 0,
   };
 
   // The row `MemberLookup.byUserIds` reads to render the requester's
@@ -216,5 +218,55 @@ describe('CommunityOwnerReviewService', () => {
         expect(state).toBeDefined();
       },
     );
+  });
+
+  // SEC-41: a 403 for a real private slug against a 404 for an unknown one
+  // used to confirm that a guessed private community exists.
+  describe.each([
+    [
+      'open',
+      () =>
+        service.open('queer-devs', 'stranger-1', {
+          reason: 'The owner has not been seen here for months.',
+        }),
+    ],
+    ['withdraw', () => service.withdraw('queer-devs', 'stranger-1')],
+  ])('%s for a caller off the roster', (_method, call) => {
+    it('answers a private community with the unknown-slug 404', async () => {
+      communities.findOne.mockResolvedValue({
+        ...LIVE_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const refusal = call();
+
+      await expect(refusal).rejects.toBeInstanceOf(NotFoundException);
+      await expect(refusal).rejects.toThrow('Community not found');
+    });
+
+    it('answers a public community with 403', async () => {
+      communities.findOne.mockResolvedValue(LIVE_COMMUNITY);
+      members.findOne.mockResolvedValue(null);
+
+      const refusal = call();
+
+      await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(refusal).rejects.toThrow('Only roster members can do that');
+    });
+
+    it('answers parent staff of a private space with 403', async () => {
+      communities.findOne.mockResolvedValue({
+        ...LIVE_COMMUNITY,
+        accessTier: AccessTier.Private,
+        parentId: 'parent-1',
+      });
+      members.findOne.mockResolvedValue(null);
+      members.find.mockResolvedValue([
+        { ...MEMBERSHIP, communityId: 'parent-1', role: RosterRole.Mod },
+      ]);
+
+      await expect(call()).rejects.toBeInstanceOf(ForbiddenException);
+    });
   });
 });

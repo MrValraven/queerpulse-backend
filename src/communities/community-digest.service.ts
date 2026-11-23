@@ -7,7 +7,8 @@ import {
 } from '../events/entities/event-community.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { UPCOMING_OR_UNDERWAY_SQL } from '../events/event-schedule-sql';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import { communityAvatarPhotoReference } from '../storage/public-media-reference';
 import { truncateCharacters } from '../common/text-characters';
 import {
   Report,
@@ -241,7 +242,11 @@ export class CommunityDigestService {
         parentName: community.parentId
           ? (parentNameById.get(community.parentId) ?? null)
           : null,
-        avatarImageUrl: toImageUrl(community.avatarImageUrl),
+        // SEC-04: the avatar's key names its uploader; render by reference.
+        avatarImageUrl: toImageUrlByReference(
+          community.avatarImageUrl,
+          communityAvatarPhotoReference(community.id),
+        ),
         myRole: membership.role,
         notificationLevel: membership.notificationLevel,
         newPostCount: newPostCounts.get(community.id) ?? 0,

@@ -1,6 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { CardTokenService } from '../membership-cards/card-token.service';
 import { CommunityCard } from '../membership-cards/entities/community-card.entity';
@@ -9,8 +9,12 @@ import {
   MembershipCardStatus,
 } from '../membership-cards/entities/membership-card.entity';
 import { Profile } from '../users/entities/profile.entity';
+import {
+  DECREMENT_EVENTS_ATTENDED_SQL,
+  INCREMENT_EVENTS_ATTENDED_SQL,
+} from './event-attendance-tally';
 import { EventCheckInService } from './event-check-in.service';
-import { EVENT_DOOR_CHANGED } from './event.events';
+import { EVENT_ATTENDEE_CHECKED_IN, EVENT_DOOR_CHANGED } from './event.events';
 import { EventsService } from './events.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
@@ -26,10 +30,33 @@ describe('EventCheckInService door event', () => {
   const COHOST_ID = 'cohost-1';
   const MEMBER_ID = 'member-1';
 
-  let rsvps: { findOne: jest.Mock; save: jest.Mock };
+  let rsvps: {
+    findOne: jest.Mock;
+    update: jest.Mock;
+    query: jest.Mock;
+    manager: { transaction: jest.Mock };
+  };
   let cohosts: { exists: jest.Mock; find: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let service: EventCheckInService;
+
+  /** The emits of one event name. */
+  const emitsNamed = (wantedName: string): unknown[][] =>
+    (eventEmitter.emit.mock.calls as unknown[][]).filter(
+      ([eventName]) => eventName === wantedName,
+    );
+
+  /** The emits addressed to the door devices, leaving the badge trigger out. */
+  const doorEmits = (): unknown[][] => emitsNamed(EVENT_DOOR_CHANGED);
+
+  /** `sql` with whitespace runs folded and the space inside parentheses dropped. */
+  function collapsed(sql: string): string {
+    return sql
+      .replace(/\s+/g, ' ')
+      .replace(/\( /g, '(')
+      .replace(/ \)/g, ')')
+      .trim();
+  }
 
   const rsvpCheckedInAt = (checkedInAt: Date | null) =>
     ({
@@ -43,7 +70,16 @@ describe('EventCheckInService door event', () => {
   beforeEach(() => {
     rsvps = {
       findOne: jest.fn().mockResolvedValue(rsvpCheckedInAt(null)),
-      save: jest.fn((row: EventRsvp) => Promise.resolve(row)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      query: jest.fn().mockResolvedValue([]),
+      // The transaction hands back this same stub as its repository, so the
+      // conditional update and the tally statement land on `update` and `query`.
+      manager: {
+        transaction: jest.fn(
+          (work: (manager: { getRepository: () => unknown }) => unknown) =>
+            work({ getRepository: () => rsvps }),
+        ),
+      },
     };
     cohosts = {
       exists: jest.fn().mockResolvedValue(false),
@@ -120,7 +156,7 @@ describe('EventCheckInService door event', () => {
 
   it('emits once for a check-in that changed state, naming the organisers', async () => {
     await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
-    expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+    expect(doorEmits()).toHaveLength(1);
     expect(eventEmitter.emit).toHaveBeenCalledWith(EVENT_DOOR_CHANGED, {
       eventSlug: 'supper',
       memberSlug: 'mara',
@@ -131,7 +167,7 @@ describe('EventCheckInService door event', () => {
 
   it('emits once for a scanned card check-in that changed state, naming the guest', async () => {
     await service.checkIn('supper', HOST_ID, { cardToken: 'signed.code' });
-    expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+    expect(doorEmits()).toHaveLength(1);
     expect(eventEmitter.emit).toHaveBeenCalledWith(EVENT_DOOR_CHANGED, {
       eventSlug: 'supper',
       memberSlug: 'mara',
@@ -165,5 +201,101 @@ describe('EventCheckInService door event', () => {
     await expect(
       service.checkIn('supper', HOST_ID, { memberSlug: 'mara' }),
     ).resolves.toMatchObject({ goingCount: 1 });
+  });
+
+  it('names the arrived member to the badge trigger once per changed check-in', async () => {
+    await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
+    expect(emitsNamed(EVENT_ATTENDEE_CHECKED_IN)).toHaveLength(1);
+    expect(eventEmitter.emit).toHaveBeenCalledWith(EVENT_ATTENDEE_CHECKED_IN, {
+      eventId: 'event-1',
+      communityId: null,
+      userId: MEMBER_ID,
+    });
+  });
+
+  it('names nobody for a repeat check-in or an undo', async () => {
+    rsvps.findOne.mockResolvedValue(rsvpCheckedInAt(new Date()));
+    await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
+    await service.undoCheckIn('supper', HOST_ID, 'mara');
+    expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+      EVENT_ATTENDEE_CHECKED_IN,
+      expect.anything(),
+    );
+  });
+
+  it('adds one to the tally for a check-in that changed state, before the badge trigger hears of it', async () => {
+    await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
+    expect(rsvps.query).toHaveBeenCalledTimes(1);
+    expect(rsvps.query).toHaveBeenCalledWith(INCREMENT_EVENTS_ATTENDED_SQL, [
+      'event-1',
+      MEMBER_ID,
+    ]);
+    expect(rsvps.query.mock.invocationCallOrder[0]).toBeLessThan(
+      eventEmitter.emit.mock.invocationCallOrder[
+        eventEmitter.emit.mock.calls.findIndex(
+          ([eventName]) => eventName === EVENT_ATTENDEE_CHECKED_IN,
+        )
+      ] ?? -1,
+    );
+  });
+
+  it('takes one off the tally for an undo that changed state', async () => {
+    rsvps.findOne.mockResolvedValue(rsvpCheckedInAt(new Date()));
+    await service.undoCheckIn('supper', HOST_ID, 'mara');
+    expect(rsvps.query).toHaveBeenCalledWith(DECREMENT_EVENTS_ATTENDED_SQL, [
+      'event-1',
+      MEMBER_ID,
+    ]);
+  });
+
+  it('leaves the tally alone for a repeat check-in and for an undo with nobody arrived', async () => {
+    rsvps.findOne.mockResolvedValueOnce(rsvpCheckedInAt(new Date()));
+    await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
+    await service.undoCheckIn('supper', HOST_ID, 'mara');
+    expect(rsvps.query).not.toHaveBeenCalled();
+  });
+
+  it('stamps the arrival only while the row has none, inside the tally transaction', async () => {
+    await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
+    expect(rsvps.manager.transaction).toHaveBeenCalledTimes(1);
+    expect(rsvps.update).toHaveBeenCalledWith(
+      { id: 'rsvp-1', checkedInAt: IsNull() },
+      { checkedInAt: expect.any(Date) as unknown },
+    );
+  });
+
+  it('clears the stamp only while the row has one, inside the tally transaction', async () => {
+    rsvps.findOne.mockResolvedValue(rsvpCheckedInAt(new Date()));
+    await service.undoCheckIn('supper', HOST_ID, 'mara');
+    expect(rsvps.manager.transaction).toHaveBeenCalledTimes(1);
+    expect(rsvps.update).toHaveBeenCalledWith(
+      { id: 'rsvp-1', checkedInAt: Not(IsNull()) },
+      { checkedInAt: null },
+    );
+  });
+
+  it('counts nothing and names nobody when a simultaneous check-in stamped the row first', async () => {
+    rsvps.update.mockResolvedValue({ affected: 0 });
+    await service.checkIn('supper', HOST_ID, { memberSlug: 'mara' });
+    expect(rsvps.query).not.toHaveBeenCalled();
+    expect(emitsNamed(EVENT_ATTENDEE_CHECKED_IN)).toHaveLength(0);
+    expect(doorEmits()).toHaveLength(0);
+  });
+
+  it('takes nothing off the tally when a simultaneous undo cleared the row first', async () => {
+    rsvps.findOne.mockResolvedValue(rsvpCheckedInAt(new Date()));
+    rsvps.update.mockResolvedValue({ affected: 0 });
+    await service.undoCheckIn('supper', HOST_ID, 'mara');
+    expect(rsvps.query).not.toHaveBeenCalled();
+    expect(doorEmits()).toHaveLength(0);
+  });
+
+  it('floors the tally at zero and matches only a roster row of the event community', () => {
+    expect(collapsed(DECREMENT_EVENTS_ATTENDED_SQL)).toContain(
+      'GREATEST("m"."events_attended_count" - 1, 0)',
+    );
+    expect(collapsed(INCREMENT_EVENTS_ATTENDED_SQL)).toContain(
+      '"m"."community_id" = "e"."community_id" AND "m"."user_id" = $2',
+    );
   });
 });

@@ -15,6 +15,11 @@ import { ForumThread } from './entities/forum-thread.entity';
  * No bell goes out: telling either member their credit was dropped the moment
  * a block lands would disclose the block.
  *
+ * An anonymous, non-official thread keeps its credit. Its writer is hidden,
+ * and a credit that vanished the moment the co-author blocked somebody would
+ * confirm who wrote it (the SEC-02 class, `forum-author-filter.ts`). An
+ * official thread follows the named rule.
+ *
  * Best-effort, as every `MEMBER_BLOCKED` consumer is (`SocialService` emits it
  * post-commit). The byline's read-time block filter in `ForumThreadsService`
  * is the authoritative gate for viewers; this listener tidies the rows so the
@@ -41,15 +46,24 @@ export class ForumCoAuthorBlockListener {
   }
 
   /** Clears `coAuthorId` on the threads `authorId` wrote crediting
-   * `coAuthorId`. Withdrawn threads are included, so a restored thread does
-   * not bring the credit back. Each direction catches its own failure, so the
-   * second still runs when the first fails. */
+   * `coAuthorId`, skipping anonymous, non-official threads. Two single-object
+   * updates cover the rest: every named thread, then every official one.
+   * Withdrawn threads are included, so a restored thread does not bring the
+   * credit back. Each direction catches its own failure, so the second still
+   * runs when the first fails. */
   private async clearCreditBetween(
     authorId: string,
     coAuthorId: string,
   ): Promise<void> {
     try {
-      await this.threads.update({ authorId, coAuthorId }, { coAuthorId: null });
+      await this.threads.update(
+        { authorId, coAuthorId, isAnonymous: false },
+        { coAuthorId: null },
+      );
+      await this.threads.update(
+        { authorId, coAuthorId, isOfficial: true },
+        { coAuthorId: null },
+      );
     } catch (error) {
       this.logger.warn(
         `Dropping forum co-author credits after a block failed: ${String(error)}`,

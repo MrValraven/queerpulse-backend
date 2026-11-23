@@ -59,6 +59,17 @@ const COMMUNITY_LEVELS_WANTING: Partial<
     CommunityNotificationLevel.All,
     CommunityNotificationLevel.Announcements,
   ],
+  // A badge earned and a gift received want every level but `muted`.
+  [NotificationType.CommunityBadgeEarned]: [
+    CommunityNotificationLevel.All,
+    CommunityNotificationLevel.Announcements,
+    CommunityNotificationLevel.Mentions,
+  ],
+  [NotificationType.CommunityGiftReceived]: [
+    CommunityNotificationLevel.All,
+    CommunityNotificationLevel.Announcements,
+    CommunityNotificationLevel.Mentions,
+  ],
 };
 
 /**
@@ -68,6 +79,25 @@ const COMMUNITY_LEVELS_WANTING: Partial<
  * referential failure, which it has no business swallowing.
  */
 const NOTIFICATIONS_USER_FK = 'FK_notifications_user_id';
+
+/**
+ * The payload flag a write sets when its actor is hidden on purpose: a reply
+ * the author of an anonymous thread writes inside it (SEC-05,
+ * `ForumPostsService.reply`). The payload names no actor then, and the
+ * write-time block and mute gate is skipped too, since a recipient's block or
+ * mute of that member suppressing the row would confirm who the hidden
+ * author is (coordinator ruling, the SEC-02 class).
+ */
+export const MASKED_ACTOR_PAYLOAD_KEY = 'isActorMasked';
+
+/** The actor the write-time gate and the batch event use: none for a
+ *  payload flagged `MASKED_ACTOR_PAYLOAD_KEY`, the caller's otherwise. */
+function gatedActorId(
+  payload: Record<string, unknown>,
+  callerActorId: string | undefined,
+): string | undefined {
+  return payload[MASKED_ACTOR_PAYLOAD_KEY] === true ? undefined : callerActorId;
+}
 
 @Injectable()
 export class NotificationsService {
@@ -141,8 +171,9 @@ export class NotificationsService {
     userId: string,
     type: NotificationType,
     payload: Record<string, unknown> = {},
-    actorId?: string,
+    callerActorId?: string,
   ): Promise<Notification | null> {
+    const actorId = gatedActorId(payload, callerActorId);
     if (actorId && (await this.isHiddenFrom(userId, actorId))) {
       return null;
     }
@@ -202,8 +233,9 @@ export class NotificationsService {
     userIds: string[],
     type: NotificationType,
     payload: Record<string, unknown> = {},
-    actorId?: string,
+    callerActorId?: string,
   ): Promise<string[]> {
+    const actorId = gatedActorId(payload, callerActorId);
     const visible = actorId
       ? await this.visibleRecipients(userIds, actorId)
       : userIds;
@@ -711,19 +743,21 @@ export class NotificationsService {
    * The subset of `userIds` whose own level for the community this notification
    * belongs to still wants it.
    *
-   * Applies ONLY to the four community-chatter types below. It is a whitelist,
-   * never a blocklist, and that is the load-bearing detail: `source: 'community'`
+   * Applies ONLY to the four community-chatter types below and to the badge
+   * and gift types (`CommunityBadgeEarned`, `CommunityGiftReceived`). The list
+   * is a whitelist, and that is the load-bearing detail: `source: 'community'`
    * is also on the payload of "you were banned", "your role changed", "the
-   * community was archived". Gating those on a level would let muting a room
-   * silence the news that you are no longer in it, which is exactly the kind of
-   * thing a mute must never be able to do.
+   * community was archived". Gating those on a level would let muting a
+   * community silence the news that you are no longer in it, which is exactly
+   * the kind of thing a mute must never be able to do.
    *
    * The levels mirror `CommunityPostsService`'s existing fan-out filter, so a
    * post filtered there and a reply filtered here answer to the same setting:
    *  - `all`: everything.
-   *  - `announcements`: only what an owner or mod marked as an announcement.
-   *  - `mentions`: none of these. `Mention` is not in this set and is never
-   *    gated, so being named still reaches the member.
+   *  - `announcements`: what an owner or mod marked as an announcement, plus
+   *    the badge and gift types.
+   *  - `mentions`: the badge and gift types only. `Mention` is outside this
+   *    set and is never gated, so being named still reaches the member.
    *  - `muted`: none of these.
    *
    * Fails OPEN at every step. A payload with no `communitySlug`, a slug that no

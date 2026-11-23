@@ -47,6 +47,7 @@ import { CommunityPublicController } from './community-public.controller';
 import { CommunityPublicService } from './community-public.service';
 import { MeCommunityDigestController } from './me-community-digest.controller';
 import { MeCommunityInvitesController } from './me-community-invites.controller';
+import { MeCommunityOwnershipOffersController } from './me-community-ownership-offers.controller';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityInsightsController } from './community-insights.controller';
 import { CommunityInsightsService } from './community-insights.service';
@@ -54,6 +55,7 @@ import { CommunityMembershipModule } from './community-membership.module';
 import { CommunityOwnerOrphanService } from './community-owner-orphan.service';
 import { CommunityPostsController } from './community-posts.controller';
 import { CommunityPostsService } from './community-posts.service';
+import { CommunityNameMarksService } from '../community-badges/community-name-marks.service';
 import { CommunityPulseController } from './community-pulse.controller';
 import { CommunityPulseService } from './community-pulse.service';
 import { CommunityVolunteeringController } from './community-volunteering.controller';
@@ -63,6 +65,7 @@ import { CommunityBan } from './entities/community-ban.entity';
 import { CommunityBanRatification } from './entities/community-ban-ratification.entity';
 import { CommunityGovernanceLog } from './entities/community-governance-log.entity';
 import { CommunityOwnerReviewRequest } from './entities/community-owner-review-request.entity';
+import { CommunityOwnershipOffer } from './entities/community-ownership-offer.entity';
 import { CommunityResource } from './entities/community-resource.entity';
 import { CommunityGivingMethod } from './entities/community-giving-method.entity';
 import { CommunitySupportOffer } from './entities/community-support-offer.entity';
@@ -140,6 +143,10 @@ import { SubcommunitiesService } from './subcommunities.service';
       // all). Stamps the community's existing `needsOwnerReviewAt` for the
       // admin surface.
       CommunityOwnerReviewRequest,
+      // PRD-514. An owner's offer to hand the community on, which moves
+      // ownership only once the member it names accepts. Read and written by
+      // `CommunitiesService` through the data source.
+      CommunityOwnershipOffer,
       Profile,
       // Read-only, for the auto-freeze listener's open-report count. Same
       // cross-module `forFeature` reuse `ReportsModule` itself does with
@@ -247,6 +254,10 @@ import { SubcommunitiesService } from './subcommunities.service';
     // invites and the decline. The community-facing half (staff list, revoke)
     // rides on `CommunityInvitesController` above.
     MeCommunityInvitesController,
+    // PRD-514. The offered member's side of an ownership offer: the list of
+    // open offers, the accept and the decline. The owner's side rides on
+    // `CommunitiesController` (`/communities/:slug/ownership-offer`).
+    MeCommunityOwnershipOffersController,
     // `GET /communities/:slug/public`, the only signed-out-reachable
     // community surface. Deliberately its own controller with NO class-level
     // `ActiveMemberGuard`, matching `DirectoryController` and
@@ -276,6 +287,11 @@ import { SubcommunitiesService } from './subcommunities.service';
   providers: [
     CommunitiesService,
     CommunityPostsService,
+    // DataSource-only reader of worn flair and recent gift marks, shared by
+    // the roster and post builders. It lives in `src/community-badges/` so
+    // the badge schema knowledge stays in one folder; this module never
+    // imports `CommunityBadgesModule`.
+    CommunityNameMarksService,
     CommunityAutoFreezeService,
     CommunityGovernanceLogService,
     CommunityOwnerOrphanService,

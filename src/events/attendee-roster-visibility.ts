@@ -62,3 +62,38 @@ export function restrictToAttendeesVisibleTo<Entity extends ObjectLiteral>(
     },
   );
 }
+
+/**
+ * PRD-508: "Hide me for 24 hours" (`profiles.hidden_until`) on a roster
+ * query read by somebody who is NOT an organiser. A row stays in the result
+ * when the attendee has no live self-hide, or when it is the viewer's own
+ * RSVP (a member who hid themself still sees themself, like their own
+ * profile). It is the same unconditional rule `ProfilesService` applies to
+ * the directory: the hide does not depend on who is reading.
+ *
+ * Like `restrictToAttendeesVisibleTo`, it runs in-query so a page of
+ * attendees comes back full, and callers skip it for organisers, who need the
+ * whole list to run the door. Counts keep counting everybody: a hidden member
+ * still holds a seat, as a number with no face or name.
+ *
+ * Call it at most once per query builder; it binds its own
+ * `attendeeSelfHide*` parameter name.
+ */
+export function excludeSelfHiddenAttendees<Entity extends ObjectLiteral>(
+  queryBuilder: SelectQueryBuilder<Entity>,
+  viewerId: string,
+  rsvpAlias: string,
+): SelectQueryBuilder<Entity> {
+  const userIdColumn = `"${rsvpAlias}"."user_id"`;
+  return queryBuilder.andWhere(
+    `(
+      ${userIdColumn} = :attendeeSelfHideViewerId
+      OR NOT EXISTS (
+        SELECT 1 FROM "profiles" "__attendee_self_hide"
+        WHERE "__attendee_self_hide"."user_id" = ${userIdColumn}
+          AND "__attendee_self_hide"."hidden_until" > now()
+      )
+    )`,
+    { attendeeSelfHideViewerId: viewerId },
+  );
+}

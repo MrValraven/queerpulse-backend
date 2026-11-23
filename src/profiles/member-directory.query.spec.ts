@@ -4,6 +4,7 @@ import {
   HOOD_VISIBLE_CLAUSE,
   applyDirectoryFilters,
   countDirectoryFacets,
+  directoryTierClause,
   memberSearchIds,
   memberSearchRank,
   memberSearchTextMatch,
@@ -597,5 +598,37 @@ describe('bio-gated member search', () => {
     expect(elseBranch).not.toContain('"p"."bio_pt"');
     // It binds the raw term only, like the ordering it replaces.
     expect(rank).not.toContain(':memberSearchPattern');
+  });
+});
+
+describe('directoryTierClause (PRD-504)', () => {
+  const clause = directoryTierClause();
+
+  it('lists open profiles and the viewer themself', () => {
+    expect(clause).toContain(`"p"."visibility" = 'open'`);
+    expect(clause).toContain('"p"."user_id" = :directoryViewerId');
+  });
+
+  it('lists a network profile only through an accepted connection in either direction', () => {
+    expect(clause).toContain(`"p"."visibility" = 'network' AND EXISTS`);
+    expect(clause).toContain(
+      '"directory_connection"."status" = :directoryAcceptedStatus',
+    );
+    expect(clause).toContain(
+      '"directory_connection"."requester_id" = :directoryViewerId',
+    );
+    expect(clause).toContain(
+      '"directory_connection"."addressee_id" = :directoryViewerId',
+    );
+  });
+
+  it('has no arm that lists a private profile to anyone else', () => {
+    expect(clause).not.toContain("'private'");
+  });
+
+  it('writes the same rule on another alias and leaves out the default one', () => {
+    const aliased = directoryTierClause('profile');
+    expect(aliased).toBe(clause.split('"p".').join('"profile".'));
+    expect(aliased).not.toContain('"p".');
   });
 });

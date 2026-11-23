@@ -7,6 +7,7 @@ import { GovernanceOverviewChange } from '../governance/entities/governance-over
 import { ListingModerationEvent } from '../listings/entities/listing-moderation-event.entity';
 import { PlatformJoinRequest } from '../membership/entities/join-request.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
+import { ModerationModule } from '../moderation/moderation.module';
 import { PlatformSettingChange } from '../platform-settings/entities/platform-setting-change.entity';
 import { Report } from '../reports/entities/report.entity';
 import { RoadmapAuditLog } from '../roadmap/entities/roadmap-audit-log.entity';
@@ -78,6 +79,10 @@ const SOURCE_CLASSES = [
       PlatformJoinRequest,
       ForumThread,
     ]),
+    // SEC-31: `ModAuditLogSource` applies the audit feed's viewer rule
+    // (`ModerationService.auditFeedViewer`). Nothing in `ModerationModule`'s
+    // import graph reaches this module, so no cycle.
+    ModerationModule,
   ],
   controllers: [PlatformLogController],
   providers: [

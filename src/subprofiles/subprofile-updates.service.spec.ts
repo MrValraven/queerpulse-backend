@@ -4,6 +4,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { SubprofileSection } from './entities/subprofile-item.entity';
 import {
   Subprofile,
+  SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
@@ -25,6 +26,7 @@ function makePersona(overrides: Partial<Subprofile> = {}): Subprofile {
     handle: 'nightform',
     status: SubprofileStatus.Published,
     visibility: SubprofileVisibility.Open,
+    linkVisibility: SubprofileLinkVisibility.Linked,
     removedAt: null,
     ...overrides,
   } as Subprofile;
@@ -111,6 +113,24 @@ describe('SubprofileUpdatesService.notifyFollowersOfNewItems', () => {
         newItemCount: 1,
       }),
       CREATOR_ID,
+    );
+  });
+
+  // SEC-02: an unlinked persona's followers hear whoever they blocked or
+  // muted, so a missing bell cannot test who runs it.
+  it('notifies an unlinked persona with no owner to filter against', async () => {
+    await service.notifyFollowersOfNewItems(
+      makePersona({ linkVisibility: SubprofileLinkVisibility.Unlinked }),
+      ['Existing item'],
+      ['Existing item', 'New item'],
+      SubprofileSection.Projects,
+    );
+
+    expect(notifications.createForRecipients).toHaveBeenCalledWith(
+      [FOLLOWER_ID],
+      NotificationType.PersonaUpdate,
+      expect.objectContaining({ subprofileId: PERSONA_ID }),
+      undefined,
     );
   });
 

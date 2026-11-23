@@ -220,12 +220,13 @@ describe('VouchService', () => {
       );
     });
 
-    it('403s when a block runs either way between the two members', async () => {
+    it('answers the member 404 when a block runs either way (SEC-19)', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
       blockFilter.isBlockedEitherWay.mockResolvedValue(true);
-      await expect(service.createVouch('u1', 'them')).rejects.toBeInstanceOf(
-        ForbiddenException,
-      );
+      await expect(service.createVouch('u1', 'them')).rejects.toMatchObject({
+        status: 404,
+        response: { message: 'Member not found' },
+      });
       expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('u1', 'u2');
       // Refused before any write, so no row, no counter bump, no notification.
       expect(manager.insert).not.toHaveBeenCalled();
@@ -874,10 +875,15 @@ describe('VouchService', () => {
       // named voucher to resolve.
       expect(visibleMemberIds).toHaveBeenCalledWith([]);
       // With no visible ids at all, the `IN` branch is never appended: the
-      // page query's visibility filter reduces to the anonymous-or-own
-      // clause alone, which never emits an `IN ()`.
+      // page query's visibility filter reduces to the anonymous, private
+      // network (shown shielded, SEC-17) and own-vouch clauses alone, which
+      // never emit an `IN ()`.
       expect(pageBuilder.andWhere).toHaveBeenCalledWith(
-        '(v.anonymous = true OR v.voucherId = :viewerId)',
+        `(v.anonymous = true OR EXISTS (
+  SELECT 1 FROM "profiles" "voucher_profile"
+  WHERE "voucher_profile"."user_id" = "v"."voucher_id"
+    AND "voucher_profile"."private_network" = true
+) OR v.voucherId = :viewerId)`,
         { viewerId: 'viewer-1' },
       );
       expect(res.vouchers).toHaveLength(1);
@@ -935,6 +941,142 @@ describe('VouchService', () => {
     });
   });
 
+  describe("a voucher's own privateNetwork (M3, SEC-17)", () => {
+    it('leaves a private voucher out of the named-voucher ids behind mutual counts', async () => {
+      namedVoucherRows = [{ voucher_id: 'v1' }];
+      await expect(service.getNamedVoucherIds('u2')).resolves.toEqual(['v1']);
+      expect(vouchesQuery.andWhere).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^NOT EXISTS \([\s\S]*"voucher_profile"\."private_network" = true/,
+        ) as unknown,
+      );
+    });
+
+    it('keeps a private voucher on the roster as a shielded row and withholds their note', async () => {
+      activeVouchesCount = 3;
+      namedVoucherRows = [{ voucher_id: 'v2' }];
+      activeVouchesPage = [
+        {
+          voucherId: 'v1',
+          anonymous: false,
+          note: 'proud of you',
+          createdAt: new Date('2026-01-02'),
+          relationships: null,
+        },
+        {
+          voucherId: 'v2',
+          anonymous: false,
+          note: null,
+          createdAt: new Date('2026-01-01'),
+          relationships: null,
+        },
+        {
+          voucherId: 'v3',
+          anonymous: true,
+          note: 'signed with love',
+          createdAt: new Date('2025-12-31'),
+          relationships: null,
+        },
+      ];
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'v1',
+          slug: 'quiet',
+          firstName: 'Quinn',
+          lastName: 'Rae',
+          privateNetwork: true,
+        },
+        {
+          userId: 'v2',
+          slug: 'wren',
+          firstName: 'Wren',
+          lastName: 'Sol',
+          privateNetwork: false,
+        },
+      ]);
+      const res = await service.listVouchers(
+        target(),
+        'viewer-1',
+        visibleMemberIds,
+      );
+      // The visibility clause keeps a private voucher's row the way it keeps
+      // an anonymous one, so it neither eats into a page nor drops silently.
+      expect(vouchesQuery.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"voucher_profile"."private_network" = true'),
+        expect.objectContaining({ viewerId: 'viewer-1' }) as unknown,
+      );
+      // The note was written as a named vouch and can identify the voucher, so
+      // it is withheld as null, the value a vouch with no note carries.
+      expect(res.vouchers[0]).toEqual({
+        slug: '',
+        firstName: '',
+        lastName: '',
+        avatarUrl: null,
+        note: null,
+        createdAt: new Date('2026-01-02'),
+        anonymous: true,
+        relationships: null,
+      });
+      expect(res.vouchers[1]).toMatchObject({
+        slug: 'wren',
+        firstName: 'Wren',
+        anonymous: false,
+      });
+      // An anonymous voucher keeps their note, as before.
+      expect(res.vouchers[2]).toMatchObject({
+        slug: '',
+        note: 'signed with love',
+        anonymous: true,
+      });
+      expect(res.count).toBe(3);
+    });
+
+    /** One named vouch from a voucher who keeps their network private. */
+    const privateVoucherRow = () => {
+      activeVouchesCount = 1;
+      activeVouchesPage = [
+        {
+          voucherId: 'v1',
+          anonymous: false,
+          note: 'proud of you',
+          createdAt: new Date('2026-01-02'),
+          relationships: null,
+        },
+      ];
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'v1',
+          slug: 'quiet',
+          firstName: 'Quinn',
+          lastName: 'Rae',
+          privateNetwork: true,
+        },
+      ]);
+    };
+
+    it('names a private voucher to themself on their own vouch', async () => {
+      privateVoucherRow();
+      const res = await service.listVouchers(target(), 'v1', visibleMemberIds);
+      expect(res.vouchers[0]).toMatchObject({
+        slug: 'quiet',
+        firstName: 'Quinn',
+        note: 'proud of you',
+        anonymous: false,
+      });
+    });
+
+    it('names a private voucher to the member reading their own roster', async () => {
+      privateVoucherRow();
+      const res = await service.listVouchers(target(), 'u2', visibleMemberIds);
+      expect(res.vouchers[0]).toMatchObject({
+        slug: 'quiet',
+        firstName: 'Quinn',
+        note: 'proud of you',
+        anonymous: false,
+      });
+    });
+  });
+
   describe('listVouchers vouchersVisible gate', () => {
     it('hides the roster (count-only) for a non-owner viewer when vouchersVisible is off', async () => {
       activeVouchesCount = 7;
@@ -948,6 +1090,20 @@ describe('VouchService', () => {
       );
       expect(res).toEqual({ count: 7, vouchers: [] });
       // The gate short-circuits before the page query even runs.
+      expect(vouchesQuery.getMany).not.toHaveBeenCalled();
+    });
+
+    it('hides the roster (count-only) for a non-owner viewer when privateNetwork is on (SEC-17)', async () => {
+      activeVouchesCount = 4;
+      activeVouchesPage = [
+        { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
+      ];
+      const res = await service.listVouchers(
+        target({ privateNetwork: true }),
+        'some-other-viewer',
+        visibleMemberIds,
+      );
+      expect(res).toEqual({ count: 4, vouchers: [] });
       expect(vouchesQuery.getMany).not.toHaveBeenCalled();
     });
 

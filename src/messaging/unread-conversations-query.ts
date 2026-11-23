@@ -1,6 +1,7 @@
 import type { Repository, SelectQueryBuilder } from 'typeorm';
 import type { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
+import { insideAbsenceGapPredicate } from './group-absence-gap';
 import {
   mailboxThreadPredicate,
   seatExcludedFromMailboxPredicate,
@@ -99,6 +100,7 @@ export function applyUnreadConversationScope(
               AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at)
               AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at)
               AND ${withinLeftAtCeilingPredicate('m.created_at', 'p')}
+              AND NOT ${insideAbsenceGapPredicate('m.created_at', 'p')}
               AND ${notModeratedMessagePredicate('m')}
               AND ${notHiddenForViewerMessagePredicate()}
               AND ${notFromBlockedGroupMemberPredicate('m', ':userId')}

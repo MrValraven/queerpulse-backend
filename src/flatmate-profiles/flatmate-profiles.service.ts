@@ -12,6 +12,7 @@ import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
@@ -134,6 +135,17 @@ export class FlatmateProfilesService {
       slug,
     );
     if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Flatmate profile not found');
+    }
+    // SEC-34: a profile whose owner is suspended, banned or deactivated is off
+    // the board, so a hello to it 404s exactly like an unknown slug.
+    const isOwnerActive = await this.profiles.exists({
+      where: {
+        userId: profile.ownerId,
+        user: { status: UserStatus.Active },
+      },
+    });
+    if (!isOwnerActive) {
       throw new NotFoundException('Flatmate profile not found');
     }
     // Baseline gate: reaching out requires the affirming pledge.

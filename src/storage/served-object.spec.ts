@@ -1,7 +1,9 @@
 import {
+  AUDIO_MAGIC_BYTE_PREFIX_LENGTH,
   contentTypeForStorageKey,
   inlineContentDispositionForStorageKey,
   isQuickTimeBrand,
+  jpegCarriesGpsLocation,
   magicBytesMatchContentType,
 } from './served-object';
 
@@ -151,5 +153,165 @@ describe('VJ video signatures', () => {
         `vj-previews/${FIRST_UUID}/${SECOND_UUID}.webm`,
       ),
     ).toBe(`inline; filename="${SECOND_UUID}.webm"`);
+  });
+});
+
+// Open item A: Studio audio is an MP3 (an ID3v2 tag at byte 0, or a Layer III
+// frame header within the bytes read) or an M4A (any `ftyp` box but QuickTime).
+// The attach parse stays authoritative, so this check refuses only what can
+// be no audio of that kind.
+describe('Studio audio signatures', () => {
+  // `ID3`, version 2.4.0, zeroed flags, then the tag size.
+  const MP3_ID3 = Uint8Array.from([
+    0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x01, 0x23,
+  ]);
+  // MPEG-1 Layer III at 128 kbit/s and 44.1 kHz, without a CRC.
+  const MP3_FRAME_HEADER = [0xff, 0xfb, 0x90, 0x64];
+  const MP3_FRAME = Uint8Array.from([...MP3_FRAME_HEADER, 0x00, 0x00]);
+  // MPEG-2 Layer III, as a low-bitrate voice memo is written.
+  const MP3_MPEG2_FRAME = Uint8Array.from([0xff, 0xf3, 0x48, 0xc4]);
+  // 40 zero bytes of padding ahead of the first frame, inside the 64 read.
+  const MP3_PADDED = Uint8Array.from([
+    ...new Array<number>(40).fill(0),
+    ...MP3_FRAME_HEADER,
+    ...new Array<number>(20).fill(0),
+  ]);
+  // ADTS AAC shares the sync bits and carries layer `00`.
+  const ADTS_AAC = Uint8Array.from([0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f]);
+  // A frame header with the invalid bitrate index `1111`.
+  const MP3_BAD_BITRATE = Uint8Array.from([0xff, 0xfb, 0xf0, 0x64]);
+  // `ID3` with a major version no ID3v2 tag carries.
+  const ID3_BAD_VERSION = Uint8Array.from([0x49, 0x44, 0x33, 0xff, 0x00]);
+  const ftypWithBrand = (brand: string): Uint8Array =>
+    Uint8Array.from([
+      0x00,
+      0x00,
+      0x00,
+      0x20,
+      0x66,
+      0x74,
+      0x79,
+      0x70,
+      ...Array.from(brand, (letter) => letter.charCodeAt(0)),
+      0x00,
+      0x00,
+      0x02,
+      0x00,
+    ]);
+
+  it('matches an MP3 by its ID3v2 tag or its Layer III frame header', () => {
+    expect(magicBytesMatchContentType(MP3_ID3, 'audio/mpeg')).toBe(true);
+    expect(magicBytesMatchContentType(MP3_FRAME, 'audio/mpeg')).toBe(true);
+    expect(magicBytesMatchContentType(MP3_MPEG2_FRAME, 'audio/mpeg')).toBe(
+      true,
+    );
+  });
+
+  it('finds the first frame header of an MP3 behind leading padding', () => {
+    expect(MP3_PADDED.length).toBe(AUDIO_MAGIC_BYTE_PREFIX_LENGTH);
+    expect(magicBytesMatchContentType(MP3_PADDED, 'audio/mpeg')).toBe(true);
+  });
+
+  it('refuses ADTS AAC, a bad frame header, a bad ID3 version and other files as MP3', () => {
+    for (const bytes of [
+      ADTS_AAC,
+      MP3_BAD_BITRATE,
+      ID3_BAD_VERSION,
+      HTML,
+      JPEG,
+      ftypWithBrand('M4A '),
+      Uint8Array.from(new Array<number>(64).fill(0)),
+    ]) {
+      expect(magicBytesMatchContentType(bytes, 'audio/mpeg')).toBe(false);
+    }
+  });
+
+  it.each(['M4A ', 'mp42', 'isom', '3gp4', 'dash', 'iso5'])(
+    'matches an M4A whose major brand is %s',
+    (brand) => {
+      expect(
+        magicBytesMatchContentType(ftypWithBrand(brand), 'audio/mp4'),
+      ).toBe(true);
+    },
+  );
+
+  it('refuses a QuickTime brand and other files as M4A', () => {
+    for (const bytes of [ftypWithBrand('qt  '), MP3_ID3, WEBP, HTML]) {
+      expect(magicBytesMatchContentType(bytes, 'audio/mp4')).toBe(false);
+    }
+  });
+
+  it('knows no audio/x-m4a type: Studio audio is stored as audio/mp4 only', () => {
+    expect(
+      magicBytesMatchContentType(ftypWithBrand('M4A '), 'audio/x-m4a'),
+    ).toBe(false);
+  });
+});
+
+// SEC-43: a JPEG whose EXIF IFD0 holds the GPS pointer tag (0x8825).
+describe('jpegCarriesGpsLocation', () => {
+  // An APP1 EXIF segment whose IFD0 holds one entry with `tag`, in the byte
+  // order `byteOrder` names.
+  function jpegWithExifTag(tag: number, byteOrder: 'II' | 'MM'): Uint8Array {
+    const isLittleEndian = byteOrder === 'II';
+    const tiff = new Uint8Array(8 + 2 + 12 + 4);
+    const view = new DataView(tiff.buffer);
+    tiff[0] = byteOrder.charCodeAt(0);
+    tiff[1] = byteOrder.charCodeAt(1);
+    view.setUint16(2, 0x2a, isLittleEndian);
+    view.setUint32(4, 8, isLittleEndian);
+    view.setUint16(8, 1, isLittleEndian);
+    view.setUint16(10, tag, isLittleEndian);
+    view.setUint16(12, 4, isLittleEndian);
+    view.setUint32(14, 1, isLittleEndian);
+    view.setUint32(18, 26, isLittleEndian);
+    const exifIdentifier = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
+    const payloadLength = exifIdentifier.length + tiff.length;
+    const segmentLength = payloadLength + 2;
+    return Uint8Array.from([
+      0xff,
+      0xd8,
+      // An APP0/JFIF segment first, as most encoders write.
+      0xff,
+      0xe0,
+      0x00,
+      0x04,
+      0x00,
+      0x00,
+      0xff,
+      0xe1,
+      segmentLength >> 8,
+      segmentLength & 0xff,
+      ...exifIdentifier,
+      ...tiff,
+      0xff,
+      0xda,
+    ]);
+  }
+
+  it('finds the GPS pointer in a little-endian EXIF block', () => {
+    expect(jpegCarriesGpsLocation(jpegWithExifTag(0x8825, 'II'))).toBe(true);
+  });
+
+  it('finds the GPS pointer in a big-endian EXIF block', () => {
+    expect(jpegCarriesGpsLocation(jpegWithExifTag(0x8825, 'MM'))).toBe(true);
+  });
+
+  it('passes EXIF that carries no GPS block', () => {
+    // 0x0112 is the orientation tag.
+    expect(jpegCarriesGpsLocation(jpegWithExifTag(0x0112, 'II'))).toBe(false);
+  });
+
+  it('passes a re-encoded JPEG with no EXIF at all', () => {
+    expect(jpegCarriesGpsLocation(JPEG)).toBe(false);
+  });
+
+  it('is false for bytes that are no JPEG', () => {
+    expect(jpegCarriesGpsLocation(PNG)).toBe(false);
+  });
+
+  it('survives a segment that runs past the bytes read', () => {
+    const truncated = jpegWithExifTag(0x8825, 'II').subarray(0, 20);
+    expect(jpegCarriesGpsLocation(truncated)).toBe(false);
   });
 });

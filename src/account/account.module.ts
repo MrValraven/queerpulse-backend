@@ -209,9 +209,9 @@ import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affili
     // import `AccountModule`, directly or transitively.
     CommunitiesModule,
     // `UsersModule` exports `UsersService`, injected for the shared
-    // `countAdmins` last-admin guard `deactivate`/`requestDeletion` use
-    // (`assertNotSoleAdmin`) — the same helper `AdminMembersService.updateRole`
-    // uses against role-demotion.
+    // `countOtherActiveAdmins` last-admin guard `deactivate`/`requestDeletion`
+    // use (`assertNotSoleAdmin`), the same helper
+    // `AdminMembersService.updateRole` uses against role-demotion.
     UsersModule,
     // `MyCardsService` — `MembershipCardsExportContributor`
     // (data-export-contributors.ts) delegates the `membershipCards` Art. 20

@@ -1,6 +1,17 @@
 import { LinkPreviewResponse } from './link-preview.response';
 
 /**
+ * What the parser found. `imageSourceUrl` is the page's own `og:image`, an
+ * address on a host the sender may control. It stays on the server: the
+ * service swaps it for a signed address on this API (SEC-23) before the card
+ * leaves, which is why the field has its own name and is absent from
+ * `LinkPreviewResponse`.
+ */
+export interface ParsedOpenGraph extends Omit<LinkPreviewResponse, 'imageUrl'> {
+  imageSourceUrl: string | null;
+}
+
+/**
  * A tiny, dependency-free OpenGraph / Twitter-card / <title> extractor. We
  * deliberately avoid a heavyweight scraping/DOM library: unfurl metadata lives
  * in flat <meta> tags in the document <head>, so a handful of regexes over the
@@ -61,15 +72,15 @@ function clamp(value: string | null, max: number): string | null {
 }
 
 /**
- * Build a hand-mapped preview DTO from an HTML document. `finalUrl` is the
+ * Parse the preview fields out of an HTML document. `finalUrl` is the
  * post-redirect URL, used to derive a fallback site name and to resolve a
- * relative og:image. Returns an all-null-ish card when nothing usable is found;
- * the caller decides whether that's worth returning.
+ * relative og:image. Returns an all-null-ish result when nothing usable is
+ * found; the caller decides whether that's worth returning.
  */
 export function parseOpenGraph(
   html: string,
   finalUrl: string,
-): LinkPreviewResponse {
+): ParsedOpenGraph {
   const head = html.slice(0, HEAD_SCAN_LIMIT);
 
   const title = clamp(
@@ -89,7 +100,7 @@ export function parseOpenGraph(
   ]);
 
   let siteName = metaContent(head, ['og:site_name', 'application-name']);
-  let imageUrl: string | null = null;
+  let imageSourceUrl: string | null = null;
   try {
     const base = new URL(finalUrl);
     if (!siteName) siteName = base.hostname.replace(/^www\./, '');
@@ -97,7 +108,7 @@ export function parseOpenGraph(
       const resolved = new URL(rawImage, base);
       // Only surface an http(s) image; never a data:/file: URI back to the client.
       if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
-        imageUrl = resolved.toString();
+        imageSourceUrl = resolved.toString();
       }
     }
   } catch {
@@ -109,6 +120,6 @@ export function parseOpenGraph(
     siteName: clamp(siteName, 120),
     title,
     description,
-    imageUrl,
+    imageSourceUrl,
   };
 }

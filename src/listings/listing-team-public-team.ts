@@ -26,6 +26,7 @@ import {
   notBlockedEitherWaySql,
   notHiddenFromViewerSql,
 } from './listing-team-visibility';
+import { unlinkedPersonaSql } from '../subprofiles/persona-creator-gates';
 
 /**
  * Who reads the team on a public listing page.
@@ -91,8 +92,14 @@ export async function loadPublicTeam(
     personaConditions.push(anonymousVisiblePersonaSql('persona'));
   }
   if (viewerParameter !== null) {
+    // SEC-02: a block with the creator withholds a LINKED persona alone. An
+    // unlinked one answers every viewer alike, so a block cannot test who
+    // runs it.
     personaConditions.push(
-      notBlockedEitherWaySql(viewerParameter, '"persona"."user_id"'),
+      `(${unlinkedPersonaSql('persona')} OR ${notBlockedEitherWaySql(
+        viewerParameter,
+        '"persona"."user_id"',
+      )})`,
     );
   }
   const memberConditions = [

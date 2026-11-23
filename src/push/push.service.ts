@@ -8,7 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Agent as HttpsAgent } from 'node:https';
-import { In, Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 import webPush from 'web-push';
 import {
   USER_SESSION_REVOKED,
@@ -181,10 +181,11 @@ export function pushRetryDelayMs(
 }
 
 // One reminder or event-update broadcast resolves every recipient's devices in
-// a single query, and each row then costs an outbound HTTPS POST plus a
-// `last_used_at` write. Handing all of those to one `Promise.all` starts them in
-// the same tick, so a popular gathering opens hundreds of concurrent sockets and
-// queues hundreds of writes against a `DATABASE_POOL_MAX` that defaults to 10 on
+// a single query, and each row then costs an outbound HTTPS POST (plus a delete
+// when the push service reports the device gone). Handing all of those to one
+// `Promise.all` starts them in the same tick, so a popular event opens
+// hundreds of concurrent sockets and can queue hundreds of prune writes against
+// a `DATABASE_POOL_MAX` that defaults to 10 on
 // a single-replica backend: unrelated requests then sit behind the fan-out and
 // can burn the whole 10s `DATABASE_CONNECTION_TIMEOUT_MS` waiting for a pool
 // slot. Waves of at most this many sends keep both the socket count and the
@@ -193,8 +194,8 @@ export function pushRetryDelayMs(
 // Deliberately wider than search's 5 concurrent queries, because the two
 // fan-outs are bound by different things: a search thunk holds a pool
 // connection for its whole life, while a push holds a worker for up to
-// `PUSH_SEND_TIMEOUT_MS` (a retry included) and only touches the pool for a
-// short write afterwards.
+// `PUSH_SEND_TIMEOUT_MS` (a retry included) and touches the pool only for a
+// short prune write afterwards.
 //
 // What this bound actually gives, stated precisely: one fan-out never holds
 // more than 8 of the 10 pool slots at once, so it leaves headroom for
@@ -203,6 +204,23 @@ export function pushRetryDelayMs(
 // it is per-call, so `PushPreviewPrivacyService` sends its two payload variants
 // one after the other rather than concurrently to keep the real ceiling at 8.
 const MAX_CONCURRENT_PUSH_SENDS = 8;
+
+/**
+ * True for a subscription linked to a session that has no live refresh row
+ * left: the same linked-row check `handleSessionRevoked` deletes by, keyed on
+ * the row's own owner. Unlinked rows (no `session_family_id`) never match.
+ */
+const ENDED_SESSION_ROW_SQL =
+  'push_subscriptions.session_family_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM refresh_tokens WHERE refresh_tokens.user_id = push_subscriptions.user_id AND refresh_tokens.family_id = push_subscriptions.session_family_id AND refresh_tokens.revoked_at IS NULL AND refresh_tokens.expires_at > now())';
+
+/** One subscription as the `sendToUsers` read returns it. */
+interface PushDeliveryRow {
+  id: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  is_session_ended: boolean;
+}
 
 @Injectable()
 export class PushService implements OnModuleInit {
@@ -231,6 +249,7 @@ export class PushService implements OnModuleInit {
     userId: string,
     input: { endpoint: string; keys: { p256dh: string; auth: string } },
     userAgent?: string,
+    sessionFamilyId?: string,
   ): Promise<void> {
     // Endpoints are unique per row on purpose: a browser hands back the SAME
     // push subscription (endpoint + keys) after its user logs out and another
@@ -255,14 +274,19 @@ export class PushService implements OnModuleInit {
         `Push endpoint reassigned from user ${existing.userId} to ${userId}`,
       );
     }
-    // A (re)subscribe is the device telling us it is alive, so it refreshes
-    // `last_used_at` the same way a successful delivery does. Without this the
-    // only thing that ever moved that column was a successful send, and the
-    // 90-day retention purge deletes on `COALESCE(last_used_at, created_at)`:
-    // a device that stays online (the DM push listener skips online recipients
-    // entirely) or simply gets no qualifying notifications was unsubscribed
-    // server-side while the browser still believed it was subscribed, and the
-    // first push that mattered went nowhere.
+    // A (re)subscribe is the device telling us it is alive, and it is the only
+    // thing that refreshes `last_used_at`, the column the 90-day retention
+    // purge reads (`COALESCE(last_used_at, created_at)`). The client re-posts
+    // once per signed-in page load and at least weekly, so a device somebody
+    // still opens never ages out. Deliveries used to refresh it as well, which
+    // kept a lost or signed-out device subscribed for as long as pushes kept
+    // arriving (SEC-12).
+    //
+    // `sessionFamilyId` links the row to the session that registered it, so
+    // signing that session out removes this device's subscription
+    // (`handleSessionRevoked`). Written on every upsert, NULL included: a
+    // re-post from a newer session moves the link to it, and a caller with no
+    // `sid` leaves an unlinked row that follows the older member-wide rule.
     await this.subscriptions.upsert(
       {
         userId,
@@ -270,6 +294,7 @@ export class PushService implements OnModuleInit {
         p256dh: input.keys.p256dh,
         auth: input.keys.auth,
         userAgent: userAgent ?? null,
+        sessionFamilyId: sessionFamilyId ?? null,
         lastUsedAt: new Date(),
       },
       ['endpoint'],
@@ -317,22 +342,32 @@ export class PushService implements OnModuleInit {
    * revoking anything itself, so its emits remove rows only once that member's
    * refresh tokens are already gone.
    *
-   * GUARDED BY "NO LIVE SESSION REMAINS", deliberately. `USER_SESSION_REVOKED`
-   * carries only `userId` and is ALSO emitted when a member ends one session
-   * while keeping others: a single-device `/auth/logout`
+   * GUARDED BY "NO LIVE SESSION REMAINS" for unlinked rows, deliberately.
+   * `USER_SESSION_REVOKED` is ALSO emitted when a member ends one session while
+   * keeping others: a single-device `/auth/logout`
    * (`AuthService.revokeRefreshToken`), revoking one device from the sessions
-   * page, and "log out other devices". `push_subscriptions` has no session
-   * link, so an unguarded delete there would silently cut off the phone every
-   * time the member signed out on a laptop (and the device the member is
-   * standing on after "log out other devices"). The `NOT EXISTS` keeps those
-   * rows. It lives in the same statement as the delete so a sign-in that mints
-   * a token between a separate check and the delete cannot lose its
-   * subscription.
+   * page, and "log out other devices". A row with no `session_family_id` cannot
+   * say which session registered it, so an unguarded delete there would
+   * silently cut off the phone every time the member signed out on a laptop
+   * (and the device the member is standing on after "log out other devices").
+   * The first `NOT EXISTS` keeps those rows.
    *
-   * A single-device logout that leaves other sessions alive is handled by the
-   * client instead: it removes this device's subscription with
-   * `POST /push/unsubscribe` before calling `/auth/logout`, while its session
-   * cookie is still valid.
+   * SEC-12: a row that IS linked goes as soon as its own session has no live
+   * row, whatever the member's other sessions are doing. That is what makes
+   * "sign out this device" and "log out other devices" on the sessions page
+   * stop the pushes to those devices: the remote device never gets to call
+   * `POST /push/unsubscribe` itself, so before the link it kept receiving the
+   * member's alerts (sender and text included when previews are on) until the
+   * member had no session left anywhere. The device the member is standing on
+   * keeps its row because its own family is still live.
+   *
+   * Both checks live in the same statement as the delete, so a sign-in or a
+   * rotation that mints a row between a separate check and the delete cannot
+   * lose its subscription.
+   *
+   * A single-device logout is also handled by the client: it names this
+   * device's endpoint in the logout body, and `AuthController.logout` removes
+   * it in the same request.
    *
    * Best-effort: an event handler that throws would surface as an unhandled
    * rejection, so a failure is logged and dropped. The next revocation, or the
@@ -347,13 +382,22 @@ export class PushService implements OnModuleInit {
         .from(PushSubscription)
         .where('user_id = :userId', { userId: event.userId })
         .andWhere(
-          'NOT EXISTS (SELECT 1 FROM refresh_tokens WHERE refresh_tokens.user_id = :userId AND refresh_tokens.revoked_at IS NULL AND refresh_tokens.expires_at > now())',
-          { userId: event.userId },
+          new Brackets((either) => {
+            either
+              .where(
+                'NOT EXISTS (SELECT 1 FROM refresh_tokens WHERE refresh_tokens.user_id = :userId AND refresh_tokens.revoked_at IS NULL AND refresh_tokens.expires_at > now())',
+                { userId: event.userId },
+              )
+              .orWhere(
+                'push_subscriptions.session_family_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM refresh_tokens WHERE refresh_tokens.user_id = :userId AND refresh_tokens.family_id = push_subscriptions.session_family_id AND refresh_tokens.revoked_at IS NULL AND refresh_tokens.expires_at > now())',
+                { userId: event.userId },
+              );
+          }),
         )
         .execute();
       if (result.affected) {
         this.logger.log(
-          `Removed ${result.affected} push subscription(s) for ${event.userId}: no live session remains`,
+          `Removed ${result.affected} push subscription(s) for ${event.userId}: their session was signed out`,
         );
       }
     } catch (error) {
@@ -443,17 +487,33 @@ export class PushService implements OnModuleInit {
     options: { shouldSkipApplePushEndpoints?: boolean } = {},
   ): Promise<void> {
     if (!this.enabled || userIds.length === 0) return;
-    const allRows = await this.subscriptions.find({
-      where: { userId: In(userIds) },
-      // Only what `deliverToSubscription` reads. A broadcast to a popular
-      // gathering materializes every recipient's every device before the cap
-      // does anything, and `userAgent` is an unbounded string that nothing on
-      // this path looks at.
-      select: ['id', 'endpoint', 'p256dh', 'auth'],
-    });
+    // Only what `deliverToSubscription` reads, plus whether the row's own
+    // session has ended. A broadcast to a popular event materializes every
+    // recipient's every device before the cap does anything, and `userAgent`
+    // is an unbounded string that nothing on this path looks at.
+    const fetchedRows = await this.subscriptions
+      .createQueryBuilder('push_subscriptions')
+      .select('push_subscriptions.id', 'id')
+      .addSelect('push_subscriptions.endpoint', 'endpoint')
+      .addSelect('push_subscriptions.p256dh', 'p256dh')
+      .addSelect('push_subscriptions.auth', 'auth')
+      .addSelect(`(${ENDED_SESSION_ROW_SQL})`, 'is_session_ended')
+      .where('push_subscriptions.user_id IN (:...userIds)', { userIds })
+      .getRawMany<PushDeliveryRow>();
+    // A row linked to a session with no live refresh row belongs to a device
+    // that was signed out (or whose session lapsed) without the sign-out event
+    // reaching `handleSessionRevoked`. It gets nothing, and it goes now so it
+    // stops at the next send, well before the 90-day retention purge.
+    const endedSessionRowIds = fetchedRows
+      .filter((row) => row.is_session_ended === true)
+      .map((row) => row.id);
+    if (endedSessionRowIds.length > 0) {
+      await this.removeEndedSessionRows(endedSessionRowIds);
+    }
+    const liveRows = fetchedRows.filter((row) => row.is_session_ended !== true);
     const rows = options.shouldSkipApplePushEndpoints
-      ? allRows.filter((row) => !isApplePushEndpoint(row.endpoint))
-      : allRows;
+      ? liveRows.filter((row) => !isApplePushEndpoint(row.endpoint))
+      : liveRows;
     const body = JSON.stringify(payload);
     // Each entry is a THUNK (not a started promise) so `runWithConcurrency`
     // decides when a send actually starts; mapping to started promises here
@@ -474,6 +534,26 @@ export class PushService implements OnModuleInit {
     await runWithConcurrency(sendThunks, MAX_CONCURRENT_PUSH_SENDS);
   }
 
+  // Deletes the ended-session rows `sendToUsers` skipped. The predicate runs
+  // again inside the delete, so a device that re-subscribed under a live
+  // session between the read and this statement keeps its row. Best-effort:
+  // the send goes on without those rows whether or not this succeeds.
+  private async removeEndedSessionRows(rowIds: string[]): Promise<void> {
+    try {
+      await this.subscriptions
+        .createQueryBuilder()
+        .delete()
+        .from(PushSubscription)
+        .where('id IN (:...rowIds)', { rowIds })
+        .andWhere(ENDED_SESSION_ROW_SQL)
+        .execute();
+    } catch (error) {
+      this.logger.warn(
+        `Failed to remove ${rowIds.length} push subscription(s) whose session ended: ${String(error)}`,
+      );
+    }
+  }
+
   // One subscription's delivery. Wrapped end to end because every failure mode
   // here is per-device and must not affect the other recipients in the fan-out.
   // The outer catch is what makes the awaits inside the inner catch (the prune)
@@ -481,7 +561,7 @@ export class PushService implements OnModuleInit {
   // braces: the only statement it cannot itself cover is its own logger call,
   // which is why the thunk in `sendToUsers` catches as well.
   private async deliverToSubscription(
-    row: PushSubscription,
+    row: Pick<PushSubscription, 'id' | 'endpoint' | 'p256dh' | 'auth'>,
     body: string,
   ): Promise<void> {
     try {
@@ -501,7 +581,6 @@ export class PushService implements OnModuleInit {
         return;
       }
 
-      let hasDelivered = false;
       let hasRetried = false;
       try {
         // Pin the send to the exact IP we just validated: web-push uses Node's
@@ -544,30 +623,18 @@ export class PushService implements OnModuleInit {
             deliveryDeadline - Date.now(),
           );
         }
-        hasDelivered = true;
-        // Left as one write per delivered device rather than a batched
-        // `UPDATE ... WHERE id IN (...)`: `last_used_at` is what the 90-day
-        // retention purge reads, so a device we just delivered to has to have
-        // it recorded even if the process dies mid fan-out, and a batched write
-        // would also have to defer the dead-subscription prune below to the
-        // same flush.
-        // The concurrency cap already bounds these to
-        // `MAX_CONCURRENT_PUSH_SENDS` in flight, which is the pool pressure
-        // that mattered; what is left is a per-row round trip against a
-        // primary key.
-        await this.subscriptions.update(row.id, { lastUsedAt: new Date() });
+        // A delivery writes nothing back (SEC-12). `last_used_at` is the
+        // client-seen time the 90-day retention purge reads, and only the
+        // device's own `/push/subscribe` re-post may move it: a push service
+        // keeps accepting messages for a lost phone or a signed-out shared
+        // computer, so stamping it here kept those devices subscribed for as
+        // long as pushes kept arriving.
       } catch (error) {
         // Optional chaining, not a bare cast: the cast is erased at runtime, so
         // a rejection value that is null or undefined would make a plain
         // property read throw from inside this catch.
         const statusCode = (error as WebPushError | null)?.statusCode;
-        if (hasDelivered) {
-          // The push itself landed, only the `last_used_at` bump failed. Saying
-          // "send failed" here would send someone hunting the wrong system.
-          this.logger.warn(
-            `Delivered push but failed to record last_used_at for ${row.id}: ${String(error)}`,
-          );
-        } else if (statusCode === 404 || statusCode === 410) {
+        if (statusCode === 404 || statusCode === 410) {
           await this.subscriptions.delete(row.id);
           this.logger.log(pruneLogLine(row.id, statusCode));
         } else if (statusCode === 401 || statusCode === 403) {

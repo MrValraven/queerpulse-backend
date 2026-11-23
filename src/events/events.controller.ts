@@ -22,7 +22,6 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { ChangeLineupRoleDto } from './dto/change-lineup-role.dto';
 import { CheckInDto } from './dto/check-in.dto';
-import { CohostDto } from './dto/cohost.dto';
 import { CreateCohostInviteDto } from './dto/create-cohost-invite.dto';
 import { CreateEventAnnouncementDto } from './dto/create-event-announcement.dto';
 import { CreateEventBanDto } from './dto/create-event-ban.dto';
@@ -535,23 +534,6 @@ export class EventsController {
     @Param('slug') slug: string,
   ) {
     return this.eventsService.attendeesCsv(slug, user.userId);
-  }
-
-  @Post(':slug/cohosts')
-  @UseGuards(NotRestrictedGuard)
-  @ApiOperation({ summary: 'Add a co-host to an event you organize.' })
-  @ApiCreatedResponse({ description: 'The co-host was added (idempotent).' })
-  @ApiBadRequestResponse({ description: 'Co-hosts must be active members.' })
-  @ApiForbiddenResponse({
-    description: 'Only the host or a co-host can do that.',
-  })
-  @ApiNotFoundResponse({ description: 'No such event or member.' })
-  addCohost(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-    @Body() dto: CohostDto,
-  ) {
-    return this.eventsService.addCohost(slug, user.userId, dto.slug);
   }
 
   @Delete(':slug/cohosts/:cohostSlug')

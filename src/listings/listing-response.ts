@@ -1,4 +1,9 @@
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
+import {
+  listingCoverPhotoReference,
+  listingGalleryPhotoReference,
+  listingReviewPhotoReference,
+} from '../storage/public-media-reference';
 import { listingCityOrDefault } from './listing-city';
 import { MemberRef } from '../common/member-ref';
 import { Event, EventVenueConfirmation } from '../events/entities/event.entity';
@@ -98,20 +103,72 @@ export interface ListingGalleryPhotoView {
 }
 
 /**
+ * SEC-04: how a response addresses a listing's photos.
+ *
+ * `storage-key` is the `/files/<key>` URL, for the owner and editor wire
+ * (`toListingDTO`, the framing echo) and the staff wire (the admin partner
+ * list), whose forms re-send it on save. `opaque-reference` is for every
+ * other read (the directory card and detail, the team card on a persona page
+ * and in the team pickers, a business mailbox avatar), and it is the default
+ * of `toGalleryView` and `toCoverPhoto`, so a caller that names no addressing
+ * fails closed. A member storage key names its uploader
+ * (`listing-photos/<uploaderUserId>/...`), which would out the owner of a
+ * listing whose owner chose `visibility: 'anon'`, or a team member, to anyone
+ * matching the id against an avatar URL. Those photos are rendered by the
+ * listing's opaque reference (`listings/<listingId>/photos/<index>` or
+ * `listings/<listingId>/cover`, see `storage/public-media-reference.ts`),
+ * which `GET /files/*` resolves server-side.
+ */
+export type ListingPhotoAddressing = 'storage-key' | 'opaque-reference';
+
+/**
+ * A stored photo value as a public read renders it: a member storage key
+ * becomes `reference` (dropped to `null` when the row id cannot form one),
+ * and an external URL or a key that names nobody passes through `toImageUrl`
+ * unchanged, since it identifies no one.
+ */
+function toPublicPhotoUrl(
+  storedValue: string | null | undefined,
+  reference: string | null,
+): string | null {
+  return toImageUrlByReference(storedValue, reference);
+}
+
+/** One gallery entry's URL under `addressing`, `photoIndex` being its place in
+ *  the ordered gallery (the place the opaque reference names). */
+function toGalleryPhotoUrl(
+  listing: Pick<Listing, 'id'>,
+  storedValue: string | null | undefined,
+  photoIndex: number,
+  addressing: ListingPhotoAddressing,
+): string | null {
+  return addressing === 'opaque-reference'
+    ? toPublicPhotoUrl(
+        storedValue,
+        listingGalleryPhotoReference(listing.id, photoIndex),
+      )
+    : toImageUrl(storedValue);
+}
+
+/**
  * Maps a listing's stored gallery to its response shape, resolving each image
  * reference and attaching any pre-loaded crop rect.
  *
  * Stays synchronous: the caller batches ONE `MediaCropService.getMany` for a
  * whole page (see `listingPhotoKeys`) and passes the resulting Map through.
+ * `addressing` is `storage-key` for the owner and staff wire, passed
+ * explicitly there, and `opaque-reference` (the default) for every other read
+ * (see `ListingPhotoAddressing`).
  */
 export function toGalleryView(
   listing: Listing,
   crops: Map<string, CropRect> = new Map(),
+  addressing: ListingPhotoAddressing = 'opaque-reference',
 ): ListingGalleryPhotoView[] {
-  return (listing.photoGallery ?? []).map((photo) => {
+  return (listing.photoGallery ?? []).map((photo, photoIndex) => {
     const crop = cropFor(photo.image, crops);
     return {
-      image: toImageUrl(photo.image),
+      image: toGalleryPhotoUrl(listing, photo.image, photoIndex, addressing),
       alt: photo.alt ?? '',
       caption: photo.caption ?? '',
       ...(crop ? { crop } : {}),
@@ -126,22 +183,32 @@ export function toGalleryView(
  *
  * The cover's alt is used as stored, even when empty. Borrowing the gallery
  * photo's alt would describe a different picture.
+ *
+ * `addressing` defaults to `opaque-reference`, as `toGalleryView`'s does; the
+ * owner and staff wires pass `storage-key` explicitly.
  */
 export function toCoverPhoto(
   listing: Listing,
   crops: Map<string, CropRect> = new Map(),
+  addressing: ListingPhotoAddressing = 'opaque-reference',
 ): ListingGalleryPhotoView | null {
   const ownCover = listing.coverPhoto;
   if (ownCover?.image) {
     const crop = cropFor(ownCover.image, crops);
     return {
-      image: toImageUrl(ownCover.image),
+      image:
+        addressing === 'opaque-reference'
+          ? toPublicPhotoUrl(
+              ownCover.image,
+              listingCoverPhotoReference(listing.id),
+            )
+          : toImageUrl(ownCover.image),
       alt: ownCover.alt ?? '',
       caption: '',
       ...(crop ? { crop } : {}),
     };
   }
-  const firstGalleryPhoto = toGalleryView(listing, crops)[0];
+  const firstGalleryPhoto = toGalleryView(listing, crops, addressing)[0];
   if (!firstGalleryPhoto) return null;
   // The gallery framing belongs to the detail gallery, and the card frames its
   // cover through the media crop.
@@ -257,13 +324,19 @@ function legacyPhotoSets(listing: Listing): {
   return legacySlotsFromGallery(listing.photoGallery ?? []);
 }
 
-/** The legacy `photos` response object (resolved URLs per named slot). */
-function legacyPhotoSetView(photos: ListingPhotoSet): ListingPhotoSetView {
+/** The legacy `photos` response object (resolved URLs per named slot). The
+ *  slots mirror the first four gallery entries in order (`legacySlotsFromGallery`),
+ *  so a slot's opaque reference is that gallery entry's. */
+function legacyPhotoSetView(
+  listing: Pick<Listing, 'id'>,
+  photos: ListingPhotoSet,
+  addressing: ListingPhotoAddressing,
+): ListingPhotoSetView {
   return {
-    wide: toImageUrl(photos.wide),
-    d1: toImageUrl(photos.d1),
-    d2: toImageUrl(photos.d2),
-    vibe: toImageUrl(photos.vibe),
+    wide: toGalleryPhotoUrl(listing, photos.wide, 0, addressing),
+    d1: toGalleryPhotoUrl(listing, photos.d1, 1, addressing),
+    d2: toGalleryPhotoUrl(listing, photos.d2, 2, addressing),
+    vibe: toGalleryPhotoUrl(listing, photos.vibe, 3, addressing),
   };
 }
 
@@ -1198,7 +1271,8 @@ export function toDirectoryCard(
       safeSpaceStatus === 'verified' &&
       isDueForReReview(listing.safeSpaceReVerifiedAt ?? null, now),
     operatingState: operatingStateView(listing),
-    coverPhoto: toCoverPhoto(listing, crops),
+    // SEC-04: a public read, so the cover is addressed by reference.
+    coverPhoto: toCoverPhoto(listing, crops, 'opaque-reference'),
     // Empty column reads as "unset", same `|| null` idiom the detail uses; the
     // client then defaults to Europe/Lisbon.
     timezone: listing.timezone || null,
@@ -1424,7 +1498,14 @@ export function toReviewDTO(
     editedAt: review.editedAt ? review.editedAt.toISOString() : null,
     isEditedAfterOwnerReply: isEditedAfterOwnerReply(review),
     helpful: review.helpful,
-    photoUrl: toImageUrl(review.photo),
+    // SEC-04: every review read is public (and CDN-cached for everyone), so a
+    // member's photo is addressed by the review's opaque reference. The
+    // reviewer's edit form re-sends it, and `StorageKeyOwnershipInterceptor`
+    // resolves it back to the stored key.
+    photoUrl: toPublicPhotoUrl(
+      review.photo,
+      listingReviewPhotoReference(review.id),
+    ),
     ownerReply: review.ownerReplyText
       ? {
           text: review.ownerReplyText,
@@ -1667,7 +1748,8 @@ export function toDirectoryDetail(
   team: ListingTeamMemberPublic[] = [],
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
-  const galleryPhotos = toGalleryView(listing, crops);
+  // SEC-04: a public read, so every photo is addressed by reference.
+  const galleryPhotos = toGalleryView(listing, crops, 'opaque-reference');
   const legacyPhotos = legacyPhotoSets(listing);
   return {
     // `undefined` for `now` keeps the mapper's own default (this read has no
@@ -1694,7 +1776,11 @@ export function toDirectoryDetail(
       .map((photo) => photo.caption || photo.alt)
       .filter((text) => text.length > 0),
     photoGallery: galleryPhotos,
-    photos: legacyPhotoSetView(legacyPhotos.photos),
+    photos: legacyPhotoSetView(
+      listing,
+      legacyPhotos.photos,
+      'opaque-reference',
+    ),
     photoCrops: toPhotoCrops(legacyPhotos.photos, crops),
     alt: legacyPhotos.alt,
     hours: listing.hours,
@@ -1712,9 +1798,11 @@ export function toDirectoryDetail(
     accessibility: accessibilityView(listing),
     services: listing.services ?? [],
     pricingMode: listing.pricingMode ?? 'services',
-    menu: toListingMenuView(listing.menu),
+    // SEC-04: the menu file and shop item photos are member uploads too, so
+    // this public read addresses them by the listing's references.
+    menu: toListingMenuView(listing.menu, listing.id),
     onlineDetails: toListingPublicOnlineDetails(listing),
-    shopItems: toListingShopItemViews(listing.shopItems, crops),
+    shopItems: toListingShopItemViews(listing.shopItems, crops, listing.id),
     affirmingBaseline: affirmingBaselineView(listing),
     queerOwnedVerification: queerOwnedVerificationView(listing),
     hoursType: hoursTypeForCategory(listing.cats[0] ?? ''),
@@ -1839,9 +1927,9 @@ export function toListingDTO(
     hoursNote: listing.hoursNote,
     hoursExceptions: listing.hoursExceptions ?? [],
     social: listing.social,
-    photoGallery: toGalleryView(listing, crops),
+    photoGallery: toGalleryView(listing, crops, 'storage-key'),
     coverPhoto: toOwnCoverPhotoView(listing, crops),
-    photos: legacyPhotoSetView(legacyPhotos.photos),
+    photos: legacyPhotoSetView(listing, legacyPhotos.photos, 'storage-key'),
     photoCrops: toPhotoCrops(legacyPhotos.photos, crops),
     alt: legacyPhotos.alt,
     rel: listing.rel,

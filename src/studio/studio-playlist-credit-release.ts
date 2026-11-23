@@ -1,6 +1,6 @@
 import { EntityManager } from 'typeorm';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from '../subprofiles/subprofile-takedown';
-import { listenablePersonaSql } from './studio-visibility';
+import { listenablePersonaStateSql } from './studio-visibility';
 import {
   CLEAR_ENDED_EDITOR_ADDED_BY_SQL,
   RELEASED_PLAYLIST_EDITORS_CTE,
@@ -50,13 +50,16 @@ export const RELEASE_PLAYLIST_CREDITS_OF_PERSONA_SQL = releaseStatement(
 );
 
 /** `$1` the persona: its playlists, only when the persona as it stands
- *  fails `listenablePersonaSql`. */
+ *  fails `listenablePersonaStateSql`. The creator's account status is left
+ *  out: a co-owner saving the persona while its creator is paused,
+ *  suspended or pending erasure keeps every credit and co-owner editor, and
+ *  readers hide those credits meanwhile (`personaCreditActiveSql`). */
 export const RELEASE_PLAYLIST_CREDITS_IF_UNLISTENABLE_SQL = releaseStatement(
   `"credit_subprofile_id" = $1
      AND NOT EXISTS (
        SELECT 1 FROM "subprofiles" "credit_persona"
         WHERE "credit_persona"."id" = $1
-          AND ${listenablePersonaSql('credit_persona')}
+          AND ${listenablePersonaStateSql('credit_persona')}
      )`,
 );
 
@@ -70,7 +73,7 @@ export async function releasePlaylistCreditsOfPersona(
 }
 
 /** The playlists credited to this persona, only when the persona as it
- *  stands inside the caller's transaction fails `listenablePersonaSql`. Runs
+ *  stands inside the caller's transaction fails `listenablePersonaStateSql`. Runs
  *  after every persona save, so a save that keeps the persona live changes
  *  nothing. */
 export async function releasePlaylistCreditsIfPersonaUnlistenable(

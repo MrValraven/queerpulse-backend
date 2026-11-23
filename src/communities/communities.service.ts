@@ -28,16 +28,20 @@ import {
   PROFILE_NAME_SEARCH_COLUMNS,
 } from '../search/search-text';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
+import { seedCommunityBadgeStarters } from '../community-badges/community-badge-starters';
+import { CommunityNameMarksService } from '../community-badges/community-name-marks.service';
+import { nameMarksFor } from '../community-badges/community-badge-response';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   DataSource,
+  EntityManager,
   In,
   IsNull,
   MoreThan,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
-import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
+import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
   normalizePage,
@@ -51,7 +55,7 @@ import { isGatedTier, membersOnlyException } from './community-gate';
 import { knownLanguages } from '../profiles/languages';
 import { toStoredPlainTextOrNull } from './community-plain-text';
 import { Profile } from '../users/entities/profile.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
@@ -163,6 +167,17 @@ import {
   CommunityFrozenReason,
   CommunityType,
 } from './entities/community.entity';
+import {
+  COMMUNITY_OWNERSHIP_OFFER_TTL_DAYS,
+  CommunityOwnershipOffer,
+  CommunityOwnershipOfferStatus,
+} from './entities/community-ownership-offer.entity';
+import {
+  COMMUNITY_OWNERSHIP_OFFER_CODES,
+  CommunityOwnershipOfferDTO,
+  effectiveOfferStatus,
+  toCommunityOwnershipOfferDTO,
+} from './community-ownership-offer-response';
 
 // Comma-separated query param -> trimmed, non-empty values. Mirrors
 // `ProfilesService`'s file-local helper of the same name/shape.
@@ -364,7 +379,7 @@ export interface RemoveMemberOptions {
 }
 
 /** The only roles `setMemberRole` can assign — `owner` is not grantable here
- * (ownership moves through `transferOwnership`; see `UpdateCommunityMemberRoleDto`).
+ * (ownership moves through an accepted `offerOwnership`; see `UpdateCommunityMemberRoleDto`).
  * `co_owner` is grantable, by the owner alone. */
 export type AssignableRole =
   RosterRole.Member | RosterRole.Mod | RosterRole.CoOwner;
@@ -400,7 +415,7 @@ export class CommunitiesService {
     @InjectRepository(CommunityGivingMethod)
     private readonly givingMethods: Repository<CommunityGivingMethod>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
-    // For the house-account guardrail on `transferOwnership` (a `User.isSystem`
+    // For the house-account guardrail on `offerOwnership` (a `User.isSystem`
     // account can never be handed a community). The repo is available via
     // `UsersModule`'s exported `TypeOrmModule` (no extra `forFeature` needed).
     @InjectRepository(User) private readonly users: Repository<User>,
@@ -454,6 +469,9 @@ export class CommunitiesService {
     // the community's staff. Exported by `SocialModule`, which this module
     // already imports for the post feeds.
     private readonly blockFilter: BlockFilterService,
+    // Flair and the recent-gift mark for roster rows, read in one query per
+    // page.
+    private readonly nameMarks: CommunityNameMarksService,
   ) {}
 
   private readonly logger = new Logger(CommunitiesService.name);
@@ -707,6 +725,10 @@ export class CommunitiesService {
               role: RosterRole.Owner,
             }),
           );
+
+          // The four starter badges ride the create transaction. Spaces are
+          // created by `SubcommunitiesService` and never seeded.
+          await seedCommunityBadgeStarters(manager, community.id);
 
           return community;
         });
@@ -1784,8 +1806,10 @@ export class CommunitiesService {
    *    stands until a moderator resolves the reports or platform staff lifts
    *    it through `AdminCommunitiesService`.
    *
-   * The count is `CommunityAutoFreezeService.openReportCount` — literally the
-   * same query that decided to freeze, so the two sides can't drift apart.
+   * The count is `CommunityAutoFreezeService.openMemberReportCount`: the
+   * freeze's own report scope, limited to reports signed-in members filed,
+   * the only reports SEC-32 lets start a freeze. A signed-out report filed
+   * after the members' reports were resolved holds nothing frozen.
    */
   async unfreeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
@@ -1805,7 +1829,8 @@ export class CommunitiesService {
     }
     if (community.frozenAt != null) {
       if (community.frozenReason !== CommunityFrozenReason.Manual) {
-        const openReports = await this.autoFreeze.openReportCount(community);
+        const openReports =
+          await this.autoFreeze.openMemberReportCount(community);
         if (openReports > 0) {
           throw new ConflictException(
             'This community was frozen by moderation. It can be unfrozen once its open reports have been resolved.',
@@ -1853,70 +1878,78 @@ export class CommunitiesService {
   }
 
   /**
-   * `POST /communities/:slug/transfer` — hand ownership to another member.
+   * `POST /communities/:slug/ownership-offer` (PRD-514): the owner offers the
+   * community to another member of its roster. Nothing moves until that
+   * member accepts through `respondToOwnershipOffer`, so nobody becomes the
+   * face of a community without agreeing to it. The offer lapses after
+   * `COMMUNITY_OWNERSHIP_OFFER_TTL_DAYS` days, and the owner can cancel it
+   * with `cancelOwnershipOffer` until it is answered.
    *
    * Guardrails, in the order enforced below (mirrors `AdminMembersService
-   * .updateRole`'s house-account + self-action posture, and this module's own
-   * owner invariants):
+   * .updateRole`'s house-account and self-action posture, and this module's
+   * own owner invariants):
    *
-   *  1. **Actor must be the CURRENT owner.** Not owner-or-mod: transferring the
-   *     community away is the single most consequential act on it, and only its
-   *     root of authority (`Community.ownerId`) may perform it. A mod attempting
-   *     it gets Forbidden. On a space the parent's owner holds this power too;
-   *     the space's current owner is then the one demoted to mod.
-   *  2. **Target must be a member of this community.** Unknown slug, or a member
-   *     of some other community, both 404 `Member not found` — same as
-   *     `setMemberRole`/`removeMember`.
-   *  3. **No self-transfer.** Handing the community to yourself is a no-op the
-   *     caller almost certainly didn't mean; 400 rather than silently succeed.
-   *  4. **No transfer to the house account.** A `User.isSystem` account is a
-   *     non-human platform account that never rides a permission path; making
-   *     it a community owner would strand the community under an account no one
-   *     signs in as. Mirrors the immovable-house-account rule in admin role
-   *     management.
-   *
-   * The swap runs in one transaction: `Community.ownerId` moves to the target,
-   * the target's roster row becomes `owner`, and the outgoing owner is demoted
-   * to `mod` (they keep moderator reach and stay on the roster rather than being
-   * orphaned). All three writes commit together or none do.
+   *  1. **Actor must be the CURRENT owner.** Handing the community on is the
+   *     single most consequential act on it, and only its root of authority
+   *     (`Community.ownerId`) may start it. A mod gets Forbidden. On a space
+   *     the parent's owner holds this power too.
+   *  2. **Target must be a member of this community.** An unknown slug and a
+   *     member of some other community both 404 with
+   *     `OWNERSHIP_OFFER_MEMBER_NOT_FOUND`, and so does a member with a block
+   *     either way between them and the offering owner (masked).
+   *  3. **No self-offer**, and no offer to the member who already owns it.
+   *  4. **No offer to the house account.** A `User.isSystem` account never
+   *     signs in, so a community handed to it would be stranded.
+   *  5. **One open offer per community**, enforced by the partial unique
+   *     index on `community_ownership_offers`: 409 `OWNERSHIP_OFFER_OPEN`.
    */
-  async transferOwnership(
+  async offerOwnership(
     slug: string,
     actorId: string,
     memberSlug: string,
-  ): Promise<CommunityDetailDTO> {
+  ): Promise<CommunityOwnershipOfferDTO> {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, actorId);
 
     // 1. actor is the current owner (on a space, the parent's owner too)
     const parent = await this.loadParent(community);
     this.assertOwner(community, actorId, parent);
-    // Captured before the swap: the owner of record the transaction demotes.
-    // It is the actor unless the parent's owner is handing a space on.
-    const previousOwnerId = community.ownerId;
 
     // 2. target is on this roster
     const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
       memberSlug,
     );
     if (!targetUserId) {
-      throw new NotFoundException('Member not found');
+      throw CommunitiesService.ownershipOfferMemberNotFound();
     }
 
-    // 3. not a self-transfer (checked before the roster lookup below since the
+    // 3. not a self-offer (checked before the roster lookup below since the
     //    owner is trivially their own member)
     if (targetUserId === actorId) {
-      throw new BadRequestException('You already own this community');
+      throw new BadRequestException({
+        code: COMMUNITY_OWNERSHIP_OFFER_CODES.selfOffer,
+        message: 'You already own this community',
+      });
     }
-    if (targetUserId === previousOwnerId) {
-      throw new BadRequestException('That member already owns this community');
+    if (targetUserId === community.ownerId) {
+      throw new BadRequestException({
+        code: COMMUNITY_OWNERSHIP_OFFER_CODES.alreadyOwner,
+        message: 'That member already owns this community',
+      });
     }
 
     const targetMembership = await this.members.findOne({
       where: { communityId: community.id, userId: targetUserId },
     });
     if (!targetMembership) {
-      throw new NotFoundException('Member not found');
+      throw CommunitiesService.ownershipOfferMemberNotFound();
+    }
+
+    // A block either way between the offering owner and the member answers
+    // exactly like a member who is not on the roster, so the refusal never
+    // reveals that a block exists.
+    if (await this.blockFilter.isBlockedEitherWay(actorId, targetUserId)) {
+      throw CommunitiesService.ownershipOfferMemberNotFound();
     }
 
     // 4. not the house account
@@ -1925,65 +1958,579 @@ export class CommunitiesService {
       select: { id: true, isSystem: true },
     });
     if (targetUser?.isSystem) {
-      throw new BadRequestException(
-        'Ownership cannot be transferred to the house account',
+      throw new BadRequestException({
+        code: COMMUNITY_OWNERSHIP_OFFER_CODES.houseAccount,
+        message: 'A community cannot be offered to the house account',
+      });
+    }
+
+    // 5. one open offer per community, decided under the community row lock
+    const offer = await this.insertOwnershipOffer(
+      community,
+      targetUserId,
+      actorId,
+    );
+
+    // Post-commit and best effort: the offer stands and shows on the member's
+    // own list (`listMyOwnershipOffers`) whether or not the bell rang.
+    await this.notifyOwnershipOfferBestEffort(
+      targetUserId,
+      NotificationType.CommunityOwnershipOffered,
+      community,
+      actorId,
+    );
+
+    return this.toOwnershipOfferDTO(offer, community);
+  }
+
+  /**
+   * `GET /communities/:slug/ownership-offer`: the open offer on a community,
+   * or `null` when it has none. Owner-only, the same gate as making one, so
+   * the owner's panel can show a pending offer on a cold open. An offer past
+   * its `expiresAt` reads as no offer.
+   */
+  async getOpenOwnershipOffer(
+    slug: string,
+    actorId: string,
+  ): Promise<CommunityOwnershipOfferDTO | null> {
+    const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
+    const parent = await this.loadParent(community);
+    this.assertOwner(community, actorId, parent);
+
+    const openOffer = await this.ownershipOffers().findOne({
+      where: {
+        communityId: community.id,
+        status: CommunityOwnershipOfferStatus.Offered,
+      },
+    });
+    if (
+      !openOffer ||
+      effectiveOfferStatus(openOffer, new Date()) !==
+        CommunityOwnershipOfferStatus.Offered
+    ) {
+      return null;
+    }
+    return this.toOwnershipOfferDTO(openOffer, community);
+  }
+
+  /**
+   * `DELETE /communities/:slug/ownership-offer`: the owner withdraws the
+   * open offer. Conditional on the row still being `offered`, so a cancel
+   * that races the member's answer loses cleanly and the answer that already
+   * landed stands.
+   *
+   * Each refusal names its cause. A cancel that loses the race above to the
+   * member's accept or decline hears `OWNERSHIP_OFFER_ANSWERED` (409). The
+   * same 409 answers the owner who made an offer the member then accepted:
+   * ownership has moved, so the owner gate would refuse them, and the
+   * accepted offer is the real reason. A community with no open offer to
+   * cancel answers `OWNERSHIP_OFFER_NOT_FOUND` (404), whatever older offers
+   * it has on file.
+   *
+   * No notification. An offer withdrawn before it was answered is not news,
+   * and telling somebody they have just lost something they had not taken
+   * up yet is worse than silence (the listings offer `revoke` reads the same
+   * way).
+   */
+  async cancelOwnershipOffer(
+    slug: string,
+    actorId: string,
+  ): Promise<CommunityOwnershipOfferDTO> {
+    const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
+    const parent = await this.loadParent(community);
+    const isOwner =
+      community.ownerId === actorId ||
+      (parent !== null && parent.ownerId === actorId);
+    if (!isOwner) {
+      const latestOffer = await this.latestOwnershipOffer(community.id);
+      if (
+        latestOffer?.status === CommunityOwnershipOfferStatus.Accepted &&
+        latestOffer.fromOwnerId === actorId
+      ) {
+        throw CommunitiesService.ownershipOfferAlreadyAnswered();
+      }
+    }
+    this.assertOwner(community, actorId, parent);
+
+    const offersRepo = this.ownershipOffers();
+    const openOffer = await offersRepo.findOne({
+      where: {
+        communityId: community.id,
+        status: CommunityOwnershipOfferStatus.Offered,
+      },
+    });
+    if (!openOffer) {
+      throw CommunitiesService.noOpenOwnershipOffer();
+    }
+
+    const respondedAt = new Date();
+    const updated = await offersRepo.update(
+      { id: openOffer.id, status: CommunityOwnershipOfferStatus.Offered },
+      { status: CommunityOwnershipOfferStatus.Cancelled, respondedAt },
+    );
+    if (updated.affected !== 1) {
+      throw await this.lostCancelRaceRefusal(openOffer.id);
+    }
+    openOffer.status = CommunityOwnershipOfferStatus.Cancelled;
+    openOffer.respondedAt = respondedAt;
+    return this.toOwnershipOfferDTO(openOffer, community);
+  }
+
+  /**
+   * `GET /me/community-ownership-offers`: every open, unexpired ownership
+   * offer addressed to this member, newest first. Batched reads cover the
+   * communities, the caller's roster rows and the member refs, whatever the
+   * number of offers.
+   *
+   * Only offers the member could still accept are listed, the same checks
+   * `respondToOwnershipOffer` runs on an accept: ownership still sits with
+   * the owner of record who made the offer (an admin reassignment, an orphan
+   * promotion or an erased owner each change or clear it), and the member is
+   * still on the community's roster (leaving and a ban each take the row).
+   */
+  async listMyOwnershipOffers(
+    userId: string,
+  ): Promise<CommunityOwnershipOfferDTO[]> {
+    const now = new Date();
+    const offers = await this.ownershipOffers().find({
+      where: {
+        offereeId: userId,
+        status: CommunityOwnershipOfferStatus.Offered,
+        expiresAt: MoreThan(now),
+      },
+      order: { offeredAt: 'DESC' },
+    });
+    if (!offers.length) return [];
+
+    const offeredCommunityIds = offers.map((offer) => offer.communityId);
+    const [offeredCommunities, offereeRosterRows] = await Promise.all([
+      this.communities.find({ where: { id: In(offeredCommunityIds) } }),
+      this.members.find({
+        where: { userId, communityId: In(offeredCommunityIds) },
+        select: { communityId: true },
+      }),
+    ]);
+    const communityById = new Map(
+      offeredCommunities.map((community) => [community.id, community]),
+    );
+    const rosterCommunityIds = new Set(
+      offereeRosterRows.map((row) => row.communityId),
+    );
+    const refs = await new MemberLookup(this.profiles).byUserIds([
+      userId,
+      ...offers
+        .map((offer) => offer.offeredByUserId)
+        .filter(
+          (offeredByUserId): offeredByUserId is string =>
+            offeredByUserId !== null,
+        ),
+    ]);
+
+    return offers
+      .map((offer): CommunityOwnershipOfferDTO | null => {
+        const community = communityById.get(offer.communityId);
+        if (!community) return null;
+        const isStillAcceptable =
+          offer.fromOwnerId !== null &&
+          community.ownerId === offer.fromOwnerId &&
+          rosterCommunityIds.has(offer.communityId);
+        if (!isStillAcceptable) return null;
+        return toCommunityOwnershipOfferDTO(
+          offer,
+          community,
+          refs.get(offer.offereeId) ?? null,
+          offer.offeredByUserId
+            ? (refs.get(offer.offeredByUserId) ?? null)
+            : null,
+          now,
+        );
+      })
+      .filter((dto): dto is CommunityOwnershipOfferDTO => dto !== null);
+  }
+
+  /**
+   * `POST /me/community-ownership-offers/:offerId/accept` and `/decline`:
+   * the offered member answers. Only an accept moves ownership.
+   *
+   * Scoped by `{ id, offereeId }`, so an offer addressed to somebody else
+   * 404s and an offer id is no oracle for "who is being handed what".
+   *
+   * An ACCEPT is checked again against the community row as it stands now,
+   * under a lock: ownership must still sit with the owner who made the offer
+   * (`OWNERSHIP_OFFER_OWNER_CHANGED` otherwise), and the member must still be
+   * on the roster (`OWNERSHIP_OFFER_RECIPIENT_NOT_MEMBER`). A DECLINE stays
+   * allowed in both cases: closing a stale offer takes nothing from anybody.
+   *
+   * ONE TRANSACTION covers the status flip and the owner swap. The flip is
+   * conditional on the row still being `offered` and runs right after the
+   * community lock, ahead of the owner and roster checks, which settles a
+   * double tap, two simultaneous answers and a race with the owner's cancel:
+   * exactly one side sees `affected === 1`, the others get
+   * `OWNERSHIP_OFFER_ANSWERED`, and a refused accept rolls its flip back.
+   *
+   * The swap: `Community.ownerId` moves to the member, their roster row
+   * becomes `owner`, and the outgoing owner is demoted to `mod` (they keep
+   * moderator reach and stay on the roster).
+   */
+  async respondToOwnershipOffer(
+    offerId: string,
+    userId: string,
+    isAccepted: boolean,
+  ): Promise<CommunityOwnershipOfferDTO> {
+    const respondedAt = new Date();
+
+    const { offer, community } = await this.dataSource.transaction(
+      async (manager) => {
+        const offersRepo = manager.getRepository(CommunityOwnershipOffer);
+        const current = await offersRepo.findOne({
+          where: { id: offerId, offereeId: userId },
+        });
+        if (!current) {
+          throw new NotFoundException({
+            code: COMMUNITY_OWNERSHIP_OFFER_CODES.notFound,
+            message: 'Offer not found',
+          });
+        }
+        if (current.status !== CommunityOwnershipOfferStatus.Offered) {
+          throw CommunitiesService.closedOwnershipOfferRefusal(current);
+        }
+        if (
+          effectiveOfferStatus(current, respondedAt) ===
+          CommunityOwnershipOfferStatus.Expired
+        ) {
+          throw CommunitiesService.ownershipOfferExpired(current);
+        }
+
+        const lockedCommunity = await manager.getRepository(Community).findOne({
+          where: { id: current.communityId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedCommunity) {
+          throw new NotFoundException('Community not found');
+        }
+
+        // The conditional flip runs FIRST under the lock, so of two
+        // simultaneous answers the second one waits on the lock, then finds
+        // the row no longer `offered`. The row is read again to name what
+        // closed it: the owner's cancel, a newer offer expiring it, or the
+        // other answer (`OWNERSHIP_OFFER_ANSWERED`).
+        // A refusal below throws, which rolls this flip back with it.
+        const answeredStatus = isAccepted
+          ? CommunityOwnershipOfferStatus.Accepted
+          : CommunityOwnershipOfferStatus.Declined;
+        const updated = await offersRepo.update(
+          { id: offerId, status: CommunityOwnershipOfferStatus.Offered },
+          { status: answeredStatus, respondedAt },
+        );
+        if (updated.affected !== 1) {
+          const closedOffer = await offersRepo.findOne({
+            where: { id: offerId },
+          });
+          throw CommunitiesService.closedOwnershipOfferRefusal(
+            closedOffer ?? current,
+          );
+        }
+        current.status = answeredStatus;
+        current.respondedAt = respondedAt;
+
+        let targetMembership: CommunityMember | null = null;
+        if (isAccepted) {
+          // An owner erased since the offer was made leaves `fromOwnerId`
+          // null (ON DELETE SET NULL), and an ownerless community reads null
+          // too, so a null owner of record refuses on its own.
+          if (
+            current.fromOwnerId === null ||
+            lockedCommunity.ownerId !== current.fromOwnerId
+          ) {
+            throw new ConflictException({
+              code: COMMUNITY_OWNERSHIP_OFFER_CODES.ownerChanged,
+              message:
+                'This community has changed hands since the offer was made, so it can no longer be accepted',
+            });
+          }
+          targetMembership = await manager
+            .getRepository(CommunityMember)
+            .findOne({
+              where: { communityId: lockedCommunity.id, userId },
+            });
+          if (!targetMembership) {
+            throw new ConflictException({
+              code: COMMUNITY_OWNERSHIP_OFFER_CODES.recipientNotMember,
+              message:
+                'You are no longer a member of this community, so the offer can no longer be accepted',
+            });
+          }
+        }
+
+        if (targetMembership) {
+          await this.swapOwnerWithin(
+            manager,
+            lockedCommunity,
+            current.fromOwnerId,
+            targetMembership,
+          );
+        }
+        return { offer: current, community: lockedCommunity };
+      },
+    );
+
+    // The person who handed the community on is the actor of record in the
+    // governance history; the accepting member is its target.
+    const handedOnBy = offer.offeredByUserId ?? userId;
+    if (offer.status === CommunityOwnershipOfferStatus.Accepted) {
+      await this.logGovernanceAction(
+        community.id,
+        handedOnBy,
+        GovernanceLogAction.OwnershipTransferred,
+        userId,
+        { fromOwnerId: offer.fromOwnerId, ownershipOfferId: offer.id },
+      );
+      await this.notifyOwnershipTransferred(community, offer, userId);
+    } else if (offer.offeredByUserId) {
+      await this.notifyOwnershipOfferBestEffort(
+        offer.offeredByUserId,
+        NotificationType.CommunityOwnershipOfferDeclined,
+        community,
+        userId,
       );
     }
 
-    const saved = await this.dataSource.transaction(async (manager) => {
-      const communitiesRepo = manager.getRepository(Community);
-      const membersRepo = manager.getRepository(CommunityMember);
+    return this.toOwnershipOfferDTO(offer, community);
+  }
 
-      community.ownerId = targetUserId;
-      const savedCommunity = await communitiesRepo.save(community);
-
-      // Outgoing owner stays on the roster, demoted to mod. This is the
-      // CURRENT owner of record, which is the actor unless the parent's owner
-      // is handing a space on. Demoted BEFORE the promotion below, so the
-      // one-owner partial unique index (`UQ_community_members_one_owner`)
-      // never sees two owner rows. Guarded on the row still reading `owner`
-      // so a retry can't double-demote something already moved.
-      if (previousOwnerId !== null) {
-        const previousOwnerMembership = await membersRepo.findOne({
-          where: { communityId: community.id, userId: previousOwnerId },
+  /**
+   * Writes the `offered` row under a lock on the community row, so two
+   * offers on the same community are decided one after the other. An offer
+   * still at `offered` but past its `expiresAt` is closed to `expired` here,
+   * since it would otherwise hold the single open slot forever. A lost race
+   * for the slot surfaces as the partial unique index's violation, which
+   * becomes the same 409.
+   *
+   * `fromOwnerId` is read off the LOCKED row: it is the owner of record the
+   * accept is later checked against.
+   */
+  private async insertOwnershipOffer(
+    community: Community,
+    offereeId: string,
+    actorId: string,
+  ): Promise<CommunityOwnershipOffer> {
+    const offeredAt = new Date();
+    const expiresAt = new Date(
+      offeredAt.getTime() +
+        COMMUNITY_OWNERSHIP_OFFER_TTL_DAYS * 24 * 60 * 60 * 1000,
+    );
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        const offersRepo = manager.getRepository(CommunityOwnershipOffer);
+        const lockedCommunity = await manager.getRepository(Community).findOne({
+          where: { id: community.id },
+          lock: { mode: 'pessimistic_write' },
         });
-        if (
-          previousOwnerMembership &&
-          previousOwnerMembership.role === RosterRole.Owner
-        ) {
-          previousOwnerMembership.role = RosterRole.Mod;
-          await membersRepo.save(previousOwnerMembership);
+        if (!lockedCommunity) {
+          throw new NotFoundException('Community not found');
         }
+        if (lockedCommunity.ownerId !== community.ownerId) {
+          throw new ConflictException({
+            code: COMMUNITY_OWNERSHIP_OFFER_CODES.ownerChanged,
+            message: 'This community has changed hands in the meantime',
+          });
+        }
+
+        const openOffer = await offersRepo.findOne({
+          where: {
+            communityId: community.id,
+            status: CommunityOwnershipOfferStatus.Offered,
+          },
+        });
+        if (openOffer) {
+          if (
+            effectiveOfferStatus(openOffer, offeredAt) ===
+            CommunityOwnershipOfferStatus.Offered
+          ) {
+            throw CommunitiesService.ownershipOfferOpen();
+          }
+          await offersRepo.update(
+            { id: openOffer.id, status: CommunityOwnershipOfferStatus.Offered },
+            { status: CommunityOwnershipOfferStatus.Expired },
+          );
+        }
+
+        return offersRepo.save(
+          offersRepo.create({
+            communityId: community.id,
+            offereeId,
+            offeredByUserId: actorId,
+            fromOwnerId: lockedCommunity.ownerId,
+            status: CommunityOwnershipOfferStatus.Offered,
+            offeredAt,
+            expiresAt,
+            respondedAt: null,
+          }),
+        );
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, 'UQ_community_ownership_offers_open')) {
+        throw CommunitiesService.ownershipOfferOpen();
       }
+      throw error;
+    }
+  }
 
-      // New owner's roster row -> owner.
-      targetMembership.role = RosterRole.Owner;
-      await membersRepo.save(targetMembership);
+  /**
+   * The owner swap an accepted offer performs, inside the caller's
+   * transaction. The outgoing owner of record stays on the roster, demoted
+   * to mod, BEFORE the promotion, so the one-owner partial unique index
+   * (`UQ_community_members_one_owner`) never sees two owner rows. Guarded on
+   * the row still reading `owner` so a retry cannot double-demote.
+   *
+   * The community has an owner again, so any open "owner unreachable" flag
+   * (`needsOwnerReviewAt`) is cleared with the swap, as the admin
+   * reassignment and the orphan promotion clear it.
+   */
+  private async swapOwnerWithin(
+    manager: EntityManager,
+    community: Community,
+    previousOwnerId: string | null,
+    targetMembership: CommunityMember,
+  ): Promise<void> {
+    const communitiesRepo = manager.getRepository(Community);
+    const membersRepo = manager.getRepository(CommunityMember);
 
-      return savedCommunity;
-    });
+    community.ownerId = targetMembership.userId;
+    community.needsOwnerReviewAt = null;
+    await communitiesRepo.save(community);
 
-    await this.logGovernanceAction(
-      community.id,
-      actorId,
-      GovernanceLogAction.OwnershipTransferred,
-      targetUserId,
-      { fromOwnerId: previousOwnerId },
-    );
-    await this.notifyOwnershipTransferred(
+    if (previousOwnerId !== null) {
+      const previousOwnerMembership = await membersRepo.findOne({
+        where: { communityId: community.id, userId: previousOwnerId },
+      });
+      if (
+        previousOwnerMembership &&
+        previousOwnerMembership.role === RosterRole.Owner
+      ) {
+        previousOwnerMembership.role = RosterRole.Mod;
+        await membersRepo.save(previousOwnerMembership);
+      }
+    }
+
+    targetMembership.role = RosterRole.Owner;
+    await membersRepo.save(targetMembership);
+  }
+
+  /** The offer repository, read through the data source so the transaction
+   * paths and the plain reads share one entity registration. */
+  private ownershipOffers(): Repository<CommunityOwnershipOffer> {
+    return this.dataSource.getRepository(CommunityOwnershipOffer);
+  }
+
+  /** One offer plus the two member refs it displays. The list path batches
+   * its own refs and calls the mapper directly. */
+  private async toOwnershipOfferDTO(
+    offer: CommunityOwnershipOffer,
+    community: Pick<Community, 'slug' | 'name'>,
+  ): Promise<CommunityOwnershipOfferDTO> {
+    const userIds = [offer.offereeId];
+    if (offer.offeredByUserId) userIds.push(offer.offeredByUserId);
+    const refs = await new MemberLookup(this.profiles).byUserIds(userIds);
+    return toCommunityOwnershipOfferDTO(
+      offer,
       community,
-      previousOwnerId,
-      targetUserId,
-      actorId,
+      refs.get(offer.offereeId) ?? null,
+      offer.offeredByUserId ? (refs.get(offer.offeredByUserId) ?? null) : null,
     );
+  }
 
-    // An owner handing off is now a moderator of it. The parent's owner keeps
-    // whatever role they effectively hold in the space.
-    const actorRole =
-      previousOwnerId === actorId
-        ? RosterRole.Mod
-        : await this.myRole(saved, actorId);
-    return this.buildDetail(saved, actorId, actorRole);
+  private static ownershipOfferMemberNotFound(): NotFoundException {
+    return new NotFoundException({
+      code: COMMUNITY_OWNERSHIP_OFFER_CODES.memberNotFound,
+      message: 'Member not found',
+    });
+  }
+
+  private static noOpenOwnershipOffer(): NotFoundException {
+    return new NotFoundException({
+      code: COMMUNITY_OWNERSHIP_OFFER_CODES.notFound,
+      message: 'This community has no open ownership offer',
+    });
+  }
+
+  private static ownershipOfferOpen(): ConflictException {
+    return new ConflictException({
+      code: COMMUNITY_OWNERSHIP_OFFER_CODES.openOfferExists,
+      message:
+        'This community already has an open ownership offer. Cancel it before offering it to somebody else.',
+    });
+  }
+
+  private static ownershipOfferAlreadyAnswered(): ConflictException {
+    return new ConflictException({
+      code: COMMUNITY_OWNERSHIP_OFFER_CODES.alreadyAnswered,
+      message: 'This offer has already been answered',
+    });
+  }
+
+  private static ownershipOfferExpired(
+    offer: Pick<CommunityOwnershipOffer, 'expiresAt'>,
+  ): ConflictException {
+    return new ConflictException({
+      code: COMMUNITY_OWNERSHIP_OFFER_CODES.expired,
+      message: 'This offer has expired',
+      expiresAt: offer.expiresAt.toISOString(),
+    });
+  }
+
+  /**
+   * The refusal for answering an offer that is no longer `offered`, named by
+   * what closed it: the owner withdrew it (`OWNERSHIP_OFFER_CANCELLED`), it
+   * lapsed or a newer offer closed it as expired (`OWNERSHIP_OFFER_EXPIRED`),
+   * or the member already accepted or declined it (`OWNERSHIP_OFFER_ANSWERED`).
+   */
+  private static closedOwnershipOfferRefusal(
+    offer: Pick<CommunityOwnershipOffer, 'status' | 'expiresAt'>,
+  ): ConflictException {
+    if (offer.status === CommunityOwnershipOfferStatus.Cancelled) {
+      return new ConflictException({
+        code: COMMUNITY_OWNERSHIP_OFFER_CODES.cancelled,
+        message: 'The owner withdrew this offer',
+      });
+    }
+    if (offer.status === CommunityOwnershipOfferStatus.Expired) {
+      return CommunitiesService.ownershipOfferExpired(offer);
+    }
+    return CommunitiesService.ownershipOfferAlreadyAnswered();
+  }
+
+  /** The newest offer on file for a community, whatever its status. */
+  private async latestOwnershipOffer(
+    communityId: string,
+  ): Promise<CommunityOwnershipOffer | null> {
+    return this.ownershipOffers().findOne({
+      where: { communityId },
+      order: { offeredAt: 'DESC' },
+    });
+  }
+
+  /**
+   * The owner-side refusal when the cancel's conditional flip finds the
+   * offer it just read already closed: 409 `OWNERSHIP_OFFER_ANSWERED` when
+   * the member accepted or declined it in between, 404
+   * `OWNERSHIP_OFFER_NOT_FOUND` for any other close.
+   */
+  private async lostCancelRaceRefusal(
+    offerId: string,
+  ): Promise<ConflictException | NotFoundException> {
+    const closedOffer = await this.ownershipOffers().findOne({
+      where: { id: offerId },
+    });
+    if (
+      closedOffer?.status === CommunityOwnershipOfferStatus.Accepted ||
+      closedOffer?.status === CommunityOwnershipOfferStatus.Declined
+    ) {
+      return CommunitiesService.ownershipOfferAlreadyAnswered();
+    }
+    return CommunitiesService.noOpenOwnershipOffer();
   }
 
   // `public` joins land on the roster instantly. On every other tier a live
@@ -2758,15 +3305,51 @@ export class CommunitiesService {
       );
     }
 
+    // PRD-507 and PRD-508, for every viewer staff included. A member whose
+    // account is paused, suspended or inside the deletion grace was promised
+    // "Your name is removed from member lists", and a member who chose "Hide
+    // me for 24h" is hidden from every profile surface the way
+    // `ProfilesService` hides them (`hidden_until` still in the future). Both
+    // leave the roster inside the query, so `total` and the page agree and no
+    // gap in a count points at them. The one exception is a viewer reading
+    // their own row while hidden, matching the owner exception on their
+    // profile. Their roster row is untouched, so they are back the moment
+    // the account is active or the 24 hours are up.
+    rosterMembersQuery.andWhere(
+      `EXISTS (
+         SELECT 1 FROM "users" "roster_user"
+         INNER JOIN "profiles" "roster_profile"
+           ON "roster_profile"."user_id" = "roster_user"."id"
+         WHERE "roster_user"."id" = m.user_id
+           AND "roster_user"."status" = :rosterActiveStatus
+           AND (
+             "roster_profile"."hidden_until" IS NULL
+             OR "roster_profile"."hidden_until" <= now()
+             OR "roster_user"."id" = :rosterViewerId
+           )
+       )`,
+      { rosterActiveStatus: UserStatus.Active, rosterViewerId: viewerId },
+    );
+
     return paginate(rosterMembersQuery, normalizedPage, async (rows) => {
       if (!rows.length) return [];
-      const profilesByUserId = await new MemberLookup(this.profiles).byUserIds(
-        rows.map((member) => member.userId),
-      );
+      const rosterUserIds = rows.map((member) => member.userId);
+      const [profilesByUserId, marksByUserId] = await Promise.all([
+        // `drop`: an account that went inactive between the page query and
+        // this read leaves the page with nothing in its place.
+        new MemberLookup(this.profiles).byUserIds(rosterUserIds, {
+          inactive: 'drop',
+        }),
+        this.nameMarks.marksFor(community.id, rosterUserIds),
+      ]);
       return rows
         .filter((member) => profilesByUserId.has(member.userId))
         .map((member) =>
-          toRosterEntry(member, profilesByUserId.get(member.userId)!),
+          toRosterEntry(
+            member,
+            profilesByUserId.get(member.userId)!,
+            nameMarksFor(marksByUserId, member.userId),
+          ),
         );
     });
   }
@@ -3959,7 +4542,7 @@ export class CommunitiesService {
   /** Tier 3 of the permission model (see `isStaffRole`): the owner-only gate,
    * read from `Community.ownerId` (the source of truth for ownership — a
    * roster row can never contradict it). Used by the two community-level
-   * actions no co-owner or mod may reach (`archive`, `transferOwnership`).
+   * actions no co-owner or mod may reach (`archive`, `offerOwnership`).
    * On a space, `parent` is passed where the parent's owner holds the same
    * power (`archive`). Throws Forbidden otherwise. */
   private assertOwner(
@@ -4096,7 +4679,7 @@ export class CommunitiesService {
    *
    * System/house accounts (`User.isSystem`) are dropped: they are non-human
    * platform accounts nobody signs in as, so an invitation to one can never be
-   * answered. Mirrors the house-account guardrail on `transferOwnership`.
+   * answered. Mirrors the house-account guardrail on `offerOwnership`.
    * `MemberLookup.userIdsForSlugs` already restricts to `active` users.
    *
    * Anyone without an accepted connection to the creator is dropped the same
@@ -4158,6 +4741,12 @@ export class CommunitiesService {
     return { stewardUserIds, invitedUserIds };
   }
 
+  /** The owner card's ref, `null` when the owner has no profile row. */
+  private async ownerRefFor(ownerId: string): Promise<MemberRef | null> {
+    const refs = await new MemberLookup(this.profiles).byUserIds([ownerId]);
+    return refs.get(ownerId) ?? null;
+  }
+
   private async buildDetail(
     community: Community,
     viewerId: string,
@@ -4174,7 +4763,7 @@ export class CommunitiesService {
     const [
       membership,
       stats,
-      ownerProfile,
+      ownerRef,
       myJoinRequest,
       crops,
       invite,
@@ -4195,8 +4784,10 @@ export class CommunitiesService {
       // `ownerId` is null for an ownerless (post-erasure, pre-promotion)
       // community, which has no profile to look up; the detail simply
       // renders no owner, with no throw and no `userId IS NULL` query.
+      // Resolved through `MemberLookup` (PRD-507), so a paused or suspended
+      // owner shows on the owner card as the "[deactivated member]" stand-in.
       community.ownerId
-        ? this.profiles.findOne({ where: { userId: community.ownerId } })
+        ? this.ownerRefFor(community.ownerId)
         : Promise.resolve(null),
       this.joinRequests.findOne({
         where: { communityId: community.id, userId: viewerId },
@@ -4252,7 +4843,7 @@ export class CommunitiesService {
       community,
       stats,
       role,
-      toMemberRef(ownerProfile),
+      ownerRef,
       myJoinRequest?.status ?? null,
       moderation,
       crops,
@@ -4331,11 +4922,30 @@ export class CommunitiesService {
     if (!communityIds.length) return stats;
     const since = new Date(Date.now() - WEEK_MS);
 
+    // `memberCount` follows the roster rule (PRD-507, PRD-508): a paused,
+    // suspended or deletion-grace account and a member hiding for 24 hours
+    // are left out, so the number on the card agrees with the roster it
+    // opens and a drop of one never points at who stepped away. The count
+    // answers every viewer the same, so it carries no own-row exception.
     const memberRows = await this.members
       .createQueryBuilder('m')
       .select('m.community_id', 'communityId')
       .addSelect('COUNT(*)', 'count')
       .where('m.community_id IN (:...ids)', { ids: communityIds })
+      .andWhere(
+        `EXISTS (
+           SELECT 1 FROM "users" "count_user"
+           INNER JOIN "profiles" "count_profile"
+             ON "count_profile"."user_id" = "count_user"."id"
+           WHERE "count_user"."id" = m.user_id
+             AND "count_user"."status" = :countActiveStatus
+             AND (
+               "count_profile"."hidden_until" IS NULL
+               OR "count_profile"."hidden_until" <= now()
+             )
+         )`,
+        { countActiveStatus: UserStatus.Active },
+      )
       .groupBy('m.community_id')
       .getRawMany<{ communityId: string; count: string }>();
     for (const row of memberRows) {
@@ -4538,53 +5148,75 @@ export class CommunitiesService {
   }
 
   /**
-   * Two best-effort notifications for `transferOwnership`: one to the
-   * incoming owner ("you are now owner"), one to the outgoing owner
-   * ("ownership was transferred"), each own try/catch so one send failing
-   * never suppresses the other.
+   * Best-effort "your offer was accepted" for an accepted ownership offer,
+   * sent as `CommunityOwnershipTransferred` with `youAreNowOwner: false` to
+   * the outgoing owner of record and, on a space, to the parent owner who
+   * made the offer when that is somebody else. The member who accepted is
+   * the actor and is not told about their own tap. Each send has its own
+   * try/catch so one failing never suppresses another.
    */
   private async notifyOwnershipTransferred(
     community: Community,
-    fromOwnerId: string | null,
-    toOwnerId: string,
-    // Who made the transfer: the outgoing owner, or on a space the parent's
-    // owner. An ownerless space has no outgoing owner to tell.
+    offer: CommunityOwnershipOffer,
+    newOwnerId: string,
+  ): Promise<void> {
+    const recipientIds = new Set(
+      [offer.fromOwnerId, offer.offeredByUserId].filter(
+        (recipientId): recipientId is string =>
+          recipientId !== null && recipientId !== newOwnerId,
+      ),
+    );
+    for (const recipientId of recipientIds) {
+      try {
+        await this.notifications.create(
+          recipientId,
+          NotificationType.CommunityOwnershipTransferred,
+          {
+            actorId: newOwnerId,
+            source: 'community',
+            communitySlug: community.slug,
+            communityName: community.name,
+            youAreNowOwner: false,
+            counterpartId: newOwnerId,
+          },
+          newOwnerId,
+        );
+      } catch {
+        // Intentionally ignored: best effort, the transfer already committed.
+      }
+    }
+  }
+
+  /**
+   * Best-effort ownership offer notice: `CommunityOwnershipOffered` to the
+   * member offered the community, `CommunityOwnershipOfferDeclined` to the
+   * owner whose offer was declined. A failed send is logged and swallowed:
+   * the offer row is the record, and the member's list shows it regardless.
+   */
+  private async notifyOwnershipOfferBestEffort(
+    recipientId: string,
+    type: NotificationType,
+    community: Community,
     actorId: string,
   ): Promise<void> {
     try {
       await this.notifications.create(
-        toOwnerId,
-        NotificationType.CommunityOwnershipTransferred,
+        recipientId,
+        type,
         {
           actorId,
           source: 'community',
           communitySlug: community.slug,
           communityName: community.name,
-          youAreNowOwner: true,
-          counterpartId: fromOwnerId ?? actorId,
         },
         actorId,
       );
-    } catch {
-      // Intentionally ignored — best-effort; the transfer already committed.
-    }
-    if (fromOwnerId === null) return;
-    try {
-      await this.notifications.create(
-        fromOwnerId,
-        NotificationType.CommunityOwnershipTransferred,
-        {
-          actorId,
-          source: 'community',
-          communitySlug: community.slug,
-          communityName: community.name,
-          youAreNowOwner: false,
-          counterpartId: toOwnerId,
-        },
-        actorId,
+    } catch (error) {
+      this.logger.warn(
+        `Failed to send ${type} notification: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
-    } catch {
-      // Intentionally ignored — best-effort; the transfer already committed.
     }
   }
 

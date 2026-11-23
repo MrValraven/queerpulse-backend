@@ -26,6 +26,10 @@ export interface StudioPlaylistMemberCredit {
   slug: string;
   displayName: string;
   avatarUrl: string | null;
+  /** PRD-507. Set when the member's account is paused, suspended or in the
+   *  deletion grace: `slug` and `displayName` are empty and the client
+   *  renders its "[deactivated member]" label. */
+  isInactiveMember?: true;
 }
 
 /** Who a playlist shows as. Exactly one of the two is set. */
@@ -40,6 +44,8 @@ export interface StudioPlaylistPerson {
   slug: string;
   displayName: string;
   avatarUrl: string | null;
+  /** PRD-507. See `StudioPlaylistMemberCredit.isInactiveMember`. */
+  isInactiveMember?: true;
 }
 
 export interface StudioPlaylistEditorResponse {
@@ -186,6 +192,9 @@ export interface StudioPlaylistCardSource {
 }
 
 export function memberDisplayName(member: MemberRef | undefined): string {
+  // PRD-507. The anonymous stand-in has no name, and "Member" would read as
+  // a name; the flag on the wire shape carries the label instead.
+  if (member?.isInactiveMember) return '';
   const fullName = member
     ? `${member.firstName} ${member.lastName}`.trim()
     : '';
@@ -205,6 +214,7 @@ export function toStudioPlaylistMemberCredit(
     slug: member?.slug ?? '',
     displayName: memberDisplayName(member),
     avatarUrl: member?.avatarUrl ?? null,
+    ...(member?.isInactiveMember ? { isInactiveMember: true as const } : {}),
   };
 }
 
@@ -217,6 +227,7 @@ export function toStudioPlaylistPerson(
     slug: member?.slug ?? '',
     displayName: memberDisplayName(member),
     avatarUrl: member?.avatarUrl ?? null,
+    ...(member?.isInactiveMember ? { isInactiveMember: true as const } : {}),
   };
 }
 

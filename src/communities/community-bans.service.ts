@@ -1,12 +1,13 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { MoreThanOrEqual, Repository } from 'typeorm';
 import {
   ACCOUNT_REINSTATED,
   AccountReinstatedEvent,
@@ -16,6 +17,7 @@ import { MemberLookup, MemberRef } from '../common/member-ref';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import {
   banExpiryFromDays,
   CommunityBanDTO,
@@ -30,11 +32,22 @@ import {
   CommunityGovernanceLogService,
 } from './community-governance-log.service';
 import { CommunityBanRatificationService } from './community-ban-ratification.service';
-import { resolveStaffCommunity } from './community-staff-access';
+import {
+  isCommunityOwnerLevelRole,
+  loadEffectiveCommunityRole,
+  resolveStaffCommunity,
+} from './community-staff-access';
 import { UpdateCommunityBanDto } from './dto/update-community-ban.dto';
+import {
+  CommunityBanRatification,
+  CommunityBanRatificationStatus,
+} from './entities/community-ban-ratification.entity';
 import { CommunityBan } from './entities/community-ban.entity';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
-import { CommunityMember } from './entities/community-member.entity';
+import {
+  CommunityMember,
+  RosterRole,
+} from './entities/community-member.entity';
 import { Community } from './entities/community.entity';
 
 /**
@@ -58,7 +71,8 @@ import { Community } from './entities/community.entity';
  *
  * Standalone service + controller, the convention this module already follows
  * (`CommunityPulseService`, `CommunityInsightsService`). Owner, co-owner and
- * moderator on all three routes.
+ * moderator on all three routes; lifting or shortening a ratified permanent
+ * bar or an owner-placed ban is owner-level (SEC-40, `assertMayLoosenBan`).
  */
 @Injectable()
 export class CommunityBansService {
@@ -73,6 +87,14 @@ export class CommunityBansService {
     private readonly bans: Repository<CommunityBan>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    // Read for the platform role of a ban's placer: a bar platform staff
+    // wrote from the admin console stays owner-level to lift.
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
+    // SEC-40. Read to tell a bar a second signatory made permanent apart from
+    // a permanent bar that predates the second signature.
+    @InjectRepository(CommunityBanRatification)
+    private readonly ratifications: Repository<CommunityBanRatification>,
     private readonly governanceLog: CommunityGovernanceLogService,
     // The barred member is told when their ban changes shape. A ban used to
     // reach them as nothing at all, which is what made "contact its
@@ -151,7 +173,7 @@ export class CommunityBansService {
     ];
     const refByUserId: Map<string, MemberRef> = await new MemberLookup(
       this.profiles,
-    ).byUserIds(referencedUserIds);
+    ).byUserIds(referencedUserIds, { inactive: 'include' });
 
     const now = new Date();
     const bans: CommunityBanDTO[] = rows.map((row) =>
@@ -177,7 +199,8 @@ export class CommunityBansService {
   /**
    * Revise a ban already in place (owner, co-owner or moderator): give it an
    * end date, make it permanent again, rewrite the reason, cite a house rule,
-   * or drop a citation made in error.
+   * or drop a citation made in error. Shortening a ratified permanent bar or
+   * an owner-placed ban is owner-level (see `assertMayLoosenBan`).
    *
    * The two pairs are mutually exclusive on purpose. `banDays` with
    * `makePermanent`, or `ruleIndex` with `clearRule`, is a request that
@@ -216,13 +239,26 @@ export class CommunityBansService {
       );
     }
 
-    const { community } = await resolveStaffCommunity(
+    const { community, role: actorRole } = await resolveStaffCommunity(
       this.communities,
       this.members,
       slug,
       actorUserId,
     );
     const ban = await this.findBanOr404(community.id, memberSlug);
+
+    // SEC-40. A new end date earlier than the one in force (and any end date
+    // at all on a permanent bar) shortens the ban, so it needs the rank that
+    // placing the ban needed. Extending it, rewording it or citing a rule
+    // stays open to every staff role.
+    const nextExpiresAt =
+      dto.banDays !== undefined ? banExpiryFromDays(dto.banDays) : undefined;
+    const isShortening =
+      nextExpiresAt !== undefined &&
+      (ban.expiresAt === null || nextExpiresAt < ban.expiresAt);
+    if (isShortening) {
+      await this.assertMayLoosenBan(community, actorUserId, actorRole, ban);
+    }
 
     // PRD-25. `makePermanent` is the second door onto a permanent bar, and it
     // no longer writes `expires_at = NULL` itself. Leaving it as a direct write
@@ -255,8 +291,8 @@ export class CommunityBansService {
 
     const patch: Partial<CommunityBan> = {};
 
-    if (dto.banDays !== undefined) {
-      patch.expiresAt = banExpiryFromDays(dto.banDays);
+    if (nextExpiresAt !== undefined) {
+      patch.expiresAt = nextExpiresAt;
     }
 
     if (dto.reason !== undefined) {
@@ -324,9 +360,10 @@ export class CommunityBansService {
       pendingHoldId = pendingHoldIdByUserId.get(updated.userId) ?? null;
     }
 
-    const memberRef = await new MemberLookup(this.profiles).byUserIds([
-      updated.userId,
-    ]);
+    const memberRef = await new MemberLookup(this.profiles).byUserIds(
+      [updated.userId],
+      { inactive: 'include' },
+    );
     return toCommunityBanDTO(
       updated,
       memberRef.get(updated.userId) ?? null,
@@ -339,7 +376,8 @@ export class CommunityBansService {
 
   /**
    * Lift one ban (owner, co-owner or moderator). The row is deleted, which
-   * every join path reads as "not barred".
+   * every join path reads as "not barred". A ratified permanent bar or an
+   * owner-placed ban is owner-level to lift (see `assertMayLoosenBan`).
    *
    * Lifting a ban does NOT put the member back on the roster. It reopens the
    * door; walking through it is still their decision, through the community's
@@ -351,7 +389,7 @@ export class CommunityBansService {
     actorUserId: string,
     memberSlug: string,
   ): Promise<{ ok: true }> {
-    const { community } = await resolveStaffCommunity(
+    const { community, role: actorRole } = await resolveStaffCommunity(
       this.communities,
       this.members,
       slug,
@@ -359,6 +397,8 @@ export class CommunityBansService {
     );
 
     const ban = await this.findBanOr404(community.id, memberSlug);
+    // SEC-40. Lifting needs the rank that placing the ban needed.
+    await this.assertMayLoosenBan(community, actorUserId, actorRole, ban);
 
     await this.bans.delete({ id: ban.id });
     // PRD-25. Close the door the hold left open. Without this a bar could be
@@ -383,6 +423,131 @@ export class CommunityBansService {
     this.eventEmitter.emit(ACCOUNT_REINSTATED, reinstated);
 
     return { ok: true };
+  }
+
+  /**
+   * SEC-40. Lifting or shortening a ban needs the rank that placing it
+   * needed. Any moderator used to be able to undo any ban, including a bar a
+   * second signatory had made permanent and a ban the owner placed on a
+   * moderator they removed, so one moderator could undo a control that took
+   * two signatures or owner rank to set.
+   *
+   * Owner-level actors (owner, co-owner) pass every case. A moderator is
+   * refused, each with its own reason code, when:
+   *
+   *  - the bar is permanent BECAUSE a second signatory ratified it
+   *    (`RATIFIED_BAR_NEEDS_OWNER_LEVEL`). A permanent bar that predates the
+   *    second signature was one moderator's to place and stays one
+   *    moderator's to lift. Making a bar permanent still goes through the
+   *    ratification hold, whoever asks.
+   *  - an owner-level member placed the ban
+   *    (`OWNER_PLACED_BAN_NEEDS_OWNER_LEVEL`). The ban row records who placed
+   *    it and leaves out the role its target held, and removing a moderator
+   *    or a co-owner is owner-level only (`CommunitiesService.removeMember`), so
+   *    the placer's rank is the evidence on file. The placer's CURRENT rank is
+   *    read: the community's owner of record, or an owner-level effective
+   *    role. A placer who has since left or stepped down leaves an ordinary
+   *    ban behind.
+   *  - the ban is a permanent bar platform staff placed
+   *    (`STAFF_PLACED_BAN_NEEDS_OWNER_LEVEL`), read off the placer's current
+   *    platform role. An admin-console bar writes no ratification row, so
+   *    this is what keeps it owner-level. The placer may still lift or
+   *    shorten their own bar.
+   *
+   * Moderators keep full control of the bans they and their fellow
+   * moderators placed.
+   */
+  private async assertMayLoosenBan(
+    community: Community,
+    actorUserId: string,
+    actorRole: RosterRole,
+    ban: CommunityBan,
+  ): Promise<void> {
+    if (isCommunityOwnerLevelRole(actorRole)) return;
+
+    if (
+      ban.expiresAt === null &&
+      (await this.isRatifiedPermanentBar(community.id, ban))
+    ) {
+      throw new ForbiddenException({
+        code: 'RATIFIED_BAR_NEEDS_OWNER_LEVEL',
+        message:
+          'A second signatory made this bar permanent, so only the owner or a co-owner can lift it or give it an end date.',
+      });
+    }
+
+    if (await this.wasPlacedByOwnerLevel(community, ban)) {
+      throw new ForbiddenException({
+        code: 'OWNER_PLACED_BAN_NEEDS_OWNER_LEVEL',
+        message:
+          'The owner or a co-owner placed this ban, so only the owner or a co-owner can lift it or shorten it.',
+      });
+    }
+
+    if (
+      ban.expiresAt === null &&
+      ban.bannedByUserId !== actorUserId &&
+      (await this.wasPlacedByPlatformStaff(ban))
+    ) {
+      throw new ForbiddenException({
+        code: 'STAFF_PLACED_BAN_NEEDS_OWNER_LEVEL',
+        message:
+          'Platform staff placed this ban, so only the owner or a co-owner can lift it or shorten it.',
+      });
+    }
+  }
+
+  /**
+   * Whether a second signatory ratified a permanent bar on this member AFTER
+   * the ban row in force was written. The time floor keeps a hold ratified
+   * on an earlier, since-lifted ban from counting toward this one.
+   */
+  private async isRatifiedPermanentBar(
+    communityId: string,
+    ban: CommunityBan,
+  ): Promise<boolean> {
+    const ratifiedHoldCount = await this.ratifications.count({
+      where: {
+        communityId,
+        targetUserId: ban.userId,
+        status: CommunityBanRatificationStatus.Ratified,
+        decidedAt: MoreThanOrEqual(ban.createdAt),
+      },
+    });
+    return ratifiedHoldCount > 0;
+  }
+
+  /** Whether the member who placed this ban holds owner-level rank here now. */
+  private async wasPlacedByOwnerLevel(
+    community: Community,
+    ban: CommunityBan,
+  ): Promise<boolean> {
+    if (ban.bannedByUserId === null) return false;
+    if (ban.bannedByUserId === community.ownerId) return true;
+    const placerRole = await loadEffectiveCommunityRole(
+      this.members,
+      community,
+      ban.bannedByUserId,
+    );
+    return placerRole !== null && isCommunityOwnerLevelRole(placerRole);
+  }
+
+  /**
+   * Whether platform staff (a platform Moderator or Admin) placed this ban.
+   * A permanent bar written from the admin console carries no ratification
+   * row and its placer is usually off the roster, so the placer's platform
+   * role is the evidence that keeps it owner-level to lift.
+   */
+  private async wasPlacedByPlatformStaff(ban: CommunityBan): Promise<boolean> {
+    if (ban.bannedByUserId === null) return false;
+    const placer = await this.users.findOne({
+      where: { id: ban.bannedByUserId },
+      select: { id: true, role: true },
+    });
+    return (
+      placer !== null &&
+      (placer.role === UserRole.Moderator || placer.role === UserRole.Admin)
+    );
   }
 
   /**

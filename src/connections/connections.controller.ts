@@ -100,11 +100,15 @@ export class ConnectionsController {
   @ApiBadRequestResponse({ description: 'You cannot connect to yourself.' })
   @ApiForbiddenResponse({
     description:
-      'Blocked, the member is not accepting connections, or an introduction is required.',
+      'The member is private or takes requests from connections only (code RECIPIENT_NOT_ACCEPTING_REQUESTS), an introduction is required, or new requests are paused or capped for you.',
   })
-  @ApiNotFoundResponse({ description: 'Member or introducer not found.' })
+  @ApiNotFoundResponse({
+    description:
+      'Member or introducer not found, or the member profile would answer 404 for you.',
+  })
   @ApiConflictResponse({
-    description: 'A request is already pending or you are already connected.',
+    description:
+      'A request is already pending, you are already connected, or you blocked this member.',
   })
   create(
     @CurrentUser() user: CurrentUserData,

@@ -54,7 +54,7 @@ const VENUE_REF = {
   ownerId: null,
 };
 
-/** The 39 keys of `EventBatchTemplateView`, contract section 4. */
+/** The 40 keys of `EventBatchTemplateView`, contract section 4. */
 const CONTRACT_VIEW_KEYS = [
   'slug',
   'title',
@@ -62,6 +62,7 @@ const CONTRACT_VIEW_KEYS = [
   'timezone',
   'startTime',
   'endTime',
+  'endDayOffset',
   'coverImageUrl',
   'gatheringFamily',
   'eventType',
@@ -148,7 +149,7 @@ function reasonCodeOf(failure: unknown): unknown {
 }
 
 describe('EventBatchTemplateService', () => {
-  let events: { findOne: jest.Mock };
+  let events: { findOne: jest.Mock; manager: { query: jest.Mock } };
   let cohosts: { exists: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
   let membership: {
@@ -177,7 +178,10 @@ describe('EventBatchTemplateService', () => {
 
   beforeEach(() => {
     setImageUrlBase('https://api.test');
-    events = { findOne: jest.fn().mockResolvedValue(templateEvent()) };
+    events = {
+      findOne: jest.fn().mockResolvedValue(templateEvent()),
+      manager: { query: jest.fn().mockResolvedValue([]) },
+    };
     cohosts = { exists: jest.fn().mockResolvedValue(false) };
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
@@ -205,6 +209,132 @@ describe('EventBatchTemplateService', () => {
 
   afterEach(() => {
     resetImageUrlBaseForTesting();
+  });
+
+  describe('house Music events and network audiences (PRD-519)', () => {
+    // The house account lookup answers `is_house`, the staff lookup answers
+    // `refusal`; each test says which of the two is true.
+    function answerManagerQueries(answers: {
+      isHouse: boolean;
+      staffRefusal: string | null;
+    }): void {
+      events.manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes('is_house')
+            ? [{ is_house: answers.isHouse }]
+            : [{ refusal: answers.staffRefusal }],
+        ),
+      );
+    }
+
+    it('refuses a co-host who copies a house Music event', async () => {
+      useTemplate({ gatheringFamily: GatheringFamily.Music });
+      cohosts.exists.mockResolvedValue(true);
+      answerManagerQueries({ isHouse: true, staffRefusal: null });
+
+      const failure = await failureOf(
+        service.resolveForCaller(TEMPLATE_SLUG, COHOST_ID),
+      );
+
+      expect(failure).toBeInstanceOf(ForbiddenException);
+      expect(reasonCodeOf(failure)).toBe(
+        'EVENT_BATCH_TEMPLATE_HOUSE_MUSIC_HOST_ONLY',
+      );
+    });
+
+    it.each([
+      'music_event_cohost_holds_grant',
+      'music_event_cohost_is_staff_tier',
+    ])(
+      'refuses staff (%s) on a house Music event with the host-only reason',
+      async (staffRefusal) => {
+        useTemplate({ gatheringFamily: GatheringFamily.Music });
+        answerManagerQueries({ isHouse: true, staffRefusal });
+
+        const failure = await failureOf(
+          service.resolveForCaller(TEMPLATE_SLUG, STRANGER_ID),
+        );
+
+        expect(failure).toBeInstanceOf(ForbiddenException);
+        expect(reasonCodeOf(failure)).toBe(
+          'EVENT_BATCH_TEMPLATE_HOUSE_MUSIC_HOST_ONLY',
+        );
+      },
+    );
+
+    it('refuses staff on a house network Music event with the host-only reason', async () => {
+      useTemplate({
+        gatheringFamily: GatheringFamily.Music,
+        visibility: EventVisibility.Network,
+      });
+      answerManagerQueries({
+        isHouse: true,
+        staffRefusal: 'music_event_cohost_holds_grant',
+      });
+
+      const failure = await failureOf(
+        service.resolveForCaller(TEMPLATE_SLUG, STRANGER_ID),
+      );
+
+      expect(reasonCodeOf(failure)).toBe(
+        'EVENT_BATCH_TEMPLATE_HOUSE_MUSIC_HOST_ONLY',
+      );
+    });
+
+    it('lets the host copy a house Music event', async () => {
+      useTemplate({ gatheringFamily: GatheringFamily.Music });
+      answerManagerQueries({ isHouse: true, staffRefusal: null });
+
+      await expect(
+        service.resolveForCaller(TEMPLATE_SLUG, HOST_ID),
+      ).resolves.toMatchObject({ template: { id: EVENT_ID } });
+    });
+
+    it('answers 404 to a stranger on a house Music event', async () => {
+      useTemplate({ gatheringFamily: GatheringFamily.Music });
+      answerManagerQueries({ isHouse: true, staffRefusal: null });
+
+      const failure = await failureOf(
+        service.resolveForCaller(TEMPLATE_SLUG, STRANGER_ID),
+      );
+
+      expect(reasonCodeOf(failure)).toBe('EVENT_BATCH_TEMPLATE_NOT_FOUND');
+    });
+
+    it('lets a co-host copy a Music event a member hosts', async () => {
+      useTemplate({ gatheringFamily: GatheringFamily.Music });
+      cohosts.exists.mockResolvedValue(true);
+      answerManagerQueries({ isHouse: false, staffRefusal: null });
+
+      await expect(
+        service.resolveForCaller(TEMPLATE_SLUG, COHOST_ID),
+      ).resolves.toMatchObject({ template: { id: EVENT_ID } });
+    });
+
+    it.each([EventVisibility.Network, EventVisibility.ExtendedNetwork])(
+      'refuses a co-host who copies a %s event',
+      async (visibility) => {
+        useTemplate({ visibility });
+        cohosts.exists.mockResolvedValue(true);
+
+        const failure = await failureOf(
+          service.resolveForCaller(TEMPLATE_SLUG, COHOST_ID),
+        );
+
+        expect(failure).toBeInstanceOf(ForbiddenException);
+        expect(reasonCodeOf(failure)).toBe(
+          'EVENT_BATCH_TEMPLATE_NETWORK_COHOST',
+        );
+      },
+    );
+
+    it('lets the host copy a network event', async () => {
+      useTemplate({ visibility: EventVisibility.Network });
+
+      await expect(
+        service.resolveForCaller(TEMPLATE_SLUG, HOST_ID),
+      ).resolves.toMatchObject({ template: { id: EVENT_ID } });
+    });
   });
 
   describe('who may start from an event', () => {
@@ -539,6 +669,21 @@ describe('EventBatchTemplateService', () => {
       expect(viewWithEnd.endTime).toBe('01:30');
     });
 
+    it('carries how many days after its start day the event ends (PRD-518)', async () => {
+      const view = await service.getTemplateView(TEMPLATE_SLUG, HOST_ID);
+      expect(view.endDayOffset).toBeNull();
+
+      // Saturday 21:00 to Monday 02:00 in Lisbon: two days later.
+      useTemplate({ endAt: new Date('2026-10-26T02:00:00.000Z') });
+      const weekendView = await service.getTemplateView(TEMPLATE_SLUG, HOST_ID);
+      expect(weekendView.endDayOffset).toBe(2);
+
+      // Same evening, 23:00 in Lisbon.
+      useTemplate({ endAt: new Date('2026-10-24T22:00:00.000Z') });
+      const eveningView = await service.getTemplateView(TEMPLATE_SLUG, HOST_ID);
+      expect(eveningView.endDayOffset).toBe(0);
+    });
+
     it('serves the cover as a display URL', async () => {
       const view = await service.getTemplateView(TEMPLATE_SLUG, HOST_ID);
 
@@ -645,7 +790,7 @@ describe('EventBatchTemplateService', () => {
     it('has exactly the contract keys', async () => {
       const view = await service.getTemplateView(TEMPLATE_SLUG, HOST_ID);
 
-      expect(CONTRACT_VIEW_KEYS).toHaveLength(39);
+      expect(CONTRACT_VIEW_KEYS).toHaveLength(40);
       expect(Object.keys(view).sort()).toEqual([...CONTRACT_VIEW_KEYS].sort());
     });
   });

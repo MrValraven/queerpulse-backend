@@ -1,7 +1,7 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { In } from 'typeorm';
+import { FindOperator, In } from 'typeorm';
 import {
   AccessTier,
   Community,
@@ -53,6 +53,7 @@ import {
   PERSONA_WALL_HAS_PHOTO_SQL,
   SubprofilePublicReadService,
 } from './subprofile-public-read.service';
+import { memberShownOnPeopleListSql } from './persona-creator-gates';
 import type { PersonaWallFillOrder } from './persona-wall.constants';
 import { restrictedAccessBody } from './subprofile-response';
 
@@ -297,6 +298,8 @@ describe('SubprofilePublicReadService', () => {
     createQueryBuilder: jest.Mock;
     find: jest.Mock;
     findOne: jest.Mock;
+    // SEC-33: the creator-active read on a single persona. Active by default.
+    exists: jest.Mock;
     // The works at read (`loadWorksAt`) runs on this manager.
     manager: { query: jest.Mock; find: jest.Mock };
   };
@@ -337,6 +340,7 @@ describe('SubprofilePublicReadService', () => {
       createQueryBuilder: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
+      exists: jest.fn().mockResolvedValue(true),
       manager: {
         query: jest.fn().mockResolvedValue([]),
         find: jest.fn().mockResolvedValue([]),
@@ -652,17 +656,33 @@ describe('SubprofilePublicReadService', () => {
       });
     });
 
-    it('excludes personas blocked either way via blockFilter.excludeBlocked, against the raw snake_case column', async () => {
+    it('excludes linked personas blocked either way via blockFilter.excludeBlocked, against the raw snake_case column', async () => {
       const rows = [makeSubprofile({ id: 'sp-a' })];
       const qb = makeSubprofilesQueryBuilderStub(rows);
       subprofiles.createQueryBuilder.mockReturnValue(qb);
 
       await service.directory({}, 'viewer-42');
 
+      // SEC-02: an unlinked persona is exempt, so a block cannot test who
+      // runs it.
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         qb,
         'viewer-42',
         '"sp"."user_id"',
+        { unless: `"sp"."link_visibility" = 'unlinked'` },
+      );
+    });
+
+    // SEC-33: a persona whose creator is not active leaves the directory.
+    it('keeps only personas whose creator is active', async () => {
+      const qb = makeSubprofilesQueryBuilderStub([]);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({}, 'viewer-42');
+
+      const clauses = qb.andWhere.mock.calls.map(([clause]) => clause);
+      expect(clauses.join('\n')).toContain(
+        `"persona_creator"."status" = 'active'`,
       );
     });
 
@@ -1006,6 +1026,7 @@ describe('SubprofilePublicReadService', () => {
         pickQueryBuilder,
         'viewer-1',
         '"sp"."user_id"',
+        { unless: `"sp"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -1034,6 +1055,7 @@ describe('SubprofilePublicReadService', () => {
         fillQueryBuilder,
         'viewer-1',
         '"sp"."user_id"',
+        { unless: `"sp"."link_visibility" = 'unlinked'` },
       );
     });
 
@@ -1418,6 +1440,132 @@ describe('SubprofilePublicReadService', () => {
       expect(view.ownerSlug).toBeUndefined();
       expect(view.ownerName).toBeUndefined();
       expect(profiles.findOne).not.toHaveBeenCalled();
+    });
+
+    // SEC-02: blocking a suspect must not make their unlinked persona vanish,
+    // or the block would confirm who runs it.
+    it('serves an unlinked persona the same whether or not the viewer and its creator are blocked', async () => {
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-unlinked',
+          userId: 'creator-1',
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        }),
+      );
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      const view = await service.getByHandle('nightform', activeViewer);
+
+      expect(view.id).toBe('sp-unlinked');
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+    });
+
+    it('still 404s a linked persona across a block with its creator', async () => {
+      personaRows.push(linkedPersona());
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(
+        service.getByHandle('ana-dj-set', activeViewer),
+      ).rejects.toThrow(new NotFoundException('Subprofile not found'));
+    });
+
+    // SEC-33: a persona whose creator is not active is gone for everyone but
+    // its owners, with the plain 404 even where a restricted state applies.
+    it.each([
+      ['an open unlinked persona', SubprofileVisibility.Open],
+      ['a private unlinked persona', SubprofileVisibility.Private],
+    ])('404s %s whose creator is not active', async (_label, visibility) => {
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-unlinked',
+          userId: 'creator-1',
+          handle: 'nightform',
+          visibility,
+        }),
+      );
+      subprofiles.exists.mockResolvedValue(false);
+
+      await expect(service.getByHandle('nightform', undefined)).rejects.toThrow(
+        new NotFoundException('Subprofile not found'),
+      );
+    });
+
+    it('still serves a persona whose creator is not active to a co-owner', async () => {
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-unlinked',
+          userId: 'creator-1',
+          handle: 'nightform',
+        }),
+      );
+      subprofiles.exists.mockResolvedValue(false);
+      membership.isMember.mockResolvedValue(true);
+
+      const view = await service.getByHandle('nightform', activeViewer);
+
+      expect(view.id).toBe('sp-unlinked');
+    });
+
+    // SEC-03: an unlinked persona's page names no credited member.
+    it('drops member credits on an unlinked persona and keeps persona credits', async () => {
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-unlinked',
+          userId: 'creator-1',
+          handle: 'nightform',
+        }),
+        makeSubprofile({
+          id: 'sp-ember',
+          userId: 'creator-2',
+          handle: 'ember',
+          displayName: 'Ember',
+        }),
+      );
+      items.find.mockResolvedValue([
+        {
+          id: 'item-1',
+          subprofileId: 'sp-unlinked',
+          section: SubprofileSection.Projects,
+          title: 'Night set',
+          collaborators: ['ana', 'ember'],
+          createdAt: new Date(),
+        },
+      ]);
+      module
+        .get<{ find: jest.Mock }>(getRepositoryToken(Handle))
+        .find.mockResolvedValue([
+          {
+            name: 'ana',
+            ownerKind: HandleOwnerKind.Profile,
+            userId: 'creator-1',
+            subprofileId: null,
+          },
+          {
+            name: 'ember',
+            ownerKind: HandleOwnerKind.Subprofile,
+            userId: null,
+            subprofileId: 'sp-ember',
+          },
+        ]);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'creator-1',
+          slug: 'ana',
+          firstName: 'Ana',
+          lastName: 'Reis',
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+      subprofiles.find.mockResolvedValue([personaRows[1]]);
+
+      const view = await service.getByHandle('nightform', undefined);
+
+      const wire = JSON.stringify(view);
+      expect(wire).toContain('Ember');
+      expect(wire).not.toContain('Ana Reis');
+      expect(wire).not.toContain('"type":"member"');
     });
 
     it('serves the published persona to a stranger when a draft holds the same handle', async () => {
@@ -2105,6 +2253,35 @@ describe('SubprofilePublicReadService', () => {
       const result = await service.resolveHandles(['removed-one'], 'viewer-1');
 
       expect(result.has('removed-one')).toBe(false);
+    });
+
+    // SEC-21: a paused, suspended, erasure-pending or 24-hour-hidden member
+    // is never credited by name, photo or slug, as on the people lists.
+    it('loads credited members through the shared people-list rule', async () => {
+      handleRegistry.find.mockResolvedValue([
+        {
+          name: 'ana',
+          ownerKind: HandleOwnerKind.Profile,
+          userId: 'ana-user',
+          subprofileId: null,
+        },
+      ]);
+
+      const result = await service.resolveHandles(['ana'], 'viewer-1');
+
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+      const profileWhere = (
+        profiles.find.mock.calls[0] as [{ where: { userId: unknown } }]
+      )[0].where;
+      expect(profileWhere.userId).toBeInstanceOf(FindOperator);
+      const userIdOperator = profileWhere.userId as FindOperator<string>;
+      expect(
+        Object.values(userIdOperator.objectLiteralParameters ?? {}),
+      ).toEqual([['ana-user']]);
+      expect(userIdOperator.getSql?.('Profile.userId')).toContain(
+        memberShownOnPeopleListSql('(Profile.userId)'),
+      );
+      expect(result.has('ana')).toBe(false);
     });
   });
 

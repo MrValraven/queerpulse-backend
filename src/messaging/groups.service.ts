@@ -37,6 +37,7 @@ import {
   requireAuthorSummary,
 } from './message-response';
 import { readGroupJoinHistoryFloor } from './group-join-history-floor';
+import { reseatHistoryWindow } from './group-absence-gap';
 import {
   GroupInviteLinkMaxUses,
   GroupInviteLinkResponse,
@@ -461,6 +462,10 @@ export class GroupsService {
         userId: true,
         leftAt: true,
         clearedAt: true,
+        // SEC-25: `reseatHistoryWindow` reads an earlier gap, so a second
+        // re-seat keeps it hidden.
+        absenceStartedAt: true,
+        absenceEndedAt: true,
         role: true,
       },
     });
@@ -677,10 +682,10 @@ export class GroupsService {
       where: { slug: In(uniqueHandles) },
     });
     const profileByHandle = new Map(profiles.map((p) => [p.slug, p]));
-    // ENG-239: only the handful of columns this method actually reads/writes
-    // (the re-activation branch needs `clearedAt` to compute the resume
-    // floor; every other column here is either overwritten outright or used
-    // purely for `id`/`userId`/`leftAt`).
+    // ENG-239: only the handful of columns this method actually reads/writes.
+    // The re-activation branch needs `clearedAt`, `leftAt` and the absence
+    // gap columns for `reseatHistoryWindow` (SEC-25); every other column
+    // here is either overwritten outright or used purely for `id`/`userId`.
     const existingRows = await this.participants.find({
       where: { conversationId },
       select: {
@@ -688,6 +693,10 @@ export class GroupsService {
         userId: true,
         leftAt: true,
         clearedAt: true,
+        // SEC-25: `reseatHistoryWindow` reads an earlier gap, so a second
+        // re-seat keeps it hidden.
+        absenceStartedAt: true,
+        absenceEndedAt: true,
         role: true,
       },
     });
@@ -1390,32 +1399,27 @@ export class GroupsService {
     // PRD-400: a brand-new seat reads the group from its join onward (see
     // `readGroupJoinHistoryFloor`). One reading per transaction, shared by
     // every new seat in it.
-    const joinHistoryFloor = newSeatUserIds.length
+    // SEC-25: a revived seat's absence gap ends at the same instant, just
+    // before its own `member_added` pill.
+    const joinHistoryFloor = seats.length
       ? await readGroupJoinHistoryFloor(manager)
       : null;
     for (const { userId, existing } of seats) {
       if (existing) {
-        // Re-activation resumes history FROM THE RE-ADD POINT onward.
-        // Nulling `clearedAt` outright (as
-        // this used to) erased two things at once: the read ceiling that
-        // held while they were out (handing a member removed for a period
-        // everything said about them in the interim) and their own
-        // "delete for me" floor, resurrecting history they had chosen to
-        // clear. Carrying the floor forward to the later of the two
-        // preserves both: everything they could legitimately see before
-        // leaving stays visible, the gap stays hidden.
-        const resumeFloor = [existing.clearedAt, existing.leftAt]
-          .filter((value): value is Date => value != null)
-          .reduce<Date | null>(
-            (latest, value) =>
-              latest === null || value > latest ? value : latest,
-            null,
-          );
+        // SEC-25: the revived seat keeps what it could read up to leaving
+        // (minus the member's own clear), and the stretch it was away for
+        // becomes its absence gap, see `reseatHistoryWindow`. The old rule
+        // moved `clearedAt` up to `leftAt`, which hid the earlier history
+        // and opened up everything posted during the absence.
+        const historyWindow = reseatHistoryWindow(
+          existing,
+          joinHistoryFloor ?? new Date(),
+        );
         await manager.update(
           ConversationParticipant,
           { id: existing.id },
           {
-            clearedAt: resumeFloor,
+            ...historyWindow,
             leftAt: null,
             role: ConversationRole.Member,
             // Re-seating clears a past removal: a re-added member reads
@@ -1870,10 +1874,18 @@ export class GroupsService {
     const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
     // PRD-364: reciprocal read-receipt sharing — see `ConversationsService
     // .listConversations`'s identical batched fetch.
-    const privacyByUser =
-      await this.preferencesService.getMessagingPrivacyForUsers(
+    // SEC-26: one batched read of every member blocked either way with the
+    // caller, alongside the privacy rows, so the roster withholds their
+    // watermarks.
+    const [privacyByUser, blockedUserIds] = await Promise.all([
+      this.preferencesService.getMessagingPrivacyForUsers(
         participantRows.map((row) => row.userId),
-      );
+      ),
+      this.blockFilter.blockedUserIds(
+        userId,
+        participantRows.map((row) => row.userId),
+      ),
+    ]);
     // ENG-238: a caller who has left (voluntarily, removed, or the group was
     // dissolved) gets NO roster and NO per-member watermarks: a severed
     // member reads history but must not keep learning who else is (or was
@@ -1894,6 +1906,7 @@ export class GroupsService {
           profileByUser,
           userId,
           privacyByUser,
+          blockedUserIds,
           nameOptions,
         );
 

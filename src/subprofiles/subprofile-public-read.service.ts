@@ -8,7 +8,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository, SelectQueryBuilder } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizeHandle } from '../common/handles';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrl, toImageUrlByReference } from '../common/image-url';
+import { eventCoverPhotoReference } from '../storage/public-media-reference';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
@@ -78,6 +79,13 @@ import { SubprofileFollowersService } from './subprofile-followers.service';
 import { kindsMatchingSearch } from './subprofile-kind-search';
 import { isSectionVisibleForKind } from './subprofile-kinds';
 import { SubprofileMembershipService } from './subprofile-membership.service';
+import {
+  PERSONA_CREATOR_ACTIVE_WHERE,
+  memberIdShownOnPeopleListIn,
+  isCreatorBlockConsulted,
+  personaCreatorActiveSql,
+  unlinkedPersonaSql,
+} from './persona-creator-gates';
 import { PublishUnmetCode, validatePublish } from './subprofile-validation';
 import {
   PERSONA_WALL_MAX_PICKS,
@@ -388,6 +396,9 @@ export class SubprofilePublicReadService {
             id: In(memberIds),
             linkVisibility: SubprofileLinkVisibility.Linked,
             status: SubprofileStatus.Published,
+            // SEC-33: a persona whose creator is not active leaves this list
+            // too, even when it nests under an active co-owner's profile.
+            ...PERSONA_CREATOR_ACTIVE_WHERE,
             // A removed persona is withheld from this bulk read too (only
             // owner-facing reads like `listMine`/`getOwned` skip this — see
             // `buildPublicView`'s single-item "removed" gate for the signal a
@@ -1053,6 +1064,13 @@ export class SubprofilePublicReadService {
     if (isOwner) {
       return;
     }
+    // SEC-33: a persona whose creator is suspended, paused or pending erasure
+    // is gone for everyone but its owners. Checked first, so the answer is the
+    // plain 404 of a persona that never existed and no restricted state says
+    // it is still there.
+    if (!(await this.isCreatorActive(sp))) {
+      throw new NotFoundException('Subprofile not found');
+    }
     if (sp.removedAt) {
       throw new ForbiddenException(restrictedAccessBody('removed'));
     }
@@ -1081,15 +1099,26 @@ export class SubprofilePublicReadService {
     if (await isSubprofileUnderTakedown(this.contentModeration, sp.id)) {
       throw new NotFoundException('Subprofile not found');
     }
-    // Never surface the persona of someone the viewer has blocked (either
-    // way). Skipped entirely for an anonymous viewer — there is no account
-    // to have blocked anyone.
+    // Never surface a LINKED persona of someone the viewer has blocked
+    // (either way). Skipped for an anonymous viewer, who has no account to
+    // have blocked anyone, and for an UNLINKED persona, which answers every
+    // viewer alike so a block cannot test who runs it (SEC-02,
+    // `isCreatorBlockConsulted`).
     if (
       viewer &&
+      isCreatorBlockConsulted(sp) &&
       (await this.blockFilter.isBlockedEitherWay(viewer.userId, sp.userId))
     ) {
       throw new NotFoundException('Subprofile not found');
     }
+  }
+
+  // SEC-33: whether the persona's creator account is active. One indexed
+  // existence read on the persona row and its creator.
+  private async isCreatorActive(sp: Subprofile): Promise<boolean> {
+    return this.subprofiles.exists({
+      where: { id: sp.id, ...PERSONA_CREATOR_ACTIVE_WHERE },
+    });
   }
 
   // Shared by `getByHandle` and `getBySlugForProfile`: resolves whether
@@ -1242,9 +1271,13 @@ export class SubprofilePublicReadService {
     const viewerFollowing = viewerFollowingIds.has(sp.id);
     const affiliations = affiliationsById.get(sp.id) ?? [];
     // Depends on `items`, so it follows the batch rather than joining it.
-    const collaboratorsByHandle = await this.resolveCollaboratorsFor(
+    const resolvedCollaboratorsByHandle = await this.resolveCollaboratorsFor(
       viewerId,
       items,
+    );
+    const collaboratorsByHandle = withoutMemberCreditsWhenUnlinked(
+      sp,
+      resolvedCollaboratorsByHandle,
     );
     const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
     const linkedEventsByItemId =
@@ -1651,7 +1684,9 @@ export class SubprofilePublicReadService {
 
   /**
    * The directory's base set as a FRESH builder aliased `sp`: published, open,
-   * not removed, nobody blocked either way, no takedown, the `kind` scope, and
+   * live (owner removal unset), held by an active creator, clear of any
+   * moderator takedown, a linked persona only when its creator and the viewer
+   * have no block either way, the `kind` scope, and
    * (unless `isSearchApplied` is false) the free-text search. The page query
    * and every facet count start from here, so they cannot drift apart on what
    * the directory contains. A `null` viewer is the admin wall preview and
@@ -1675,10 +1710,16 @@ export class SubprofilePublicReadService {
       // redesign Phase 1b); only owner-facing reads skip this check.
       .andWhere('sp.removedAt IS NULL');
 
-    // Hide personas of members blocked either way (design spec §4). The raw
-    // column reference must match the DB's snake_case name (SnakeNamingStrategy).
+    // SEC-33: a persona whose creator is not active is withheld.
+    qb.andWhere(personaCreatorActiveSql());
+    // Hide LINKED personas of members blocked either way (design spec §4).
+    // An unlinked persona stays for every viewer alike, so a block cannot
+    // test who runs it (SEC-02). The raw column reference must match the
+    // DB's snake_case name (SnakeNamingStrategy).
     if (viewerId !== null) {
-      this.blockFilter.excludeBlocked(qb, viewerId, '"sp"."user_id"');
+      this.blockFilter.excludeBlocked(qb, viewerId, '"sp"."user_id"', {
+        unless: unlinkedPersonaSql(),
+      });
     }
     // Withhold any persona under a moderator takedown, in-query so the capped
     // directory result stays consistent.
@@ -1742,7 +1783,7 @@ export class SubprofilePublicReadService {
 
   // Cross-entity global search (SearchService) — standalone personas only
   // (unlinked + published + open + handle-bearing), mirroring `directory`'s
-  // WHERE + block filter. Accent-folded LIKE over displayName / tagline
+  // WHERE for unlinked rows (which the block filter leaves alone). Accent-folded LIKE over displayName / tagline
   // (`PERSONA_SEARCH_HAYSTACK`). Returns the public
   // `handle` (the persona's /p/:handle identifier) — never the owner tie.
   async searchByText(
@@ -1769,10 +1810,11 @@ export class SubprofilePublicReadService {
       .andWhere(
         `${PERSONA_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
         { pattern },
-      );
-    // Hide personas of members blocked either way (mirrors `directory`). The
-    // raw column reference must match the DB's snake_case name.
-    this.blockFilter.excludeBlocked(qb, viewerId, '"sp"."user_id"');
+      )
+      // SEC-33: a persona whose creator is not active is withheld.
+      .andWhere(personaCreatorActiveSql());
+    // Every row here is unlinked, so no block filter on the creator runs:
+    // an unlinked persona answers every viewer alike (SEC-02).
     // Withhold any persona under a moderator takedown (mirrors `directory`).
     this.excludeModeratedSubprofiles(qb);
     const rows = await qb
@@ -1800,6 +1842,8 @@ export class SubprofilePublicReadService {
         // A removed persona is withheld from the sitemap/prerender set too
         // (Personas redesign Phase 1b).
         removedAt: IsNull(),
+        // SEC-33: so is a persona whose creator is not active.
+        ...PERSONA_CREATOR_ACTIVE_WHERE,
       },
       // `id` is selected purely so the takedown filter below can key on it. It
       // is not emitted in the sitemap payload.
@@ -1909,7 +1953,12 @@ export class SubprofilePublicReadService {
           {
             targetId: event.id,
             name: event.title,
-            imageUrl: toImageUrl(event.coverImageUrl),
+            // SEC-04: the cover's key names its uploader, so this public
+            // persona read renders the event's opaque reference.
+            imageUrl: toImageUrlByReference(
+              event.coverImageUrl,
+              eventCoverPhotoReference(event.id),
+            ),
             ownerId: event.hostId,
           },
         ]),
@@ -2022,9 +2071,9 @@ export class SubprofilePublicReadService {
   // `subprofiles` lookup, and ONE batched block-lookup via
   // `BlockFilterService.blockedUserIds` (mirrors `resolveAffiliationsFor`'s
   // two-entity-query shape). A handle is DROPPED (never surfaced, never
-  // throws) when: it isn't registered, its owner is blocked either way with
-  // `viewerId`, or — for a persona — it isn't currently published +
-  // unlinked + non-private (a linked persona is nested under its owner and
+  // throws) when: it isn't registered, a credited MEMBER is blocked either
+  // way with `viewerId`, or (for a persona) it isn't currently published +
+  // unlinked + non-private with an active creator (a linked persona is nested under its owner and
   // is NOT creditable; a private persona isn't discoverable by handle to
   // just anyone). Callers that must reject an unresolvable handle (the
   // owner-facing validation in `replaceSection`) check the returned map's
@@ -2070,10 +2119,19 @@ export class SubprofilePublicReadService {
 
     const [profileRows, fetchedSubprofileRows] = await Promise.all([
       profileUserIds.length
-        ? this.profiles.find({ where: { userId: In(profileUserIds) } })
+        ? this.profiles.find({
+            // SEC-21: a credited member whose account is paused, suspended,
+            // banned or pending erasure, or who is inside a 24-hour hide, is
+            // never credited by name, photo or slug, as on the people lists.
+            where: { userId: memberIdShownOnPeopleListIn(profileUserIds) },
+          })
         : Promise.resolve([]),
       subprofileIds.length
-        ? this.subprofiles.find({ where: { id: In(subprofileIds) } })
+        ? this.subprofiles.find({
+            // SEC-33: a persona whose creator is not active is never
+            // credited by name either.
+            where: { id: In(subprofileIds), ...PERSONA_CREATOR_ACTIVE_WHERE },
+          })
         : Promise.resolve([]),
     ]);
     // A persona under a moderator takedown is withheld here like on every
@@ -2089,14 +2147,12 @@ export class SubprofilePublicReadService {
       subprofileRows.map((subprofile) => [subprofile.id, subprofile]),
     );
 
-    // ONE batched block-lookup over every candidate owner (a credited
-    // member's own userId, or a credited persona's owner userId) — never a
-    // per-handle query.
+    // ONE batched block-lookup over every credited member, one query for the
+    // whole set. A credited persona's creator is left out: only an
+    // unlinked persona is creditable, and an unlinked persona answers every
+    // viewer alike, so a block cannot test who runs it (SEC-02).
     const candidateOwnerIds = [
-      ...new Set([
-        ...profileRows.map((profile) => profile.userId),
-        ...subprofileRows.map((subprofile) => subprofile.userId),
-      ]),
+      ...new Set(profileRows.map((profile) => profile.userId)),
     ];
     const blockedOwnerIds = await this.blockFilter.blockedUserIds(
       viewerId,
@@ -2133,14 +2189,14 @@ export class SubprofilePublicReadService {
         // creditable — see the phase note), a draft doesn't exist publicly
         // yet, a private persona isn't meant to be namelinked from someone
         // else's page, and a removed persona is withheld like every other
-        // public read (Personas redesign Phase 1b).
+        // public read (Personas redesign Phase 1b). No block check on its
+        // creator: see `candidateOwnerIds` above.
         if (
           !persona ||
           persona.status !== SubprofileStatus.Published ||
           persona.linkVisibility !== SubprofileLinkVisibility.Unlinked ||
           persona.visibility === SubprofileVisibility.Private ||
-          persona.removedAt ||
-          blockedOwnerIds.has(persona.userId)
+          persona.removedAt
         ) {
           continue;
         }
@@ -2306,4 +2362,25 @@ export class SubprofilePublicReadService {
     }
     return summaries;
   }
+}
+
+/**
+ * SEC-03: an UNLINKED persona's page names no member it credits. A credited
+ * member's real name, face and profile link on a pseudonymous page tie the
+ * pseudonym to the people around it, and the directory card already leaves
+ * them out (`isOutboundMemberCredit`). Credited personas stay. A linked
+ * persona keeps every resolved credit.
+ */
+function withoutMemberCreditsWhenUnlinked(
+  persona: Pick<Subprofile, 'linkVisibility'>,
+  collaboratorsByHandle: Map<string, CollaboratorView>,
+): Map<string, CollaboratorView> {
+  if (persona.linkVisibility !== SubprofileLinkVisibility.Unlinked) {
+    return collaboratorsByHandle;
+  }
+  return new Map(
+    [...collaboratorsByHandle].filter(
+      ([, collaborator]) => collaborator.type !== 'member',
+    ),
+  );
 }

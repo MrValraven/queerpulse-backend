@@ -87,7 +87,9 @@ export class AdminChangemakerNominationsService {
         ]),
       ),
     ];
-    const refsByUserId = await memberLookup.byUserIds(userIds);
+    const refsByUserId = await memberLookup.byUserIds(userIds, {
+      inactive: 'include',
+    });
 
     const items: AdminChangemakerNominationDTO[] = rows.map((nomination) =>
       toAdminChangemakerNominationDTO(
@@ -166,16 +168,19 @@ export class AdminChangemakerNominationsService {
     }
 
     const memberLookup = new MemberLookup(this.profiles);
-    const refsByUserId = await memberLookup.byUserIds([
-      // Same narrowing as `list`: neither the nominator's profile nor the
-      // linked nominee's is even fetched for a caller who reached this on the
-      // `partnerships` grant.
-      ...(isPlatformStaffReader ? [nomination.nominatorId] : []),
-      ...(isPlatformStaffReader && nomination.nomineeUserId
-        ? [nomination.nomineeUserId]
-        : []),
-      actorUserId,
-    ]);
+    const refsByUserId = await memberLookup.byUserIds(
+      [
+        // Same narrowing as `list`: neither the nominator's profile nor the
+        // linked nominee's is even fetched for a caller who reached this on the
+        // `partnerships` grant.
+        ...(isPlatformStaffReader ? [nomination.nominatorId] : []),
+        ...(isPlatformStaffReader && nomination.nomineeUserId
+          ? [nomination.nomineeUserId]
+          : []),
+        actorUserId,
+      ],
+      { inactive: 'include' },
+    );
     return toAdminChangemakerNominationDTO(
       {
         ...nomination,

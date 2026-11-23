@@ -180,6 +180,7 @@ describe('ActivityListener write gate: communities', () => {
       accessTier: AccessTier.Public,
       archivedAt: null,
       parentId: null,
+      rosterVisible: true,
     });
 
     await listener.onCommunityMemberJoined({
@@ -237,6 +238,27 @@ describe('ActivityListener write gate: communities', () => {
     expect(record).not.toHaveBeenCalled();
   });
 
+  it('records nothing when joining a community that hid its roster', async () => {
+    const { listener, record, communities } = await buildListener();
+    communities.findOne.mockResolvedValue({
+      id: 'community-1',
+      slug: 'quiet-circle',
+      name: 'Quiet Circle',
+      accessTier: AccessTier.Public,
+      archivedAt: null,
+      parentId: null,
+      rosterVisible: false,
+    });
+
+    await listener.onCommunityMemberJoined({
+      communityId: 'community-1',
+      userId: 'member-1',
+    });
+
+    // A hidden roster rebuilt from "Joined X" rows is the leak SEC-06 closes.
+    expect(record).not.toHaveBeenCalled();
+  });
+
   it('records nothing when joining a space (a community with a parent)', async () => {
     const { listener, record, communities } = await buildListener();
     communities.findOne.mockResolvedValue({
@@ -246,6 +268,7 @@ describe('ActivityListener write gate: communities', () => {
       accessTier: AccessTier.Public,
       archivedAt: null,
       parentId: 'community-1',
+      rosterVisible: true,
     });
 
     await listener.onCommunityMemberJoined({
@@ -442,6 +465,7 @@ describe('ActivityListener titles parse back into action and subject', () => {
       accessTier: AccessTier.Public,
       archivedAt: null,
       parentId: null,
+      rosterVisible: true,
     });
     await listener.onCommunityMemberJoined({
       communityId: 'community-1',

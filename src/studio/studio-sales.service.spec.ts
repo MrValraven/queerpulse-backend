@@ -174,7 +174,11 @@ describe('StudioSalesService', () => {
       null,
       null,
       31,
+      USER_ID,
     ]);
+    // SEC-02: a buyer blocked either way with the owner reading is left out.
+    expect(TO_CONFIRM_SQL).toContain('"sale_block"."blocker_id" = $5::uuid');
+    expect(TO_CONFIRM_SQL).toContain('"sale_block"."blocked_id" = $5::uuid');
     expect(TO_CONFIRM_SQL).toContain(`"purchase"."status" = 'pending'`);
     expect(TO_CONFIRM_SQL).toContain(
       'ORDER BY "purchase"."created_at" ASC, "purchase"."id" ASC',
@@ -229,7 +233,14 @@ describe('StudioSalesService', () => {
 
     const page = await service.listSales(USER_ID, PERSONA_ID, undefined);
 
-    expect(query).toHaveBeenCalledWith(SALES_SQL, [PERSONA_ID, null, null, 31]);
+    expect(query).toHaveBeenCalledWith(SALES_SQL, [
+      PERSONA_ID,
+      null,
+      null,
+      31,
+      USER_ID,
+    ]);
+    expect(SALES_SQL).toContain('"sale_block"');
     expect(SALES_SQL).toContain(`"purchase"."status" = 'confirmed'`);
     expect(SALES_SQL).toContain(
       'ORDER BY "purchase"."decided_at" DESC, "purchase"."id" DESC',
@@ -272,6 +283,7 @@ describe('StudioSalesService', () => {
       lastPageRow?.created_at,
       lastPageRow?.id,
       31,
+      USER_ID,
     ]);
   });
 
@@ -307,6 +319,13 @@ describe('StudioSalesService', () => {
     expect(query).toHaveBeenCalledWith(PENDING_COUNT_SQL, [USER_ID]);
     expect(PENDING_COUNT_SQL).toContain('"subprofile_members"');
     expect(PENDING_COUNT_SQL).toContain(`"purchase"."status" = 'pending'`);
+    // SEC-02: a claim by a buyer blocked with the caller is left out of the
+    // caller's count; a deleted buyer still counts.
+    expect(PENDING_COUNT_SQL).toContain('"sale_block"."blocker_id" = $1::uuid');
+    expect(PENDING_COUNT_SQL).toContain('"sale_block"."blocked_id" = $1::uuid');
+    expect(PENDING_COUNT_SQL).toContain(
+      '"purchase"."buyer_user_id" IS NULL OR NOT EXISTS',
+    );
     expect(isPersonaMember).not.toHaveBeenCalled();
   });
 

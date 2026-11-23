@@ -1,7 +1,10 @@
 import type { Repository } from 'typeorm';
 import type { ModAuditLog } from '../../moderation/entities/mod-audit-log.entity';
 import { MOD_STAFF_ACTIONS, type SourceWindow } from '../platform-log.types';
-import { ModAuditLogSource } from './mod-audit-log.source';
+import {
+  ModAuditLogSource,
+  type ModAuditViewerRule,
+} from './mod-audit-log.source';
 
 type QueryBuilderMethod =
   | 'select'
@@ -68,11 +71,19 @@ const ROW = {
   note: 'Repeated slurs.',
 };
 
-function sourceWith(rows: Record<string, unknown>[] = []) {
+const NO_VIEWER_RULE: ModAuditViewerRule = {
+  auditFeedViewer: () => undefined,
+};
+
+function sourceWith(
+  rows: Record<string, unknown>[] = [],
+  moderation: ModAuditViewerRule = NO_VIEWER_RULE,
+) {
   const queryBuilder = queryBuilderStub(rows);
   const repository = { createQueryBuilder: jest.fn(() => queryBuilder) };
   const source = new ModAuditLogSource(
     repository as unknown as Repository<ModAuditLog>,
+    moderation,
   );
   return { source, queryBuilder, repository };
 }
@@ -188,5 +199,121 @@ describe('ModAuditLogSource creator draft views', () => {
 
   it('lists the action among the staff actions', () => {
     expect(MOD_STAFF_ACTIONS).toContain('creator_draft_viewed');
+  });
+});
+
+describe('ModAuditLogSource for a reported staff member (SEC-31)', () => {
+  const VIEWER_ID = '11111111-1111-4111-8111-111111111111';
+
+  interface ViewerRuleState {
+    viewerIdsAsked: (string | undefined)[];
+    reportIdBatches: string[][];
+  }
+
+  function viewerRule(state: ViewerRuleState): ModAuditViewerRule {
+    return {
+      auditFeedViewer: (actorId) => {
+        state.viewerIdsAsked.push(actorId);
+        if (!actorId) return undefined;
+        return {
+          userId: actorId,
+          reportIdsAboutViewer: (reportIds) => {
+            state.reportIdBatches.push(reportIds);
+            return Promise.resolve(
+              new Set(
+                reportIds.filter((reportId) =>
+                  reportId.startsWith('report-about-viewer'),
+                ),
+              ),
+            );
+          },
+        };
+      },
+    };
+  }
+
+  it('excludes in SQL the rows a report or citation ties to the viewer', async () => {
+    const state: ViewerRuleState = { viewerIdsAsked: [], reportIdBatches: [] };
+    const { source, queryBuilder } = sourceWith([], viewerRule(state));
+    await source.fetch(windowWith({ viewerUserId: VIEWER_ID }));
+
+    expect(state.viewerIdsAsked).toEqual([VIEWER_ID]);
+    expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+      expect.stringContaining('e.targetUserId'),
+      { viewerUserId: VIEWER_ID },
+    );
+    expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+      expect.stringContaining("e.action <> 'evidence_cited'"),
+      { viewerUserId: VIEWER_ID },
+    );
+  });
+
+  it('drops the rows on a report about the viewer and keeps the rest', async () => {
+    const state: ViewerRuleState = { viewerIdsAsked: [], reportIdBatches: [] };
+    const { source } = sourceWith(
+      [
+        { ...ROW, row_id: 'about-viewer', report_id: 'report-about-viewer' },
+        { ...ROW, row_id: 'about-other', report_id: 'report-about-other' },
+        { ...ROW, row_id: 'platform', report_id: null },
+      ],
+      viewerRule(state),
+    );
+    const entries = await source.fetch(windowWith({ viewerUserId: VIEWER_ID }));
+
+    expect(entries.map((entry) => entry.rowId)).toEqual([
+      'about-other',
+      'platform',
+    ]);
+    expect(state.reportIdBatches).toEqual([
+      ['report-about-viewer', 'report-about-other'],
+    ]);
+  });
+
+  it('reads past a full batch that lost rows so the page stays full', async () => {
+    const state: ViewerRuleState = { viewerIdsAsked: [], reportIdBatches: [] };
+    const firstBatch = [
+      { ...ROW, row_id: 'kept-1', report_id: null },
+      {
+        ...ROW,
+        row_id: 'dropped',
+        occurred_at_exact: '2026-10-05T11:00:00.000000Z',
+        report_id: 'report-about-viewer',
+      },
+    ];
+    const secondBatch = [
+      {
+        ...ROW,
+        row_id: 'kept-2',
+        occurred_at_exact: '2026-10-05T10:00:00.000000Z',
+        report_id: null,
+      },
+    ];
+    const { source, queryBuilder } = sourceWith([], viewerRule(state));
+    queryBuilder.getRawMany
+      .mockResolvedValueOnce(firstBatch)
+      .mockResolvedValueOnce(secondBatch);
+
+    const entries = await source.fetch(
+      windowWith({ limit: 1, viewerUserId: VIEWER_ID }),
+    );
+
+    expect(entries.map((entry) => entry.rowId)).toEqual(['kept-1', 'kept-2']);
+    expect(queryBuilder.getRawMany).toHaveBeenCalledTimes(2);
+    // The second read starts after the last raw row of the first.
+    expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+      expect.stringContaining(':platformLogCursorRowId'),
+      {
+        platformLogCursorTime: '2026-10-05T11:00:00.000000Z',
+        platformLogCursorRowId: 'dropped',
+      },
+    );
+  });
+
+  it('reads once and adds no viewer filter when no viewer is given', async () => {
+    const { source, queryBuilder } = sourceWith([ROW]);
+    await source.fetch(windowWith());
+
+    expect(queryBuilder.getRawMany).toHaveBeenCalledTimes(1);
+    expect(conditionsOf(queryBuilder).join(' ')).not.toContain('viewerUserId');
   });
 });

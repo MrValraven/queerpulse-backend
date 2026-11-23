@@ -6,14 +6,20 @@ import {
 } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
+import { unblockToContactException } from '../connections/unblock-to-contact';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
 } from '../connections/connection.events';
 import { ConnectionsService } from '../connections/connections.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { IdentityKind } from '../identities/entities/identity.entity';
 import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Block } from '../social/entities/block.entity';
+import { HiddenFromService } from '../social/hidden-from.service';
+import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { sanitizeMessageBody } from './dto/trim-message-body';
@@ -123,6 +129,10 @@ export async function loadReceivingStaffUserIds(
   );
 }
 
+/** The moderation subject type of a member takedown, as the profile read
+ *  (`ProfilesService.assertNotTakenDown`) checks it. */
+const MEMBER_TAKEDOWN_SUBJECT_TYPE = 'member';
+
 /**
  * Task 18: the mailbox twin of `EnquiryContactability`, from
  * `MessageRequestsService.identityEnquiryContactability`.
@@ -170,7 +180,95 @@ export class MessageRequestsService {
     // ordinary member send path. No cycle: `MessagesService` depends on
     // `MessagingCoreService` only.
     private readonly messagesService: MessagesService,
+    // SEC-19: the profile read's 404 gates, applied to `messageRequest`
+    // (`assertRecipientVisibleOrNotFound`), and the one-way read that names
+    // a block the requester placed (`hasBlocked`). Typed optional so the
+    // specs of other domains that build this service by position keep
+    // compiling; the module always injects all three, and the methods that
+    // read them refuse to run without them.
+    @InjectRepository(Block) private readonly blocks?: Repository<Block>,
+    private readonly hiddenFrom?: HiddenFromService,
+    private readonly contentModeration?: ContentModerationService,
   ) {}
+
+  /**
+   * SEC-19: whether `userId` placed a block on `otherUserId` themselves,
+   * the one block a refusal may name (`unblockToContactException`).
+   * PRD-423: a block placed from inside a matched Go together chat
+   * (`matchedConversationId` set) is left out, as `SocialService
+   * .getBlockStatus` leaves it out, so a guessed slug cannot be tested
+   * against a member blocked by first name. Such a block still answers the
+   * profile read's 404 through `assertRecipientVisibleOrNotFound`.
+   */
+  private async hasBlocked(
+    userId: string,
+    otherUserId: string,
+  ): Promise<boolean> {
+    if (!this.blocks) {
+      throw new Error(
+        'MessageRequestsService cannot read blocks: the Block repository was not injected',
+      );
+    }
+    return this.blocks.exist({
+      where: {
+        blockerId: userId,
+        blockedId: otherUserId,
+        matchedConversationId: IsNull(),
+      },
+    });
+  }
+
+  /**
+   * SEC-19: the profile read's 404 gates (`ProfilesService
+   * .assertVisibleOrNotFound`) for `requesterId` reaching `recipient`, so a
+   * message request tells the requester nothing their profile page does
+   * not. An account that is not active, a block either way (the other
+   * member's, or the requester's own placed inside a matched chat), a
+   * hide from this requester, a live "Hide me for 24 hours" and a moderator
+   * takedown each answer the 404 an unknown handle gives. Run after the
+   * requester's own block, which is named.
+   */
+  private async assertRecipientVisibleOrNotFound(
+    requesterId: string,
+    recipient: Profile,
+  ): Promise<void> {
+    if (!this.hiddenFrom || !this.contentModeration) {
+      throw new Error(
+        'MessageRequestsService cannot check profile visibility: HiddenFromService or ContentModerationService was not injected',
+      );
+    }
+    const recipientUser = await this.users.findOne({
+      where: { id: recipient.userId },
+      select: { id: true, status: true },
+    });
+    if (!recipientUser || recipientUser.status !== UserStatus.Active) {
+      throw new NotFoundException('Member not found');
+    }
+    const takedownSubjectIds = [recipient.slug, recipient.userId];
+    const [isBlockedEitherWay, isHiddenFromRequester, takedownStates] =
+      await Promise.all([
+        this.blockFilter.isBlockedEitherWay(requesterId, recipient.userId),
+        this.hiddenFrom.isHiddenFrom(recipient.userId, requesterId),
+        this.contentModeration.statesFor(
+          MEMBER_TAKEDOWN_SUBJECT_TYPE,
+          takedownSubjectIds,
+        ),
+      ]);
+    const isSelfHidden =
+      !!recipient.hiddenUntil && recipient.hiddenUntil > new Date();
+    const isTakenDown = takedownSubjectIds.some((subjectId) => {
+      const state = takedownStates.get(subjectId);
+      return !!state && (state.hidden || state.removed);
+    });
+    if (
+      isBlockedEitherWay ||
+      isHiddenFromRequester ||
+      isSelfHidden ||
+      isTakenDown
+    ) {
+      throw new NotFoundException('Member not found');
+    }
+  }
 
   /**
    * "Say hello" to a member by handle. Connected pair: the body lands in
@@ -198,9 +296,19 @@ export class MessageRequestsService {
     if (recipient.userId === userId) {
       throw new BadRequestException('You cannot message yourself');
     }
-    if (await this.blockFilter.isBlockedEitherWay(userId, recipient.userId)) {
-      throw new ForbiddenException('You cannot message this member');
+    // SEC-19. A block the requester placed is named first, because they can
+    // lift it (`ConnectionsService.requestConnection` names it the same way).
+    if (await this.hasBlocked(userId, recipient.userId)) {
+      throw unblockToContactException();
     }
+    // SEC-19. Every recipient the profile page answers 404 for (an inactive
+    // account, a block they placed, a block the requester placed inside a
+    // matched chat, a hide, a self-hide, a takedown) answers the same 404
+    // here. A block therefore never reads differently from an
+    // unknown handle, and a member who only accepts requests from connections
+    // answers the same coded 403 (`requestConnection`'s gate) to everyone the
+    // profile page shows them to.
+    await this.assertRecipientVisibleOrNotFound(userId, recipient);
 
     if (await this.connectionsService.areConnected(userId, recipient.userId)) {
       const { conversation } = await this.core.getOrCreateConversation(
@@ -313,8 +421,15 @@ export class MessageRequestsService {
     if (fromUserId === toUserId) {
       throw new BadRequestException('You cannot send an enquiry to yourself');
     }
+    // SEC-19. A block either way is still a hard stop, answered like
+    // `messageRequest`: the sender's own block is named, and a block the
+    // recipient placed, or one placed inside a matched chat (`hasBlocked`),
+    // reads as the profile page's 404.
     if (await this.blockFilter.isBlockedEitherWay(fromUserId, toUserId)) {
-      throw new ForbiddenException('You cannot contact this member');
+      if (await this.hasBlocked(fromUserId, toUserId)) {
+        throw unblockToContactException();
+      }
+      throw new NotFoundException('Member not found');
     }
     // PRD-365: an enquiry skips the daily and open-pending request caps (each
     // enquiry domain keeps its own quota) but still meets the report-driven
@@ -457,6 +572,14 @@ export class MessageRequestsService {
    * enquiry is refused. A person block with SOME staff still delivers while
    * another reachable colleague remains; the blocked seats are left out at
    * read time. Otherwise the coded `IdentityContactRefusal`, or null.
+   *
+   * SEC-02: an UNLINKED persona's mailbox leaves person blocks out of the
+   * "nobody reachable" verdict and counts receiving staff alone. Refusing a
+   * member whose only reachable owner blocked them (or was blocked by them)
+   * answered differently from any other member, which confirmed who runs
+   * the pseudonym. The enquiry delivers, and the blocked seats are still
+   * left out at read time, so a blocked owner never reads it. The member's
+   * own block of the persona (`direct`) still refuses.
    */
   private async identityEnquiryBlockedReason(
     fromUserId: string,
@@ -490,7 +613,39 @@ export class MessageRequestsService {
       this.users,
       unblockedStaffUserIds,
     );
-    return reachableStaffUserIds.length > 0 ? null : 'blocked';
+    if (reachableStaffUserIds.length > 0) {
+      return null;
+    }
+    // Asked only when a person block is what left nobody reachable, so every
+    // other mailbox answers without the extra read.
+    if (
+      blockedStaffUserIds.size > 0 &&
+      (await this.isUnlinkedPersonaMailbox(toIdentityId))
+    ) {
+      const receivingStaffUserIds = await loadReceivingStaffUserIds(
+        this.users,
+        contact.staffUserIds,
+      );
+      return receivingStaffUserIds.length > 0 ? null : 'blocked';
+    }
+    return 'blocked';
+  }
+
+  /** SEC-02: whether `identityId` is the mailbox of an UNLINKED persona. One
+   *  indexed read; a missing identity or persona answers false. */
+  private async isUnlinkedPersonaMailbox(identityId: string): Promise<boolean> {
+    const rows: unknown[] = await this.users.manager.query(
+      `SELECT 1
+         FROM "identities" "identity"
+         JOIN "subprofiles" "persona"
+           ON "persona"."id" = "identity"."subprofile_id"
+        WHERE "identity"."id" = $1
+          AND "identity"."kind" = $2
+          AND "persona"."link_visibility" = $3
+        LIMIT 1`,
+      [identityId, IdentityKind.Subprofile, SubprofileLinkVisibility.Unlinked],
+    );
+    return rows.length > 0;
   }
 
   @OnEvent(CONNECTION_ACCEPTED)

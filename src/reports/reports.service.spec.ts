@@ -221,6 +221,8 @@ describe('ReportsService', () => {
         createdAt: '2026-01-01T00:00:00.000Z',
         slaDueAt: res.slaDueAt,
         acknowledgement: res.acknowledgement,
+        // PRD-510: a new report says it was filed.
+        filing: 'filed',
       });
       expect(typeof res.slaDueAt).toBe('string');
       expect(typeof res.acknowledgement).toBe('string');

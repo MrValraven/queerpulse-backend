@@ -12,6 +12,11 @@ export interface SignInCodeEmail {
   locale: EmailCodeLocale;
   /** `true` sends the create-your-account template, falling back to the sign-in one when unset. */
   isRegistration?: boolean;
+  /**
+   * `true` sends the confirm-your-request template (SEC-10), falling back to
+   * the sign-in one while `RESEND_JOIN_REQUEST_TEMPLATE_ID_*` is unset.
+   */
+  isJoinRequest?: boolean;
   challengeId: string;
 }
 
@@ -55,6 +60,8 @@ export class EmailCodeMailer {
   private readonly templateIdPt: string | undefined;
   private readonly signUpTemplateIdEn: string | undefined;
   private readonly signUpTemplateIdPt: string | undefined;
+  private readonly joinRequestTemplateIdEn: string | undefined;
+  private readonly joinRequestTemplateIdPt: string | undefined;
 
   constructor(config: ConfigService) {
     const apiKey = config.get<string>('email.resendApiKey');
@@ -69,6 +76,12 @@ export class EmailCodeMailer {
     this.templateIdPt = config.get<string>('email.signInTemplateIdPt');
     this.signUpTemplateIdEn = config.get<string>('email.signUpTemplateIdEn');
     this.signUpTemplateIdPt = config.get<string>('email.signUpTemplateIdPt');
+    this.joinRequestTemplateIdEn = config.get<string>(
+      'email.joinRequestTemplateIdEn',
+    );
+    this.joinRequestTemplateIdPt = config.get<string>(
+      'email.joinRequestTemplateIdPt',
+    );
   }
 
   async sendSignInCode(email: SignInCodeEmail): Promise<SignInCodeSendResult> {
@@ -93,7 +106,11 @@ export class EmailCodeMailer {
     const signUpTemplateId = isPortuguese
       ? this.signUpTemplateIdPt
       : this.signUpTemplateIdEn;
+    const joinRequestTemplateId = isPortuguese
+      ? this.joinRequestTemplateIdPt
+      : this.joinRequestTemplateIdEn;
     const templateId =
+      (email.isJoinRequest ? joinRequestTemplateId : undefined) ||
       (email.isRegistration ? signUpTemplateId : undefined) ||
       (isPortuguese ? this.templateIdPt : this.templateIdEn);
     if (!templateId) {

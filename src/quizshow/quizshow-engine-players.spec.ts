@@ -270,9 +270,10 @@ function join(
     .me;
 }
 
-/** What `host:start` leaves behind: a running session at round 0's intro. */
+/** What `host:start` leaves behind: a running session at round 0's intro, with round 0 counted as played. */
 function startGame(state: QuizshowLiveState, now: number): void {
   state.status = 'running';
+  state.wheelProgress.playedRoundIndexes.push(0);
   advanceCursor(state, {
     phase: 'round_intro',
     roundIndex: 0,

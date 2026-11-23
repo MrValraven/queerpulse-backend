@@ -5,9 +5,13 @@ import { IsNull } from 'typeorm';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { ConnectionsService } from '../connections/connections.service';
-import { Connection } from '../connections/entities/connection.entity';
+import {
+  Connection,
+  ConnectionStatus,
+} from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { directoryTierClause } from '../profiles/member-directory.query';
 import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
@@ -301,7 +305,21 @@ describe('MemberSuggestionsService', () => {
           'addressee_id',
         ),
       ).toBe(true);
-      expect(builder.hasPredicateWith('"connections"', 'status')).toBe(false);
+      expect(
+        builder.hasPredicateWith('"__suggestion_connection"', 'status'),
+      ).toBe(false);
+    });
+
+    it('applies the directory visibility-tier rule, so private and unconnected network members are never suggested (PRD-504)', async () => {
+      seedSharedCommunity(['candidate-1']);
+      await service.suggest(VIEWER_ID);
+
+      const builder = candidateBuilder();
+      expect(builder.hasPredicateWith(directoryTierClause())).toBe(true);
+      expect(builder.parameters).toMatchObject({
+        directoryViewerId: VIEWER_ID,
+        directoryAcceptedStatus: ConnectionStatus.Accepted,
+      });
     });
 
     it('excludes anyone the viewer has already dismissed', async () => {

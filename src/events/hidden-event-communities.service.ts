@@ -5,7 +5,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { toImageUrl } from '../common/image-url';
+import { toImageUrlByReference } from '../common/image-url';
+import { communityAvatarPhotoReference } from '../storage/public-media-reference';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { assertCommunityInteriorReadable } from '../communities/community-read-gate';
 import {
@@ -130,7 +131,11 @@ export class HiddenEventCommunitiesService {
     const communityRef = {
       slug: community.slug,
       name: community.name,
-      avatarImageUrl: toImageUrl(community.avatarImageUrl),
+      // SEC-04: the avatar's key names its uploader; render by reference.
+      avatarImageUrl: toImageUrlByReference(
+        community.avatarImageUrl,
+        communityAvatarPhotoReference(community.id),
+      ),
     };
     const existingRow = await this.hiddenCommunities.findOne({
       where: { userId: viewerId, communityId: community.id },

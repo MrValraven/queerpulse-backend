@@ -588,7 +588,9 @@ export class LandlordsService {
       ),
     ];
     if (!submitterIds.length) return new Map();
-    return new MemberLookup(this.profiles).byUserIds(submitterIds);
+    return new MemberLookup(this.profiles).byUserIds(submitterIds, {
+      inactive: 'include',
+    });
   }
 
   async adminCreate(
@@ -752,6 +754,7 @@ export class LandlordsService {
     const authorUserIds = presentActorIds(recs.map((rec) => rec.authorUserId));
     const members = await new MemberLookup(this.profiles).byUserIds(
       authorUserIds,
+      { inactive: 'include' },
     );
     const levels = await this.recLevels(authorUserIds);
     const states = await this.contentModeration.statesFor(
@@ -1031,7 +1034,9 @@ export class LandlordsService {
         ),
       ];
       const requesters = requesterIds.length
-        ? await new MemberLookup(this.profiles).byUserIds(requesterIds)
+        ? await new MemberLookup(this.profiles).byUserIds(requesterIds, {
+            inactive: 'include',
+          })
         : new Map<string, MemberRef>();
       return rows.map((request) =>
         toIntroRequestDTO(
@@ -1113,7 +1118,9 @@ export class LandlordsService {
     const landlordById = await this.landlordsByIds([request.landlordId]);
     const requester = request.userId
       ? ((
-          await new MemberLookup(this.profiles).byUserIds([request.userId])
+          await new MemberLookup(this.profiles).byUserIds([request.userId], {
+            inactive: 'include',
+          })
         ).get(request.userId) ?? null)
       : null;
     return toIntroRequestDTO(

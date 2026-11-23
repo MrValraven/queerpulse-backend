@@ -37,6 +37,7 @@ import { UpdateGroupDto } from '../housing-groups/dto/update-group.dto';
 import { ListGroupJoinRequestsQuery } from '../housing-groups/dto/list-group-join-requests.query';
 import { TriageGroupJoinRequestDto } from '../housing-groups/dto/triage-group-join-request.dto';
 import { HideGroupListingDto } from '../housing-groups/dto/hide-group-listing.dto';
+import { DeleteHousingGroupDto } from '../housing-groups/dto/delete-housing-group.dto';
 
 /**
  * Steward/moderator console for vetted housing groups: manage groups, review
@@ -70,8 +71,11 @@ export class AdminHousingGroupsController {
   @ApiBadRequestResponse({ description: 'Malformed request body.' })
   @ApiConflictResponse({ description: 'Slug already in use.' })
   @Post()
-  createGroup(@Body() dto: CreateHousingGroupDto) {
-    return this.groups.createGroup(dto);
+  createGroup(
+    @Body() dto: CreateHousingGroupDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.groups.createGroup(dto, user.userId);
   }
 
   @ApiOperation({ summary: 'Update a housing group.' })
@@ -82,20 +86,28 @@ export class AdminHousingGroupsController {
   updateGroup(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateGroupDto,
+    @CurrentUser() user: CurrentUserData,
   ) {
-    return this.groups.updateGroup(id, dto);
+    return this.groups.updateGroup(id, dto, user.userId);
   }
 
-  @ApiOperation({ summary: 'Delete a housing group.' })
+  @ApiOperation({
+    summary:
+      'Delete a housing group for good, with its listings and join requests.',
+  })
   @ApiNoContentResponse({ description: 'Group deleted.' })
+  @ApiBadRequestResponse({
+    description: 'Deleting a group needs a reason for the audit trail.',
+  })
   @ApiNotFoundResponse({ description: 'Group not found.' })
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   deleteGroup(
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: DeleteHousingGroupDto,
     @CurrentUser() user: CurrentUserData,
   ) {
-    return this.groups.deleteGroup(id, user.userId);
+    return this.groups.deleteGroup(id, user.userId, dto);
   }
 
   @ApiOperation({

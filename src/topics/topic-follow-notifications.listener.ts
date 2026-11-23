@@ -21,9 +21,11 @@ import { TopicFollow } from './entities/topic-follow.entity';
  *
  * BLOCK/MUTE: applies via `event.authorId` passed as `createForRecipients`'s
  * `actorId` argument, exactly like every other member-driven fan-out
- * (`MentionNotificationService.notify`, `NotificationsListener`). That argument
- * is passed even for a masked author (`event.isAuthorMasked`), whose id stays
- * out of the stored payload so no recipient can see who wrote the thread.
+ * (`MentionNotificationService.notify`, `NotificationsListener`). An official
+ * thread passes it too, with the id kept out of the stored payload. An
+ * anonymous, non-official thread (`event.isAuthorAnonymous`) passes no actor
+ * at all: a follower who blocked or muted the hidden writer would otherwise
+ * be skipped, and a missing notification would confirm who wrote it.
  *
  * PREFERENCE GATING: no dedicated `NotificationPreferenceCategory` exists for
  * "new post in a topic I follow". `CommunityReplies` governs REPLIES to a
@@ -81,8 +83,10 @@ export class TopicFollowNotificationsListener {
           threadTitle: event.threadTitle,
         },
         // Block and mute filtering only; never rendered to a recipient. An
-        // erased author blocks and mutes nobody, so there is nothing to apply.
-        event.authorId ?? undefined,
+        // erased author blocks and mutes nobody, so there is nothing to apply,
+        // and the hidden writer of an anonymous thread is left out so their
+        // blocks and mutes reach no follower.
+        event.isAuthorAnonymous ? undefined : (event.authorId ?? undefined),
       );
     } catch (error) {
       this.logger.warn(`Topic follow notification failed: ${String(error)}`);

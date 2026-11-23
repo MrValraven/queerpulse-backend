@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   Logger,
   NotFoundException,
@@ -14,7 +15,10 @@ import {
   severConnectionForBlock,
 } from '../connections/block-restore';
 import { Connection } from '../connections/entities/connection.entity';
-import { ReportsService } from '../reports/reports.service';
+import {
+  REPORT_FOLLOW_UP_LIMIT_CODE,
+  ReportsService,
+} from '../reports/reports.service';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { BlockOptionsDto } from './dto/block-options.dto';
@@ -44,6 +48,18 @@ import {
 @Injectable()
 export class SocialService {
   private readonly logger = new Logger(SocialService.name);
+
+  /** PRD-510: the coded 409 `ReportsService.create` answers when the
+   *  reporter's open report on the subject is already full. */
+  private static isFollowUpLimitRefusal(error: unknown): boolean {
+    if (!(error instanceof HttpException)) return false;
+    const body = error.getResponse();
+    return (
+      typeof body === 'object' &&
+      body !== null &&
+      Reflect.get(body, 'code') === REPORT_FOLLOW_UP_LIMIT_CODE
+    );
+  }
   private readonly memberLookup: MemberLookup;
 
   constructor(
@@ -72,6 +88,7 @@ export class SocialService {
     return paginate(qb, normalizePage(page), async (rows) => {
       const members = await this.memberLookup.byUserIds(
         rows.map((r) => r.blockedId),
+        { inactive: 'include' },
       );
       return rows.map((r) => toBlockDTO(r, members.get(r.blockedId)));
     });
@@ -208,15 +225,28 @@ export class SocialService {
       // report it always filed. The blocker's free text still rides as
       // `detail` either way, which is where a moderator reads the context the
       // taxonomy cannot carry.
-      await this.reportsService.create(actorId, {
-        subjectType: ReportSubjectType.Member,
-        subjectId: blockedId,
-        reasonCode: dto.reasonCode ?? 'other',
-        detail: dto.reason ?? 'Filed alongside a block.',
-      });
+      try {
+        await this.reportsService.create(actorId, {
+          subjectType: ReportSubjectType.Member,
+          subjectId: blockedId,
+          reasonCode: dto.reasonCode ?? 'other',
+          detail: dto.reason ?? 'Filed alongside a block.',
+        });
+      } catch (error) {
+        // PRD-510: the blocker's open report about this member for this
+        // reason already holds as much as one report can, so the companion
+        // report adds nothing a moderator does not have. The block is
+        // committed above and stands; every other refusal still surfaces.
+        if (!SocialService.isFollowUpLimitRefusal(error)) throw error;
+        this.logger.debug(
+          'block-and-report: the open report already holds all it can; the block stands',
+        );
+      }
     }
 
-    const members = await this.memberLookup.byUserIds([blockedId]);
+    const members = await this.memberLookup.byUserIds([blockedId], {
+      inactive: 'include',
+    });
     return toBlockDTO(row, members.get(blockedId));
   }
 
@@ -334,6 +364,7 @@ export class SocialService {
     return paginate(qb, normalizePage(page), async (rows) => {
       const members = await this.memberLookup.byUserIds(
         rows.map((r) => r.mutedId),
+        { inactive: 'include' },
       );
       return rows.map((r) => toMuteDTO(r, members.get(r.mutedId)));
     });
@@ -354,7 +385,9 @@ export class SocialService {
     const row = await this.mutes.findOneOrFail({
       where: { muterId: actorId, mutedId },
     });
-    const members = await this.memberLookup.byUserIds([mutedId]);
+    const members = await this.memberLookup.byUserIds([mutedId], {
+      inactive: 'include',
+    });
     return toMuteDTO(row, members.get(mutedId));
   }
 

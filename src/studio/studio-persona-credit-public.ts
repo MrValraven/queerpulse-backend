@@ -1,6 +1,6 @@
 import {
   PersonaColumns,
-  notBlockedEitherWaySql,
+  notBlockedWithLinkedCreatorSql,
   personaColumnsFromRow,
   personaColumnsSql,
 } from './studio-discovery-sql';
@@ -29,7 +29,7 @@ import { isStudioCreditRole } from './studio.constants';
  *  playable credited track, so a track still uploading names nobody. */
 const PUBLIC_CREDIT_PREDICATE_SQL = `"credit"."status" = 'accepted'
    AND ${listenablePersonaSql('persona')}
-   AND ${notBlockedEitherWaySql('$1', '"persona"."user_id"', 'credited_block')}`;
+   AND ${notBlockedWithLinkedCreatorSql('$1', 'persona', 'credited_block')}`;
 
 /** `$1` the viewer or null, `$2` the track. */
 export const TRACK_PUBLIC_CREDITS_SQL = `SELECT "credit"."role" AS "role",

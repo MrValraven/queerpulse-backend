@@ -29,7 +29,11 @@ import {
   SubprofileVisibility,
 } from '../subprofiles/entities/subprofile.entity';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from '../subprofiles/subprofile-takedown';
-import { Activity, ActivitySubjectKind } from './entities/activity.entity';
+import {
+  Activity,
+  ActivityKind,
+  ActivitySubjectKind,
+} from './entities/activity.entity';
 
 /**
  * The READ half of the profile activity privacy gate.
@@ -71,6 +75,15 @@ import { Activity, ActivitySubjectKind } from './entities/activity.entity';
  * is left in place with the purge skipped, because the attendee can switch
  * the setting back at any time and the hidden row would still be true the
  * moment they do.
+ *
+ * A "Joined X" row (kind `community`) carries a second gate too (SEC-06): the
+ * community's own `rosterVisible`. A public community that hid its roster
+ * keeps its member list to itself, and a "Joined X" row on each member's
+ * profile would rebuild that list one profile at a time. The row shows to its
+ * owner alone while the roster is hidden, and stays in the table, because the
+ * community can show its roster again and the row is still true. Post rows
+ * ("Posted in X") are untouched: a post in a public community is readable by
+ * anyone and says nothing the community hid.
  *
  * Rows with a null `subjectKind` were written before the subject columns
  * existed. They pass through untouched, which is exactly their previous
@@ -127,14 +140,14 @@ export class ActivityVisibilityService {
     }
     const [
       publicEventSlugs,
-      publicCommunitySlugs,
+      publicCommunities,
       publicPersonaIds,
       publicForumThreadSlugs,
     ] = await Promise.all([
       this.publicEventSlugs([
         ...(idsByKind.get(ActivitySubjectKind.Event) ?? []),
       ]),
-      this.publicCommunitySlugs([
+      this.publicCommunities([
         ...(idsByKind.get(ActivitySubjectKind.Community) ?? []),
       ]),
       this.publicPersonaIds([
@@ -146,7 +159,7 @@ export class ActivityVisibilityService {
     ]);
     const stillPublicByKind: Record<ActivitySubjectKind, Set<string>> = {
       [ActivitySubjectKind.Event]: publicEventSlugs,
-      [ActivitySubjectKind.Community]: publicCommunitySlugs,
+      [ActivitySubjectKind.Community]: publicCommunities.slugs,
       [ActivitySubjectKind.Persona]: publicPersonaIds,
       [ActivitySubjectKind.ForumThread]: publicForumThreadSlugs,
     };
@@ -166,7 +179,37 @@ export class ActivityVisibilityService {
     if (staleRowIds.length) {
       void this.purge(staleRowIds);
     }
-    return this.filterByRsvpVisibility(visible, viewerId);
+    return this.filterByRsvpVisibility(
+      this.filterByRosterVisibility(
+        visible,
+        publicCommunities.rosterHiddenSlugs,
+        viewerId,
+      ),
+      viewerId,
+    );
+  }
+
+  /**
+   * `rows` without the "Joined X" rows whose community hid its roster
+   * (SEC-06), order preserved. The row's owner keeps their own row. Nothing
+   * here is purged: see the class doc.
+   */
+  private filterByRosterVisibility(
+    rows: Activity[],
+    rosterHiddenSlugs: Set<string>,
+    viewerId: string | null,
+  ): Activity[] {
+    if (!rosterHiddenSlugs.size) {
+      return rows;
+    }
+    return rows.filter(
+      (row) =>
+        row.kind !== ActivityKind.Community ||
+        row.subjectKind !== ActivitySubjectKind.Community ||
+        row.subjectId === null ||
+        !rosterHiddenSlugs.has(row.subjectId) ||
+        row.userId === viewerId,
+    );
   }
 
   /**
@@ -338,12 +381,15 @@ export class ActivityVisibilityService {
   }
 
   /** Of `slugs`, the communities that are still top-level, public-tier and
-   *  unarchived. A row recorded for a space before this gate existed drops
-   *  out here at read time: "Posted in X" must never re-surface a space's
-   *  name once the read half re-checks it. */
-  private async publicCommunitySlugs(slugs: string[]): Promise<Set<string>> {
+   *  unarchived, plus which of those hide their roster. A row recorded for a
+   *  space before this gate existed drops out here at read time: "Posted in
+   *  X" must never re-surface a space's name once the read half re-checks it.
+   *  `rosterHiddenSlugs` feeds the "Joined X" gate (SEC-06). */
+  private async publicCommunities(
+    slugs: string[],
+  ): Promise<{ slugs: Set<string>; rosterHiddenSlugs: Set<string> }> {
     if (!slugs.length) {
-      return new Set();
+      return { slugs: new Set(), rosterHiddenSlugs: new Set() };
     }
     const rows = await this.communities.find({
       where: {
@@ -352,9 +398,16 @@ export class ActivityVisibilityService {
         archivedAt: IsNull(),
         ...TOP_LEVEL_WHERE,
       },
-      select: { slug: true },
+      select: { slug: true, rosterVisible: true },
     });
-    return new Set(rows.map((row) => row.slug));
+    return {
+      slugs: new Set(rows.map((row) => row.slug)),
+      rosterHiddenSlugs: new Set(
+        rows
+          .filter((row) => row.rosterVisible === false)
+          .map((row) => row.slug),
+      ),
+    };
   }
 
   /**

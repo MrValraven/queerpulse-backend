@@ -13,6 +13,7 @@ import {
   PlatformJoinRequest,
   PlatformJoinRequestStatus,
 } from './entities/join-request.entity';
+import { MemberLookup } from '../common/member-ref';
 import { InvitesService } from './invites.service';
 import { JoinRequestsService } from './join-requests.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
@@ -1442,9 +1443,9 @@ describe('JoinRequestsService', () => {
       // Three rows, two distinct reviewers, ONE profile query. This is the N+1 that
       // batching exists to prevent.
       expect(profileRepo.find).toHaveBeenCalledTimes(1);
-      expect(profileRepo.find).toHaveBeenCalledWith({
-        where: { userId: In(['reviewer-ana', 'reviewer-luis']) },
-      });
+      expect(profileRepo.find).toHaveBeenCalledWith(
+        MemberLookup.findOptionsFor(['reviewer-ana', 'reviewer-luis']),
+      );
     });
 
     it('leaves the reviewer name off a row whose reviewer was erased, rather than inventing one', async () => {
@@ -1468,7 +1469,7 @@ describe('JoinRequestsService', () => {
 
       expect(rows[0]!.reviewedBy).toBeNull();
       expect(rows[0]).not.toHaveProperty('reviewedByName');
-      // Nothing to look up, so no query is issued at all.
+      // The page names no reviewer, so the profile lookup is skipped.
       expect(profileRepo.find).not.toHaveBeenCalled();
     });
 
@@ -1575,9 +1576,9 @@ describe('JoinRequestsService', () => {
       expect(view.internalNoteUpdatedByName).toBe('Luís Matos');
       // The author resolves in the SAME batched lookup as the reviewer.
       expect(profileRepo.find).toHaveBeenCalledTimes(1);
-      expect(profileRepo.find).toHaveBeenCalledWith({
-        where: { userId: In(['reviewer-ana', 'staff-luis']) },
-      });
+      expect(profileRepo.find).toHaveBeenCalledWith(
+        MemberLookup.findOptionsFor(['reviewer-ana', 'staff-luis']),
+      );
     });
 
     it('clears the text and both stamps when the note is blank', async () => {

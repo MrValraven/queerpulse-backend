@@ -12,6 +12,7 @@ import {
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
@@ -94,6 +95,21 @@ export class HousingDirectoryService {
           AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
       )`,
       { housingSubjectType: HousingDirectoryService.SUBJECT_TYPE },
+    );
+  }
+
+  // SEC-34. A listing whose lister is suspended, banned or deactivated stays
+  // off browse, search and detail. The predicate requires an active owner row,
+  // so a listing with no owner (an erased lister) drops out as well; the
+  // erasure job already marks those homes filled.
+  private excludeInactiveOwners(qb: SelectQueryBuilder<HousingListing>): void {
+    qb.andWhere(
+      `EXISTS (
+        SELECT 1 FROM "users" "owner_user"
+        WHERE "owner_user"."id" = l.owner_id
+          AND "owner_user"."status" = :activeOwnerStatus
+      )`,
+      { activeOwnerStatus: UserStatus.Active },
     );
   }
 
@@ -221,6 +237,7 @@ export class HousingDirectoryService {
     }
 
     this.excludeModeratedListings(qb);
+    this.excludeInactiveOwners(qb);
     if (viewerId !== undefined) {
       // Raw column reference in the DB's snake_case (SnakeNamingStrategy).
       this.blockFilter.excludeHidden(qb, viewerId, '"l"."owner_id"');
@@ -278,6 +295,7 @@ export class HousingDirectoryService {
         { pattern },
       );
     this.excludeModeratedListings(qbSearch);
+    this.excludeInactiveOwners(qbSearch);
     if (viewerId !== undefined) {
       this.blockFilter.excludeHidden(qbSearch, viewerId, '"l"."owner_id"');
     }
@@ -323,6 +341,12 @@ export class HousingDirectoryService {
       throw new NotFoundException('Housing listing not found');
     }
     const listerId = listing.ownerId;
+    // SEC-34: a lister who is no longer active takes their homes off the
+    // public detail too, with the same 404 a takedown gives. The owner skips
+    // the check and keeps reaching their own listing from "My Listings".
+    if (!isOwner && !(await this.isListerActive(listerId))) {
+      throw new NotFoundException('Housing listing not found');
+    }
     // ENG-470: a block either way hides the home entirely, as the same 404 so
     // the response never confirms the listing exists (the flatmate board's
     // `detail` does the same).
@@ -369,6 +393,14 @@ export class HousingDirectoryService {
       false,
       unlockedVia ?? undefined,
     );
+  }
+
+  /** True while the lister's account is active; an erased lister has none. */
+  private async isListerActive(listerId: string | null): Promise<boolean> {
+    if (listerId === null) return false;
+    return this.profiles.exists({
+      where: { userId: listerId, user: { status: UserStatus.Active } },
+    });
   }
 
   /** Which address-privacy gate `viewerId` passes on `listing`, owner first,

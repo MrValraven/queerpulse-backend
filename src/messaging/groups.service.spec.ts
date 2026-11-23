@@ -54,6 +54,8 @@ describe('GroupsService.updateGroup foreign photo ownership (M1)', () => {
     hasUnreadMentionByConversation: jest.Mock;
   };
   let mediaCropService: { getMany: jest.Mock };
+  // SEC-26: the roster's blocked-either-way read.
+  let rosterBlockFilter: { blockedUserIds: jest.Mock };
 
   const makeGroup = (avatarUrl: string | null): Conversation =>
     ({
@@ -92,6 +94,9 @@ describe('GroupsService.updateGroup foreign photo ownership (M1)', () => {
       hasUnreadMentionByConversation: jest.fn().mockResolvedValue(new Map()),
     };
     mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
+    rosterBlockFilter = {
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+    };
 
     service = new GroupsService(
       conversations as unknown as Repository<Conversation>,
@@ -102,7 +107,7 @@ describe('GroupsService.updateGroup foreign photo ownership (M1)', () => {
       {} as never,
       {} as never,
       {} as never,
-      {} as never,
+      rosterBlockFilter as never,
       mediaCropService as never,
       // PRD-364: `PreferencesService`. `toGroupConversationResponse` reads
       // the roster's read-receipt sharing through it on every successful
@@ -137,6 +142,31 @@ describe('GroupsService.updateGroup foreign photo ownership (M1)', () => {
     ).resolves.toBeDefined();
     // Unchanged: no write, no impersonation.
     expect(conversations.save).not.toHaveBeenCalled();
+  });
+
+  it('hands the roster the members blocked either way with the caller (SEC-26)', async () => {
+    const BLOCKED_ID = 'blocked-member';
+    conversations.findOne.mockResolvedValue(makeGroup(FOREIGN_PHOTO));
+    participants.find.mockResolvedValue([
+      { userId: ACTOR_ID, clearedAt: null, leftAt: null },
+      { userId: BLOCKED_ID, clearedAt: null, leftAt: null },
+    ]);
+    rosterBlockFilter.blockedUserIds.mockResolvedValue(new Set([BLOCKED_ID]));
+
+    await service.updateGroup('c1', ACTOR_ID, { avatarUrl: FOREIGN_PHOTO });
+
+    expect(rosterBlockFilter.blockedUserIds).toHaveBeenCalledWith(ACTOR_ID, [
+      ACTOR_ID,
+      BLOCKED_ID,
+    ]);
+    expect(core.buildMemberSummaries).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.any(Map),
+      ACTOR_ID,
+      expect.any(Map),
+      new Set([BLOCKED_ID]),
+      expect.anything(),
+    );
   });
 
   it('rejects an admin introducing a new foreign photo key', async () => {
@@ -193,7 +223,10 @@ describe('GroupsService, section 8 (Groups)', () => {
   let dataSource: { transaction: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let connectionsService: { acceptedConnectionsAmong: jest.Mock };
-  let blockFilter: { blockedAgainstAnyOf: jest.Mock };
+  let blockFilter: {
+    blockedAgainstAnyOf: jest.Mock;
+    blockedUserIds: jest.Mock;
+  };
   let mediaCropService: { getMany: jest.Mock };
   let preferencesService: {
     getMessagingPrivacyForUsers: jest.Mock;
@@ -333,6 +366,8 @@ describe('GroupsService, section 8 (Groups)', () => {
     };
     blockFilter = {
       blockedAgainstAnyOf: jest.fn().mockResolvedValue(new Set<string>()),
+      // SEC-26: the group roster's blocked-either-way read.
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
     mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
     preferencesService = {
@@ -994,6 +1029,55 @@ describe('GroupsService, section 8 (Groups)', () => {
           historyFloorAt: JOIN_FLOOR,
         }),
       ]);
+    });
+
+    // SEC-25 fix round 1: a member seated a second time keeps the first
+    // absence hidden, so the seat load carries the gap columns. `addMembers`
+    // sends a member with a prior row to an invite (PRD-353), so the revive
+    // branch of `seatMembersInTransaction` runs through the Go together seat
+    // path, which this test drives.
+    it('addMatchedMembers raises the clear point past an earlier gap for a member seated a second time', async () => {
+      const firstGapStartedAt = new Date('2026-01-05T00:00:00.000Z');
+      const firstGapEndedAt = new Date('2026-01-10T00:00:00.000Z');
+      const leftAgainAt = new Date('2026-01-20T00:00:00.000Z');
+      conversations.findOne.mockResolvedValue({
+        ...activeGroup(),
+        eventMatchGroupId: 'match-group-1',
+      });
+      participants.find.mockResolvedValue([
+        participantRow({
+          userId: MEMBER_ID,
+          leftAt: leftAgainAt,
+          absenceStartedAt: firstGapStartedAt,
+          absenceEndedAt: firstGapEndedAt,
+        }),
+      ]);
+
+      await service.addMatchedMembers(CONVERSATION_ID, OWNER_ID, [MEMBER_ID]);
+
+      expect(participants.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: {
+            id: true,
+            userId: true,
+            leftAt: true,
+            clearedAt: true,
+            absenceStartedAt: true,
+            absenceEndedAt: true,
+            role: true,
+          },
+        }),
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        ConversationParticipant,
+        { id: `p-${MEMBER_ID}` },
+        expect.objectContaining({
+          clearedAt: firstGapEndedAt,
+          absenceStartedAt: leftAgainAt,
+          absenceEndedAt: JOIN_FLOOR,
+          leftAt: null,
+        }),
+      );
     });
 
     it('addMembers reads the floor inside the seating transaction, before the member_added pill is written', async () => {

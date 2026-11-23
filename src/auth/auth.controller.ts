@@ -39,6 +39,7 @@ import {
   sessionCookieOptsFromConfig,
 } from './auth-cookies';
 import { AuthService, GoogleUserInput } from './auth.service';
+import { clearTrustedRequesterCookie } from './email-code/email-code-trusted-requester';
 import {
   CurrentUser,
   CurrentUserData,
@@ -57,6 +58,7 @@ import {
 } from './socket-ticket.service';
 import { decodeOAuthState } from './oauth-state';
 import {
+  oauthFailureUrl,
   reauthFailureUrl,
   resolvePostLoginRedirect,
   resolveReauthCompletionUrl,
@@ -212,14 +214,17 @@ export class AuthController {
 
     // CSRF / fixation gate: the nonce echoed in `state` must match the one we
     // stored in the httpOnly cookie when the flow began. Reject on missing or
-    // mismatched nonce before trusting anything else in `state`.
+    // mismatched nonce before trusting anything else in `state`. A reauth
+    // attempt lands back on the page it started from (PRD-502); `state` only
+    // picks that same-origin landing here and grants nothing.
     if (
       !state.nonce ||
       typeof cookieNonce !== 'string' ||
       !this.nonceMatches(state.nonce, cookieNonce)
     ) {
       res.redirect(
-        signInErrorUrl(
+        oauthFailureUrl(
+          state,
           this.config.getOrThrow<string>('app.frontendUrl'),
           'invalid_state',
         ),
@@ -249,12 +254,19 @@ export class AuthController {
       const linkedUser = currentSession
         ? await this.usersService.findByGoogleId(profile.googleId)
         : null;
-      if (
-        !currentSession ||
-        !linkedUser ||
-        linkedUser.id !== currentSession.sub
-      ) {
-        res.redirect(reauthFailureUrl(redirect, frontendUrl, 'reauth_failed'));
+      // Two named causes (PRD-502): no live session on this browser to step
+      // up from, or a Google account that is not the one on this member's
+      // account.
+      if (!currentSession) {
+        res.redirect(
+          reauthFailureUrl(redirect, frontendUrl, 'reauth_session_expired'),
+        );
+        return;
+      }
+      if (!linkedUser || linkedUser.id !== currentSession.sub) {
+        res.redirect(
+          reauthFailureUrl(redirect, frontendUrl, 'reauth_account_mismatch'),
+        );
         return;
       }
       const { reauthToken, expiresAt } = await this.authService.mintReauthToken(
@@ -431,6 +443,9 @@ export class AuthController {
     }
     clearAuthCookies(res, this.cookieOpts());
     clearCsrfCookie(res);
+    // SEC-11: a signed-out browser stops counting as a trusted email-code
+    // requester, so a shared device keeps no trace of the address.
+    clearTrustedRequesterCookie(res, this.cookieOpts());
     return { ok: true };
   }
 
@@ -485,6 +500,9 @@ export class AuthController {
     }
     clearAuthCookies(res, this.cookieOpts());
     clearCsrfCookie(res);
+    // SEC-11: a signed-out browser stops counting as a trusted email-code
+    // requester, so a shared device keeps no trace of the address.
+    clearTrustedRequesterCookie(res, this.cookieOpts());
     return { ok: true };
   }
 

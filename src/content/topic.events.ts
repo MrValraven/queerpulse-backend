@@ -27,4 +27,13 @@ export interface TopicPostLinkedEvent {
    * `actorId`, a name, an avatar) and use it for block/mute filtering only.
    */
   isAuthorMasked: boolean;
+  /**
+   * True for an anonymous, non-official thread, whose writer is hidden from
+   * every member. A block or mute keyed on that writer must then change
+   * nothing a recipient receives, so a listener passes no block/mute actor
+   * for it and uses `authorId` only to skip the writer's own follow. An
+   * official thread keeps its staff writer's block and mute filtering, as the
+   * forum list does (`forum-author-filter.ts`).
+   */
+  isAuthorAnonymous: boolean;
 }

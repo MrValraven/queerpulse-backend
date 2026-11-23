@@ -731,18 +731,34 @@ export class UsersService {
   }
 
   /**
-   * Count of members currently holding the Admin role. The shared guard
-   * behind "never leave the platform with zero admins" — used both by
-   * `AdminMembersService.updateRole` (never demote the last admin) and by
-   * `AccountService.deactivate` / `requestDeletion` (never let the last admin
-   * lock themselves out via ordinary member settings).
+   * How many ACTIVE admins there are besides `userId`, read under a row lock.
+   * The guard behind "never leave the platform with zero admins" for an
+   * action that takes `userId` out of the active admins (SEC-35):
+   * `AccountService.deactivate` / `requestDeletion` and
+   * `AdminMembersService.updateRole` (never demote the last admin).
    *
-   * Takes the caller's transaction `manager` rather than this service's own
-   * repository, so the count is read inside the same transaction as the write
-   * it gates — a concurrent action against a different admin can't slip past
-   * a stale count.
+   * Active only: an admin who is deactivated, in deletion grace, suspended or
+   * banned cannot reach any admin surface, so counting them let the last
+   * admin who could act leave as well, with genesis already consumed and
+   * nobody able to reverse it.
+   *
+   * Locked: every active admin row is read `FOR UPDATE` inside the caller's
+   * transaction, in id order. Two admins leaving at the same moment then
+   * queue on the same first row, and the second one re-reads the first one's
+   * committed status and sees it gone. Locking only the OTHER admins would
+   * have each transaction hold the row the other one is about to update, a
+   * deadlock. The id order is what keeps the two lock sequences identical.
    */
-  countAdmins(manager: EntityManager): Promise<number> {
-    return manager.count(User, { where: { role: UserRole.Admin } });
+  async countOtherActiveAdmins(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<number> {
+    const activeAdmins = await manager.find(User, {
+      where: { role: UserRole.Admin, status: UserStatus.Active },
+      select: { id: true },
+      order: { id: 'ASC' },
+      lock: { mode: 'pessimistic_write' },
+    });
+    return activeAdmins.filter((admin) => admin.id !== userId).length;
   }
 }

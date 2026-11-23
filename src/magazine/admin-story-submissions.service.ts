@@ -247,7 +247,9 @@ export class AdminStorySubmissionsService {
         ),
       ),
     ];
-    const refsByUserId = await memberLookup.byUserIds(userIds);
+    const refsByUserId = await memberLookup.byUserIds(userIds, {
+      inactive: 'include',
+    });
 
     const items: AdminStorySubmissionDTO[] = rows.map((submission) =>
       toAdminStorySubmissionDTO(
@@ -353,6 +355,7 @@ export class AdminStorySubmissionsService {
       submission.reopenedBy === null
         ? [submission.userId, actorUserId]
         : [submission.userId, actorUserId, submission.reopenedBy],
+      { inactive: 'include' },
     );
     const submitterRef = refsByUserId.get(submission.userId) ?? null;
     const deciderRef = refsByUserId.get(actorUserId) ?? null;
@@ -620,10 +623,10 @@ export class AdminStorySubmissionsService {
     }
 
     const memberLookup = new MemberLookup(this.profiles);
-    const refsByUserId = await memberLookup.byUserIds([
-      submission.userId,
-      actorUserId,
-    ]);
+    const refsByUserId = await memberLookup.byUserIds(
+      [submission.userId, actorUserId],
+      { inactive: 'include' },
+    );
 
     // The member is told, best-effort and outside any transaction, exactly as
     // the decision itself is. They were rung when the story was declined and

@@ -42,4 +42,29 @@ describe('PushController', () => {
     );
     expect(result).toEqual({ ok: true });
   });
+
+  it('links a new subscription to the caller’s session family (SEC-12)', async () => {
+    const service = makeService();
+    const controller = new PushController(
+      service as unknown as PushService,
+      {} as unknown as PushPreviewPrivacyService,
+    );
+    const dto = {
+      endpoint: 'https://push.example.test/e1',
+      keys: { p256dh: 'k1', auth: 'a1' },
+    };
+
+    await controller.subscribe(
+      { userId: 'user-1', sessionId: 'family-1' } as never,
+      dto,
+      'agent',
+    );
+
+    expect(service.saveSubscription).toHaveBeenCalledWith(
+      'user-1',
+      dto,
+      'agent',
+      'family-1',
+    );
+  });
 });

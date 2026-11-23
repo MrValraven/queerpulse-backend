@@ -15,6 +15,7 @@ import {
 import { isSubprofileUnderTakedown } from '../subprofiles/subprofile-takedown';
 import { SubprofilePost } from './entities/subprofile-post.entity';
 import { personaPostExcerpt } from './persona-post.constants';
+import { personaNotificationActorId } from '../subprofiles/persona-creator-gates';
 
 /** The fan-out bounds `SubprofileUpdatesService` uses: a cap far above any
  *  real audience, one multi-row insert per chunk, three chunks in flight. */
@@ -28,9 +29,10 @@ const POST_ALERT_MAX_CONCURRENT_CHUNKS = 3;
  * persona is published, open, present and clear of a moderator takedown,
  * to its followers minus its own creator and co-owners, through
  * `NotificationsService.createForRecipients` (block, mute and the
- * `persona_follows` preference filtered inside). The persona owner's id is
- * passed for block and mute filtering only; the payload names the persona
- * and never a member. The caller decides the three-a-day throttle.
+ * `persona_follows` preference filtered inside). For a LINKED persona the
+ * owner's id is passed for block and mute filtering only; an unlinked
+ * persona passes none (`personaNotificationActorId`, SEC-02). The payload
+ * names the persona and never a member. The caller decides the three-a-day throttle.
  *
  * Best effort and post-commit: nothing here throws back at the post.
  */
@@ -89,7 +91,8 @@ export class PersonaPostAlertsService {
             chunk,
             NotificationType.PersonaPost,
             payload,
-            persona.userId,
+            // SEC-02: the creator filters a linked persona's alert alone.
+            personaNotificationActorId(persona),
           ),
         );
       }

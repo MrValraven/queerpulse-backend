@@ -796,6 +796,7 @@ export class PartnersService {
   ): Promise<PartnerApplicationDTO> {
     const refs = await new MemberLookup(this.profiles).byUserIds(
       partnerRefUserIds([partner]),
+      { inactive: 'include' },
     );
     return toPartnerApplication(
       partner,
@@ -809,6 +810,7 @@ export class PartnersService {
   ): Promise<PartnerApplicationDTO[]> {
     const refs = await new MemberLookup(this.profiles).byUserIds(
       partnerRefUserIds(partners),
+      { inactive: 'include' },
     );
     return partners.map((partner) =>
       toPartnerApplication(

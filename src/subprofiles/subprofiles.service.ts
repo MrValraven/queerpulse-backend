@@ -1472,6 +1472,10 @@ export class SubprofilesService {
                   salesUnlink.outcome = outcome;
                 },
               );
+              // SEC-07: the re-key restarted `created_at`, and the save below
+              // writes this copy back, so the loaded timestamp must not
+              // overwrite it.
+              sp.createdAt = new Date();
               // T17: every image the named persona showed moves to a fresh
               // persona-scoped key, so no image URL carries the owner's id
               // or matches an image the persona showed while linked.
@@ -1708,6 +1712,12 @@ export class SubprofilesService {
         );
       }
     }
+    // SEC-03: an unlinked persona never credits the member handle of a person
+    // who runs it. Refused with `UNLINKED_PERSONA_OWNER_CREDIT`.
+    await this.credits.assertNoOwnerCreditOnUnlinked(
+      sp,
+      allCollaboratorHandles,
+    );
 
     // Tattoo contract "Flash day event links": a `flash_days` item may link
     // an event only on a linked persona, and only to an event the
@@ -3149,6 +3159,16 @@ export class SubprofilesService {
       new Date(),
       options.hasConfirmedAvailability === true,
     );
+    // SEC-07: the public "updated" stamp on availability would carry the
+    // named persona's exact time into the pseudonymous one, so a save that
+    // performs the unlink restarts a set stamp at the unlink.
+    const isUnlinkingSave =
+      options.hasEditedLinkVisibility &&
+      options.loadedLinkVisibility === SubprofileLinkVisibility.Linked &&
+      sp.linkVisibility === SubprofileLinkVisibility.Unlinked;
+    if (isUnlinkingSave && sp.availabilityUpdatedAt !== null) {
+      sp.availabilityUpdatedAt = new Date();
+    }
     // T17: the avatar and cover are re-homed here, under the row lock and on
     // the link state this save writes, so the copy's registry row commits or
     // rolls back with the save. An unlinked persona shows a member upload

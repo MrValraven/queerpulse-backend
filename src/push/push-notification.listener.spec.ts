@@ -3,7 +3,11 @@ import {
   NotificationType,
 } from '../notifications/entities/notification.entity';
 import { NotificationBatchCreatedEvent } from '../notifications/notification.events';
-import { PushNotificationListener } from './push-notification.listener';
+import { NotificationPushThrottleService } from '../notifications/notification-push-throttle.service';
+import {
+  PUSH_FATIGUE_WINDOW_MS,
+  PushNotificationListener,
+} from './push-notification.listener';
 import { GENERIC_PUSH_COPY } from './generic-push-copy';
 import { PushPayload } from './push.service';
 
@@ -23,6 +27,15 @@ function makeNotification(
     otherActorCount: 0,
     createdAt: NOTIFICATION_CREATED_AT,
   };
+}
+
+/** A throttle that suppresses nobody, for tests about other rules. */
+function passThroughThrottle(): NotificationPushThrottleService {
+  const throttle = new NotificationPushThrottleService();
+  jest
+    .spyOn(throttle, 'allowedRecipients')
+    .mockImplementation((userIds: string[]) => userIds);
+  return throttle;
 }
 
 function build(opts: {
@@ -51,6 +64,9 @@ function build(opts: {
     eventMatchGroupId: string | null;
     isGoTogetherChat?: boolean;
   };
+  // PRD-512: the push fatigue throttle. Absent passes every recipient, so
+  // the tests that emit one subject twice measure only their own rule.
+  pushThrottle?: NotificationPushThrottleService;
 }) {
   const profilesRepo = {
     findOne: jest.fn().mockResolvedValue(opts.actorProfile ?? null),
@@ -132,6 +148,7 @@ function build(opts: {
     pushMessageListener as never,
     conversationsRepo as never,
     notificationRows as never,
+    opts.pushThrottle ?? passThroughThrottle(),
   );
   return {
     listener,
@@ -168,6 +185,77 @@ const ACTOR = {
 };
 
 describe('PushNotificationListener', () => {
+  // PRD-512: one buzz per bundled subject per fatigue window; the in-app row
+  // is never touched here.
+  describe('push fatigue cap', () => {
+    const forumReply = makeNotification(NotificationType.ForumReply, {
+      threadSlug: 'busy-thread',
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('pushes a recipient once per busy thread inside the window', async () => {
+      const { listener, push } = build({
+        actorProfile: ACTOR,
+        pushThrottle: new NotificationPushThrottleService(),
+      });
+
+      await listener.handleNotificationBatchCreated(emit(forumReply));
+      await listener.handleNotificationBatchCreated(emit(forumReply));
+
+      expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    });
+
+    it('pushes again once the window has passed', async () => {
+      jest.useFakeTimers({ now: NOTIFICATION_CREATED_AT });
+      const { listener, push } = build({
+        actorProfile: ACTOR,
+        pushThrottle: new NotificationPushThrottleService(),
+      });
+
+      await listener.handleNotificationBatchCreated(emit(forumReply));
+      jest.setSystemTime(
+        NOTIFICATION_CREATED_AT.getTime() + PUSH_FATIGUE_WINDOW_MS,
+      );
+      await listener.handleNotificationBatchCreated(emit(forumReply));
+
+      expect(push.sendToUsers).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps separate threads apart', async () => {
+      const { listener, push } = build({
+        actorProfile: ACTOR,
+        pushThrottle: new NotificationPushThrottleService(),
+      });
+
+      await listener.handleNotificationBatchCreated(emit(forumReply));
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.ForumReply, {
+            threadSlug: 'another-thread',
+          }),
+        ),
+      );
+
+      expect(push.sendToUsers).toHaveBeenCalledTimes(2);
+    });
+
+    it('never throttles a type with no bundled subject', async () => {
+      const { listener, push } = build({
+        actorProfile: ACTOR,
+        pushThrottle: new NotificationPushThrottleService(),
+      });
+      const request = makeNotification(NotificationType.ConnectionRequest);
+
+      await listener.handleNotificationBatchCreated(emit(request));
+      await listener.handleNotificationBatchCreated(emit(request));
+
+      expect(push.sendToUsers).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('pushes a ConnectionRequest: Connections-gated, correct l10n keys + data.url', async () => {
     const { listener, push, notificationPreferences } = build({
       actorProfile: ACTOR,

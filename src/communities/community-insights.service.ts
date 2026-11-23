@@ -3,6 +3,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, MoreThanOrEqual, Repository } from 'typeorm';
 import { CommunityMembershipService } from './community-membership.service';
 import {
+  visibleMemberSql,
+  visibleMemberUserId,
+} from './community-visible-member';
+import {
   CommunityInsightsResponse,
   CommunityTrendPoint,
   INSIGHTS_TREND_WEEKS,
@@ -131,12 +135,27 @@ export class CommunityInsightsService {
       newMemberWeekRows,
       postWeekRows,
     ] = await Promise.all([
-      this.members.count({ where: { communityId } }),
+      // Every member count here, the trend line included, follows the
+      // roster rule (`visibleMemberUserId`): staff read these numbers beside
+      // the roster, which already leaves out paused, suspended and
+      // self-hidden members, and a total running one ahead of it would point
+      // at whoever stepped away.
       this.members.count({
-        where: { communityId, joinedAt: MoreThanOrEqual(weekAgo) },
+        where: { communityId, userId: visibleMemberUserId() },
       }),
       this.members.count({
-        where: { communityId, joinedAt: MoreThanOrEqual(monthAgo) },
+        where: {
+          communityId,
+          joinedAt: MoreThanOrEqual(weekAgo),
+          userId: visibleMemberUserId(),
+        },
+      }),
+      this.members.count({
+        where: {
+          communityId,
+          joinedAt: MoreThanOrEqual(monthAgo),
+          userId: visibleMemberUserId(),
+        },
       }),
       this.posts.count({ where: { communityId, deletedAt: IsNull() } }),
       this.posts.count({
@@ -183,6 +202,7 @@ export class CommunityInsightsService {
         .addSelect('COUNT(*)', 'count')
         .where('m.community_id = :communityId', { communityId })
         .andWhere('m.joined_at >= :since', { since: trendSince })
+        .andWhere(visibleMemberSql('"m"."user_id"'))
         .groupBy("date_trunc('week', m.joined_at AT TIME ZONE 'UTC')")
         .getRawMany<{ weekStart: string; count: string }>(),
       // TREND, query 2 of 2: posts per ISO week over the same window, same

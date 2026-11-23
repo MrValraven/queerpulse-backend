@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { effectiveCardStatus } from '../membership-cards/card-status';
 import { CardTokenService } from '../membership-cards/card-token.service';
@@ -24,11 +24,20 @@ import {
   CHECK_IN_WAITLISTED,
 } from './event-check-in-codes';
 import {
+  DECREMENT_EVENTS_ATTENDED_SQL,
+  INCREMENT_EVENTS_ATTENDED_SQL,
+} from './event-attendance-tally';
+import {
   EVENT_ATTENDANCE_WINDOW_CLOSED_CODE,
   isAttendanceCleared,
 } from './event-attendance-window';
 import { AttendeeView, toAttendeeView } from './event-response';
-import { EVENT_DOOR_CHANGED, EventDoorChangedEvent } from './event.events';
+import {
+  EVENT_ATTENDEE_CHECKED_IN,
+  EVENT_DOOR_CHANGED,
+  EventAttendeeCheckedInEvent,
+  EventDoorChangedEvent,
+} from './event.events';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event } from './entities/event.entity';
@@ -164,16 +173,22 @@ export class EventCheckInService {
       );
     }
 
-    const didChange = rsvp.checkedInAt === null;
-    if (didChange) {
-      rsvp.checkedInAt = new Date();
-      await this.rsvps.save(rsvp);
-    }
+    // An arrival already stamped keeps its first time and skips the write.
+    const didChange =
+      rsvp.checkedInAt === null &&
+      (await this.recordDoorChange(event, rsvp, targetUserId, 'checked_in'));
     const result = await this.result(event, rsvp, targetUserId);
     // An idempotent repeat changed nothing, so other doors have nothing to
     // learn from it.
     if (didChange) {
       await this.announceDoorChange(event, result.attendee.slug, 'checked_in');
+      // The tally committed with the stamp above, so the badge trigger reads
+      // it fresh.
+      this.eventEmitter.emit(EVENT_ATTENDEE_CHECKED_IN, {
+        eventId: event.id,
+        communityId: event.communityId ?? null,
+        userId: targetUserId,
+      } satisfies EventAttendeeCheckedInEvent);
     }
     return result;
   }
@@ -209,11 +224,11 @@ export class EventCheckInService {
     // sweep has not reached yet and that a host is now forbidden from taking
     // off. Clearing an already-null value is a no-op, so this stays safe and
     // available forever.
-    const didChange = rsvp.checkedInAt !== null;
-    if (didChange) {
-      rsvp.checkedInAt = null;
-      await this.rsvps.save(rsvp);
-    }
+    // An undo of a row the retention sweep already cleared changes no state
+    // and touches no tally.
+    const didChange =
+      rsvp.checkedInAt !== null &&
+      (await this.recordDoorChange(event, rsvp, targetUserId, 'undone'));
     const result = await this.result(event, rsvp, targetUserId);
     if (didChange) {
       await this.announceDoorChange(event, result.attendee.slug, 'undone');
@@ -222,6 +237,55 @@ export class EventCheckInService {
   }
 
   // --- internals ---
+
+  /**
+   * Writes one door change and moves the events attended tally (contract
+   * section 12) in the same transaction.
+   *
+   * The write is a conditional update that matches the row only while it is
+   * still in its starting state (no stamp for a check-in, a stamp for an
+   * undo). Of two simultaneous requests exactly one sees `affected === 1`, so
+   * the tally moves once, and a failed tally statement rolls the stamp back
+   * with it. Returns whether this request made the change, and leaves
+   * `rsvp.checkedInAt` holding the stamp the row now carries for `result()`.
+   */
+  private async recordDoorChange(
+    event: Event,
+    rsvp: EventRsvp,
+    targetUserId: string,
+    change: EventDoorChangedEvent['change'],
+  ): Promise<boolean> {
+    const isCheckIn = change === 'checked_in';
+    const nextCheckedInAt = isCheckIn ? new Date() : null;
+    const hasChanged = await this.rsvps.manager.transaction(async (manager) => {
+      const transactionRsvps = manager.getRepository(EventRsvp);
+      const outcome = await transactionRsvps.update(
+        {
+          id: rsvp.id,
+          checkedInAt: isCheckIn ? IsNull() : Not(IsNull()),
+        },
+        { checkedInAt: nextCheckedInAt },
+      );
+      if (outcome.affected !== 1) {
+        return false;
+      }
+      await transactionRsvps.query(
+        isCheckIn
+          ? INCREMENT_EVENTS_ATTENDED_SQL
+          : DECREMENT_EVENTS_ATTENDED_SQL,
+        [event.id, targetUserId],
+      );
+      return true;
+    });
+    if (hasChanged) {
+      rsvp.checkedInAt = nextCheckedInAt;
+      return true;
+    }
+    // A simultaneous request changed the row first: report what it now holds.
+    const currentRsvp = await this.rsvps.findOne({ where: { id: rsvp.id } });
+    rsvp.checkedInAt = currentRsvp?.checkedInAt ?? null;
+    return false;
+  }
 
   /**
    * Refuse to record an arrival on a gathering whose attendance window has

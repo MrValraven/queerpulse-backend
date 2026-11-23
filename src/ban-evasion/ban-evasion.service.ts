@@ -363,7 +363,9 @@ export class BanEvasionService {
     );
     const communityIds = unique(candidateRows.map((row) => row.communityId));
     const [refsByUserId, communityNameById] = await Promise.all([
-      new MemberLookup(this.profiles).byUserIds(removedUserIds),
+      new MemberLookup(this.profiles).byUserIds(removedUserIds, {
+        inactive: 'include',
+      }),
       this.communityNames(communityIds),
     ]);
 

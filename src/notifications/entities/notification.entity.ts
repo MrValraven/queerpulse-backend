@@ -215,6 +215,26 @@ export enum NotificationType {
   // transferred (including the automatic owner→mod promotion on owner
   // account erasure).
   CommunityOwnershipTransferred = 'community_ownership_transferred',
+  /**
+   * PRD-514. A community's owner (or, on a space, the parent's owner) has
+   * offered this member ownership of it. Nothing moves until the member
+   * accepts. Emitted by `CommunitiesService.offerOwnership`. Actor: the
+   * offering owner (`actorId`). Payload: `{ actorId, source: 'community',
+   * communitySlug, communityName }`. Always delivered, like the other
+   * community governance types. Migration:
+   * CreateCommunityOwnershipOffers1840820000000.
+   */
+  CommunityOwnershipOffered = 'community_ownership_offered',
+  /**
+   * PRD-514. The member offered a community declined it, so ownership stays
+   * where it was. Sent to the owner who made the offer. Emitted by
+   * `CommunitiesService.respondToOwnershipOffer`. Actor: the member who
+   * declined (`actorId`). Payload: `{ actorId, source: 'community',
+   * communitySlug, communityName }`. Always delivered. An accept is told
+   * through `CommunityOwnershipTransferred` (`youAreNowOwner: false`).
+   * Migration: CreateCommunityOwnershipOffers1840820000000.
+   */
+  CommunityOwnershipOfferDeclined = 'community_ownership_offer_declined',
   // Sent to a community's roster when its owner archives it.
   CommunityArchived = 'community_archived',
   // Sent to a community's roster when it is frozen (auto or manual).
@@ -2130,6 +2150,46 @@ export enum NotificationType {
    * See migration `AddCulturalProduction1840600000000`.
    */
   CulturalTaskBatchAssigned = 'cultural_task_batch_assigned',
+
+  /**
+   * Community badges. A member earned one of their community's badges.
+   *
+   * RECIPIENTS: the member who earned the badge.
+   *
+   * ACTOR: none. The row is a system notice, written only for an award caused
+   * by the member's own new activity or by a daily sweep crossing. History
+   * awards (seeding, create, enable, a lowered threshold, the backfill) write
+   * no row.
+   *
+   * PAYLOAD: `{ communitySlug, communityName, badgeId, badgeName, starterKey,
+   * iconKey, tint }`; the bell forwards all of them.
+   *
+   * UNBUNDLED; in-app only, with no push and no email; suppressed only by a
+   * muted community level.
+   *
+   * See migration `AddCommunityBadges1840700000000`.
+   */
+  CommunityBadgeEarned = 'community_badge_earned',
+
+  /**
+   * Community badges. A staff member sent the recipient a gift with a short
+   * note.
+   *
+   * RECIPIENTS: the member the gift is addressed to.
+   *
+   * ACTOR: `senderId`, resolved for the bell. The emit site passes `actorId`,
+   * so a mute of the sender silences the row and a block hides it.
+   *
+   * PAYLOAD: `{ communitySlug, communityName, giftId, giftKey, note,
+   * senderId }`; the bell forwards the community fields, the gift id, the gift
+   * key and the note.
+   *
+   * UNBUNDLED; in-app only, with no push and no email; suppressed only by a
+   * muted community level.
+   *
+   * See migration `AddCommunityBadges1840700000000`.
+   */
+  CommunityGiftReceived = 'community_gift_received',
 }
 
 @Entity('notifications')

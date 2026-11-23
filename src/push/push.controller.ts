@@ -64,7 +64,15 @@ export class PushController {
     @Body() dto: PushSubscribeDto,
     @Headers('user-agent') userAgent?: string,
   ): Promise<{ ok: true }> {
-    await this.pushService.saveSubscription(user.userId, dto, userAgent);
+    // SEC-12: `sessionId` is the access token's `sid`, the refresh-token
+    // family id of this device's session. Linking the row to it is what lets
+    // signing that session out remove this device's subscription.
+    await this.pushService.saveSubscription(
+      user.userId,
+      dto,
+      userAgent,
+      user.sessionId,
+    );
     return { ok: true };
   }
 

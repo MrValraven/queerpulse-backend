@@ -236,7 +236,7 @@ export interface ProfileRelations {
  * trust cue, computed per read because it is viewer-relative and therefore
  * never a column.
  *
- * `null` means "no answer", and there are exactly two reasons for it, both
+ * `null` means "no answer", and there are exactly three reasons for it, all
  * deliberate:
  *  - the viewer IS the member (mutual vouchers with yourself is not a
  *    question), and
@@ -251,6 +251,9 @@ export interface ProfileRelations {
  *    names. The toggle itself stays off every card (see ProfileCard), so no
  *    list response can enumerate who hid their roster; the frontend reads a
  *    non-owner's hidden roster off this `null`.
+ *  - the member turned on "Keep my trust network private" (`privateNetwork`,
+ *    SEC-17), which hides the roster from every other member for the same
+ *    reason.
  *
  * `0` therefore always means the real answer is zero.
  */
@@ -513,8 +516,10 @@ export function toMemberCard(
   // scope renders no band rather than an invented one.
   activityBand: ActivityBand | null = null,
 ): MemberCard {
-  // The directory lists every member (§8), but only `open` profiles expose
-  // location/openTo on the card — `network`/`private` keep them blank here,
+  // The directory lists `open` members to everyone, a `network` member to
+  // their direct connections and a `private` member to themself alone
+  // (PRD-504, `directoryTierClause`). Only `open` profiles expose
+  // location/openTo on the card; `network`/`private` keep them blank here,
   // mirroring toLimitedProfile so the card can't leak what the profile detail
   // deliberately hides. `hood` is derived from `location` and follows the
   // same gate for the same reason. Layered with the `hoodVisible` member

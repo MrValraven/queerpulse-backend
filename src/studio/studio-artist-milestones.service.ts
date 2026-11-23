@@ -11,7 +11,7 @@ import {
   toStudioMilestone,
 } from './studio-milestones';
 import { StudioOwnershipService } from './studio-ownership.service';
-import { blockedWithAnyPersonaMemberSql } from './studio-persona-members';
+import { blockedWithAnyLinkedPersonaMemberSql } from './studio-persona-members';
 import { StudioArtistPersona, toStudioArtistRef } from './studio-response';
 import { isStudioArtistPersonaKind, studioError } from './studio.constants';
 import { listenablePersonaSql } from './studio-visibility';
@@ -131,7 +131,7 @@ export class StudioArtistMilestonesService {
       .where('"persona"."id" = :subprofileId', { subprofileId })
       .andWhere(listenablePersonaSql('persona'))
       .andWhere(
-        `NOT ${blockedWithAnyPersonaMemberSql(':viewerId', '"persona"."id"')}`,
+        `NOT ${blockedWithAnyLinkedPersonaMemberSql(':viewerId', '"persona"."id"')}`,
         { viewerId },
       )
       .getOne();

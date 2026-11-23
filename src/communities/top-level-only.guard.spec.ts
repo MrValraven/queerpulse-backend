@@ -25,9 +25,12 @@ const EXPECTED_COUNTS: Record<
   string,
   { helperUses: number; communityQuerySites: number }
 > = {
+  // Three sites belong to ownership offers and read communities by id: the
+  // offer inbox loads the communities its offers name (a space's offer
+  // belongs there too), and accepting or making an offer locks the one row.
   'communities/communities.service.ts': {
     helperUses: 5,
-    communityQuerySites: 10,
+    communityQuerySites: 13,
   },
   'landing/landing.service.ts': { helperUses: 1, communityQuerySites: 1 },
   'member-suggestions/member-suggestions.service.ts': {

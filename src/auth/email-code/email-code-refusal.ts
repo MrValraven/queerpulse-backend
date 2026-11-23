@@ -14,6 +14,7 @@ export type EmailCodeReason =
   | 'code_used_up'
   | 'code_replaced'
   | 'code_already_used'
+  // Retired (SEC-11): the service no longer sends it; kept for old clients.
   | 'too_many_attempts'
   | 'account_recovery_review'
   | 'name_required';

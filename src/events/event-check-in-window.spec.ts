@@ -34,7 +34,12 @@ describe('EventCheckInService attendance window', () => {
 
   let events: { findOne: jest.Mock };
   let cohosts: { exists: jest.Mock; find: jest.Mock };
-  let rsvps: { findOne: jest.Mock; save: jest.Mock };
+  let rsvps: {
+    findOne: jest.Mock;
+    update: jest.Mock;
+    query: jest.Mock;
+    manager: { transaction: jest.Mock };
+  };
   let profiles: { findOne: jest.Mock };
   let cardTokens: { verify: jest.Mock };
   let eventsService: { rosterCounts: jest.Mock };
@@ -72,7 +77,14 @@ describe('EventCheckInService attendance window', () => {
     };
     rsvps = {
       findOne: jest.fn().mockResolvedValue(goingRsvp()),
-      save: jest.fn((row: EventRsvp) => Promise.resolve(row)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      query: jest.fn().mockResolvedValue([]),
+      manager: {
+        transaction: jest.fn(
+          (work: (manager: { getRepository: () => unknown }) => unknown) =>
+            work({ getRepository: () => rsvps }),
+        ),
+      },
     };
     profiles = {
       findOne: jest.fn().mockResolvedValue({ userId: MEMBER_ID, slug: 'mara' }),
@@ -112,9 +124,12 @@ describe('EventCheckInService attendance window', () => {
     it('records an arrival inside the window', async () => {
       events.findOne.mockResolvedValue(gatheringEndedDaysAgo(0));
       await service.checkIn('past-supper', HOST_ID, { memberSlug: 'mara' });
-      expect(rsvps.save).toHaveBeenCalledTimes(1);
-      const saved = rsvps.save.mock.calls[0] as [EventRsvp];
-      expect(saved[0].checkedInAt).toBeInstanceOf(Date);
+      expect(rsvps.update).toHaveBeenCalledTimes(1);
+      const [, changes] = rsvps.update.mock.calls[0] as [
+        unknown,
+        Partial<EventRsvp>,
+      ];
+      expect(changes.checkedInAt).toBeInstanceOf(Date);
     });
 
     it('refuses past the window, and writes nothing', async () => {
@@ -124,7 +139,7 @@ describe('EventCheckInService attendance window', () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
       // The whole point: no fresh `checked_in_at` is created on a row the
       // sweep has already cleared.
-      expect(rsvps.save).not.toHaveBeenCalled();
+      expect(rsvps.update).not.toHaveBeenCalled();
     });
 
     it('carries the machine-readable code a client branches on', async () => {
@@ -145,7 +160,7 @@ describe('EventCheckInService attendance window', () => {
       await expect(
         service.checkIn('past-supper', HOST_ID, { cardToken: 'card-abc' }),
       ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(rsvps.save).not.toHaveBeenCalled();
+      expect(rsvps.update).not.toHaveBeenCalled();
     });
 
     it('refuses before resolving who is being checked in', async () => {
@@ -181,7 +196,7 @@ describe('EventCheckInService attendance window', () => {
         startAt: new Date(Date.now() - 30 * DAY_MS),
       });
       await service.checkIn('past-supper', HOST_ID, { memberSlug: 'mara' });
-      expect(rsvps.save).toHaveBeenCalledTimes(1);
+      expect(rsvps.update).toHaveBeenCalledTimes(1);
     });
 
     it('refuses one millisecond past it', async () => {
@@ -202,7 +217,7 @@ describe('EventCheckInService attendance window', () => {
         endAt: new Date(Date.now() - 1 * DAY_MS),
       });
       await service.checkIn('past-supper', HOST_ID, { memberSlug: 'mara' });
-      expect(rsvps.save).toHaveBeenCalledTimes(1);
+      expect(rsvps.update).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -216,9 +231,12 @@ describe('EventCheckInService attendance window', () => {
 
       await service.undoCheckIn('past-supper', HOST_ID, 'mara');
 
-      expect(rsvps.save).toHaveBeenCalledTimes(1);
-      const saved = rsvps.save.mock.calls[0] as [EventRsvp];
-      expect(saved[0].checkedInAt).toBeNull();
+      expect(rsvps.update).toHaveBeenCalledTimes(1);
+      const [, changes] = rsvps.update.mock.calls[0] as [
+        unknown,
+        Partial<EventRsvp>,
+      ];
+      expect(changes.checkedInAt).toBeNull();
     });
 
     it('is a harmless no-op past the window when nothing is stamped', async () => {
@@ -228,14 +246,14 @@ describe('EventCheckInService attendance window', () => {
       await expect(
         service.undoCheckIn('past-supper', HOST_ID, 'mara'),
       ).resolves.toBeDefined();
-      expect(rsvps.save).not.toHaveBeenCalled();
+      expect(rsvps.update).not.toHaveBeenCalled();
     });
 
     it('still works inside the window', async () => {
       events.findOne.mockResolvedValue(gatheringEndedDaysAgo(1));
       rsvps.findOne.mockResolvedValue(goingRsvp(new Date()));
       await service.undoCheckIn('past-supper', HOST_ID, 'mara');
-      expect(rsvps.save).toHaveBeenCalledTimes(1);
+      expect(rsvps.update).toHaveBeenCalledTimes(1);
     });
   });
 });

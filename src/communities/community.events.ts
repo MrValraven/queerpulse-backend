@@ -39,3 +39,17 @@ export interface CommunityMemberLeftEvent {
   communityId: string;
   userId: string;
 }
+
+export const COMMUNITY_REPLY_CREATED = 'community.reply_created';
+
+/**
+ * Emitted after a reply row saves inside a community: a reply on the nested
+ * route, or a flat reply whose post has a community. Feeds community badge
+ * evaluation.
+ */
+export interface CommunityReplyCreatedEvent {
+  communityId: string;
+  authorId: string;
+  postId: string;
+  replyId: string;
+}

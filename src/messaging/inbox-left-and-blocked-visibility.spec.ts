@@ -2,7 +2,7 @@ import { ConversationKind } from './entities/conversation.entity';
 import { MessageKind } from './entities/message.entity';
 import {
   notFromBlockedGroupMemberPredicate,
-  notPastViewerLeftAtPredicate,
+  withinViewerMembershipPredicate,
   withinLeftAtCeilingPredicate,
 } from './message-visibility-predicates';
 import { MessagingCoreService } from './messaging-core.service';
@@ -96,21 +96,6 @@ describe('the shared visibility predicates', () => {
     );
   });
 
-  it("ceilings a builder with no seat join through the viewer's own seat", () => {
-    const fragment = normaliseSql(
-      notPastViewerLeftAtPredicate('m', ':viewerId'),
-    );
-    expect(fragment.startsWith('NOT EXISTS')).toBe(true);
-    expect(fragment).toContain(
-      '"left_seat"."conversation_id" = m.conversation_id',
-    );
-    expect(fragment).toContain('"left_seat"."user_id" = :viewerId');
-    expect(fragment).toContain('"left_seat"."left_at" IS NOT NULL');
-    // Strictly after: a message at the exact instant the member left stays
-    // theirs, matching the inclusive `<=` the joined form and history use.
-    expect(fragment).toContain('m.created_at > "left_seat"."left_at"');
-  });
-
   it('hides a blocked sender either way, in group threads alone, and keeps system pills', () => {
     const fragment = normaliseSql(
       notFromBlockedGroupMemberPredicate('m', ':viewerId'),
@@ -151,7 +136,7 @@ describe('the shared visibility predicates', () => {
 });
 
 describe('the inbox preview (lastMessagesByConversation)', () => {
-  it("stops at the viewer's own leftAt, bound to the viewer", async () => {
+  it("stops at the viewer's own leftAt and skips their absence gap, bound to the viewer", async () => {
     const { query, clauses, parameters } = makeRecordingQuery([]);
 
     await makeCore(query).lastMessagesByConversation(
@@ -160,7 +145,7 @@ describe('the inbox preview (lastMessagesByConversation)', () => {
     );
 
     expect(clauses).toContain(
-      normaliseSql(notPastViewerLeftAtPredicate('m', ':hiddenForUserId')),
+      normaliseSql(withinViewerMembershipPredicate('m', ':hiddenForUserId')),
     );
     expect(parameters.hiddenForUserId).toBe(VIEWER_ID);
   });

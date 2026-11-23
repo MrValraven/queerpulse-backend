@@ -98,6 +98,8 @@ describe('CommunityPreferencesService community existence gate', () => {
     rulesAcceptedAt: null,
     rulesVersionAccepted: null,
     welcomeSeenAt: null,
+    wornBadgeId: null,
+    eventsAttendedCount: 0,
   };
 
   beforeEach(async () => {

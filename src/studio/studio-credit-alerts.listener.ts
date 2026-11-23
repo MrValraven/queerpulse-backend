@@ -11,6 +11,7 @@ import {
   StudioCreditRequestedEvent,
 } from './studio-persona-credit.events';
 import { listenablePersonaSql } from './studio-visibility';
+import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
 
 /** The persona names fall back to the handle when the display name is
  *  blank, so the payload always carries a name the push can print. */
@@ -32,6 +33,8 @@ export const CREDIT_ALERT_SQL = `SELECT "credit"."id" AS "credit_id",
        "requesting"."id" AS "requesting_subprofile_id",
        ${personaNameSql('requesting')} AS "requesting_persona_name",
        "requesting"."handle" AS "requesting_persona_handle",
+       "requesting"."link_visibility"::text AS "requesting_link_visibility",
+       "credited"."link_visibility"::text AS "credited_link_visibility",
        "track"."id" AS "track_id",
        "track"."title" AS "track_title",
        "release"."id" AS "release_id",
@@ -64,6 +67,10 @@ interface CreditAlertRow {
   requesting_subprofile_id: string;
   requesting_persona_name: string;
   requesting_persona_handle: string;
+  /** SEC-02: the link state of each persona, so an unlinked acting persona
+   *  passes no member to filter against. */
+  requesting_link_visibility: string;
+  credited_link_visibility: string;
   track_id: string;
   track_title: string;
   release_id: string;
@@ -71,10 +78,13 @@ interface CreditAlertRow {
 }
 
 /**
- * Studio discovery: the two credit notifications. The acting member's id
- * reaches `createForRecipients` for the block and mute filter only, so a
- * request that a block silences is stored and reaches nobody the block
- * covers, while the payload names personas alone. Push rides the batch
+ * Studio discovery: the two credit notifications. When the acting persona
+ * is LINKED, the acting member's id reaches `createForRecipients` for the
+ * block and mute filter only, so a request that a block silences is stored
+ * and reaches nobody the block covers. An unlinked acting persona passes no
+ * member (`actingMemberFilterId`, SEC-02): a request or acceptance that
+ * vanished on a block would test who runs it. The payload names personas
+ * alone. Push rides the batch
  * event, behind the `Personas` category and quiet hours.
  *
  * Best effort and post-commit: the write has already happened, so nothing
@@ -121,7 +131,10 @@ export class StudioCreditAlertsListener {
           releaseTitle: credit.release_title,
           role: credit.role,
         },
-        event.requestingUserId,
+        actingMemberFilterId(
+          credit.requesting_link_visibility,
+          event.requestingUserId,
+        ),
       );
     } catch (error) {
       this.logger.warn(
@@ -159,7 +172,10 @@ export class StudioCreditAlertsListener {
           releaseTitle: credit.release_title,
           role: credit.role,
         },
-        event.acceptingUserId,
+        actingMemberFilterId(
+          credit.credited_link_visibility,
+          event.acceptingUserId,
+        ),
       );
     } catch (error) {
       this.logger.warn(
@@ -189,4 +205,15 @@ export class StudioCreditAlertsListener {
     );
     return rows.map((row) => row.user_id);
   }
+}
+
+/** The acting member a credit alert is block- and mute-filtered against: the
+ *  member behind a LINKED acting persona, none for an unlinked one (SEC-02). */
+function actingMemberFilterId(
+  actingPersonaLinkVisibility: string,
+  actingUserId: string,
+): string | undefined {
+  return actingPersonaLinkVisibility === String(SubprofileLinkVisibility.Linked)
+    ? actingUserId
+    : undefined;
 }

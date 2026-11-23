@@ -5,6 +5,11 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+  USER_SESSION_REVOKED,
+  UserSessionRevokedEvent,
+} from '../chat/session.events';
 import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -98,6 +103,22 @@ export const INVITE_ACCESS_CHANGED_ACTION = 'invite_access_changed';
 
 /** The `filter: 'new'` window on `list()` — "joined in the last week". */
 const NEW_MEMBER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The audit action the trust-network inspector's Cite writes
+ *  (`AdminMemberModerationService.citeMember`). SEC-31 keeps it off the cited
+ *  member's own page. */
+const EVIDENCE_CITED_ACTION = 'evidence_cited';
+
+/**
+ * SEC-30: the staff grants a live socket is admitted by. Revoking one drops
+ * the member's sockets so the handshake re-reads the grants: the magazine
+ * desk presence gateway admits `magazine_editor`, the VJ gateway admits
+ * `vj_operator`.
+ */
+const SOCKET_GATING_STAFF_ROLES: readonly StaffRoleId[] = [
+  'magazine_editor',
+  'vj_operator',
+];
 
 /** The `note` detail on each `music_event_cohost_removed` row written when a
  *  member's house Music co-host seats end because they became house staff:
@@ -220,9 +241,21 @@ export class AdminMembersService {
     // PRD-372: moderators and admins answer the QueerPulse Team mailbox, so a
     // role change re-seats it (`OfficialMailboxSeatsService.resyncStaff`).
     private readonly officialMailboxSeats: OfficialMailboxSeatsService,
+    // SEC-30: a revoked staff role drops the member's live sockets, so a
+    // role-gated gateway (the magazine desk, VJ) re-checks them at once.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async list(query: ListAdminMembersQuery): Promise<AdminMemberListDTO> {
+  /**
+   * One page of the roster. `viewerUserId` is the staff member reading it
+   * (always passed by the controller). SEC-31: their own row carries a null
+   * `openReportCount`, so the roster never tells them how many reports about
+   * them are open, the same count `getMember` withholds on their own page.
+   */
+  async list(
+    query: ListAdminMembersQuery,
+    viewerUserId?: string,
+  ): Promise<AdminMemberListDTO> {
     const page = query.page && query.page > 0 ? query.page : 1;
 
     const profileQueryBuilder = this.profiles
@@ -294,7 +327,10 @@ export class AdminMembersService {
           joinedAt: profileRow.joinedAt,
         },
         role: roleByUserId.get(profileRow.userId) ?? UserRole.Member,
-        openReportCount: openReportCountByUserId.get(profileRow.userId) ?? 0,
+        openReportCount:
+          profileRow.userId === viewerUserId
+            ? null
+            : (openReportCountByUserId.get(profileRow.userId) ?? 0),
         communities: communityNamesByUserId.get(profileRow.userId) ?? [],
         vouchCount: vouchCountsByUserId.get(profileRow.userId) ?? 0,
         vouchedBy: topVouchersByVouchee.get(profileRow.userId) ?? [],
@@ -445,7 +481,13 @@ export class AdminMembersService {
       );
   }
 
-  async listFlagged(): Promise<FlaggedMemberDTO[]> {
+  /**
+   * `viewerUserId` is the staff member reading the queue (always passed by
+   * `AdminMembersController.listFlagged`). SEC-31: their own row is left out,
+   * since it carries the reports about them (reason, latest detail, count);
+   * every other staff member still sees it.
+   */
+  async listFlagged(viewerUserId?: string): Promise<FlaggedMemberDTO[]> {
     const [openMemberReports, suspendedUsers] = await Promise.all([
       // Both scans are bounded (BE-COM-36): neither carried a `take`, so the
       // flagged tab read every open member report and every suspended account
@@ -477,7 +519,7 @@ export class AdminMembersService {
 
     const flaggedUserIds = [
       ...new Set([...reportsByOwnerUserId.keys(), ...suspendedUserIds]),
-    ];
+    ].filter((flaggedUserId) => flaggedUserId !== viewerUserId);
     if (!flaggedUserIds.length) return [];
 
     const profilesForFlaggedMembers = await this.profiles.find({
@@ -524,7 +566,18 @@ export class AdminMembersService {
     });
   }
 
-  async getMember(idOrSlug: string): Promise<AdminMemberDetailDTO> {
+  /**
+   * `viewerUserId` is the staff member opening the page (always passed by
+   * `AdminMembersController.getMember`). SEC-31: when it is the member on the
+   * page, the reports about them and the audit rows tied to those reports are
+   * left out, so a reported staff member reads none of the case being built
+   * about them; report-less rows (role and staff-role changes, citations)
+   * stay. Every other staff member sees the page in full.
+   */
+  async getMember(
+    idOrSlug: string,
+    viewerUserId?: string,
+  ): Promise<AdminMemberDetailDTO> {
     const where = UUID_RE.test(idOrSlug)
       ? [{ slug: idOrSlug }, { userId: idOrSlug }]
       : [{ slug: idOrSlug }];
@@ -612,12 +665,17 @@ export class AdminMembersService {
       }),
     ]);
 
-    const openReportCount = memberReports.filter(
+    // SEC-31: see this method's doc comment.
+    const isViewerTheMember =
+      viewerUserId !== undefined && viewerUserId === profile.userId;
+    const visibleMemberReports = isViewerTheMember ? [] : memberReports;
+
+    const openReportCount = visibleMemberReports.filter(
       (report) =>
         report.status === ReportStatus.Open ||
         report.status === ReportStatus.Escalated,
     ).length;
-    const reportIds = memberReports.map((report) => report.id);
+    const reportIds = visibleMemberReports.map((report) => report.id);
 
     const [
       reportScopedAuditLogEntries,
@@ -650,8 +708,14 @@ export class AdminMembersService {
         },
         order: { createdAt: 'ASC' },
       }),
-      memberLookup.byUserIds(vouchersReceived.map((vouch) => vouch.voucherId)),
-      memberLookup.byUserIds(vouchesGiven.map((vouch) => vouch.voucheeId)),
+      memberLookup.byUserIds(
+        vouchersReceived.map((vouch) => vouch.voucherId),
+        { inactive: 'include' },
+      ),
+      memberLookup.byUserIds(
+        vouchesGiven.map((vouch) => vouch.voucheeId),
+        { inactive: 'include' },
+      ),
     ]);
     // Both queries above can match the SAME row, so the id de-dupe below is
     // load-bearing. Since ENG-480 a sanction decided on a report also carries
@@ -662,9 +726,21 @@ export class AdminMembersService {
     // before ENG-480 carry no target and only surface through a `member`
     // report, as before.
     const auditLogEntriesById = new Map<string, ModAuditLog>();
+    // SEC-31: a target-scoped row that came from a report (a sanction decided
+    // on one) is part of that report's case, so it is left out for the member
+    // themselves along with the report-scoped rows.
+    // A citation (`evidence_cited`) is report-less and still evidence
+    // gathered against them, so it is left out the same way.
+    const visibleTargetScopedAuditLogEntries = isViewerTheMember
+      ? targetScopedAuditLogEntries.filter(
+          (auditLogEntry) =>
+            auditLogEntry.reportId === null &&
+            auditLogEntry.action !== EVIDENCE_CITED_ACTION,
+        )
+      : targetScopedAuditLogEntries;
     for (const auditLogEntry of [
       ...reportScopedAuditLogEntries,
-      ...targetScopedAuditLogEntries,
+      ...visibleTargetScopedAuditLogEntries,
     ]) {
       auditLogEntriesById.set(auditLogEntry.id, auditLogEntry);
     }
@@ -677,7 +753,9 @@ export class AdminMembersService {
           .filter((actorId): actorId is string => actorId !== null),
       ),
     ];
-    const actorRefsByUserId = await memberLookup.byUserIds(actorUserIds);
+    const actorRefsByUserId = await memberLookup.byUserIds(actorUserIds, {
+      inactive: 'include',
+    });
 
     const communities = communityRows.map((communityRow) => ({
       name: communityRow.name,
@@ -716,7 +794,9 @@ export class AdminMembersService {
         reportId: null,
       });
     }
-    if (openReportCount === 0) {
+    // SEC-31: on their own page the count is withheld, so "no reports"
+    // would be a claim the page cannot make; the row is left off.
+    if (openReportCount === 0 && !isViewerTheMember) {
       // Not a historical event (there is no "at" the platform recorded) —
       // stamped with the moment this detail view was built, purely so it can
       // slot into the same chronological timeline as everything else.
@@ -867,6 +947,7 @@ export class AdminMembersService {
     }
 
     let hasRoleChanged = false;
+    let isDemotionFromStaffTier = false;
     const appliedRole = await this.dataSource.transaction(async (manager) => {
       const users = manager.getRepository(User);
       const targetUser = await users.findOne({
@@ -885,17 +966,24 @@ export class AdminMembersService {
 
       const previousRole = targetUser.role;
       hasRoleChanged = previousRole !== targetRole;
+      isDemotionFromStaffTier =
+        (previousRole === UserRole.Admin && targetRole !== UserRole.Admin) ||
+        (previousRole === UserRole.Moderator && targetRole === UserRole.Member);
       if (previousRole === targetRole) {
         // Nothing changed — return without writing an audit row for a no-op.
         return previousRole;
       }
 
       // Demoting an admin: never let the final admin lose the role, or the
-      // platform is locked out of every admin surface. Counted inside the
-      // transaction so a concurrent demotion can't slip past a stale count.
+      // platform is locked out of every admin surface. SEC-35: what has to
+      // remain is another ACTIVE admin, since an admin in deletion grace,
+      // deactivated or suspended reaches no admin surface. Counted inside the
+      // transaction under a lock on every active admin row, so two demotions
+      // at the same moment queue and the second sees the first.
       if (previousRole === UserRole.Admin && targetRole !== UserRole.Admin) {
-        const adminCount = await this.usersService.countAdmins(manager);
-        if (adminCount <= 1) {
+        const otherActiveAdmins =
+          await this.usersService.countOtherActiveAdmins(manager, targetUserId);
+        if (otherActiveAdmins === 0) {
           throw new ConflictException(
             'This is the last admin — promote another member to admin before removing this one.',
           );
@@ -951,6 +1039,17 @@ export class AdminMembersService {
 
       return targetRole;
     });
+
+    // SEC-30: after the commit, a member moved down out of Admin or Moderator
+    // loses every live socket a gateway admitted by that role (the magazine
+    // desk admits an Admin, VJ and the lockdown rule read the role too). No
+    // `sessionId`, so every session stays signed in and each socket's
+    // reconnect handshake re-reads the new role. Emitted before the best
+    // effort steps below, so a failure there cannot skip it.
+    if (isDemotionFromStaffTier) {
+      const revokedEvent: UserSessionRevokedEvent = { userId: targetUserId };
+      this.eventEmitter.emit(USER_SESSION_REVOKED, revokedEvent);
+    }
 
     // ENG-457: the admin tier opens the ambassadors admin routes, so an admin
     // may hold a staff seat in the ambassadors circle. Any non-admin outcome
@@ -1185,6 +1284,7 @@ export class AdminMembersService {
     const profile = await this.resolveMemberProfile(idOrSlug);
     const targetUserId = profile.userId;
 
+    let hasRevokedGrant = false;
     const staffRoleList = await this.dataSource.transaction(async (manager) => {
       const users = manager.getRepository(User);
       const targetUser = await users.findOne({
@@ -1208,6 +1308,7 @@ export class AdminMembersService {
         role,
       });
       if (deleteResult.affected) {
+        hasRevokedGrant = true;
         const auditLogs = manager.getRepository(ModAuditLog);
         await auditLogs.save(
           auditLogs.create({
@@ -1249,6 +1350,17 @@ export class AdminMembersService {
       });
       return holdings.map((holding) => holding.role);
     });
+
+    // SEC-30: after the commit, a revoked grant that admits a live socket
+    // (`SOCKET_GATING_STAFF_ROLES`: the magazine desk, VJ) drops every live
+    // socket of the member, and each reconnect handshake re-reads the
+    // grants. No `sessionId`, so no socket is told it was signed out and the
+    // member's sessions stay signed in. Emitted before the seat release
+    // below, so a failure there cannot skip it. A no-op revoke emits nothing.
+    if (hasRevokedGrant && SOCKET_GATING_STAFF_ROLES.includes(role)) {
+      const revokedEvent: UserSessionRevokedEvent = { userId: targetUserId };
+      this.eventEmitter.emit(USER_SESSION_REVOKED, revokedEvent);
+    }
 
     // ENG-457: the `partnerships` grant earns a staff seat in the ambassadors
     // circle, so losing it gives the seat up (an admin keeps it). Runs after
@@ -1542,7 +1654,9 @@ export class AdminMembersService {
       ),
     ];
     const memberLookup = new MemberLookup(this.profiles);
-    const voucherRefsByUserId = await memberLookup.byUserIds(voucherIds);
+    const voucherRefsByUserId = await memberLookup.byUserIds(voucherIds, {
+      inactive: 'include',
+    });
 
     for (const [voucheeId, vouchRowsForVouchee] of vouchRowsByVouchee) {
       const vouchAvatars: VouchAvatarDTO[] = [];

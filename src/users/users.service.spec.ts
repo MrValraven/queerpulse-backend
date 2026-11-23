@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EntityManager, IsNull, Not } from 'typeorm';
 import { Profile } from './entities/profile.entity';
-import { User, UserStatus } from './entities/user.entity';
+import { User, UserRole, UserStatus } from './entities/user.entity';
 import { UsersService } from './users.service';
 import {
   PolicyAcceptance,
@@ -711,5 +711,77 @@ describe('UsersService', () => {
       expect(harness.lockedUsersRepo.update).not.toHaveBeenCalled();
       expect(harness.transactionManager.insert).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('UsersService.countOtherActiveAdmins (SEC-35)', () => {
+  interface AdminReadManager {
+    find: jest.Mock<Promise<Array<Pick<User, 'id'>>>, [unknown, unknown]>;
+  }
+
+  async function buildService(): Promise<UsersService> {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UsersService,
+        { provide: getRepositoryToken(User), useValue: {} },
+        { provide: getRepositoryToken(Profile), useValue: {} },
+      ],
+    }).compile();
+    return module.get(UsersService);
+  }
+
+  it('reads only active admins, locked in id order, inside the caller’s transaction', async () => {
+    const service = await buildService();
+    const manager: AdminReadManager = {
+      find: jest
+        .fn<Promise<Array<Pick<User, 'id'>>>, [unknown, unknown]>()
+        .mockResolvedValue([{ id: 'admin-a' }, { id: 'admin-b' }]),
+    };
+
+    await service.countOtherActiveAdmins(
+      manager as unknown as EntityManager,
+      'admin-a',
+    );
+
+    expect(manager.find).toHaveBeenCalledWith(User, {
+      where: { role: UserRole.Admin, status: UserStatus.Active },
+      select: { id: true },
+      order: { id: 'ASC' },
+      lock: { mode: 'pessimistic_write' },
+    });
+  });
+
+  it('leaves the caller out of the count', async () => {
+    const service = await buildService();
+    const manager: AdminReadManager = {
+      find: jest
+        .fn<Promise<Array<Pick<User, 'id'>>>, [unknown, unknown]>()
+        .mockResolvedValue([{ id: 'admin-a' }, { id: 'admin-b' }]),
+    };
+
+    await expect(
+      service.countOtherActiveAdmins(
+        manager as unknown as EntityManager,
+        'admin-a',
+      ),
+    ).resolves.toBe(1);
+  });
+
+  it('answers zero when the only other admin row is not active (deletion grace)', async () => {
+    // The admin in deletion grace is `deactivated`, so the active-only read
+    // returns the caller alone.
+    const service = await buildService();
+    const manager: AdminReadManager = {
+      find: jest
+        .fn<Promise<Array<Pick<User, 'id'>>>, [unknown, unknown]>()
+        .mockResolvedValue([{ id: 'admin-a' }]),
+    };
+
+    await expect(
+      service.countOtherActiveAdmins(
+        manager as unknown as EntityManager,
+        'admin-a',
+      ),
+    ).resolves.toBe(0);
   });
 });

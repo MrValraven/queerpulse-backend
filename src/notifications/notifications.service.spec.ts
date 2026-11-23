@@ -32,6 +32,7 @@ describe('NotificationsService', () => {
     create: jest.Mock;
     save: jest.Mock;
     find: jest.Mock;
+    findOne: jest.Mock;
     update: jest.Mock;
     delete: jest.Mock;
     count: jest.Mock;
@@ -51,6 +52,9 @@ describe('NotificationsService', () => {
       create: jest.fn((value: unknown) => value),
       save: jest.fn((value: unknown) => value),
       find: jest.fn().mockResolvedValue([]),
+      // The single-create bundle lookup: no unread row to absorb into, so a
+      // bundleable type writes a fresh row.
+      findOne: jest.fn().mockResolvedValue(null),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       count: jest.fn().mockResolvedValue(0),
@@ -318,6 +322,23 @@ describe('NotificationsService', () => {
       expect(result).toBeNull();
       expect(repo.save).not.toHaveBeenCalled();
       expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('skips the gate for a masked actor, so a block cannot reveal who wrote an anonymous thread', async () => {
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+      blockFilter.isMutedBy.mockResolvedValue(true);
+
+      const result = await service.create(
+        'u1',
+        NotificationType.ForumThreadReply,
+        { source: 'forum', threadSlug: 'hello', isActorMasked: true },
+        'u2',
+      );
+
+      expect(result).not.toBeNull();
+      expect(repo.save).toHaveBeenCalledTimes(1);
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+      expect(blockFilter.isMutedBy).not.toHaveBeenCalled();
     });
 
     it('writes nothing when the recipient has muted the actor', async () => {

@@ -7,10 +7,13 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, In, QueryFailedError } from 'typeorm';
+import { DataSource, In, IsNull, QueryFailedError } from 'typeorm';
 import { Notification } from '../notifications/entities/notification.entity';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Block } from '../social/entities/block.entity';
+import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { CONNECTION_ACCEPTED } from './connection.events';
@@ -61,6 +64,9 @@ describe('ConnectionsService', () => {
   };
   let emitter: { emit: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
+  let blocks: { exist: jest.Mock };
+  let hiddenFrom: { isHiddenFrom: jest.Mock };
+  let contentModeration: { statesFor: jest.Mock };
   let notifications: { find: jest.Mock };
   let memberPreferences: { find: jest.Mock };
   let manager: {
@@ -178,6 +184,10 @@ describe('ConnectionsService', () => {
     };
     emitter = { emit: jest.fn() };
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
+    blocks = { exist: jest.fn().mockResolvedValue(false) };
+    hiddenFrom = { isHiddenFrom: jest.fn().mockResolvedValue(false) };
+    // An empty map = no takedown on file for anyone.
+    contentModeration = { statesFor: jest.fn().mockResolvedValue(new Map()) };
     notifications = { find: jest.fn().mockResolvedValue([]) };
     // No rows = sharing on for everyone (the platform default), so a test
     // that doesn't care about PRD-344's read signal doesn't have to stub this.
@@ -203,6 +213,9 @@ describe('ConnectionsService', () => {
         { provide: VouchService, useValue: vouchService },
         { provide: EventEmitter2, useValue: emitter },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: getRepositoryToken(Block), useValue: blocks },
+        { provide: HiddenFromService, useValue: hiddenFrom },
+        { provide: ContentModerationService, useValue: contentModeration },
         { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
@@ -316,22 +329,139 @@ describe('ConnectionsService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('rejects a non-active target (§8)', async () => {
+    it('answers 404 for a non-active target like the profile read (SEC-19)', async () => {
       profiles.findOne.mockResolvedValue(
         targetProfile({ user: { status: UserStatus.Suspended } }),
       );
       await expect(
         service.requestConnection('me', 'them'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(connections.save).not.toHaveBeenCalled();
     });
 
-    it('rejects when either party has blocked the other (spec §2)', async () => {
+    it('answers a block by the other member with the profile 404 (SEC-19)', async () => {
       profiles.findOne.mockResolvedValue(targetProfile());
       blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      blocks.exist.mockResolvedValueOnce(false);
+      connections.findOne.mockResolvedValue(null);
       await expect(
         service.requestConnection('me', 'them'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toMatchObject({
+        status: 404,
+        response: { message: 'Member not found' },
+      });
       expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('answers a block the requester placed with the coded unblock 409, with no pair row (SEC-19)', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      blocks.exist.mockResolvedValueOnce(true);
+      connections.findOne.mockResolvedValue(null);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: {
+          code: 'UNBLOCK_TO_CONTACT',
+          message: 'Unblock this member before sending a request',
+        },
+      });
+      // A plain block only (PRD-423): a matched-chat block stays unnamed.
+      expect(blocks.exist).toHaveBeenCalledWith({
+        where: {
+          blockerId: 'me',
+          blockedId: 'them',
+          matchedConversationId: IsNull(),
+        },
+      });
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it("names the requester's own block ahead of the inactive-account 404 (SEC-19)", async () => {
+      profiles.findOne.mockResolvedValue(
+        targetProfile({ user: { status: UserStatus.Suspended } }),
+      );
+      blocks.exist.mockResolvedValueOnce(true);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'UNBLOCK_TO_CONTACT' },
+      });
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it("answers the profile 404 for the requester's own matched-chat block (PRD-423, SEC-19)", async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      // The plain-block read finds nothing (the only block row carries a
+      // matched conversation), while the either-way read still sees it.
+      blocks.exist.mockResolvedValueOnce(false);
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      connections.findOne.mockResolvedValue(null);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        status: 404,
+        response: { message: 'Member not found' },
+      });
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('answers 404 to a member the target hid their profile from (SEC-19)', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      hiddenFrom.isHiddenFrom.mockResolvedValueOnce(true);
+      connections.findOne.mockResolvedValue(null);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        status: 404,
+        response: { message: 'Member not found' },
+      });
+      expect(hiddenFrom.isHiddenFrom).toHaveBeenCalledWith('them', 'me');
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('answers 404 while the target is inside a live self-hide (SEC-19)', async () => {
+      profiles.findOne.mockResolvedValue(
+        targetProfile({ hiddenUntil: new Date(Date.now() + 60 * 60 * 1000) }),
+      );
+      connections.findOne.mockResolvedValue(null);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        status: 404,
+        response: { message: 'Member not found' },
+      });
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a request through once a self-hide has lapsed (SEC-19)', async () => {
+      profiles.findOne.mockResolvedValue(
+        targetProfile({ hiddenUntil: new Date(Date.now() - 60 * 1000) }),
+      );
+      connections.findOne.mockResolvedValue(null);
+      const result = await service.requestConnection('me', 'them');
+      expect(result.status).toBe(ConnectionStatus.Pending);
+    });
+
+    it('answers 404 for a target a moderator took down (SEC-19)', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      contentModeration.statesFor.mockResolvedValueOnce(
+        new Map([['them', { hidden: true, removed: false }]]),
+      );
+      connections.findOne.mockResolvedValue(null);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        status: 404,
+        response: { message: 'Member not found' },
+      });
+      expect(contentModeration.statesFor).toHaveBeenCalledWith('member', [
+        'them',
+        'them',
+      ]);
       expect(connections.save).not.toHaveBeenCalled();
     });
 
@@ -402,15 +532,18 @@ describe('ConnectionsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('allows and flags a private-visibility request (§8)', async () => {
+    it('refuses a new request to a private-visibility member (PRD-506)', async () => {
       profiles.findOne.mockResolvedValue(
         targetProfile({ visibility: ProfileVisibility.Private }),
       );
       connections.findOne.mockResolvedValue(null);
-      const result = await service.requestConnection('me', 'them');
-      expect(result.status).toBe(ConnectionStatus.Pending);
-      expect(result.flagged).toBe(true);
-      expect(result.introducedBy).toBeNull();
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        status: 403,
+        response: { code: 'RECIPIENT_NOT_ACCEPTING_REQUESTS' },
+      });
+      expect(connections.save).not.toHaveBeenCalled();
     });
 
     it('emits CONNECTION_REQUESTED with introducedBy for an introduced request', async () => {
@@ -457,7 +590,7 @@ describe('ConnectionsService', () => {
       expect(result.respondedAt).toBeNull();
     });
 
-    it('does not disclose that the other member blocked you (indistinguishable 409)', async () => {
+    it('answers a legacy blocked row the other member placed with the profile 404 (SEC-19)', async () => {
       profiles.findOne.mockResolvedValue(targetProfile());
       connections.findOne.mockResolvedValue({
         id: 'c1',
@@ -467,7 +600,8 @@ describe('ConnectionsService', () => {
       await expect(
         service.requestConnection('me', 'them'),
       ).rejects.toMatchObject({
-        response: { message: 'A request is already pending' },
+        status: 404,
+        response: { message: 'Member not found' },
       });
     });
 
@@ -481,7 +615,11 @@ describe('ConnectionsService', () => {
       await expect(
         service.requestConnection('me', 'them'),
       ).rejects.toMatchObject({
-        response: { message: 'Unblock this member before sending a request' },
+        status: 409,
+        response: {
+          code: 'UNBLOCK_TO_CONTACT',
+          message: 'Unblock this member before sending a request',
+        },
       });
     });
 
@@ -532,15 +670,15 @@ describe('ConnectionsService', () => {
       expect(connections.save).not.toHaveBeenCalled();
     });
 
-    it('phrases the refusal exactly like a block, revealing nothing new', async () => {
+    it('phrases the refusal exactly like a pending request, revealing nothing new', async () => {
       profiles.findOne.mockResolvedValue(targetProfile());
       connections.findOne.mockResolvedValue(declinedPair());
       connectionDeclines.findOne.mockResolvedValue(
         declineRecord(2, daysAgo(1)),
       );
 
-      // The same string `requestConnection` returns when the OTHER member has
-      // blocked you, so a cooldown, a cap and a block are one answer.
+      // The same string `requestConnection` returns for a request still
+      // waiting, so a cooldown, a cap and a pending request are one answer.
       await expect(
         service.requestConnection('me', 'them'),
       ).rejects.toMatchObject({

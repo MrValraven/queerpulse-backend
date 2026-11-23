@@ -1,14 +1,27 @@
 import {
   CallHandler,
   ExecutionContext,
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NestInterceptor,
+  Optional,
 } from '@nestjs/common';
 import { Request } from 'express';
-import { Observable } from 'rxjs';
+import { Observable, from, mergeMap } from 'rxjs';
+import { DataSource } from 'typeorm';
 import { codedErrorBody, PLATFORM_ERROR_CODE } from '../common/coded-error';
-import { storageKeyFromImageUrl } from '../common/image-url';
+import {
+  filesUrlOrNull,
+  publicMediaReferenceFromImageUrl,
+  storageKeyFromImageUrl,
+} from '../common/image-url';
+import {
+  PublicMediaReference,
+  parsePublicMediaReference,
+} from './public-media-reference';
+import { findPublicMediaReferenceValues } from './public-media-reference-route';
+import { UPLOAD_ERROR_CODE } from './upload-error-codes';
 import {
   allowsPersonaScopedKeys,
   allowsSharedUploads,
@@ -70,9 +83,49 @@ const UPLOAD_NOT_YOURS_BODY = codedErrorBody(
 // the intended end state: the service compares against the entity's currently
 // stored value and allows a foreign key only when it is unchanged.
 //
+// 3. RESOLVE public media references (SEC-01 / SEC-04). A public read renders a
+//    forum, listing or review photo by an opaque reference
+//    (`<apiBaseUrl>/files/listing-reviews/<reviewId>/photo` and its siblings,
+//    see `public-media-reference.ts`), and an edit form seeded from that read
+//    (a reviewer editing their own review) sends it back. Before the walk
+//    above, each such value is looked up server-side and rewritten IN PLACE to
+//    the bare storage key the row holds, which then meets the ownership rule
+//    as a BARE key: the shared-upload allowance does not apply, so a
+//    reference resolves only to the requester's own upload and can never be
+//    used to learn, or attach, somebody else's key. A reference that names
+//    nothing is refused like a foreign key. A body that carries no reference
+//    costs no query and is checked synchronously, exactly as before.
+//
 // Guards run before interceptors (see `app.module.ts`), so `request.user` is
 // already populated here when a route is authenticated.
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+// The most public media references one body may carry. A real edit form
+// carries at most a listing gallery (12) plus its cover and shop items, so 32
+// is headroom; past it the body is refused with a code before any lookup.
+export const MAX_PUBLIC_MEDIA_REFERENCES_PER_BODY = 32;
+
+const TOO_MANY_REFERENCES_BODY = codedErrorBody(
+  UPLOAD_ERROR_CODE.UPLOAD_TOO_MANY_REFERENCES,
+  'Request body references too many photos to verify',
+);
+
+// The only routes where a public media reference is rewritten to its
+// resolved `/files/<key>` URL, which the walk then treats with the route's
+// shared-upload allowance: the two listing photo framing saves, whose service
+// accepts a photo only when it is already in that listing's gallery
+// (`ListingsService.savePhotoFraming`) and echoes the gallery on the owner
+// wire. Every other route, shared or not, gets the bare key under the strict
+// owner rule, so a reference can never hand back somebody else's key.
+const REFERENCE_URL_REWRITE_HANDLERS: ReadonlySet<string> = new Set([
+  'ListingsController.updatePhotoFraming',
+  'AdminListingsController.updatePhotoFraming',
+]);
+
+// The reference kinds a framing save addresses: a listing's gallery photos
+// and its own cover.
+const REFERENCE_URL_REWRITE_KINDS: ReadonlySet<PublicMediaReference['kind']> =
+  new Set(['listing-gallery-photo', 'listing-cover-photo']);
 
 // Bodies nest at most a few levels deep in every real DTO in this codebase
 // (the deepest today is `CreateJobDto.company.work[].imageUrl`, four levels —
@@ -102,6 +155,10 @@ interface UploadAllowances {
 
 @Injectable()
 export class StorageKeyOwnershipInterceptor implements NestInterceptor {
+  // Optional so a spec can build the interceptor bare; without it a body that
+  // carries a public media reference is refused (nothing can resolve it).
+  constructor(@Optional() private readonly dataSource?: DataSource) {}
+
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     // HTTP only — a WebSocket message has no `request.body` to walk.
     if (context.getType() !== 'http') {
@@ -146,22 +203,185 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       vjKeys: allowsVjKeys(controllerName, handlerName),
     };
 
-    if (typeof body === 'string') {
-      // A top-level string body can't be rewritten in place (nothing owns the
-      // reference), but it is still ownership-checked. `inspectString`'s
-      // normalized result is discarded here — a foreign key throws in either
-      // form.
-      this.inspectString(body, requesterUserId, allowances);
-    } else if (typeof body === 'object') {
-      this.normalizeAndAssert(
-        body as BodyContainer,
-        requesterUserId,
-        allowances,
-        new Set(),
-      );
-    }
+    const walkBody = (): void => {
+      if (typeof body === 'string') {
+        // A top-level string body can't be rewritten in place (nothing owns
+        // the reference), but it is still ownership-checked.
+        // `inspectString`'s normalized result is discarded here: a foreign
+        // key throws in either form.
+        this.inspectString(body, requesterUserId, allowances);
+      } else if (typeof body === 'object') {
+        this.normalizeAndAssert(
+          body as BodyContainer,
+          requesterUserId,
+          allowances,
+          new Set(),
+        );
+      }
+    };
 
-    return next.handle();
+    // A top-level string body is never an edit form, so only an object body
+    // is searched for public media references.
+    const references =
+      typeof body === 'object'
+        ? this.collectPublicMediaReferences(body as BodyContainer)
+        : new Set<string>();
+    if (references.size === 0) {
+      walkBody();
+      return next.handle();
+    }
+    // Nobody can own an upload without a session, so a reference from a
+    // signed-out caller is refused before any lookup runs.
+    if (!requesterUserId) {
+      throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
+    }
+    if (references.size > MAX_PUBLIC_MEDIA_REFERENCES_PER_BODY) {
+      throw new BadRequestException(TOO_MANY_REFERENCES_BODY);
+    }
+    return from(
+      this.resolvePublicMediaReferences(
+        body as BodyContainer,
+        references,
+        controllerName !== undefined &&
+          handlerName !== undefined &&
+          REFERENCE_URL_REWRITE_HANDLERS.has(
+            `${controllerName}.${handlerName}`,
+          ),
+      ),
+    ).pipe(
+      mergeMap(() => {
+        walkBody();
+        return next.handle();
+      }),
+    );
+  }
+
+  // Every string in the body that is a public media reference, in either
+  // form. Bounded by the same depth cap as the walk; anything deeper is left
+  // for that walk, which refuses the body outright. Collection stops one past
+  // the per-body cap, which is enough for the caller to refuse the body.
+  private collectPublicMediaReferences(
+    container: BodyContainer,
+    found = new Set<string>(),
+    visited = new Set<object>(),
+    depth = 0,
+  ): Set<string> {
+    if (depth > MAX_TRAVERSAL_DEPTH || visited.has(container)) {
+      return found;
+    }
+    visited.add(container);
+    const values = Array.isArray(container)
+      ? container
+      : Object.values(container);
+    for (const value of values) {
+      if (found.size > MAX_PUBLIC_MEDIA_REFERENCES_PER_BODY) {
+        return found;
+      }
+      if (typeof value === 'string') {
+        if (publicMediaReferenceFromImageUrl(value) !== null) {
+          found.add(value);
+        }
+      } else if (value !== null && typeof value === 'object') {
+        this.collectPublicMediaReferences(
+          value as BodyContainer,
+          found,
+          visited,
+          depth + 1,
+        );
+      }
+    }
+    return found;
+  }
+
+  // Looks every collected reference up, one query per table, and rewrites it
+  // in place to the stored value it names. A reference that names no member
+  // storage key (a missing row, an empty slot, an external URL) is refused
+  // with the ownership code, as a foreign key is.
+  //
+  // On a `REFERENCE_URL_REWRITE_HANDLERS` route, a listing gallery or cover
+  // reference is rewritten to the resolved `/files/<key>` URL, the form a
+  // read rendered before references existed, so the walk gives it that
+  // route's shared-upload allowance: a co-manager or an admin repositioning a
+  // photo the owner uploaded still saves, and the service keeps its own check
+  // that the photo is already in the listing's gallery. Every other
+  // reference, on every other route, becomes the bare key, which the walk
+  // holds to the requester's own uploads (a foreign one is a 403).
+  private async resolvePublicMediaReferences(
+    body: BodyContainer,
+    references: Set<string>,
+    isFramingRoute: boolean,
+  ): Promise<void> {
+    if (!this.dataSource) {
+      throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
+    }
+    const values = [...references];
+    const parsed: PublicMediaReference[] = [];
+    for (const value of values) {
+      const reference = parsePublicMediaReference(
+        publicMediaReferenceFromImageUrl(value) ?? '',
+      );
+      if (!reference) {
+        throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
+      }
+      parsed.push(reference);
+    }
+    const storedValues = await findPublicMediaReferenceValues(
+      this.dataSource,
+      parsed,
+    );
+    const storedValueByReference = new Map<string, string>();
+    values.forEach((value, index) => {
+      const storedValue = storedValues[index];
+      if (!storedValue || storageKeyOwnerId(storedValue) === null) {
+        throw new ForbiddenException(UPLOAD_NOT_YOURS_BODY);
+      }
+      const isFramedListingPhoto =
+        isFramingRoute && REFERENCE_URL_REWRITE_KINDS.has(parsed[index]!.kind);
+      storedValueByReference.set(
+        value,
+        (isFramedListingPhoto ? filesUrlOrNull(storedValue) : null) ??
+          storedValue,
+      );
+    });
+    this.replaceStrings(body, storedValueByReference, new Set(), 0);
+  }
+
+  // Rewrites, in place, every string child that is one of the collected
+  // references (the keys of `replacements`). Any other string is left
+  // exactly as it arrived.
+  private replaceStrings(
+    container: BodyContainer,
+    replacements: Map<string, string>,
+    visited: Set<object>,
+    depth: number,
+  ): void {
+    if (depth > MAX_TRAVERSAL_DEPTH || visited.has(container)) {
+      return;
+    }
+    visited.add(container);
+    const rewrite = (value: unknown): unknown => {
+      if (typeof value === 'string' && replacements.has(value)) {
+        return replacements.get(value);
+      }
+      if (value !== null && typeof value === 'object') {
+        this.replaceStrings(
+          value as BodyContainer,
+          replacements,
+          visited,
+          depth + 1,
+        );
+      }
+      return value;
+    };
+    if (Array.isArray(container)) {
+      for (let index = 0; index < container.length; index += 1) {
+        container[index] = rewrite(container[index]);
+      }
+      return;
+    }
+    for (const key of Object.keys(container)) {
+      container[key] = rewrite(container[key]);
+    }
   }
 
   // Normalizes one string: our own `<apiBaseUrl>/files/<key>` URL → the bare

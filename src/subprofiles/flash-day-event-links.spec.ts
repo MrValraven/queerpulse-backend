@@ -9,6 +9,7 @@ describe('flash day event links', () => {
   describe('toFlashDayEventRef', () => {
     it('maps an event to exactly the eight public fields', () => {
       const eventRow = {
+        id: 'event-1',
         slug: 'flash-day-arroios',
         title: 'Flash Day at Arroios',
         startAt: new Date('2026-11-14T11:00:00.000Z'),
@@ -53,6 +54,7 @@ describe('flash day event links', () => {
 
     it('maps a missing end, venue, neighbourhood and cover to null', () => {
       const ref = toFlashDayEventRef({
+        id: 'event-2',
         slug: 'online-flash-day',
         title: 'Online Flash Day',
         startAt: new Date('2026-12-01T18:00:00.000Z'),

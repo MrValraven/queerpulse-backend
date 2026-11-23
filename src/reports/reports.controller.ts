@@ -24,6 +24,7 @@ import { ListReasonsQuery } from './dto/list-reasons.query';
 import { formatReportReference } from './report-reference';
 import { ReportsService } from './reports.service';
 import {
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
@@ -93,7 +94,13 @@ export class ReportsController {
   @ApiOperation({ summary: 'File a report against a subject' })
   @ApiCreatedResponse({
     description:
-      'The created report (or the caller’s existing open report on the same subject).',
+      'The created report, or the caller’s existing open report on the same subject for the same reason. ' +
+      'PRD-510: `filing` says which: `filed` (a new report), `details_added` (the new detail and evidence were appended to the open report) ' +
+      'or `already_open` (the open report, with nothing new to add).',
+  })
+  @ApiConflictResponse({
+    description:
+      'PRD-510: `code: "REPORT_FOLLOW_UP_LIMIT"`. The caller’s open report on this subject for this reason already holds as much detail or evidence as one report can.',
   })
   @ApiForbiddenResponse({
     description:

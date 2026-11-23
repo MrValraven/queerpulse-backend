@@ -225,7 +225,9 @@ export class AdminInvitesService {
         ),
       ),
     ];
-    const refsByUserId = await memberLookup.byUserIds(userIds);
+    const refsByUserId = await memberLookup.byUserIds(userIds, {
+      inactive: 'include',
+    });
 
     const items: AdminInviteDTO[] = inviteRows.map((invite) => {
       const inviter: MemberRef | null =
@@ -262,7 +264,9 @@ export class AdminInvitesService {
 
     const inviterIds = grouped.map((row) => row.inviterId);
     const [refsByUserId, quotaRows] = await Promise.all([
-      new MemberLookup(this.profiles).byUserIds(inviterIds),
+      new MemberLookup(this.profiles).byUserIds(inviterIds, {
+        inactive: 'include',
+      }),
       this.users.find({
         where: { id: In(inviterIds) },
         select: ['id', 'inviteMonthlyQuota'],
@@ -540,9 +544,10 @@ export class AdminInvitesService {
     const invitesById = new Map(
       inviteRows.map((invite) => [invite.id, invite]),
     );
-    const refsByUserId = await new MemberLookup(this.profiles).byUserIds([
-      ...new Set(inviteRows.map((invite) => invite.inviterId)),
-    ]);
+    const refsByUserId = await new MemberLookup(this.profiles).byUserIds(
+      [...new Set(inviteRows.map((invite) => invite.inviterId))],
+      { inactive: 'include' },
+    );
 
     const updatedInvites: { sentId: string; inviteId: string }[] = [];
     const skipped: AdminInviteBulkSkipDTO[] = [];
@@ -657,7 +662,9 @@ export class AdminInvitesService {
 
       const refsByUserId = await new MemberLookup(
         manager.getRepository(Profile),
-      ).byUserIds([...new Set(refreshedRows.map((row) => row.inviter_id))]);
+      ).byUserIds([...new Set(refreshedRows.map((row) => row.inviter_id))], {
+        inactive: 'include',
+      });
       const auditRows = refreshedRows.map((row) =>
         this.toInviteAuditRow(
           'refresh',
@@ -694,7 +701,9 @@ export class AdminInvitesService {
     const invite = await this.invites.findOne({ where: { id: inviteId } });
     const inviterRef = invite
       ? ((
-          await new MemberLookup(this.profiles).byUserIds([invite.inviterId])
+          await new MemberLookup(this.profiles).byUserIds([invite.inviterId], {
+            inactive: 'include',
+          })
         ).get(invite.inviterId) ?? null)
       : null;
 

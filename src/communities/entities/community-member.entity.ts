@@ -106,6 +106,35 @@ export class CommunityMember {
   @Column({ type: 'timestamptz', nullable: true })
   welcomeSeenAt!: Date | null;
 
+  /**
+   * The badge this member wears as flair in this community, NULL for none.
+   * `update: false` keeps every roster `save()` from writing back a stale
+   * value; the only writer is `SET_WORN_BADGE_SQL` in
+   * `community-badges.service.ts`. The FK `FK_community_members_worn_badge_id`
+   * clears it when the badge is deleted; leave, removal and ban delete the row
+   * and the flair with it. Migration `AddCommunityBadges1840700000000`.
+   * The foreign key lives in the migration only; the entity declares no
+   * relation, so TypeORM never manages it.
+   */
+  @Index('IDX_community_members_worn_badge_id', {
+    where: '"worn_badge_id" IS NOT NULL',
+  })
+  @Column({ type: 'uuid', nullable: true, update: false })
+  wornBadgeId!: string | null;
+
+  /**
+   * How many events of this community the member was checked in at while on
+   * its roster, a bare number with no event id and no date (contract section
+   * 12). Kept because the retention job erases `event_rsvps.checked_in_at` 30
+   * days after an event. `update: false` keeps every roster `save()` from
+   * writing back a stale value; the only writers are
+   * `INCREMENT_EVENTS_ATTENDED_SQL` and `DECREMENT_EVENTS_ATTENDED_SQL` in
+   * `src/events/event-attendance-tally.ts`. Leave, removal and ban delete the
+   * row, so a rejoin starts at 0. Migration `AddCommunityBadges1840700000000`.
+   */
+  @Column({ type: 'integer', default: 0, update: false })
+  eventsAttendedCount!: number;
+
   @CreateDateColumn({ type: 'timestamptz' })
   joinedAt!: Date;
 }

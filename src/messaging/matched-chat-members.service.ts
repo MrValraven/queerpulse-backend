@@ -7,7 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ReportSubjectType } from '../reports/entities/report.entity';
-import type { ReportDTO } from '../reports/report-response';
+import type { FiledReportDTO } from '../reports/reports.service';
 import { ReportsService } from '../reports/reports.service';
 import type { BlockOptionsDto } from '../social/dto/block-options.dto';
 import { SocialService } from '../social/social.service';
@@ -30,7 +30,9 @@ export interface MatchedChatMemberBlockResponse {
 /** `POST /conversations/:id/members/:memberKey/report`: the filed report
  *  (or the caller's open report on that member), without its subject, as Go
  *  together's member report answers. */
-export type MatchedChatMemberReportResponse = Omit<ReportDTO, 'subjectId'>;
+// PRD-510: carries `filing`, so the reporter learns their details reached
+// their open report.
+export type MatchedChatMemberReportResponse = Omit<FiledReportDTO, 'subjectId'>;
 
 /** Where a matched chat member's visible avatar lives: a storage key the
  *  avatar route streams, or a provider https URL it streams on their
@@ -158,6 +160,7 @@ export class MatchedChatMembersService {
       createdAt: filed.createdAt,
       slaDueAt: filed.slaDueAt,
       acknowledgement: filed.acknowledgement,
+      filing: filed.filing,
     };
   }
 
