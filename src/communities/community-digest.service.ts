@@ -21,6 +21,7 @@ import {
   studioShareOrigins,
 } from '../studio/studio-share-link';
 import { isCommunityStaffRole } from './community-staff-access';
+import { markdownLitePlainText } from './markdown-lite-plain-text';
 import {
   CommunityDigestEntry,
   CommunityDigestExcerpt,
@@ -534,16 +535,19 @@ export class CommunityDigestService {
   /**
    * Studio rich cards: the first Studio link leaves the excerpt before it is
    * cut, as it leaves the feed summary (`communityPostToFeedItem`), so a
-   * "Share to a community" post reads as its note.
+   * "Share to a community" post reads as its note. The markdown-lite marks
+   * leave first (`markdownLitePlainText`), so the digest reads as the words
+   * the post shows.
    */
   private static excerptText(
     body: string,
     studioOrigins: readonly string[],
   ): string {
-    const studioMatch = findStudioShareLinkMatch(body, studioOrigins);
+    const plainBody = markdownLitePlainText(body);
+    const studioMatch = findStudioShareLinkMatch(plainBody, studioOrigins);
     const visibleBody = studioMatch
-      ? postTextWithoutStudioShareLink(body, studioMatch)
-      : body;
+      ? postTextWithoutStudioShareLink(plainBody, studioMatch)
+      : plainBody;
     return truncateCharacters(visibleBody, DIGEST_EXCERPT_LENGTH);
   }
 

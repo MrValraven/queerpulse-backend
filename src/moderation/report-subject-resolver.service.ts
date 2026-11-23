@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
+import { markdownLitePlainText } from '../communities/markdown-lite-plain-text';
 
 /**
  * What a report is actually about, resolved from its `(subjectType,
@@ -228,7 +229,11 @@ export class ReportSubjectResolverService {
       case ReportSubjectType.Post:
         return this.mergeSources(
           await Promise.all([
-            this.queryByUuid(COMMUNITY_POST_SQL, subjectIds),
+            this.queryByUuid(
+              COMMUNITY_POST_SQL,
+              subjectIds,
+              markdownLitePlainText,
+            ),
             this.queryByUuid(FORUM_POST_SQL, subjectIds),
           ]),
         );
@@ -236,7 +241,11 @@ export class ReportSubjectResolverService {
       case ReportSubjectType.Reply:
         return this.mergeSources(
           await Promise.all([
-            this.queryByUuid(COMMUNITY_REPLY_SQL, subjectIds),
+            this.queryByUuid(
+              COMMUNITY_REPLY_SQL,
+              subjectIds,
+              markdownLitePlainText,
+            ),
             this.queryByUuid(FORUM_POST_SQL, subjectIds),
           ]),
         );
@@ -418,14 +427,19 @@ export class ReportSubjectResolverService {
   }
 
   /** Runs a lookup keyed by a `uuid` column, dropping non-uuid subject ids
-   *  before they can reach Postgres and blow up the whole query. */
+   *  before they can reach Postgres and blow up the whole query.
+   *  `excerptSource`, when given, rewrites each raw excerpt before it is
+   *  collapsed and cut (a community post or reply drops its markdown-lite
+   *  marks through it). */
   private queryByUuid(
     sql: string,
     subjectIds: string[],
+    excerptSource?: (rawExcerpt: string) => string,
   ): Promise<Map<string, ReportSubjectResolution>> {
     return this.runLookup(
       sql,
       subjectIds.filter((subjectId) => UUID_RE.test(subjectId)),
+      excerptSource,
     );
   }
 
@@ -440,6 +454,7 @@ export class ReportSubjectResolverService {
   private async runLookup(
     sql: string,
     keys: string[],
+    excerptSource?: (rawExcerpt: string) => string,
   ): Promise<Map<string, ReportSubjectResolution>> {
     const byKey = new Map<string, ReportSubjectResolution>();
     if (!keys.length) return byKey;
@@ -448,7 +463,11 @@ export class ReportSubjectResolverService {
     for (const row of rows) {
       byKey.set(row.key, {
         authorUserId: row.author_user_id ?? null,
-        excerpt: toExcerpt(row.excerpt),
+        excerpt: toExcerpt(
+          excerptSource && row.excerpt
+            ? excerptSource(row.excerpt)
+            : row.excerpt,
+        ),
         communityId: row.community_id ?? null,
         // Absent on every statement whose subject has exactly one author.
         // See `RawSubjectRow`.

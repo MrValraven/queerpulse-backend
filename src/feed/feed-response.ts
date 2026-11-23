@@ -12,6 +12,7 @@ import {
   findStudioShareLinkMatch,
   postTextWithoutStudioShareLink,
 } from '../studio/studio-share-link';
+import { markdownLitePlainText } from '../communities/markdown-lite-plain-text';
 
 // ── Frontend-contract shapes ─────────────────────────────────────────────
 // Mirror `AuthorSummary`/`FeedItem`/`FeedItemType` from the frontend's
@@ -289,11 +290,17 @@ export function communityPostToFeedItem(
   const studioMatch = isBodyBlanked
     ? null
     : findStudioShareLinkMatch(post.body, studioOrigins);
-  const visibleBody = isBodyBlanked
-    ? ''
-    : studioMatch
-      ? postTextWithoutStudioShareLink(post.body, studioMatch)
-      : post.body;
+  // The summary is cut from the body with its markdown-lite marks removed
+  // (`markdownLitePlainText`), so a card reads as the words the post shows.
+  // `studioLink` above still comes from the stored body, so a Studio link
+  // written as `[text](url)` keeps its rich card.
+  const plainBody = isBodyBlanked ? '' : markdownLitePlainText(post.body);
+  const plainStudioMatch = isBodyBlanked
+    ? null
+    : findStudioShareLinkMatch(plainBody, studioOrigins);
+  const visibleBody = plainStudioMatch
+    ? postTextWithoutStudioShareLink(plainBody, plainStudioMatch)
+    : plainBody;
   return {
     id: post.id,
     type: 'community_post',

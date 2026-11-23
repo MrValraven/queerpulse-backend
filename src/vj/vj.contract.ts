@@ -886,7 +886,7 @@ export interface VjTransitionLength {
 
 /** How the screens move between sources. */
 export interface VjTransition {
-  /** Default 'fade'. */
+  /** Default 'cut'. */
   mode: VjTransitionId;
   /** Default { unit: 'ms', value: 800 }; 'cut' ignores it. */
   length: VjTransitionLength;
@@ -1117,7 +1117,7 @@ export function createVjStageState(
     liveGeneratorVariant: null,
     liveSince: null,
     transition: {
-      mode: 'fade',
+      mode: 'cut',
       length: { unit: 'ms', value: VJ_LIMITS.fadeMsDefault },
     },
     overlay: {

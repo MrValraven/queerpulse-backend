@@ -94,7 +94,7 @@ describe('vj look rules', () => {
       ruleSetTransition(state, { length: { unit: 'beats', value: 4 } }),
     );
     expect(accepted.nextState.transition).toEqual({
-      mode: 'fade',
+      mode: 'cut',
       length: { unit: 'beats', value: 4 },
     });
     expect(accepted.isImmediate).toBe(false);
@@ -595,7 +595,7 @@ describe('vj look rules', () => {
         { mode: 'spin', length: { unit: 'beats', value: 8 } },
         defaults.transition,
       ),
-    ).toEqual({ mode: 'fade', length: { unit: 'beats', value: 8 } });
+    ).toEqual({ mode: 'cut', length: { unit: 'beats', value: 8 } });
     expect(restoredVjTransition('junk', defaults.transition)).toEqual(
       defaults.transition,
     );

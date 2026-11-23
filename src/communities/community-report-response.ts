@@ -9,6 +9,7 @@ import {
 import { acknowledgementFor } from '../reports/report-severity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { toPlainTextExcerpt } from './community-plain-text';
+import { markdownLitePlainText } from './markdown-lite-plain-text';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 
@@ -178,7 +179,10 @@ function toContentDTO(
     };
   }
   if (reply) {
-    const excerpt = toPlainTextExcerpt(reply.text, REPORT_EXCERPT_LENGTH);
+    const excerpt = toPlainTextExcerpt(
+      markdownLitePlainText(reply.text),
+      REPORT_EXCERPT_LENGTH,
+    );
     return {
       kind: 'reply',
       id: reply.id,
@@ -193,7 +197,10 @@ function toContentDTO(
     };
   }
   if (!post) return null;
-  const excerpt = toPlainTextExcerpt(post.body, REPORT_EXCERPT_LENGTH);
+  const excerpt = toPlainTextExcerpt(
+    markdownLitePlainText(post.body),
+    REPORT_EXCERPT_LENGTH,
+  );
   return {
     kind: 'post',
     id: post.id,

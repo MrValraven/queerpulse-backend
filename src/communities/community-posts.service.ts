@@ -30,6 +30,7 @@ import {
   studioShareOrigins,
   textWithoutFirstStudioShareLink,
 } from '../studio/studio-share-link';
+import { markdownLitePlainText } from './markdown-lite-plain-text';
 import {
   DEFAULT_LIST_LIMIT,
   PAGE_SIZE,
@@ -153,6 +154,16 @@ export type UpdateFlatPostInput = Partial<CreatePostInput>;
 /** An excerpt reads without a raw Studio URL (Studio rich cards). */
 function withoutStudioLink(body: string): string {
   return textWithoutFirstStudioShareLink(body, studioShareOrigins());
+}
+
+/**
+ * The text an excerpt is cut from. The body's markdown-lite marks leave
+ * first (`markdownLitePlainText`), so a notification reads as the words the
+ * post shows, and its first Studio link leaves after. Runs before
+ * truncation, so a cut always lands on visible text.
+ */
+function excerptPlainText(body: string): string {
+  return withoutStudioLink(markdownLitePlainText(body));
 }
 
 @Injectable()
@@ -408,7 +419,7 @@ export class CommunityPostsService {
       source: 'community',
       communitySlug: slug,
       postId: saved.id,
-      excerpt: truncateCharacters(withoutStudioLink(dto.body), 140),
+      excerpt: truncateCharacters(excerptPlainText(dto.body), 140),
     });
     // Record the post as public profile activity — but only for PUBLIC
     // communities; the listener drops request/invite/private ones (the
@@ -421,7 +432,7 @@ export class CommunityPostsService {
       communityName: community.name,
       accessTier: community.accessTier,
       postId: saved.id,
-      excerpt: truncateCharacters(withoutStudioLink(dto.body), 80),
+      excerpt: truncateCharacters(excerptPlainText(dto.body), 80),
     } satisfies CommunityPostCreatedEvent);
     return this.buildPostDTO(saved, authorId, membership.role);
   }
@@ -1135,7 +1146,7 @@ export class CommunityPostsService {
       communitySlug: slug,
       postId: post.id,
       replyId: saved.id,
-      excerpt: truncateCharacters(withoutStudioLink(text), 140),
+      excerpt: truncateCharacters(excerptPlainText(text), 140),
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
     // Tell the post's author their post got a reply — unless the reply already
@@ -1289,7 +1300,7 @@ export class CommunityPostsService {
       source: 'community',
       postId: saved.id,
       communitySlug: dto.communitySlug,
-      excerpt: truncateCharacters(withoutStudioLink(dto.body), 140),
+      excerpt: truncateCharacters(excerptPlainText(dto.body), 140),
     });
     return { id: saved.id };
   }
@@ -1367,7 +1378,7 @@ export class CommunityPostsService {
       postId: post.id,
       replyId: saved.id,
       ...(community ? { communitySlug: community.slug } : {}),
-      excerpt: truncateCharacters(withoutStudioLink(text), 140),
+      excerpt: truncateCharacters(excerptPlainText(text), 140),
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
     // A `null` post.authorId (erased author) has no one to notify — see the
@@ -2023,7 +2034,7 @@ export class CommunityPostsService {
         communitySlug: community.slug,
         communityName: community.name,
         postId: post.id,
-        excerpt: truncateCharacters(withoutStudioLink(post.body), 140),
+        excerpt: truncateCharacters(excerptPlainText(post.body), 140),
       };
 
       for (

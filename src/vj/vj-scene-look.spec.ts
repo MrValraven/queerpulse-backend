@@ -202,7 +202,7 @@ describe('vj-scene-look', () => {
       mix: 'none',
     });
     expect(stored.transition).toEqual({
-      mode: 'fade',
+      mode: 'cut',
       length: { unit: 'ms', value: 800 },
     });
     expect(stored.mix).toEqual({
