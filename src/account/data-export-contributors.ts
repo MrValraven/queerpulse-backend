@@ -65,6 +65,10 @@ import {
   QuizshowGamesExportContributor,
   QuizshowPlaysExportContributor,
 } from './data-export-contributors-quizshow';
+import {
+  QuizBadgeWinsExportContributor,
+  QuizGameWinsExportContributor,
+} from './data-export-contributors-quiz-win-badges';
 import { PersonaPostsExportContributor } from './data-export-contributors-persona-posts';
 import {
   CommunityBadgesExportContributor,
@@ -1141,6 +1145,9 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   QuizshowPlaysExportContributor,
   // Pulse Live: the games the member owns, with their questions
   QuizshowGamesExportContributor,
+  // Quiz win badges: the badges the member won and the event games they won.
+  QuizBadgeWinsExportContributor,
+  QuizGameWinsExportContributor,
   // Community badges: the member's earned badges, their events attended tally, and the gifts they received and sent.
   CommunityBadgesExportContributor,
   CommunityEventsAttendedExportContributor,

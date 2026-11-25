@@ -418,8 +418,15 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // had no way to translate. Forwarding the id lets the client resolve the
     // name itself and keeps `badgeName` as the fallback for an id its build
     // does not know. Neither field is content-bearing: a badge and its name
-    // are the recipient's own, and already public on their badge case.
-    [NotificationType.BadgeEarned]: ['badgeKey', 'badgeName'],
+    // are the recipient's own, and already public on their badge case. A quiz
+    // badge win also carries the badge's Portuguese name and the event title,
+    // both the recipient's own (contract 9).
+    [NotificationType.BadgeEarned]: [
+      'badgeKey',
+      'badgeName',
+      'badgeNamePt',
+      'eventName',
+    ],
     [NotificationType.SubprofileCredit]: [
       'subprofileName',
       'subprofileSlugOrHandle',

@@ -13,11 +13,16 @@ import { RecognitionStat } from './entities/recognition-stat.entity';
 import { RecognitionAwardingService } from './recognition-awarding.service';
 import { RecognitionService } from './recognition.service';
 import { ProfilesService } from '../profiles/profiles.service';
+import { MEMBER_QUIZ_AWARDS_SQL } from '../quiz-win-badges/quiz-win-badges-recognition-reads';
 
 describe('RecognitionService', () => {
   let service: RecognitionService;
   let statsRepo: { findOne: jest.Mock };
-  let awardsRepo: { find: jest.Mock };
+  let awardsRepo: {
+    find: jest.Mock;
+    update: jest.Mock;
+    manager: { query: jest.Mock };
+  };
   let perkClaimsRepo: { find: jest.Mock };
   let ledgerRepo: { find: jest.Mock };
   let profilesRepo: { findOne: jest.Mock };
@@ -28,7 +33,13 @@ describe('RecognitionService', () => {
 
   beforeEach(async () => {
     statsRepo = { findOne: jest.fn().mockResolvedValue(null) };
-    awardsRepo = { find: jest.fn().mockResolvedValue([]) };
+    awardsRepo = {
+      find: jest.fn().mockResolvedValue([]),
+      update: jest.fn(),
+      // The quiz badge reads go through the awards manager; no quiz award
+      // rows by default.
+      manager: { query: jest.fn().mockResolvedValue([]) },
+    };
     perkClaimsRepo = { find: jest.fn().mockResolvedValue([]) };
     ledgerRepo = { find: jest.fn().mockResolvedValue([]) };
     profilesRepo = { findOne: jest.fn() };
@@ -198,6 +209,52 @@ describe('RecognitionService', () => {
         where: { userId: 'u2' },
         take: DEFAULT_LIST_LIMIT,
       });
+    });
+  });
+
+  describe('quiz badges', () => {
+    it('reads quiz badges with the owner switch', async () => {
+      await service.getForUser('u1', false);
+      expect(awardsRepo.manager.query).toHaveBeenCalledWith(
+        MEMBER_QUIZ_AWARDS_SQL,
+        ['u1', false],
+      );
+    });
+
+    it('reads quiz badges as the owner on the own recognition path', async () => {
+      await service.getForUser('u1');
+      expect(awardsRepo.manager.query).toHaveBeenCalledWith(
+        MEMBER_QUIZ_AWARDS_SQL,
+        ['u1', true],
+      );
+    });
+
+    it('toggles the visibility of a known quiz badge key', async () => {
+      awardsRepo.manager.query.mockResolvedValueOnce([{ exists: true }]);
+      awardsRepo.update.mockResolvedValue({ affected: 1 });
+      await expect(
+        service.setBadgeVisibility('u1', 'quiz:def-1', true),
+      ).resolves.toEqual({ key: 'quiz:def-1', hiddenFromProfile: true });
+      expect(awardsRepo.update).toHaveBeenCalledWith(
+        { userId: 'u1', badgeKey: 'quiz:def-1' },
+        { hiddenFromProfile: true },
+      );
+    });
+
+    it('answers No badge with that key for an unknown quiz key', async () => {
+      awardsRepo.manager.query.mockResolvedValueOnce([{ exists: false }]);
+      await expect(
+        service.setBadgeVisibility('u1', 'quiz:def-9', true),
+      ).rejects.toThrow(new NotFoundException('No badge with that key'));
+      expect(awardsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('toggles a code catalogue badge with no quiz query', async () => {
+      awardsRepo.update.mockResolvedValue({ affected: 1 });
+      await expect(
+        service.setBadgeVisibility('u1', 'first-gathering', false),
+      ).resolves.toEqual({ key: 'first-gathering', hiddenFromProfile: false });
+      expect(awardsRepo.manager.query).not.toHaveBeenCalled();
     });
   });
 

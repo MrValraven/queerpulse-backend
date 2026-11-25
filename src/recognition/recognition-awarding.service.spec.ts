@@ -351,6 +351,45 @@ describe('RecognitionAwardingService.recompute', () => {
     expect(savedStats).toHaveLength(0);
   });
 
+  it('writes the same XP and ledger rows with a held quiz key', async () => {
+    // Identical fixtures twice; the second member also holds a quiz award.
+    // Quiz badges never pay XP, so the stat upsert, the ledger rows and the
+    // inserted code awards must match exactly.
+    const signals: RecognitionSignals = { ...BASE, gatheringsAttended: 1 };
+    const withoutQuizKey = makeService({
+      stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
+      awards: [],
+      signals,
+    });
+    const withQuizKey = makeService({
+      stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
+      awards: [{ userId: 'u1', badgeKey: 'quiz:def-1', context: null }],
+      signals,
+    });
+
+    const resultWithoutQuizKey = await withoutQuizKey.service.recompute(USER, {
+      force: true,
+    });
+    const resultWithQuizKey = await withQuizKey.service.recompute(USER, {
+      force: true,
+    });
+
+    expect(resultWithQuizKey.xpAfter).toBe(resultWithoutQuizKey.xpAfter);
+    expect(resultWithQuizKey.newBadgeKeys).toEqual(
+      resultWithoutQuizKey.newBadgeKeys,
+    );
+    expect(withQuizKey.savedStats).toEqual(withoutQuizKey.savedStats);
+    expect(withQuizKey.insertedLedgerRows).toEqual(
+      withoutQuizKey.insertedLedgerRows,
+    );
+    expect(withQuizKey.insertedAwards).toEqual(withoutQuizKey.insertedAwards);
+    expect(
+      withQuizKey.insertedAwards.some((award) =>
+        award.badgeKey.startsWith('quiz:'),
+      ),
+    ).toBe(false);
+  });
+
   describe('XP ledger', () => {
     it('writes one precise row per newly-earned badge, worth its rarity bonus', async () => {
       const { service, insertedLedgerRows } = makeService({

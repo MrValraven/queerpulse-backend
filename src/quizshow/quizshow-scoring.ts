@@ -4,12 +4,14 @@
  */
 import {
   isTypedAnswerMatch,
+  normaliseAnswerText,
   typedAnswerCandidates,
 } from './quizshow-answer-normaliser';
 import {
   QUIZSHOW_LIMITS,
   type QuizshowAnswerKeyView,
   type QuizshowAnswerPayload,
+  type QuizshowClosestTolerance,
   type QuizshowQuestionType,
 } from './quizshow.contract';
 
@@ -41,14 +43,31 @@ export type ClosestOutcome = 'closest' | 'band' | 'none';
 const distanceKey = (distance: number): number =>
   Number(distance.toPrecision(12));
 
+/** Half-points band around the truth; 0 means only the closest answers score. */
+export function closestBandWidth(
+  truth: number,
+  tolerance: QuizshowClosestTolerance,
+): number {
+  switch (tolerance.mode) {
+    case 'exact':
+      return 0;
+    case 'absolute':
+      return tolerance.amount;
+    case 'percent':
+      return (Math.abs(truth) * tolerance.amount) / 100;
+  }
+}
+
 /**
  * Every answer at the minimum distance from the truth is `closest`; any other
- * answer within the band (10% of the truth) is `band`; the rest are `none`.
- * A truth of 0 has a band of 0. Distances compare at 12 significant digits so
- * float noise keeps a decimal tie fair and an answer at the band edge inside.
+ * answer within the question's tolerance band is `band`; the rest are `none`.
+ * An exact tolerance, or a percent tolerance on a truth of 0, has a band of 0.
+ * Distances compare at 12 significant digits so float noise keeps a decimal
+ * tie fair and an answer at the band edge inside.
  */
 export function closestNumberOutcomes(
   truth: number,
+  tolerance: QuizshowClosestTolerance,
   answers: ReadonlyArray<{ playerId: string; value: number }>,
 ): Map<string, ClosestOutcome> {
   const outcomes = new Map<string, ClosestOutcome>();
@@ -57,9 +76,7 @@ export function closestNumberOutcomes(
     ...answers.map((answer) => Math.abs(answer.value - truth)),
   );
   const minimumDistanceKey = distanceKey(minimumDistance);
-  const bandWidthKey = distanceKey(
-    QUIZSHOW_LIMITS.closestNumberBand * Math.abs(truth),
-  );
+  const bandWidthKey = distanceKey(closestBandWidth(truth, tolerance));
   for (const answer of answers) {
     const answerDistanceKey = distanceKey(Math.abs(answer.value - truth));
     if (answerDistanceKey === minimumDistanceKey) {
@@ -74,7 +91,8 @@ export function closestNumberOutcomes(
 }
 
 export interface QuizAnswerScoringInput {
-  type: Exclude<QuizshowQuestionType, 'prompt'>;
+  /** A poll is never scored, so it never reaches this input. */
+  type: Exclude<QuizshowQuestionType, 'prompt' | 'poll'>;
   base: number;
   answerKey: QuizshowAnswerKeyView;
   payload: QuizshowAnswerPayload | null;
@@ -84,6 +102,10 @@ export interface QuizAnswerScoringInput {
   streakBefore: number;
   isJokerActive: boolean;
   closestOutcome: ClosestOutcome | null;
+  /** Normalised texts a host accepted (contract 6.4 rule 2); empty set otherwise. */
+  acceptedTexts: ReadonlySet<string>;
+  /** Warm-up round: judged, 0 points, streak unchanged (contract 6.19). */
+  isWarmUp: boolean;
 }
 
 export interface QuizAnswerScore {
@@ -100,11 +122,16 @@ interface QuizAnswerJudgement {
   itemCount: number;
 }
 
-/** Whether a payload is right against its key. A payload of another type is wrong. */
+/**
+ * Whether a payload is right against its key. A payload of another type is
+ * wrong. A typed answer is also right when its normalised text is one the
+ * host accepted.
+ */
 function judgeQuizAnswer(
   answerKey: QuizshowAnswerKeyView,
   payload: QuizshowAnswerPayload,
   closestOutcome: ClosestOutcome | null,
+  acceptedTexts: ReadonlySet<string>,
 ): QuizAnswerJudgement {
   const wrongJudgement: QuizAnswerJudgement = {
     isCorrect: false,
@@ -116,7 +143,7 @@ function judgeQuizAnswer(
       if (payload.type !== 'multiple_choice') return wrongJudgement;
       return {
         ...wrongJudgement,
-        isCorrect: payload.optionIndex === answerKey.correctIndex,
+        isCorrect: answerKey.correctIndexes.includes(payload.optionIndex),
       };
     case 'true_false':
       if (payload.type !== 'true_false') return wrongJudgement;
@@ -128,13 +155,14 @@ function judgeQuizAnswer(
       if (payload.type !== 'type_answer') return wrongJudgement;
       return {
         ...wrongJudgement,
-        isCorrect: isTypedAnswerMatch(
-          payload.text,
-          typedAnswerCandidates(
-            { text: answerKey.text },
-            answerKey.acceptedAnswers,
-          ),
-        ),
+        isCorrect:
+          isTypedAnswerMatch(
+            payload.text,
+            typedAnswerCandidates(
+              { text: answerKey.text },
+              answerKey.acceptedAnswers,
+            ),
+          ) || acceptedTexts.has(normaliseAnswerText(payload.text)),
       };
     case 'order': {
       const itemCount = answerKey.orderedIds.length;
@@ -160,7 +188,8 @@ function judgeQuizAnswer(
  * Scores one quiz answer: speed points on a correct answer (closest number
  * takes the plain base), order partials and the closest-number band without
  * speed, the streak bonus on a correct answer, and the joker doubling the
- * whole question total.
+ * whole question total. A warm-up answer is judged and scores 0 with the
+ * streak kept as it was, so the warm-up never moves the standings.
  */
 export function scoreQuizAnswer(
   input: QuizAnswerScoringInput,
@@ -176,12 +205,14 @@ export function scoreQuizAnswer(
     streakBefore,
     isJokerActive,
     closestOutcome,
+    acceptedTexts,
+    isWarmUp,
   } = input;
   if (payload === null) {
     return {
       isCorrect: false,
       correctPositions: null,
-      streakAfter: 0,
+      streakAfter: isWarmUp ? streakBefore : 0,
       streakBonus: 0,
       pointsAwarded: 0,
     };
@@ -190,7 +221,17 @@ export function scoreQuizAnswer(
     answerKey,
     payload,
     closestOutcome,
+    acceptedTexts,
   );
+  if (isWarmUp) {
+    return {
+      isCorrect,
+      correctPositions,
+      streakAfter: streakBefore,
+      streakBonus: 0,
+      pointsAwarded: 0,
+    };
+  }
   const raw = isCorrect
     ? type === 'closest_number'
       ? base

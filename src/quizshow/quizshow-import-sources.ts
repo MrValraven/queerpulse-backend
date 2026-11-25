@@ -1,10 +1,20 @@
 import type { DataSource, EntityManager } from 'typeorm';
 import {
   QUIZSHOW_LIMITS,
+  type QuizshowContentLabel,
+  type QuizshowImportRoundRef,
   type QuizshowImportSource,
+  type QuizshowRoundKind,
 } from './quizshow.contract';
 
-/** Round count, question count and the adults flag of the quiz aliased `"quiz"`. */
+/**
+ * Round count, question count, the adults flag and every row of the quiz
+ * aliased `"quiz"`. The rows feed "Add rounds from" (contract 6.28): a save
+ * writes positions from 0 without gaps, so a row's position is its index. A
+ * wheel row carries its stored slice count (null for Auto, for a stored value
+ * that is not a JSON number, and on every other row), so the FE checklist
+ * selects the same slice range the server adds.
+ */
 const QUIZ_COUNT_COLUMNS = `
     (
       SELECT COUNT(*)::int FROM "quizshow_rounds" "round"
@@ -21,7 +31,31 @@ const QUIZ_COUNT_COLUMNS = `
       SELECT 1 FROM "quizshow_rounds" "round"
       WHERE "round"."quiz_id" = "quiz"."id"
         AND "round"."content_label" = 'adults'
-    ) AS "has_adults_rounds"
+    ) AS "has_adults_rounds",
+    COALESCE((
+      SELECT jsonb_agg(
+        jsonb_build_object(
+          'roundIndex', "listed_round"."position",
+          'kind', "listed_round"."kind",
+          'titleEn', "listed_round"."title_en",
+          'titlePt', "listed_round"."title_pt",
+          'questionCount', (
+            SELECT COUNT(*)::int FROM "quizshow_questions" "listed_question"
+            WHERE "listed_question"."round_id" = "listed_round"."id"
+          ),
+          'sliceCount', CASE
+            WHEN "listed_round"."kind"::text = 'wheel'
+              AND jsonb_typeof("listed_round"."settings"->'sliceCount') = 'number'
+              THEN ("listed_round"."settings"->>'sliceCount')::numeric::int
+            ELSE NULL
+          END,
+          'contentLabel', "listed_round"."content_label"
+        )
+        ORDER BY "listed_round"."position"
+      )
+      FROM "quizshow_rounds" "listed_round"
+      WHERE "listed_round"."quiz_id" = "quiz"."id"
+    ), '[]'::jsonb) AS "rounds"
 `;
 
 /** $1 excluded slug (nullable), $2 caller id, $3 series id (nullable), $4 limit. */
@@ -60,11 +94,25 @@ export const GAME_IMPORT_SOURCES_SQL = `
   LIMIT $3
 `;
 
+/** One element of the `rounds` jsonb array. */
+interface ListedRoundRow {
+  roundIndex: number;
+  kind: QuizshowRoundKind;
+  titleEn: string;
+  titlePt: string;
+  questionCount: number;
+  /** Wheel rows: the stored slice count, null for Auto; null on every other row. */
+  sliceCount: number | null;
+  /** Absent on a row written by an older query: maps to 'none'. */
+  contentLabel?: QuizshowContentLabel | null;
+}
+
 interface QuizCountRow {
   quiz_title: string;
   round_count: number;
   question_count: number;
   has_adults_rounds: boolean;
+  rounds: ListedRoundRow[] | null;
 }
 
 interface EventImportSourceRow extends QuizCountRow {
@@ -92,6 +140,19 @@ function runQuery<Row>(
 
 function toIsoString(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
+}
+
+function toRoundRefs(
+  rounds: ListedRoundRow[] | null,
+): QuizshowImportRoundRef[] {
+  return (rounds ?? []).map((round) => ({
+    roundIndex: round.roundIndex,
+    kind: round.kind,
+    title: { en: round.titleEn, pt: round.titlePt },
+    questionCount: round.questionCount,
+    sliceCount: round.kind === 'wheel' ? (round.sliceCount ?? null) : null,
+    contentLabel: round.contentLabel ?? 'none',
+  }));
 }
 
 /** Events the caller hosts or co-hosts that hold a quiz, newest start first. */
@@ -124,6 +185,7 @@ export async function listOrganisedEventSources(
     questionCount: row.question_count,
     hasAdultsRounds: row.has_adults_rounds,
     isSameSeries: row.is_same_series,
+    rounds: toRoundRefs(row.rounds),
   }));
 }
 
@@ -148,5 +210,6 @@ export async function listOwnedGameSources(
     questionCount: row.question_count,
     hasAdultsRounds: row.has_adults_rounds,
     isSameSeries: false,
+    rounds: toRoundRefs(row.rounds),
   }));
 }

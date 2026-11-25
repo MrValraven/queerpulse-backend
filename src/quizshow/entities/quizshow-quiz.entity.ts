@@ -14,9 +14,10 @@ import { User } from '../../users/entities/user.entity';
 import { QuizshowTemplateRecord } from './quizshow-template.entity';
 import {
   QUIZSHOW_LANGUAGE_MODES,
-  QUIZSHOW_LANGUAGES,
-  QuizshowLanguage,
+  QUIZSHOW_SCREEN_LANGUAGES,
   QuizshowLanguageMode,
+  QuizshowOpenSettingsMemory,
+  QuizshowScreenLanguage,
 } from '../quizshow.contract';
 
 /**
@@ -76,12 +77,13 @@ export class QuizshowQuizRecord {
   })
   languages!: QuizshowLanguageMode;
 
+  /** The Postgres enum keeps its name `quizshow_language`; only this column uses it, so it gained `both`. */
   @Column({
     type: 'enum',
-    enum: QUIZSHOW_LANGUAGES,
+    enum: QUIZSHOW_SCREEN_LANGUAGES,
     enumName: 'quizshow_language',
   })
-  screenLanguage!: QuizshowLanguage;
+  screenLanguage!: QuizshowScreenLanguage;
 
   @Column({ type: 'uuid', nullable: true })
   templateId!: string | null;
@@ -134,4 +136,12 @@ export class QuizshowQuizRecord {
 
   @Column({ type: 'timestamptz', precision: 3 })
   updatedAt!: Date;
+
+  /** The settings of the last lobby opened from this quiz; null until one opens. */
+  @Column({ type: 'jsonb', nullable: true })
+  lastOpenSettings!: QuizshowOpenSettingsMemory | null;
+
+  /** Set when a template import sets `sourceTemplateId`; null on a quiz with no source template. */
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  sourceTemplateCopiedAt!: Date | null;
 }

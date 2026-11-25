@@ -29,7 +29,11 @@ const defaultSettings: QuizshowRoundInput['settings'] = {
   writeSeconds: 60,
   voteSeconds: 30,
   ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  isWarmUp: false,
+  talkSeconds: 0,
 };
+
+const emptyText: QuizshowText = { en: '', pt: '' };
 
 function optionsOf(count: number): QuizshowOption[] {
   return Array.from({ length: count }, (_unused, optionIndex) => ({
@@ -45,10 +49,14 @@ function multipleChoice(
     type: 'multiple_choice',
     prompt: filledText('Prompt'),
     mediaRef: null,
+    mediaAlt: emptyText,
+    mediaReveal: 'instant',
+    revealNote: emptyText,
+    numberUnit: emptyText,
     timeLimitSeconds: null,
     points: 1000,
     options: optionsOf(3),
-    answer: { correctIndex: 1 },
+    answer: { correctIndexes: [1] },
     acceptedAnswers: [],
     ...overrides,
   };
@@ -69,8 +77,12 @@ function questionOfType(
       options: optionsOf(3),
       answer: { orderedIds: ['o1', 'o2', 'o3'] },
     },
-    closest_number: { options: [], answer: { value: 42 } },
+    closest_number: {
+      options: [],
+      answer: { value: 42, tolerance: { mode: 'exact', amount: 0 } },
+    },
     prompt: { options: [], answer: null, timeLimitSeconds: null },
+    poll: { options: optionsOf(3), answer: null },
   };
   return {
     ...multipleChoice(),
@@ -141,11 +153,13 @@ describe('quiz validation', () => {
     ]);
   });
 
-  it('flags too many questions in the quiz', () => {
-    const rounds = Array.from({ length: 6 }, () =>
-      quizRound(Array.from({ length: 9 }, () => multipleChoice())),
+  it('takes 100 questions in the quiz and flags the 101st', () => {
+    const hundred = Array.from({ length: 5 }, () =>
+      quizRound(Array.from({ length: 20 }, () => multipleChoice())),
     );
-    expect(structuralProblems(quizOf(rounds))).toEqual([
+    expect(structuralProblems(quizOf(hundred))).toEqual([]);
+    const hundredAndOne = [...hundred, quizRound([multipleChoice()])];
+    expect(structuralProblems(quizOf(hundredAndOne))).toEqual([
       {
         code: 'too_many_questions',
         roundIndex: null,
@@ -197,7 +211,10 @@ describe('quiz validation', () => {
   it('flags a wrong option count', () => {
     const round = quizRound([
       multipleChoice(),
-      multipleChoice({ options: optionsOf(5), answer: { correctIndex: 0 } }),
+      multipleChoice({
+        options: optionsOf(5),
+        answer: { correctIndexes: [0] },
+      }),
     ]);
     expect(structuralProblems(quizOf([round]))).toEqual([
       { code: 'option_count', roundIndex: 0, questionIndex: 1, language: null },
@@ -254,7 +271,9 @@ describe('quiz validation', () => {
   });
 
   it('flags a correct index outside the options', () => {
-    const round = quizRound([multipleChoice({ answer: { correctIndex: 3 } })]);
+    const round = quizRound([
+      multipleChoice({ answer: { correctIndexes: [3] } }),
+    ]);
     expect(structuralProblems(quizOf([round]))).toEqual([
       {
         code: 'answer_out_of_range',
@@ -267,7 +286,7 @@ describe('quiz validation', () => {
 
   it('flags a non-integer correct index', () => {
     const round = quizRound([
-      multipleChoice({ answer: { correctIndex: 1.5 } }),
+      multipleChoice({ answer: { correctIndexes: [1.5] } }),
     ]);
     expect(structuralProblems(quizOf([round]))).toEqual([
       {
@@ -276,6 +295,181 @@ describe('quiz validation', () => {
         questionIndex: 0,
         language: null,
       },
+    ]);
+  });
+
+  it('flags a repeated correct index', () => {
+    const round = quizRound([
+      multipleChoice({ answer: { correctIndexes: [1, 1] } }),
+    ]);
+    expect(structuralProblems(quizOf([round]))).toEqual([
+      problemOf('answer_out_of_range', 0, 0),
+    ]);
+  });
+
+  it('takes several correct options and flags one that marks every option correct', () => {
+    const twoOfThree = quizRound([
+      multipleChoice({ answer: { correctIndexes: [0, 2] } }),
+    ]);
+    expect(structuralProblems(quizOf([twoOfThree]))).toEqual([]);
+    const everyOption = quizRound([
+      multipleChoice({ answer: { correctIndexes: [0, 1, 2] } }),
+    ]);
+    expect(structuralProblems(quizOf([everyOption]))).toEqual([
+      problemOf('too_many_correct_options', 0, 0),
+    ]);
+  });
+
+  it('flags a multiple choice answer with no correct option as incomplete', () => {
+    const empty = quizRound([
+      multipleChoice({ answer: { correctIndexes: [] } }),
+    ]);
+    expect(structuralProblems(quizOf([empty]))).toEqual([]);
+    expect(completenessProblems(quizOf([empty]))).toEqual([
+      problemOf('correct_option_missing', 0, 0),
+    ]);
+    const answered = quizRound([multipleChoice()]);
+    expect(completenessProblems(quizOf([answered]))).toEqual([]);
+  });
+
+  it('takes a closest number tolerance inside the range of its mode', () => {
+    const tolerances = [
+      { mode: 'exact', amount: 0 },
+      { mode: 'absolute', amount: 0.5 },
+      { mode: 'absolute', amount: 1e12 },
+      { mode: 'percent', amount: 1 },
+      { mode: 'percent', amount: 50 },
+    ];
+    for (const tolerance of tolerances) {
+      const round = quizRound([
+        questionOfType('closest_number', { answer: { value: 42, tolerance } }),
+      ]);
+      expect(structuralProblems(quizOf([round]))).toEqual([]);
+    }
+  });
+
+  it('flags a closest number tolerance outside the range of its mode', () => {
+    const tolerances = [
+      { mode: 'exact', amount: 5 },
+      { mode: 'absolute', amount: 0 },
+      { mode: 'absolute', amount: 1e13 },
+      { mode: 'absolute', amount: Number.POSITIVE_INFINITY },
+      { mode: 'percent', amount: 0 },
+      { mode: 'percent', amount: 51 },
+      { mode: 'percent', amount: 2.5 },
+      { mode: 'within', amount: 1 },
+      undefined,
+    ];
+    for (const tolerance of tolerances) {
+      const round = quizRound([
+        questionOfType('closest_number', { answer: { value: 42, tolerance } }),
+      ]);
+      expect(structuralProblems(quizOf([round]))).toEqual([
+        problemOf('tolerance_out_of_range', 0, 0),
+      ]);
+    }
+  });
+
+  it('takes a poll in a quiz round with no answer', () => {
+    const round = quizRound([questionOfType('poll')]);
+    expect(structuralProblems(quizOf([round]))).toEqual([]);
+    expect(completenessProblems(quizOf([round]))).toEqual([]);
+  });
+
+  it('flags a poll in a party round with its own problem', () => {
+    const round = roundOf('lie_detector', [
+      questionOfType('prompt', { answer: { truth: filledText('Truth') } }),
+      questionOfType('poll'),
+    ]);
+    expect(structuralProblems(quizOf([round]))).toEqual([
+      problemOf('poll_in_party_round', 0, 1),
+    ]);
+  });
+
+  it('gives a poll the multiple choice option rules and no answer', () => {
+    const oneOption = quizRound([
+      questionOfType('poll', { options: optionsOf(1) }),
+    ]);
+    expect(structuralProblems(quizOf([oneOption]))).toEqual([
+      problemOf('option_count', 0, 0),
+    ]);
+    const fiveOptions = quizRound([
+      questionOfType('poll', { options: optionsOf(5) }),
+    ]);
+    expect(structuralProblems(quizOf([fiveOptions]))).toEqual([
+      problemOf('option_count', 0, 0),
+    ]);
+    const withAnswer = quizRound([
+      questionOfType('poll', { answer: { correctIndexes: [0] } }),
+    ]);
+    expect(structuralProblems(quizOf([withAnswer]))).toEqual([
+      problemOf('answer_not_allowed', 0, 0),
+    ]);
+    const options = optionsOf(3);
+    options[2] = { id: 'o3', text: { en: 'Three', pt: '' } };
+    const blankOption = quizRound([questionOfType('poll', { options })]);
+    expect(completenessProblems(quizOf([blankOption]))).toEqual([
+      {
+        code: 'option_text_missing',
+        roundIndex: 0,
+        questionIndex: 0,
+        language: 'pt',
+      },
+    ]);
+  });
+
+  it('flags a slow reveal without a picture in a quiz round', () => {
+    const withoutPicture = quizRound([
+      multipleChoice({ mediaReveal: 'slow', mediaRef: null }),
+    ]);
+    expect(structuralProblems(quizOf([withoutPicture]))).toEqual([
+      problemOf('slow_reveal_needs_picture', 0, 0),
+    ]);
+    const withPicture = quizRound([
+      multipleChoice({ mediaReveal: 'slow', mediaRef: 'event-cover/abc' }),
+    ]);
+    expect(structuralProblems(quizOf([withPicture]))).toEqual([]);
+  });
+
+  it('leaves a slow reveal in a party round to the save, which stores it instant', () => {
+    const round = roundOf('drag_name', [
+      questionOfType('prompt', { mediaReveal: 'slow', mediaRef: null }),
+    ]);
+    expect(structuralProblems(quizOf([round]))).toEqual([]);
+  });
+
+  it('takes a warm-up only on the first playable row', () => {
+    const warmUp = () =>
+      roundOf('quiz', [multipleChoice()], {
+        settings: { ...defaultSettings, isWarmUp: true },
+      });
+    const plain = () => quizRound([multipleChoice()]);
+    expect(structuralProblems(quizOf([warmUp(), plain()]))).toEqual([]);
+    expect(structuralProblems(quizOf([plain(), warmUp()]))).toEqual([
+      problemOf('warm_up_not_first', 1),
+    ]);
+    expect(structuralProblems(quizOf([plain(), plain(), plain()]))).toEqual([]);
+  });
+
+  it('counts the warm-up from the first row that is not a wheel and refuses it on a wheel slice', () => {
+    const warmUp = roundOf('quiz', [multipleChoice()], {
+      settings: { ...defaultSettings, isWarmUp: true },
+    });
+    const plain = () => quizRound([multipleChoice()]);
+    expect(structuralProblems(quizOf([warmUp, wheelRow(), plain()]))).toEqual(
+      [],
+    );
+    // The first playable row sits in the wheel's range, so the wheel decides when it plays.
+    expect(structuralProblems(quizOf([wheelRow(), warmUp, plain()]))).toEqual([
+      problemOf('warm_up_not_first', 1),
+    ]);
+    expect(
+      structuralProblems(
+        quizOf([wheelRow({ isWarmUp: true }), plain(), plain()]),
+      ),
+    ).toEqual([problemOf('warm_up_not_first', 0)]);
+    expect(structuralProblems(quizOf([wheelRow(), plain(), warmUp]))).toEqual([
+      problemOf('warm_up_not_first', 2),
     ]);
   });
 

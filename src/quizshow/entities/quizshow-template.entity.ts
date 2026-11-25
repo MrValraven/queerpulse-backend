@@ -51,4 +51,14 @@ export class QuizshowTemplateRecord {
 
   @CreateDateColumn({ type: 'timestamptz', precision: 3 })
   createdAt!: Date;
+
+  /** Set on publish and on every quiz save while published; a host copy made before it has an update. */
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  contentUpdatedAt!: Date | null;
+
+  @Column({ type: 'varchar', length: 300, default: '' })
+  changeNoteEn!: string;
+
+  @Column({ type: 'varchar', length: 300, default: '' })
+  changeNotePt!: string;
 }

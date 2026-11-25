@@ -1,6 +1,7 @@
 import {
   QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
   type QuizshowAnswerPayload,
+  type QuizshowClosestTolerance,
   type QuizshowNextEvent,
   type QuizshowOption,
   type QuizshowPhase,
@@ -18,6 +19,7 @@ import {
   advanceCursor,
   createLobbyState,
   entrantTotals,
+  podiumSteps,
   setSessionStatus,
 } from './quizshow-engine-state';
 import type {
@@ -35,17 +37,24 @@ import {
   buildLobby,
   buildMyReveal,
   buildMyScores,
+  buildPairedDevices,
   buildPhaseChange,
+  buildPlayerLobby,
   buildPodiumFrame,
+  buildRankIndex,
   buildReveal,
   buildReviewList,
   buildScores,
   buildSessionEnd,
+  buildSessionFlags,
   buildSessionState,
+  buildTypedAnswers,
   buildVoteOptions,
   quizshowPlayerRoomName,
   quizshowRoomName,
+  visibleVoteOptions,
 } from './quizshow-frames';
+import * as quizshowScoring from './quizshow-scoring';
 import { competitionRanks } from './quizshow-scoring';
 import {
   emptyWheelProgress,
@@ -96,7 +105,11 @@ const PRE_REVEAL_PHASES: ReadonlySet<QuizshowPhase> = new Set<QuizshowPhase>([
 ]);
 /** Key names that only an answer key, a truth or a vote tally carries. */
 const ANSWER_KEY_FIELDS = new Set([
-  'correctIndex',
+  'correctIndexes',
+  'tolerance',
+  'revealNote',
+  'note',
+  'wasCorrected',
   'truth',
   'isTruth',
   'voteCount',
@@ -131,9 +144,21 @@ function option(optionId: string, english: string): QuizshowOption {
 const QUESTION_DEFAULTS = {
   mediaRef: null,
   mediaUrl: null,
+  mediaAlt: bilingual(''),
+  mediaReveal: 'instant' as const,
+  revealNote: bilingual(''),
+  numberUnit: bilingual(''),
   timeLimitSeconds: null,
   points: 1000,
 };
+const TEN_PERCENT_TOLERANCE: QuizshowClosestTolerance = {
+  mode: 'percent',
+  amount: 10,
+};
+const REVEAL_NOTE = bilingual(
+  'The march set off from Largo de Camoes',
+  'A marcha saiu do Largo de Camoes',
+);
 
 const MULTIPLE_CHOICE_OPTIONS = [
   option('a', '1997'),
@@ -154,8 +179,9 @@ const MULTIPLE_CHOICE_QUESTION: QuizshowSnapshotQuestion = {
     'When did Lisbon hold its first Pride march?',
     'Quando foi a primeira marcha do Orgulho em Lisboa?',
   ),
+  revealNote: REVEAL_NOTE,
   options: MULTIPLE_CHOICE_OPTIONS,
-  answer: { correctIndex: 1 },
+  answer: { correctIndexes: [1] },
   acceptedAnswers: [],
   shownOptions: MULTIPLE_CHOICE_OPTIONS,
 };
@@ -199,7 +225,7 @@ const CLOSEST_QUESTION: QuizshowSnapshotQuestion = {
   type: 'closest_number',
   prompt: bilingual('In which year did Portugal open marriage to everyone?'),
   options: [],
-  answer: { value: 2010 },
+  answer: { value: 2010, tolerance: TEN_PERCENT_TOLERANCE },
   acceptedAnswers: [],
   shownOptions: null,
 };
@@ -212,6 +238,21 @@ const LIE_DETECTOR_QUESTION: QuizshowSnapshotQuestion = {
   answer: { truth: bilingual(LIE_DETECTOR_TRUTH) },
   acceptedAnswers: [],
   shownOptions: null,
+};
+const POLL_OPTIONS = [
+  option('p', 'Lisbon'),
+  option('q', 'Porto'),
+  option('r', 'Coimbra'),
+];
+const POLL_QUESTION: QuizshowSnapshotQuestion = {
+  ...QUESTION_DEFAULTS,
+  id: 'question-poll',
+  type: 'poll',
+  prompt: bilingual('Where should the next Pride night be?'),
+  options: POLL_OPTIONS,
+  answer: null,
+  acceptedAnswers: [],
+  shownOptions: POLL_OPTIONS,
 };
 const CAPTION_QUESTION: QuizshowSnapshotQuestion = {
   ...QUESTION_DEFAULTS,
@@ -243,6 +284,8 @@ function snapshotRound(
       writeSeconds: 60,
       voteSeconds: 30,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+      isWarmUp: false,
+      talkSeconds: 0,
     },
     questions,
   };
@@ -259,10 +302,12 @@ const SNAPSHOT: QuizshowSessionSnapshot = {
       TYPED_QUESTION,
       ORDER_QUESTION,
       CLOSEST_QUESTION,
+      POLL_QUESTION,
     ]),
     snapshotRound('lie_detector', 'Lie Detector', [LIE_DETECTOR_QUESTION]),
     snapshotRound('caption_this', 'Caption This', [CAPTION_QUESTION]),
   ],
+  sourceUpdatedAt: '2026-11-01T12:00:00.000Z',
 };
 
 const WHEEL_SNAPSHOT: QuizshowSessionSnapshot = {
@@ -316,6 +361,7 @@ function wheelNightState(
     playMode: 'solo',
     maxTeamSize: null,
     isReviewOn: true,
+    isPractice: false,
     snapshot: WHEEL_SNAPSHOT,
     attachedOrganiserUserIds: new Set<string>([HOST_USER_ID]),
     nextEvent: null,
@@ -368,6 +414,7 @@ function lobbyState(playMode: QuizshowPlayMode = 'solo'): QuizshowLiveState {
     playMode,
     maxTeamSize: null,
     isReviewOn: true,
+    isPractice: false,
     snapshot: SNAPSHOT,
     attachedOrganiserUserIds: new Set<string>([HOST_USER_ID]),
     nextEvent: null,
@@ -426,6 +473,8 @@ function livePlayer(
     joinedAt,
     removedAt: null,
     connectedSocketCount: 1,
+    disconnectedAt: null,
+    leftAt: null,
     ...overrides,
   };
 }
@@ -444,6 +493,7 @@ function liveTeam(
     hasUsedJoker: false,
     jokerRoundIndex: null,
     createdAt,
+    isHostMade: false,
     ...overrides,
   };
 }
@@ -517,6 +567,12 @@ function openQuestion(
     wasSkipped: false,
     pointsByPlayer: new Map(),
     teamPoints: new Map(),
+    answersById: new Map(),
+    awayPlayerIds: new Set<string>(),
+    streakBeforeByPlayer: new Map(),
+    keyOverride: null,
+    acceptedTexts: new Set<string>(),
+    wasCorrected: false,
   };
   advanceCursor(state, {
     phase: isParty ? 'write' : 'read',
@@ -572,6 +628,7 @@ function submitAnswer(
     hiddenAt: null,
   };
   play.answers.set(playerId, answer);
+  play.answersById.set(answer.answerId, answer);
   return answer;
 }
 
@@ -982,7 +1039,9 @@ function publicFrames(state: QuizshowLiveState): unknown[] {
     buildVoteOptions(state, null),
     buildAnswerCount(state),
     buildLobby(state, 'screen'),
-    buildLobby(state, 'players'),
+    buildPlayerLobby(state),
+    buildPodiumFrame(state, 'public'),
+    buildSessionFlags(state),
     ...PLAYER_IDS.flatMap((playerId) => [
       playerState(state, playerId),
       buildVoteOptions(state, playerId),
@@ -998,8 +1057,11 @@ function everyFrame(state: QuizshowLiveState): unknown[] {
     buildReviewList(state),
     buildHostVoteOptions(state),
     buildReveal(state),
+    buildTypedAnswers(state),
     buildScores(state),
-    buildPodiumFrame(state),
+    buildScores(state, undefined, 'hosts'),
+    buildPodiumFrame(state, 'hosts'),
+    buildPairedDevices(state),
     buildSessionEnd(state),
     buildSessionState(state, { role: 'host' }),
     ...PLAYER_IDS.flatMap((playerId) => [
@@ -1104,7 +1166,10 @@ describe('quizshow frames', () => {
   it("gives hosts the answer key from the question's first phase", () => {
     const steps = playSession();
     const expectedKeys: Array<[string, unknown]> = [
-      ['multiple choice read', { type: 'multiple_choice', correctIndex: 1 }],
+      [
+        'multiple choice read',
+        { type: 'multiple_choice', correctIndexes: [1] },
+      ],
       ['true or false read', { type: 'true_false', isTrue: false }],
       [
         'typed read',
@@ -1115,7 +1180,14 @@ describe('quizshow frames', () => {
         },
       ],
       ['order read', { type: 'order', orderedIds: ['x', 'y', 'z'] }],
-      ['closest read', { type: 'closest_number', value: 2010 }],
+      [
+        'closest read',
+        {
+          type: 'closest_number',
+          value: 2010,
+          tolerance: TEN_PERCENT_TOLERANCE,
+        },
+      ],
       [
         'lie detector write',
         { type: 'lie_detector', truth: bilingual(LIE_DETECTOR_TRUTH) },
@@ -1168,11 +1240,7 @@ describe('quizshow frames', () => {
       null,
       CRIS_AVATAR,
     ]);
-    expect(avatarsOf(buildLobby(state, 'players').players)).toEqual([
-      null,
-      null,
-      null,
-    ]);
+    expect(buildPlayerLobby(state)).not.toHaveProperty('players');
     expect(
       avatarsOf(buildSessionState(state, { role: 'screen' }).lobby.players),
     ).toEqual([ANA_AVATAR, null, CRIS_AVATAR]);
@@ -1317,9 +1385,11 @@ describe('quizshow frames', () => {
     );
     expect(multipleChoiceReveal).toMatchObject({
       questionId: MULTIPLE_CHOICE_QUESTION.id,
-      correct: { type: 'multiple_choice', correctIndex: 1 },
+      correct: { type: 'multiple_choice', correctIndexes: [1] },
       answeredCount: 2,
       eligibleCount: 3,
+      note: REVEAL_NOTE,
+      wasCorrected: false,
     });
 
     const lieDetectorState = stepState(steps, 'lie detector reveal');
@@ -1363,6 +1433,8 @@ describe('quizshow frames', () => {
         ],
         favouriteOptionId: null,
       },
+      note: null,
+      wasCorrected: false,
     });
     expect(JSON.stringify(lieDetectorReveal)).not.toContain('Bayard Rustin');
 
@@ -1752,13 +1824,14 @@ describe('quizshow frames', () => {
   it('ends with the podium and results only when finished', () => {
     const steps = playSession();
     const podiumState = stepState(steps, 'podium');
-    expect(buildPodiumFrame(podiumState)).toEqual({
+    expect(buildPodiumFrame(podiumState, 'public')).toEqual({
       phaseId: podiumState.cursor.phaseId,
       entries: [
         expect.objectContaining({ place: 1, name: 'Ana', score: 5983 }),
         expect.objectContaining({ place: 2, name: 'Cris', score: 1600 }),
         expect.objectContaining({ place: 3, name: 'Bea', score: 1000 }),
       ],
+      revealedCount: 3,
     });
     expect(buildScores(podiumState)?.scope).toBe('final');
 
@@ -1786,6 +1859,8 @@ describe('quizshow frames', () => {
       podium: [],
       nextEvent: null,
       hasResults: false,
+      isPractice: false,
+      giving: null,
     });
   });
 
@@ -2004,6 +2079,597 @@ describe('quizshow frames', () => {
         wheel: null,
         wheelBonus: null,
       });
+    });
+  });
+
+  describe('Pulse Live v2 frames', () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('ranks once for a scores fan-out of 200 players (W1)', () => {
+      const state = lobbyState('solo');
+      for (let seat = 0; seat < 200; seat += 1) {
+        addPlayer(
+          state,
+          livePlayer(`player-crowd-${seat}`, `Crowd ${seat}`, 2_000 + seat, {
+            score: (seat % 17) * 100,
+          }),
+        );
+      }
+      setSessionStatus(state, 'running');
+      showScores(state, 'scores', 'question', 20_000, {
+        roundIndex: 0,
+        questionIndex: 0,
+      });
+      const rankSpy = jest.spyOn(quizshowScoring, 'competitionRanks');
+
+      const rankIndex = buildRankIndex(state);
+      const scores = buildScores(state, rankIndex);
+      const myScores = [...state.players.keys()].map((playerId) =>
+        buildMyScores(state, playerId, rankIndex),
+      );
+      expect(rankSpy).toHaveBeenCalledTimes(1);
+      expect(scores?.entrantCount).toBe(200);
+      expect(myScores.every((frame) => frame !== null)).toBe(true);
+
+      rankSpy.mockClear();
+      buildScores(state);
+      expect(rankSpy).toHaveBeenCalledTimes(1);
+
+      rankSpy.mockClear();
+      playerState(state, 'player-crowd-0');
+      expect(rankSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends the players room team cards and a head count with no roster (W2)', () => {
+      const state = lobbyState('teams');
+      state.teams.set(
+        'team-glitter',
+        liveTeam('team-glitter', 'Glitter', 1, { isHostMade: true }),
+      );
+      state.teams.set(
+        'team-sequin',
+        liveTeam('team-sequin', 'Sequin', 2, { colorKey: 'star' }),
+      );
+      addPlayer(
+        state,
+        livePlayer(ANA, 'Ana', 2_000, { teamId: 'team-glitter' }),
+      );
+      addPlayer(
+        state,
+        livePlayer(BEA, 'Bea', 3_000, { teamId: 'team-glitter' }),
+      );
+      addPlayer(
+        state,
+        livePlayer(CRIS, 'Cris', 4_000, {
+          teamId: 'team-sequin',
+          leftAt: 5_000,
+        }),
+      );
+
+      const playerLobby = buildPlayerLobby(state);
+      expect(playerLobby).toEqual({
+        teams: [
+          {
+            teamId: 'team-glitter',
+            name: 'Glitter',
+            colorKey: 'circle',
+            memberCount: 2,
+            isHostMade: true,
+          },
+          {
+            teamId: 'team-sequin',
+            name: 'Sequin',
+            colorKey: 'star',
+            memberCount: 0,
+            isHostMade: false,
+          },
+        ],
+        playerCount: 2,
+      });
+      expect(playerLobby).not.toHaveProperty('players');
+      expect(playerState(state, ANA).lobby).toEqual(playerLobby);
+      expect(playerState(state, null).lobby).not.toHaveProperty('players');
+      expect(buildLobby(state, 'screen').teams).toEqual(playerLobby.teams);
+      expect(
+        buildHostLobby(state).players.map((player) => player.screenName),
+      ).toEqual(['Ana', 'Bea']);
+      expect(buildPlayerLobby(lobbyState('solo'))).toEqual({
+        teams: [],
+        playerCount: 0,
+      });
+    });
+
+    it('withholds unrevealed podium places from the screen and players (contract 6.7)', () => {
+      const podiumState = structuredClone(stepState(playSession(), 'podium'));
+      expect(podiumSteps(podiumState)).toEqual([3, 2, 1]);
+      podiumState.cursor.podiumRevealedCount = 1;
+
+      expect(buildPodiumFrame(podiumState, 'public')).toEqual({
+        phaseId: podiumState.cursor.phaseId,
+        entries: [expect.objectContaining({ place: 3, name: 'Bea' })],
+        revealedCount: 1,
+      });
+      expect(
+        buildPodiumFrame(podiumState, 'hosts')?.entries.map(
+          (entry) => entry.name,
+        ),
+      ).toEqual(['Ana', 'Cris', 'Bea']);
+      expect(buildPodiumFrame(podiumState, 'hosts')?.revealedCount).toBe(1);
+
+      expect(
+        buildScores(podiumState)?.entries.map((entry) => entry.name),
+      ).toEqual(['Bea', 'Dani']);
+      expect(
+        buildScores(podiumState, undefined, 'hosts')?.entries.map(
+          (entry) => entry.name,
+        ),
+      ).toEqual(['Ana', 'Cris', 'Bea', 'Dani']);
+
+      expect(buildMyScores(podiumState, ANA)).toBeNull();
+      expect(buildMyScores(podiumState, CRIS)).toBeNull();
+      expect(buildMyScores(podiumState, BEA)?.rank).toBe(3);
+      expect(buildMyScores(podiumState, DANI)?.rank).toBe(4);
+
+      const anaState = playerState(podiumState, ANA);
+      expect(anaState.myScores).toBeNull();
+      expect(anaState.podium?.map((entry) => entry.place)).toEqual([3]);
+      expect(anaState.scores?.entries.map((entry) => entry.rank)).toEqual([
+        3, 4,
+      ]);
+      expect(
+        buildSessionState(podiumState, { role: 'screen' }).podium,
+      ).toHaveLength(1);
+      expect(
+        buildSessionState(podiumState, { role: 'host' }).podium,
+      ).toHaveLength(3);
+      expect(
+        buildSessionState(podiumState, { role: 'host' }).scores?.entries,
+      ).toHaveLength(4);
+
+      podiumState.cursor.podiumRevealedCount = 0;
+      expect(buildPodiumFrame(podiumState, 'public')?.entries).toEqual([]);
+      expect(buildMyScores(podiumState, BEA)).toBeNull();
+
+      const endedState = stepState(playSession(), 'ended');
+      expect(buildSessionEnd(endedState).podium).toHaveLength(3);
+      expect(
+        buildSessionState(endedState, { role: 'screen' }).podium,
+      ).toHaveLength(3);
+    });
+
+    it("gives the leaderboard each player's streak and a team the best active member's", () => {
+      const soloState = lobbyState('solo');
+      addPlayer(
+        soloState,
+        livePlayer(ANA, 'Ana', 2_000, { score: 900, streak: 4 }),
+      );
+      addPlayer(
+        soloState,
+        livePlayer(BEA, 'Bea', 3_000, { score: 100, streak: 0 }),
+      );
+      setSessionStatus(soloState, 'running');
+      showScores(soloState, 'leaderboard', 'round', 20_000, {
+        roundIndex: 0,
+        questionIndex: null,
+      });
+      expect(
+        buildScores(soloState)?.entries.map((entry) => [
+          entry.name,
+          entry.streak,
+        ]),
+      ).toEqual([
+        ['Ana', 4],
+        ['Bea', 0],
+      ]);
+
+      const teamsState = lobbyState('teams');
+      teamsState.teams.set(
+        'team-glitter',
+        liveTeam('team-glitter', 'Glitter', 1, { score: 900 }),
+      );
+      teamsState.teams.set(
+        'team-velvet',
+        liveTeam('team-velvet', 'Velvet', 2, { score: 300, colorKey: 'moon' }),
+      );
+      addPlayer(
+        teamsState,
+        livePlayer(ANA, 'Ana', 2_000, { teamId: 'team-glitter', streak: 2 }),
+      );
+      addPlayer(
+        teamsState,
+        livePlayer(BEA, 'Bea', 3_000, { teamId: 'team-glitter', streak: 5 }),
+      );
+      addPlayer(
+        teamsState,
+        livePlayer(CRIS, 'Cris', 4_000, {
+          teamId: 'team-glitter',
+          streak: 9,
+          removedAt: 4_500,
+        }),
+      );
+      setSessionStatus(teamsState, 'running');
+      showScores(teamsState, 'leaderboard', 'round', 30_000, {
+        roundIndex: 0,
+        questionIndex: null,
+      });
+      expect(
+        buildScores(teamsState)?.entries.map((entry) => [
+          entry.name,
+          entry.streak,
+        ]),
+      ).toEqual([
+        ['Glitter', 5],
+        ['Velvet', 0],
+      ]);
+    });
+
+    it('reveals a host correction, the reveal note and the corrected flag (contract 6.4 rule 8)', () => {
+      const revealState = structuredClone(
+        stepState(playSession(), 'multiple choice reveal'),
+      );
+      const correctedKey = {
+        type: 'multiple_choice' as const,
+        correctIndexes: [0, 1],
+      };
+      const play = currentPlay(revealState);
+      play.keyOverride = correctedKey;
+      play.wasCorrected = true;
+
+      expect(buildReveal(revealState)).toMatchObject({
+        correct: correctedKey,
+        note: REVEAL_NOTE,
+        wasCorrected: true,
+      });
+      expect(
+        buildSessionState(revealState, { role: 'host' }).question?.answerKey,
+      ).toEqual(correctedKey);
+      expect(buildPhaseChange(revealState, 'host').question).toMatchObject({
+        answerKey: correctedKey,
+        revealNote: REVEAL_NOTE,
+      });
+      expect(
+        buildPhaseChange(revealState, 'public').question,
+      ).not.toHaveProperty('revealNote');
+
+      const readState = stepState(playSession(), 'multiple choice read');
+      expect(
+        JSON.stringify(buildPhaseChange(readState, 'public')),
+      ).not.toContain(REVEAL_NOTE.en);
+      expect(JSON.stringify(playerState(readState, ANA))).not.toContain(
+        REVEAL_NOTE.en,
+      );
+      expect(buildPhaseChange(readState, 'host').question).toMatchObject({
+        revealNote: REVEAL_NOTE,
+      });
+    });
+
+    it('groups wrong typed answers for hosts, most written first, at most 30 (contract 6.4 rule 9)', () => {
+      const state = lobbyState('solo');
+      const wrongTexts = [
+        'Christopher Street',
+        'Castro',
+        'christopher street',
+        'Castro!',
+        'CHRISTOPHER  STREET!',
+        ...Array.from(
+          { length: 32 },
+          (_unused, position) => `Bar ${String(position + 1).padStart(2, '0')}`,
+        ),
+      ];
+      const seatIds = [...wrongTexts, TYPED_ANSWER_TEXT].map(
+        (_text, seat) => `player-typed-${seat}`,
+      );
+      seatIds.forEach((playerId, seat) =>
+        addPlayer(state, livePlayer(playerId, `Typist ${seat}`, 2_000 + seat)),
+      );
+      setSessionStatus(state, 'running');
+      let now = 10_000;
+      openQuestion(state, 0, 2, now);
+      moveTo(state, 'open', (now += 1_000));
+      const submissions = [...wrongTexts, TYPED_ANSWER_TEXT].map(
+        (text, seat) => ({ playerId: seatIds[seat] ?? '', text }),
+      );
+      for (const submission of submissions) {
+        submitAnswer(
+          state,
+          submission.playerId,
+          { type: 'type_answer', text: submission.text },
+          (now += 10),
+        );
+      }
+      expect(buildTypedAnswers(state)).toBeNull();
+      moveTo(state, 'reveal', now + 1_000);
+      for (const submission of submissions) {
+        answerOf(state, submission.playerId).isCorrect =
+          submission.text === TYPED_ANSWER_TEXT;
+      }
+
+      const typedAnswers = buildTypedAnswers(state);
+      expect(typedAnswers?.phaseId).toBe(state.cursor.phaseId);
+      expect(typedAnswers?.questionId).toBe(TYPED_QUESTION.id);
+      expect(typedAnswers?.groups).toHaveLength(30);
+      expect(typedAnswers?.groups.slice(0, 3)).toEqual([
+        {
+          normalisedText: 'christopher street',
+          sampleText: 'Christopher Street',
+          count: 3,
+        },
+        { normalisedText: 'castro', sampleText: 'Castro', count: 2 },
+        { normalisedText: 'bar 01', sampleText: 'Bar 01', count: 1 },
+      ]);
+      expect(typedAnswers?.groups.at(-1)?.sampleText).toBe('Bar 28');
+      expect(JSON.stringify(typedAnswers)).not.toContain(TYPED_ANSWER_TEXT);
+      expect(buildSessionState(state, { role: 'host' }).typedAnswers).toEqual(
+        typedAnswers,
+      );
+
+      const steps = playSession();
+      expect(
+        buildTypedAnswers(stepState(steps, 'multiple choice reveal')),
+      ).toBeNull();
+      const typedScoresState = stepState(steps, 'typed scores');
+      expect(buildTypedAnswers(typedScoresState)).toEqual({
+        phaseId: buildReveal(typedScoresState)?.phaseId,
+        questionId: TYPED_QUESTION.id,
+        groups: [
+          {
+            normalisedText: 'christopher street',
+            sampleText: 'Christopher Street',
+            count: 1,
+          },
+        ],
+      });
+    });
+
+    it('leaves typed answers that normalise to nothing out of the host groups', () => {
+      const state = lobbyState('solo');
+      const wrongTexts = ['?!', '...', 'Castro'];
+      const seatIds = wrongTexts.map((_text, seat) => `player-blank-${seat}`);
+      seatIds.forEach((playerId, seat) =>
+        addPlayer(state, livePlayer(playerId, `Typist ${seat}`, 2_000 + seat)),
+      );
+      setSessionStatus(state, 'running');
+      let now = 10_000;
+      openQuestion(state, 0, 2, now);
+      moveTo(state, 'open', (now += 1_000));
+      wrongTexts.forEach((text, seat) =>
+        submitAnswer(
+          state,
+          seatIds[seat] ?? '',
+          { type: 'type_answer', text },
+          (now += 10),
+        ),
+      );
+      moveTo(state, 'reveal', now + 1_000);
+      for (const playerId of seatIds) {
+        answerOf(state, playerId).isCorrect = false;
+      }
+
+      expect(buildTypedAnswers(state)?.groups).toEqual([
+        { normalisedText: 'castro', sampleText: 'Castro', count: 1 },
+      ]);
+    });
+
+    it('reveals a poll with option counts and no right answer (contract 6.22)', () => {
+      const state = lobbyState('solo');
+      seatPlayers(state);
+      setSessionStatus(state, 'running');
+      openQuestion(state, 0, 5, 10_000);
+      moveTo(state, 'open', 11_000);
+      submitAnswer(state, ANA, { type: 'poll', optionIndex: 0 }, 11_100);
+      submitAnswer(state, BEA, { type: 'poll', optionIndex: 2 }, 11_200);
+      submitAnswer(state, CRIS, { type: 'poll', optionIndex: 0 }, 11_300);
+      moveTo(state, 'reveal', 12_000);
+
+      expect(buildReveal(state)).toEqual({
+        phaseId: state.cursor.phaseId,
+        questionId: POLL_QUESTION.id,
+        correct: null,
+        answeredCount: 3,
+        eligibleCount: 3,
+        distribution: { kind: 'options', counts: [2, 0, 1] },
+        note: null,
+        wasCorrected: false,
+      });
+      expect(buildMyReveal(state, ANA)?.isCorrect).toBeNull();
+      expect(buildTypedAnswers(state)).toBeNull();
+    });
+
+    it("counts the closest band from the question's percent tolerance (contract 6.1)", () => {
+      const closestState = structuredClone(
+        stepState(playSession(), 'closest reveal'),
+      );
+      // Truth 2010 at 10%: the band is 201 either side.
+      submitAnswer(
+        closestState,
+        DANI,
+        { type: 'closest_number', value: 2200 },
+        90_000,
+      );
+      expect(buildReveal(closestState)?.distribution).toEqual({
+        kind: 'closest',
+        closestValue: 2011,
+        closestNames: ['Ana'],
+        withinBandCount: 2,
+      });
+      answerOf(closestState, DANI).payload = {
+        type: 'closest_number',
+        value: 2212,
+      };
+      expect(buildReveal(closestState)?.distribution).toMatchObject({
+        withinBandCount: 1,
+      });
+    });
+
+    it("shows hosts each player's streak and when their last socket left (contract 6.2)", () => {
+      const state = stepState(playSession(), 'lobby');
+      const bea = state.players.get(BEA);
+      if (bea === undefined) throw new Error('Bea is missing');
+      bea.connectedSocketCount = 0;
+      bea.disconnectedAt = 12_345;
+      bea.streak = 3;
+
+      expect(
+        buildHostLobby(state).players.map((player) => [
+          player.screenName,
+          player.isConnected,
+          player.disconnectedAt,
+          player.streak,
+        ]),
+      ).toEqual([
+        ['Ana', true, null, 0],
+        ['Bea', false, 12_345, 3],
+        ['Cris', true, null, 0],
+      ]);
+      expect(JSON.stringify(buildLobby(state, 'screen'))).not.toContain(
+        'disconnectedAt',
+      );
+    });
+
+    it('lists unrevoked paired devices for hosts with no account id (contract 6.5)', () => {
+      const state = stepState(playSession(), 'lobby');
+      state.pairedDevices = [
+        {
+          pairingId: 'pairing-screen',
+          kind: 'screen',
+          helperUserId: null,
+          helperName: null,
+          pairedAt: 5_000,
+          revokedAt: null,
+          connectedSocketCount: 1,
+        },
+        {
+          pairingId: 'pairing-helper',
+          kind: 'helper',
+          helperUserId: 'user-helper',
+          helperName: 'Rui',
+          pairedAt: 6_000,
+          revokedAt: null,
+          connectedSocketCount: 0,
+        },
+        {
+          pairingId: 'pairing-gone',
+          kind: 'helper',
+          helperUserId: 'user-gone',
+          helperName: 'Gil',
+          pairedAt: 7_000,
+          revokedAt: 8_000,
+          connectedSocketCount: 0,
+        },
+      ];
+      const devices = buildPairedDevices(state);
+      expect(devices).toEqual([
+        {
+          pairingId: 'pairing-screen',
+          kind: 'screen',
+          helperName: null,
+          pairedAt: 5_000,
+          isConnected: true,
+        },
+        {
+          pairingId: 'pairing-helper',
+          kind: 'helper',
+          helperName: 'Rui',
+          pairedAt: 6_000,
+          isConnected: false,
+        },
+      ]);
+      const hostState = buildSessionState(state, { role: 'host' });
+      expect(hostState.pairedDevices).toEqual(devices);
+      expect(JSON.stringify(hostState)).not.toContain('user-helper');
+      expect(
+        JSON.stringify(buildSessionState(state, { role: 'screen' })),
+      ).not.toContain('pairing-');
+    });
+
+    it('carries the practice, join lock, auto-advance and guest push fields', () => {
+      const state = structuredClone(stepState(playSession(), 'lobby'));
+      state.isPractice = true;
+      state.isJoinLocked = true;
+      state.guestPushSentAt = 42_000;
+      expect(buildSessionFlags(state)).toEqual({
+        isJoinLocked: true,
+        isAutoAdvanceOn: false,
+      });
+      for (const { role, frame } of sessionStatesForEveryRole(state)) {
+        expect({
+          role,
+          isPractice: frame.isPractice,
+          isJoinLocked: frame.isJoinLocked,
+          isAutoAdvanceOn: frame.isAutoAdvanceOn,
+          giving: frame.giving,
+        }).toEqual({
+          role,
+          isPractice: true,
+          isJoinLocked: true,
+          isAutoAdvanceOn: false,
+          giving: null,
+        });
+      }
+      expect(buildSessionState(state, { role: 'host' }).guestPushSentAt).toBe(
+        42_000,
+      );
+      expect(playerState(state, ANA)).not.toHaveProperty('guestPushSentAt');
+    });
+
+    it('gives phones the same answer count as the screen (contract 6.21)', () => {
+      const openState = stepState(playSession(), 'multiple choice open');
+      expect(playerState(openState, ANA).answerCount).toEqual({
+        count: 2,
+        total: 3,
+      });
+      expect(playerState(openState, null).answerCount).toEqual(
+        buildSessionState(openState, { role: 'screen' }).answerCount,
+      );
+    });
+
+    it('ends a practice session with no results and the giving link only on a finished end', () => {
+      const giving = {
+        communitySlug: 'lisbon-queer-choir',
+        communityName: 'Lisbon Queer Choir',
+      };
+      const endedState = structuredClone(stepState(playSession(), 'ended'));
+      endedState.giving = giving;
+      expect(buildSessionEnd(endedState)).toMatchObject({
+        status: 'finished',
+        hasResults: true,
+        isPractice: false,
+        giving,
+      });
+      expect(buildSessionState(endedState, { role: 'screen' }).giving).toEqual(
+        giving,
+      );
+
+      endedState.isPractice = true;
+      expect(buildSessionEnd(endedState)).toMatchObject({
+        status: 'finished',
+        hasResults: false,
+        isPractice: true,
+        giving: null,
+      });
+      expect(
+        buildSessionState(endedState, { role: 'screen' }).giving,
+      ).toBeNull();
+
+      const podiumState = structuredClone(stepState(playSession(), 'podium'));
+      podiumState.giving = giving;
+      expect(
+        buildSessionState(podiumState, { role: 'screen' }).giving,
+      ).toBeNull();
+    });
+
+    it('shares one visible option list across a vote fan-out', () => {
+      const voteState = stepState(playSession(), 'caption vote');
+      const play = currentPlay(voteState);
+      const visibleOptions = visibleVoteOptions(voteState, play);
+      expect(visibleOptions).toHaveLength(2);
+      for (const playerId of PLAYER_IDS) {
+        expect(buildVoteOptions(voteState, playerId, visibleOptions)).toEqual(
+          buildVoteOptions(voteState, playerId),
+        );
+      }
     });
   });
 

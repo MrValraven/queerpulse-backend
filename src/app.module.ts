@@ -56,6 +56,7 @@ import {
   redactCulturalProductionPath,
 } from './cultural-production/cultural-production-request-log';
 import { isVjRequest, redactVjPath } from './vj/vj-request-log';
+import { redactQuizshowJoinCodePath } from './quizshow/quizshow-request-log';
 import { isLandingVisitBeacon } from './landing/landing-visit-request-log';
 import { isStudioLandingPublicRequest } from './studio/studio-landing-request-log';
 import { CommunitiesModule } from './communities/communities.module';
@@ -157,6 +158,7 @@ import { SearchModule } from './search/search.module';
 import { GeocodeModule } from './geocode/geocode.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { QuizshowModule } from './quizshow/quizshow.module';
+import { QuizWinBadgesModule } from './quiz-win-badges/quiz-win-badges.module';
 import { EarlyAccessModule } from './early-access/early-access.module';
 import { FeatureAccessModule } from './early-access/feature-access.module';
 import { ResourcesModule } from './resources/resources.module';
@@ -261,12 +263,16 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
               // A preview token in the path is a bearer credential too, and a
               // creator draft path names a draft kind, id or listing ref, and a
               // leads path names a lead or a search, and a VJ path names a pack or
-              // a clip.
+              // a clip. The Pulse Live join preview path carries a join code.
               url: redactSensitiveQueryParameters(
                 redactVjPath(
                   redactCulturalProductionPath(
                     redactLeadsPath(
-                      redactCreatorDraftPath(redactStudioPreviewToken(req.url)),
+                      redactCreatorDraftPath(
+                        redactStudioPreviewToken(
+                          redactQuizshowJoinCodePath(req.url),
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -403,6 +409,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     AffirmingPledgeModule,
     MagazineModule,
     QuizshowModule,
+    QuizWinBadgesModule,
     ResourcesModule,
     TopicsModule,
     // "Members you might know" (SOC-05). Its controller is

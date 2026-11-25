@@ -26,6 +26,8 @@ import { QuizshowVoteRecord } from './entities/quizshow-vote.entity';
 import { AdminQuizshowController } from './admin-quizshow.controller';
 import { AdminQuizshowTemplatesController } from './admin-quizshow-templates.controller';
 import { QuizshowAccessService } from './quizshow-access.service';
+import { QuizshowDevicePairingService } from './quizshow-device-pairing.service';
+import { QuizshowDevicesController } from './quizshow-devices.controller';
 import { QuizshowEventController } from './quizshow-event.controller';
 import { QuizshowEventLifecycleListener } from './quizshow-event-lifecycle.listener';
 import { QuizshowGamesController } from './quizshow-games.controller';
@@ -45,7 +47,9 @@ import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
  * Pulse Live (`quizshow`): live quiz and party games on events, and games
  * without an event that a member owns, and the staff templates hosts import
  * from. Join is open to every active member
- * before launch; hosting stays behind the feature gate.
+ * before launch; hosting stays behind the feature gate. A TV pairs as a
+ * screen and a member's phone as a helper remote; the screen start and the
+ * signed-out join preview are public and open at launch.
  *
  * Module edges: `QuizshowModule` imports `EventsModule`; `EventsModule` and
  * `ReportsModule` reach quizshow through dependency-free helpers and one
@@ -78,7 +82,8 @@ import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
       RefreshToken,
     ]),
     // The gateway verifies the handshake token itself and passes the secret
-    // on each call, as `ChatGateway` does, so no defaults.
+    // on each call, as `ChatGateway` does, so no defaults. The device pairing
+    // service signs and verifies device tickets the same way, with its own key.
     JwtModule.register({}),
     // `EventsService`: `assertCanView` and `isOrganizer`.
     EventsModule,
@@ -108,6 +113,8 @@ import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
     AdminQuizshowController,
     AdminQuizshowTemplatesController,
     QuizshowController,
+    // Device pairing starts and claims, and the signed-out join preview.
+    QuizshowDevicesController,
   ],
   providers: [
     QuizshowAccessService,
@@ -124,6 +131,9 @@ import { QuizshowLobbyOpenRecord } from './entities/quizshow-lobby-open.entity';
     QuizshowRetentionService,
     // Abandons open sessions on `EVENT_CANCELLED` and `EVENT_DELETING`.
     QuizshowEventLifecycleListener,
+    // Pending TV and helper pairings (memory only) and device tickets; the
+    // gateway in this module reaches it, so no export.
+    QuizshowDevicePairingService,
   ],
 })
 export class QuizshowModule {}

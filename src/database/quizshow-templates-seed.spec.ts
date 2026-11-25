@@ -8,6 +8,11 @@ import {
   completenessProblems,
   structuralProblems,
 } from '../quizshow/quizshow-quiz-validation';
+import {
+  normaliseStoredQuestion,
+  withRoundSettingsDefaults,
+} from '../quizshow/quizshow-stored-shapes';
+import type { QuizshowRoundSettings } from '../quizshow/quizshow.contract';
 
 /** Printed by the one-off generator over the retired catalog values. */
 const ORIGINAL_PACKS_SHA256 =
@@ -19,6 +24,31 @@ const ORIGINAL_SOURCES_SHA256 =
 const NOTE_LABEL_PATTERN = /^Round \d+, question \d+: /;
 
 type QuizShape = Parameters<typeof structuralProblems>[0];
+
+/**
+ * The frozen seeds keep the shape they were written in (a single
+ * `correctIndex`, closest answers without a tolerance, eight settings keys).
+ * Reading them goes through the stored-shape normaliser, as every stored
+ * template does (contract 2.4).
+ */
+function readSeedQuiz(seedQuiz: unknown): QuizShape {
+  const storedQuiz = seedQuiz as {
+    rounds: Array<{
+      settings: Partial<QuizshowRoundSettings>;
+      questions: Array<Record<string, unknown>>;
+    }>;
+  };
+  return {
+    ...storedQuiz,
+    rounds: storedQuiz.rounds.map((round) => ({
+      ...round,
+      settings: withRoundSettingsDefaults(round.settings),
+      questions: round.questions.map((question) =>
+        normaliseStoredQuestion(question),
+      ),
+    })),
+  } as unknown as QuizShape;
+}
 
 function sha256Of(text: string): string {
   return createHash('sha256').update(text).digest('hex');
@@ -148,7 +178,7 @@ describe('Frozen quizshow template seeds', () => {
 
   it('passes the structural and the completeness checks and holds no adults round and no image', () => {
     for (const seed of seeds) {
-      const quiz = seed.quiz as unknown as QuizShape;
+      const quiz = readSeedQuiz(seed.quiz);
       expect(structuralProblems(quiz)).toEqual([]);
       expect(completenessProblems(quiz)).toEqual([]);
       for (const round of seed.quiz.rounds) {
@@ -246,7 +276,7 @@ describe('Frozen quizshow wheel template seeds', () => {
 
   it('passes the structural and the completeness checks and holds no adults round and no image', () => {
     for (const seed of wheelSeeds) {
-      const quiz = seed.quiz as unknown as QuizShape;
+      const quiz = readSeedQuiz(seed.quiz);
       expect(structuralProblems(quiz)).toEqual([]);
       expect(completenessProblems(quiz)).toEqual([]);
       for (const round of seed.quiz.rounds) {

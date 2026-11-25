@@ -1,8 +1,13 @@
 /**
- * Pulse Live (`quizshow`) wire contract: pure vocabulary, no imports.
+ * Pulse Live (`quizshow`) wire contract: pure vocabulary with no runtime imports (type imports only).
  * Frontend mirror (by hand, same names and string values):
  * `queerpulse/src/shared/contracts/quizshow.ts`.
  */
+
+import type {
+  QuizshowResultsWinBadges,
+  QuizshowWinBadgesPreview,
+} from '../quiz-win-badges/quiz-win-badges.contract';
 
 export const QUIZSHOW_ROUND_KINDS = [
   'quiz',
@@ -36,6 +41,7 @@ export const QUIZSHOW_QUESTION_TYPES = [
   'order',
   'closest_number',
   'prompt',
+  'poll', // quiz rounds only: 2..4 options, no answer, unscored (item 57)
 ] as const;
 export type QuizshowQuestionType = (typeof QUIZSHOW_QUESTION_TYPES)[number];
 
@@ -52,6 +58,55 @@ export const QUIZSHOW_LANGUAGE_MODES = ['en', 'pt', 'both'] as const;
 export type QuizshowLanguageMode = (typeof QUIZSHOW_LANGUAGE_MODES)[number];
 export const QUIZSHOW_LANGUAGES = ['en', 'pt'] as const;
 export type QuizshowLanguage = (typeof QUIZSHOW_LANGUAGES)[number];
+
+/** What the screen shows. 'both' is allowed only when `languages` is 'both' (item 64). */
+export const QUIZSHOW_SCREEN_LANGUAGES = ['en', 'pt', 'both'] as const;
+export type QuizshowScreenLanguage = (typeof QUIZSHOW_SCREEN_LANGUAGES)[number];
+
+/** The eight shapes; each comes in three tiers (item 26). */
+export const QUIZSHOW_TEAM_SHAPES = [
+  'circle',
+  'triangle',
+  'square',
+  'diamond',
+  'star',
+  'hexagon',
+  'heart',
+  'moon',
+] as const;
+export type QuizshowTeamShape = (typeof QUIZSHOW_TEAM_SHAPES)[number];
+
+export const QUIZSHOW_CLOSEST_TOLERANCE_MODES = [
+  'exact',
+  'absolute',
+  'percent',
+] as const;
+export type QuizshowClosestToleranceMode =
+  (typeof QUIZSHOW_CLOSEST_TOLERANCE_MODES)[number];
+
+export const QUIZSHOW_MEDIA_REVEALS = ['instant', 'slow'] as const;
+export type QuizshowMediaReveal = (typeof QUIZSHOW_MEDIA_REVEALS)[number];
+
+/** Fixed reaction ids (item 46). FE maps each to a react-icons glyph component. */
+export const QUIZSHOW_REACTION_IDS = [
+  'heart',
+  'fire',
+  'clap',
+  'laugh',
+  'wow',
+  'party',
+] as const;
+export type QuizshowReactionId = (typeof QUIZSHOW_REACTION_IDS)[number];
+
+export const QUIZSHOW_TALK_SECONDS_VALUES = [0, 10, 20, 30] as const;
+export type QuizshowTalkSeconds = (typeof QUIZSHOW_TALK_SECONDS_VALUES)[number];
+
+export const QUIZSHOW_PAIRED_DEVICE_KINDS = ['screen', 'helper'] as const;
+export type QuizshowPairedDeviceKind =
+  (typeof QUIZSHOW_PAIRED_DEVICE_KINDS)[number];
+
+export const QUIZSHOW_IMPORT_MODES = ['replace', 'append'] as const;
+export type QuizshowImportMode = (typeof QUIZSHOW_IMPORT_MODES)[number];
 
 export const QUIZSHOW_SESSION_STATUSES = [
   'lobby',
@@ -74,7 +129,7 @@ export type QuizshowPlayMode = (typeof QUIZSHOW_PLAY_MODES)[number];
 export const QUIZSHOW_PHASES = [
   'lobby', // waiting room, players join
   'round_intro', // round title card with its content label; jokers are played here
-  'read', // quiz question shown, 4 s, no answers accepted
+  'read', // quiz question shown for readPhaseMsFor(question), no answers accepted
   'open', // quiz question accepting answers
   'write', // party question accepting written answers
   'review', // party submissions on the host remote; screen shows "checking"
@@ -93,8 +148,8 @@ export const QUIZSHOW_TIMED_PHASES = ['read', 'open', 'write', 'vote'] as const;
 export const QUIZSHOW_ATTACH_ROLES = ['screen', 'player', 'host'] as const;
 export type QuizshowAttachRole = (typeof QUIZSHOW_ATTACH_ROLES)[number];
 
-/** Eight team keys. The frontend pairs each with a colour token and an icon
- *  (both themes, colour-blind safe); the wire carries the key alone. */
+/** 24 team keys: tier 1 keeps the old names, tiers 2 and 3 add a suffix. Order is the auto-assign order.
+ *  The frontend pairs each with a colour token and an icon (both themes, colour-blind safe); the wire carries the key alone. */
 export const QUIZSHOW_TEAM_COLOR_KEYS = [
   'circle',
   'triangle',
@@ -104,6 +159,22 @@ export const QUIZSHOW_TEAM_COLOR_KEYS = [
   'hexagon',
   'heart',
   'moon',
+  'circle_2',
+  'triangle_2',
+  'square_2',
+  'diamond_2',
+  'star_2',
+  'hexagon_2',
+  'heart_2',
+  'moon_2',
+  'circle_3',
+  'triangle_3',
+  'square_3',
+  'diamond_3',
+  'star_3',
+  'hexagon_3',
+  'heart_3',
+  'moon_3',
 ] as const;
 export type QuizshowTeamColorKey = (typeof QUIZSHOW_TEAM_COLOR_KEYS)[number];
 
@@ -188,6 +259,65 @@ export const QUIZSHOW_ERROR_CODES = [
   'quizshow_wheel_spin_too_few_rounds',
   'quizshow_wheel_already_next',
   'quizshow_joker_wheel_next',
+  // item 8: the causes behind a refused host or player command
+  'quizshow_session_not_started',
+  'quizshow_already_started',
+  'quizshow_session_paused',
+  'quizshow_session_ended',
+  'quizshow_spin_not_available',
+  'quizshow_no_wheel_open',
+  'quizshow_no_timer_running',
+  'quizshow_already_revealed',
+  'quizshow_nothing_to_reveal',
+  'quizshow_nothing_to_skip',
+  'quizshow_review_not_open',
+  'quizshow_unhide_review_only',
+  'quizshow_author_removed',
+  'quizshow_favourite_not_available',
+  'quizshow_teams_off',
+  // Pulse Live v2 features
+  'quizshow_screen_name_taken',
+  'quizshow_joining_locked',
+  'quizshow_not_in_lobby',
+  'quizshow_move_during_question',
+  'quizshow_player_left',
+  'quizshow_rescore_not_now',
+  'quizshow_accept_needs_typed_answer',
+  'quizshow_change_needs_choice_question',
+  'quizshow_answer_text_not_found',
+  'quizshow_answer_already_correct',
+  'quizshow_correct_option_not_found',
+  'quizshow_every_option_correct',
+  'quizshow_adjust_not_now',
+  'quizshow_adjust_below_zero',
+  'quizshow_entrant_not_found',
+  'quizshow_pairing_code_not_found',
+  'quizshow_pairing_code_expired',
+  'quizshow_pairing_code_used',
+  'quizshow_paired_devices_full',
+  'quizshow_helper_cannot_pair',
+  'quizshow_helper_is_playing',
+  'quizshow_device_not_found',
+  'quizshow_device_unpaired',
+  'quizshow_device_ticket_expired',
+  'quizshow_pairing_not_found',
+  'quizshow_pairing_rate_limited',
+  'quizshow_pairing_too_many_tries', // per host: 10 wrong pairing codes in 10 minutes
+  'quizshow_guest_push_cooldown',
+  'quizshow_guest_push_already_sent',
+  'quizshow_guest_push_needs_event',
+  'quizshow_guest_push_practice',
+  'quizshow_refresh_quiz_incomplete',
+  'quizshow_refresh_adults_mismatch',
+  'quizshow_refresh_adults_lobby_joined',
+  'quizshow_refresh_quiz_gone',
+  'quizshow_rematch_not_found',
+  'quizshow_rematch_expired',
+  'quizshow_reaction_not_now',
+  'quizshow_import_round_not_found',
+  'quizshow_import_too_many_rounds',
+  'quizshow_import_too_many_questions',
+  'quizshow_import_too_many_wheels',
   // existing, reused as is
   'ACCOUNT_RESTRICTED',
 ] as const;
@@ -214,6 +344,12 @@ export const QUIZSHOW_QUIZ_PROBLEM_CODES = [
   'media_missing',
   'too_many_wheels',
   'wheel_too_few_slices',
+  'correct_option_missing', // MC: correctIndexes empty
+  'too_many_correct_options', // MC: correctIndexes covers every option
+  'tolerance_out_of_range', // closest: amount outside the mode's range
+  'poll_in_party_round', // poll outside a quiz round
+  'slow_reveal_needs_picture', // mediaReveal 'slow' with mediaRef null
+  'warm_up_not_first', // isWarmUp on a round other than the first playable round
 ] as const;
 export type QuizshowQuizProblemCode =
   (typeof QUIZSHOW_QUIZ_PROBLEM_CODES)[number];
@@ -222,6 +358,8 @@ export type QuizshowQuizProblemCode =
 export const QUIZSHOW_JOIN_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const QUIZSHOW_JOIN_CODE_PATTERN =
   /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
+/** TV pairing code: 6 digits from '23456789' (item 9). */
+export const QUIZSHOW_PAIRING_CODE_PATTERN = /^[2-9]{6}$/;
 
 /** Limits and scoring numbers; the frontend mirror carries the same names and values. */
 export const QUIZSHOW_LIMITS = {
@@ -233,7 +371,7 @@ export const QUIZSHOW_LIMITS = {
   acceptedAnswersMax: 10,
   acceptedAnswerMax: 80,
   roundsMax: 10,
-  questionsPerQuizMax: 50,
+  questionsPerQuizMax: 100,
   questionsPerRoundMax: 20,
   multipleChoiceOptionsMin: 2,
   multipleChoiceOptionsMax: 4,
@@ -257,10 +395,9 @@ export const QUIZSHOW_LIMITS = {
   partyTextMax: 80,
   typedAnswerMax: 80,
   playersPerSessionMax: 150,
-  teamsPerSessionMax: 8,
+  teamsPerSessionMax: 24,
   maxTeamSizeMin: 2,
   maxTeamSizeMax: 20,
-  readPhaseMs: 4000,
   answerGraceMs: 500,
   extraTimeFactor: 1.5,
   addTimeSecondsMin: 5,
@@ -268,7 +405,6 @@ export const QUIZSHOW_LIMITS = {
   streakStep: 100,
   streakCap: 500,
   jokerMultiplier: 2,
-  closestNumberBand: 0.1,
   lieDetectorTruthPoints: 1000,
   lieDetectorFooledPoints: 500,
   partyVotePoints: 250,
@@ -294,6 +430,39 @@ export const QUIZSHOW_LIMITS = {
   wheelJitterSpread: 0.7, // share of one slice the landing may drift from its middle
   wheelPointerAngle: 270, // degrees clockwise from 12 o'clock: the pointer at 9 o'clock
   wheelLandingToleranceMs: 250,
+  readPhaseBaseMs: 1500, // readPhaseMsFor (section 6.12) replaces the flat 4 s read
+  readPhaseMsPerChar: 25,
+  readPhaseMinMs: 3000,
+  readPhaseMaxMs: 8000,
+  closestPercentMin: 1, // tolerance is per question (section 6.1)
+  closestPercentMax: 50,
+  closestLegacyPercent: 10, // what a stored question without tolerance means
+  revealNoteMax: 200,
+  mediaAltMax: 200,
+  numberUnitMax: 20,
+  awayAfterMs: 20_000,
+  latencyAllowanceMaxMs: 400,
+  latencyProbeIntervalMs: 30_000,
+  latencyProbeSamples: 5,
+  latencyProbeTimeoutMs: 3_000,
+  sessionPingTimeoutMs: 1_500, // FE only reads it
+  pairingCodeLength: 6,
+  pairingCodeTtlMs: 600_000,
+  pairingPollMs: 2_000,
+  pairedDevicesMax: 6,
+  deviceTicketTtlMs: 43_200_000, // 12 h; also capped by the session staying open
+  reactionBurst: 3,
+  reactionRefillMs: 1_500,
+  reactionsFrameMs: 500,
+  autoAdvanceRoundIntroMs: 5_000,
+  autoAdvanceRevealMs: 6_000,
+  autoAdvanceScoresMs: 6_000,
+  rematchWindowMs: 1_800_000,
+  adjustPointsMax: 5_000, // |delta| per host:adjustPoints
+  leaderboardStreakMin: 3,
+  podiumWinnerHoldMs: 2_000, // FE: the held beat before 1st place
+  hostTeamsPerCommandMax: 24,
+  answerWriteCoalesceMs: 150,
 } as const;
 
 /** Every bilingual field. A language the quiz does not use may hold ''. */
@@ -320,8 +489,13 @@ export interface QuizshowRoundSettings {
   wheelPick: QuizshowWheelPick; // default 'round'
   /** Wheel rows: 2..8 slices, null = Auto. null on every other row after a save. */
   sliceCount: number | null; // default null
+  /** Quiz rounds: every question scores 0 and streaks stay as they were. Only the first playable row. Default false. */
+  isWarmUp: boolean;
+  /** Quiz rounds in teams play: seconds added to `read` for the team to talk. Default 0. Ignored in solo. */
+  talkSeconds: QuizshowTalkSeconds;
 }
-// All eight are present on every round a GET, PUT, import or snapshot returns.
+// All ten are present on every round a GET, PUT, import or snapshot returns.
+// Normalisation on save: wheel rows and party rows store isWarmUp false and talkSeconds 0.
 
 export const QUIZSHOW_WHEEL_SETTINGS_DEFAULTS: Readonly<
   Pick<QuizshowRoundSettings, 'wheelBonus' | 'wheelPick' | 'sliceCount'>
@@ -393,11 +567,30 @@ export interface QuizshowOption {
   text: QuizshowText;
 }
 
+export interface QuizshowClosestTolerance {
+  mode: QuizshowClosestToleranceMode;
+  /** 'exact': 0. 'absolute': 0 < amount <= numberAbsMax. 'percent': integer closestPercentMin..closestPercentMax. */
+  amount: number;
+}
+export const QUIZSHOW_CLOSEST_TOLERANCE_DEFAULT: Readonly<QuizshowClosestTolerance> =
+  {
+    mode: 'exact',
+    amount: 0,
+  }; // new questions (call); stored questions migrate to { mode: 'percent', amount: 10 }
+
 export interface QuizshowQuestionBase {
   prompt: QuizshowText;
   /** Bare storage key from `POST /uploads/presign` with kind `event-cover`
    *  (validated with `@IsImageReference()`), or null. */
   mediaRef: string | null;
+  /** Describes the picture for screen readers; '' both when none. 0..mediaAltMax each. */
+  mediaAlt: QuizshowText;
+  /** 'slow' needs mediaRef and a quiz round. Default 'instant'. */
+  mediaReveal: QuizshowMediaReveal;
+  /** Shown with the answer at reveal ("Fun fact"); '' both when none. 0..revealNoteMax each. Never on prompt. */
+  revealNote: QuizshowText;
+  /** closest_number only: unit label shown by the number field ("years"); '' both on every other type. */
+  numberUnit: QuizshowText;
   /** null falls back to the round's `timeLimitSeconds`. Always null on `prompt`. */
   timeLimitSeconds: number | null;
   /** 500 | 1000 | 2000. Stored on `prompt` questions and ignored there. */
@@ -408,7 +601,8 @@ export type QuizshowQuestionInput =
   | (QuizshowQuestionBase & {
       type: 'multiple_choice';
       options: QuizshowOption[];
-      answer: { correctIndex: number } | null;
+      /** Sorted ascending, unique, 1..options.length - 1 entries (item 57). */
+      answer: { correctIndexes: number[] } | null;
       acceptedAnswers: [];
     })
   | (QuizshowQuestionBase & {
@@ -432,7 +626,7 @@ export type QuizshowQuestionInput =
   | (QuizshowQuestionBase & {
       type: 'closest_number';
       options: [];
-      answer: { value: number } | null;
+      answer: { value: number; tolerance: QuizshowClosestTolerance } | null;
       acceptedAnswers: [];
     })
   /** Party rounds only. Lie Detector: the real question plus `answer.truth`.
@@ -442,6 +636,12 @@ export type QuizshowQuestionInput =
       type: 'prompt';
       options: [];
       answer: { truth: QuizshowText } | null;
+      acceptedAnswers: [];
+    })
+  | (QuizshowQuestionBase & {
+      type: 'poll';
+      options: QuizshowOption[]; // 2..4, same id rules as MC
+      answer: null;
       acceptedAnswers: [];
     });
 
@@ -460,7 +660,7 @@ export interface QuizshowQuizInput {
   expectedUpdatedAt: string | null;
   title: string;
   languages: QuizshowLanguageMode;
-  screenLanguage: QuizshowLanguage;
+  screenLanguage: QuizshowScreenLanguage; // widened
   rounds: QuizshowRoundInput[]; // array order is `position`
 }
 
@@ -473,11 +673,24 @@ export interface QuizshowRound extends Omit<QuizshowRoundInput, 'questions'> {
   id: string;
   questions: QuizshowQuestion[];
 }
+export interface QuizshowSourceTemplateRef {
+  templateId: string;
+  title: QuizshowText; // the template's card title
+  copiedAt: string; // when this quiz copied it
+  lastPublishedAt: string; // the template's latest publish
+  /** true when lastPublishedAt is after copiedAt. */
+  hasUpdate: boolean;
+  /** Staff note of the latest publish; '' both when none. */
+  changeNote: QuizshowText;
+}
+
 export interface QuizshowQuiz {
   title: string;
   languages: QuizshowLanguageMode;
-  screenLanguage: QuizshowLanguage;
+  screenLanguage: QuizshowScreenLanguage; // widened
   sourceTemplateId: string | null; // read only; set by a template import, copied by an event or game import, null once the template is deleted
+  /** null when sourceTemplateId is null or the template is unpublished. */
+  sourceTemplate: QuizshowSourceTemplateRef | null;
   updatedAt: string;
   rounds: QuizshowRound[];
 }
@@ -489,6 +702,16 @@ export interface QuizshowLiveSessionRef {
   playMode: QuizshowPlayMode;
   playerCount: number;
   startedAt: string;
+  isPractice: boolean;
+  /** The quiz was saved after this lobby took its snapshot (item 18). Always false once running. */
+  isBehindQuiz: boolean;
+}
+
+/** What the open dialog last used on this quiz (item 52). */
+export interface QuizshowOpenSettingsMemory {
+  playMode: QuizshowPlayMode;
+  maxTeamSize: number | null;
+  isReviewOn: boolean;
 }
 
 /** GET, PUT and import response. */
@@ -500,6 +723,7 @@ export interface QuizshowQuizResponse {
   isAdultsEvent: boolean;
   liveSession: QuizshowLiveSessionRef | null;
   hasResults: boolean;
+  lastOpenSettings: QuizshowOpenSettingsMemory | null;
 }
 
 export interface QuizshowQuizProblem {
@@ -515,11 +739,30 @@ export type QuizshowScopeKind = 'event' | 'game';
 export const QUIZSHOW_GAMES_PER_MEMBER_MAX = 50;
 export const QUIZSHOW_LOBBY_OPENS_PER_HOUR_MAX = 10;
 
-/** The import body: a published template, an event the caller organises, or a game the caller owns. */
-export type QuizshowImportInput =
+/** The import body: a published template, an event the caller organises, or a game the caller owns.
+ *  Item 23: the three sources are unchanged; the new fields are optional for old clients. */
+export type QuizshowImportInput = (
   | { from: 'template'; templateId: string }
   | { from: 'event'; eventSlug: string }
-  | { from: 'game'; gameId: string };
+  | { from: 'game'; gameId: string }
+) & {
+  mode?: QuizshowImportMode; // default 'replace'
+  /** append only: row indexes of the source to copy, in source order; null = every row. */
+  roundIndexes?: number[] | null;
+  /** append only, required there: the target quiz's updatedAt, or null when it has none. */
+  expectedUpdatedAt?: string | null;
+};
+
+export interface QuizshowImportRoundRef {
+  roundIndex: number;
+  kind: QuizshowRoundKind;
+  title: QuizshowText;
+  questionCount: number;
+  /** Wheel rows: 2..8 slices, null = Auto; null on every other row (item 23). */
+  sliceCount: number | null;
+  /** The round's 18+ label; an append holds only the adults rows when the event is not 18+. */
+  contentLabel: QuizshowContentLabel;
+}
 
 export interface QuizshowGameSummary {
   id: string;
@@ -560,6 +803,20 @@ export interface QuizshowImportSource {
   /** Same `seriesId` as `:slug`. The empty state's "Copy from the last event in
    *  this series" picks the first item with this flag and `startAt` before the event. */
   isSameSeries: boolean; // always false for game sources
+  rounds: QuizshowImportRoundRef[];
+}
+
+/** GET /quizshow/templates/:templateId/preview (item 23). Prompts only: no options, answers or notes. */
+export interface QuizshowTemplatePreview {
+  templateId: string;
+  title: QuizshowText;
+  description: QuizshowText;
+  languages: QuizshowLanguageMode;
+  rounds: Array<
+    QuizshowImportRoundRef & {
+      prompts: QuizshowText[];
+    }
+  >;
 }
 
 /** Host-facing card. Never carries questions or answers. */
@@ -571,6 +828,7 @@ export interface QuizshowTemplateCard {
   roundCount: number;
   questionCount: number;
   hasAdultsRounds: boolean;
+  lastPublishedAt: string;
 }
 
 /** Staff list row. */
@@ -600,6 +858,8 @@ export interface QuizshowTemplateDetail {
   publishedAt: string | null;
   publishedByName: string | null;
   quiz: QuizshowQuiz; // same shape the builder reads today
+  changeNote: QuizshowText;
+  lastPublishedAt: string | null;
 }
 
 /** Staff PUT body. `quiz.expectedUpdatedAt` is the concurrency token. */
@@ -607,15 +867,19 @@ export interface QuizshowTemplateInput {
   card: QuizshowTemplateCardText;
   staffNotes: string;
   quiz: QuizshowQuizInput;
+  changeNote: QuizshowText; // 0..300 each, staff only
 }
 
 export interface QuizshowOpenSessionInput {
   playMode: QuizshowPlayMode;
   maxTeamSize: number | null; // teams only, 2..20; null = no cap. Must be null in solo.
   isReviewOn: boolean; // default true in the UI
-  notifyGuests: boolean; // "Let guests know", default true in the UI
-  /** true after the host confirmed that opening deletes the event's kept results. */
+  notifyGuests: boolean; // the dialog's switch now defaults to false (item 16)
+  /** true after the host confirmed that opening deletes the event's kept results. Ignored when isPractice. */
   shouldReplaceResults: boolean;
+  isPractice: boolean; // item 17
+  /** item 38: the finished session this one replays; null otherwise. */
+  rematchOfSessionId: string | null;
 }
 
 export interface QuizshowJoinHost {
@@ -634,6 +898,18 @@ export interface QuizshowJoinResponse {
   status: 'lobby' | 'running' | 'paused';
   /** The caller already has a player row in this session (reconnect, second device). */
   isRejoin: boolean;
+}
+
+/** GET /quizshow/join-preview/:code, signed out (item 29). Nothing else is safe to show. */
+export interface QuizshowJoinPreview {
+  quizTitle: string;
+  status: 'lobby' | 'running' | 'paused';
+}
+
+/** REST details of `quizshow_quiz_changed` (item 54). */
+export interface QuizshowQuizChangedDetails {
+  updatedAt: string | null;
+  updatedByName: string | null; // display name; null when the account is gone
 }
 
 export interface QuizshowResultsPodiumEntry {
@@ -662,12 +938,23 @@ export interface QuizshowResultsResponse {
   teamCount: number | null; // null in solo
   /** Organisers only (a co-host who played sees it once the session ended); null for everyone else. */
   recap: QuizshowRecap | null;
+  /** Win badges of this game: its winners and the viewer's own; null when the game gave none. */
+  winBadges: QuizshowResultsWinBadges | null;
 }
 
+export interface QuizshowRecapStanding {
+  rank: number;
+  kind: 'player' | 'team';
+  name: string;
+  colorKey: QuizshowTeamColorKey | null;
+  score: number;
+}
 export interface QuizshowRecap {
   questionsPlayed: number;
   answersGiven: number;
   questions: QuizshowRecapQuestion[];
+  /** Every entrant of the night, rank ASC then name. Organisers only, like the rest of the recap (item 59). */
+  standings: QuizshowRecapStanding[];
 }
 export interface QuizshowRecapQuestion {
   roundIndex: number;
@@ -676,11 +963,13 @@ export interface QuizshowRecapQuestion {
   type: QuizshowQuestionType;
   prompt: QuizshowText;
   answerCount: number;
-  /** 0..100 integer: share of eligible players who scored the full base. null on party questions. */
+  /** 0..100 integer: share of eligible players who scored the full base. null on party, poll and warm-up questions. */
   percentCorrect: number | null;
   /** Mean `receivedAt - phaseStartedAt` of `open`; null on party questions. */
   averageAnswerMs: number | null;
   wasSkipped: boolean;
+  isWarmUp: boolean;
+  wasCorrected: boolean;
 }
 
 /** The quiz without the concurrency token: what an import copies and a write stores. */
@@ -694,6 +983,8 @@ export interface QuizshowEventDetail {
   liveSessionCode: string | null;
   /** Kept results exist AND this viewer may open them (organiser, going RSVP, or played). */
   hasResults: boolean;
+  /** "Win to earn": the badges the next game of this event gives; null when it gives none or the event has no quiz. */
+  winBadges: QuizshowWinBadgesPreview | null;
 }
 
 export type QuizshowScoresScope = 'question' | 'round' | 'final';
@@ -733,8 +1024,10 @@ export interface QuizshowAckFailure {
   ok: false;
   code: QuizshowErrorCode;
   message: string; // English, for logs; the FE maps `code` to copy
-  /** On `quizshow_stale_phase` and `quizshow_command_not_allowed`: the current cursor. */
+  /** On `quizshow_stale_phase` and every phase or status refusal of contract 3.2: the current cursor. */
   cursor?: QuizshowCursor;
+  /** Only on quizshow_screen_name_taken: the first free "<name> 2".."<name> 99". */
+  suggestedScreenName?: string;
 }
 
 export interface QuizshowCursor {
@@ -767,6 +1060,12 @@ export interface QuizshowCursor {
   upNext: QuizshowUpNext | null;
   /** True only in `leaderboard` when the remote may offer "Spin for the next round". */
   canSpinForNextRound: boolean;
+  /** read in teams play with talkSeconds > 0: when the talk beat starts (server ms); null otherwise. */
+  talkStartsAt: number | null;
+  /** When the server moves on by itself (auto-advance); null when it will not. Cleared by pause. */
+  autoAdvanceAt: number | null;
+  /** podium only: places revealed so far, 0..3, counted from 3rd; null in every other phase. */
+  podiumRevealedCount: number | null;
 }
 
 export type QuizshowAnswerPayload =
@@ -775,7 +1074,8 @@ export type QuizshowAnswerPayload =
   | { type: 'type_answer'; text: string } // 1..80 after trim
   | { type: 'order'; orderedIds: string[] } // a permutation of the shown option ids
   | { type: 'closest_number'; value: number }
-  | { type: 'prompt'; text: string }; // party: 1..80 after trim
+  | { type: 'prompt'; text: string } // party: 1..80 after trim
+  | { type: 'poll'; optionIndex: number };
 
 /** What the server stored, with no correctness in it. */
 export interface QuizshowMyAnswer {
@@ -797,6 +1097,8 @@ export interface QuizshowRoundCard {
   questionCount: number;
   isJokerAllowed: boolean;
   isSpeedBonusOn: boolean;
+  isWarmUp: boolean;
+  talkSeconds: QuizshowTalkSeconds; // 0 in solo play whatever the setting
 }
 
 /** Screen and players. Carries no answer key. */
@@ -811,22 +1113,33 @@ export interface QuizshowQuestionView {
   points: number;
   /** Effective standard limit of `open` (quiz) or `write` (party), seconds. */
   timeLimitSeconds: number;
-  /** MC: authored order (index = `optionIndex`). Order: shuffled at lobby open
-   *  into an order that differs from the correct one. Every other type: null. Sent from `read` on. */
+  mediaAlt: QuizshowText;
+  mediaReveal: QuizshowMediaReveal;
+  numberUnit: QuizshowText;
+  /** The `read` length this question got, ms (item 30). */
+  readMs: number;
+  /** MC and poll: authored order (index = `optionIndex`). Order: shuffled at lobby open
+   *  into an order that differs from the correct one. Others: null. Sent from `read` on. */
   options: QuizshowOption[] | null;
 }
 
 export type QuizshowAnswerKeyView =
-  | { type: 'multiple_choice'; correctIndex: number }
+  | { type: 'multiple_choice'; correctIndexes: number[] }
   | { type: 'true_false'; isTrue: boolean }
   | { type: 'type_answer'; text: QuizshowText; acceptedAnswers: string[] }
   | { type: 'order'; orderedIds: string[] }
-  | { type: 'closest_number'; value: number }
+  | {
+      type: 'closest_number';
+      value: number;
+      tolerance: QuizshowClosestTolerance;
+    }
   | { type: 'lie_detector'; truth: QuizshowText };
+// poll has no key: toAnswerKeyView returns null for it, as for Caption This.
 
-/** Hosts only: the answer from the question's first phase. null on Caption This and Drag Name. */
+/** Hosts only: the answer from the question's first phase. null on Caption This, Drag Name and poll. */
 export interface QuizshowHostQuestionView extends QuizshowQuestionView {
   answerKey: QuizshowAnswerKeyView | null;
+  revealNote: QuizshowText; // hosts see it from read on
 }
 
 export interface QuizshowPhaseChangeFrame {
@@ -848,9 +1161,15 @@ export interface QuizshowLobbyTeam {
   name: string;
   colorKey: QuizshowTeamColorKey;
   memberCount: number;
+  isHostMade: boolean; // item 26: created by a host
 }
 export interface QuizshowLobby {
   players: QuizshowLobbyPlayer[]; // joined order, removed players left out
+  teams: QuizshowLobbyTeam[]; // [] in solo
+  playerCount: number;
+}
+/** lobby:update and session:state for the players room (W2). No roster. */
+export interface QuizshowPlayerLobby {
   teams: QuizshowLobbyTeam[]; // [] in solo
   playerCount: number;
 }
@@ -859,7 +1178,10 @@ export interface QuizshowHostPlayer extends QuizshowLobbyPlayer {
   hasExtraTime: boolean;
   hasUsedJoker: boolean;
   score: number;
+  streak: number;
   isConnected: boolean;
+  /** Server ms when the last socket left; null while connected. The remote tags "Away" at awayAfterMs (item 3). */
+  disconnectedAt: number | null;
   joinedAt: number;
 }
 export interface QuizshowHostTeam extends QuizshowLobbyTeam {
@@ -870,6 +1192,15 @@ export interface QuizshowHostLobby {
   players: QuizshowHostPlayer[];
   teams: QuizshowHostTeam[];
   playerCount: number;
+}
+
+export interface QuizshowPairedDevice {
+  pairingId: string;
+  kind: QuizshowPairedDeviceKind;
+  /** helper: the member's display name; screen: null. */
+  helperName: string | null;
+  pairedAt: number;
+  isConnected: boolean;
 }
 
 export interface QuizshowMe {
@@ -960,11 +1291,27 @@ export interface QuizshowPartyRevealEntry {
 export interface QuizshowReveal {
   phaseId: string;
   questionId: string;
-  /** null on Caption This and Drag Name. */
+  /** null on Caption This, Drag Name and poll. */
   correct: QuizshowAnswerKeyView | null;
   answeredCount: number;
   eligibleCount: number;
-  distribution: QuizshowDistribution;
+  distribution: QuizshowDistribution; // poll uses { kind: 'options', counts }
+  /** The question's revealNote; null when both languages are ''. */
+  note: QuizshowText | null;
+  /** The host changed the key or accepted an answer on this question (item 5). */
+  wasCorrected: boolean;
+}
+
+/** type_answer reveal, hosts only (item 5): distinct wrong answers, most written first. */
+export interface QuizshowTypedAnswerGroup {
+  normalisedText: string; // the accept key the server compares
+  sampleText: string; // the first stored spelling, as written
+  count: number;
+}
+export interface QuizshowHostTypedAnswers {
+  phaseId: string;
+  questionId: string;
+  groups: QuizshowTypedAnswerGroup[]; // max 30 groups
 }
 
 export interface QuizshowMyReveal {
@@ -991,6 +1338,8 @@ export interface QuizshowLeaderboardEntry {
   colorKey: QuizshowTeamColorKey | null;
   score: number;
   previousScore: number; // for the RollingNumber count-up
+  /** Solo: the player's streak. Teams: the highest streak among active members (item 45). */
+  streak: number;
 }
 export interface QuizshowScores {
   phaseId: string;
@@ -1015,6 +1364,24 @@ export interface QuizshowPodiumEntry {
   score: number;
 }
 
+export interface QuizshowAnswerCountFrame {
+  phaseId: string;
+  count: number;
+  total: number;
+}
+
+export interface QuizshowPodiumFrame {
+  phaseId: string;
+  /** Screen and players: places already revealed. Hosts: every podium entry. */
+  entries: QuizshowPodiumEntry[];
+  revealedCount: number; // 0..3, equals cursor.podiumRevealedCount
+}
+
+export interface QuizshowReactionsFrame {
+  /** Reactions received in the window, by id; ids with 0 left out. Anonymous: no player ids. */
+  counts: Partial<Record<QuizshowReactionId, number>>;
+}
+
 export interface QuizshowNextEvent {
   slug: string;
   title: string;
@@ -1026,7 +1393,21 @@ export interface QuizshowSessionEnd {
   status: 'finished' | 'abandoned';
   podium: QuizshowPodiumEntry[]; // [] when abandoned
   nextEvent: QuizshowNextEvent | null; // next occurrence of the event's series, when there is one
-  hasResults: boolean;
+  hasResults: boolean; // false for a practice session
+  isPractice: boolean;
+  giving: QuizshowGivingLink | null;
+}
+
+export interface QuizshowGivingLink {
+  communitySlug: string;
+  communityName: string;
+}
+
+export interface QuizshowRematch {
+  fromSessionId: string;
+  sessionId: string;
+  joinCode: string;
+  playMode: QuizshowPlayMode;
 }
 
 export interface QuizshowStateBase {
@@ -1039,10 +1420,15 @@ export interface QuizshowStateBase {
   joinCode: string;
   quizTitle: string;
   languages: QuizshowLanguageMode;
-  screenLanguage: QuizshowLanguage;
+  screenLanguage: QuizshowScreenLanguage; // widened
   playMode: QuizshowPlayMode;
   maxTeamSize: number | null;
   isReviewOn: boolean;
+  isPractice: boolean;
+  isJoinLocked: boolean;
+  isAutoAdvanceOn: boolean;
+  /** Set in `ended` of a finished event session (item 66); null otherwise. */
+  giving: QuizshowGivingLink | null;
   /** Screen sound muted by a host; in-memory, starts false, kept across reconnects for the session (coordinator addition 2026-10-19). Screen and host states carry it; players ignore it. */
   isScreenMuted: boolean;
   cursor: QuizshowCursor;
@@ -1066,7 +1452,8 @@ export interface QuizshowScreenState extends QuizshowStateBase {
 
 export interface QuizshowPlayerState extends QuizshowStateBase {
   role: 'player';
-  lobby: QuizshowLobby; // avatarUrl null
+  lobby: QuizshowPlayerLobby; // was QuizshowLobby (W2)
+  answerCount: { count: number; total: number } | null; // item 48
   question: QuizshowQuestionView | null;
   voteOptions: QuizshowVoteOptions | null;
   me: QuizshowMe | null; // null until `lobby:join`
@@ -1086,10 +1473,31 @@ export interface QuizshowHostState extends QuizshowStateBase {
   answerCount: { count: number; total: number } | null;
   voteOptions: QuizshowHostVoteOptions | null;
   reviewList: QuizshowReviewList | null;
+  pairedDevices: QuizshowPairedDevice[]; // item 9
+  typedAnswers: QuizshowHostTypedAnswers | null; // item 5, reveal and scores of type_answer
+  guestPushSentAt: number | null; // item 16
 }
 
 export type QuizshowSessionState =
   QuizshowScreenState | QuizshowPlayerState | QuizshowHostState;
+
+/** TV pairing and helper remote (item 9). */
+export interface QuizshowPairingStart {
+  pairingId: string; // uuid
+  pairingCode: string; // 6 digits from '23456789'
+  pollToken: string; // 32 bytes base64url; sent in the claim body only
+  expiresAt: number; // server ms
+}
+export type QuizshowPairingClaim =
+  | { status: 'waiting'; expiresAt: number }
+  | {
+      status: 'paired';
+      deviceTicket: string; // JWT, section 6.5
+      sessionId: string;
+      kind: QuizshowScopeKind;
+      eventSlug: string | null;
+      gameId: string | null;
+    };
 
 export const QUIZSHOW_ANSWER_SNAPSHOT_TYPE = 'quizshow-answer-snapshot';
 export interface QuizshowAnswerSnapshotEvidence {

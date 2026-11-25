@@ -9,9 +9,17 @@ import {
   type QuizshowHostLobby,
   type QuizshowMyReveal,
   type QuizshowMyScores,
+  type QuizshowPairedDevice,
   type QuizshowPhaseChangeFrame,
+  type QuizshowPlayerLobby,
+  type QuizshowPlayerState,
+  type QuizshowPodiumEntry,
+  type QuizshowPodiumFrame,
+  type QuizshowReactionsFrame,
+  type QuizshowRematch,
   type QuizshowRoundKind,
   type QuizshowSessionEnd,
+  type QuizshowSessionState,
   type QuizshowVoteOptions,
 } from './quizshow.contract';
 import {
@@ -28,6 +36,8 @@ import {
 import { joinLobby, submitAnswer, submitVote } from './quizshow-engine-players';
 import { createLobbyState, succeed } from './quizshow-engine-state';
 import type {
+  QuizshowEngineEffect,
+  QuizshowLivePlayer,
   QuizshowLiveQuestionPlay,
   QuizshowLiveState,
   QuizshowPersistOperation,
@@ -39,7 +49,11 @@ import {
   type QuizshowRoleRoom,
 } from './quizshow-frames';
 import type { QuizshowPersistenceService } from './quizshow-persistence.service';
-import { QuizshowRuntimeService } from './quizshow-runtime.service';
+import {
+  QUIZSHOW_LOBBY_THROTTLE_MS,
+  QuizshowRuntimeService,
+} from './quizshow-runtime.service';
+import * as quizshowScoring from './quizshow-scoring';
 import type {
   QuizshowRandom,
   QuizshowSessionSnapshot,
@@ -66,7 +80,15 @@ const OPEN_STATUSES = new Set(['lobby', 'running', 'paused']);
 
 type NamespaceRecord =
   | { kind: 'emit'; room: string; event: string; payload: unknown }
-  | { kind: 'leave'; room: string; rooms: string[] };
+  | { kind: 'leave'; room: string; rooms: string[] }
+  | { kind: 'socket_emit'; socketId: string; event: string; payload: unknown }
+  | { kind: 'socket_leave'; socketId: string; room: string };
+
+/** The sockets the fake namespace knows: room membership as socket.io's adapter keeps it, and each socket by id. */
+interface FakeSockets {
+  rooms: Map<string, Set<string>>;
+  byId: Map<string, Socket>;
+}
 
 interface FakePersistence {
   loadLiveState: jest.Mock<
@@ -92,6 +114,7 @@ interface Harness {
   runtime: QuizshowRuntimeService;
   persistence: FakePersistence;
   records: NamespaceRecord[];
+  sockets: FakeSockets;
   state: QuizshowLiveState;
   random: QuizshowRandom;
 }
@@ -114,6 +137,10 @@ function trueFalseQuestion(questionId: string): QuizshowSnapshotQuestion {
     prompt: { en: 'Is it true?', pt: 'É verdade?' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [],
@@ -130,10 +157,34 @@ function promptQuestion(questionId: string): QuizshowSnapshotQuestion {
     prompt: { en: 'Write a caption', pt: 'Escreve uma legenda' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [],
     answer: null,
+    acceptedAnswers: [],
+    shownOptions: null,
+  };
+}
+
+function typeAnswerQuestion(questionId: string): QuizshowSnapshotQuestion {
+  return {
+    id: questionId,
+    type: 'type_answer',
+    prompt: { en: 'Is it true?', pt: 'É verdade?' },
+    mediaRef: null,
+    mediaUrl: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
+    timeLimitSeconds: null,
+    points: 1000,
+    options: [],
+    answer: { text: { en: 'Stonewall', pt: 'Stonewall' } },
     acceptedAnswers: [],
     shownOptions: null,
   };
@@ -156,6 +207,8 @@ function snapshotRound(
       writeSeconds: 60,
       voteSeconds: 30,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+      isWarmUp: false,
+      talkSeconds: 0,
     },
     questions,
   };
@@ -180,6 +233,7 @@ function lobbyState(
     languages: 'both',
     screenLanguage: 'en',
     rounds,
+    sourceUpdatedAt: '2026-10-19T18:00:00.000Z',
   };
   return createLobbyState({
     sessionId,
@@ -198,6 +252,7 @@ function lobbyState(
     snapshot,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
+    isPractice: false,
     startedAt: START,
   });
 }
@@ -245,8 +300,17 @@ function fakePersistence(
   };
 }
 
-function fakeNamespace(records: NamespaceRecord[]): Namespace {
+function emptySockets(): FakeSockets {
+  return { rooms: new Map(), byId: new Map() };
+}
+
+function fakeNamespace(
+  records: NamespaceRecord[],
+  sockets: FakeSockets = emptySockets(),
+): Namespace {
   const namespace = {
+    adapter: { rooms: sockets.rooms },
+    sockets: sockets.byId,
     to: (room: string) => ({
       emit: (event: string, payload: unknown) => {
         records.push({ kind: 'emit', room, event, payload });
@@ -275,8 +339,87 @@ function createHarness(rounds: QuizshowSnapshotRound[]): Harness {
     random,
   );
   const records: NamespaceRecord[] = [];
-  runtime.bindNamespace(fakeNamespace(records));
-  return { runtime, persistence, records, state, random };
+  const sockets = emptySockets();
+  runtime.bindNamespace(fakeNamespace(records, sockets));
+  return { runtime, persistence, records, sockets, state, random };
+}
+
+/** A socket in the listed rooms that records what it receives and the rooms it leaves. */
+function addSocket(
+  harness: Harness,
+  socketId: string,
+  rooms: readonly string[],
+  playerId: string | null = null,
+): Socket {
+  const socket = {
+    id: socketId,
+    data: { sessionId: SESSION_ID, playerId },
+    emit: (event: string, payload: unknown) => {
+      harness.records.push({ kind: 'socket_emit', socketId, event, payload });
+      return true;
+    },
+    leave: (room: string) => {
+      harness.sockets.rooms.get(room)?.delete(socketId);
+      harness.records.push({ kind: 'socket_leave', socketId, room });
+    },
+  } as unknown as Socket;
+  harness.sockets.byId.set(socketId, socket);
+  for (const room of rooms) {
+    const members = harness.sockets.rooms.get(room) ?? new Set<string>();
+    members.add(socketId);
+    harness.sockets.rooms.set(room, members);
+  }
+  return socket;
+}
+
+function socketStatesOf(
+  records: readonly NamespaceRecord[],
+  socketId: string,
+): QuizshowSessionState[] {
+  return records.flatMap((record) =>
+    record.kind === 'socket_emit' &&
+    record.socketId === socketId &&
+    record.event === 'session:state'
+      ? [record.payload as QuizshowSessionState]
+      : [],
+  );
+}
+
+/** Applies effects the engine would emit, without a command behind them. */
+async function applyEffects(
+  harness: Harness,
+  effects: QuizshowEngineEffect[],
+): Promise<void> {
+  const outcome = await harness.runtime.execute(SESSION_ID, () =>
+    succeed<Record<string, never>>({}, effects),
+  );
+  if (outcome === null) throw new Error('Session not live');
+}
+
+function livePlayer(
+  playerId: string,
+  overrides: Partial<QuizshowLivePlayer> = {},
+): QuizshowLivePlayer {
+  return {
+    playerId,
+    userId: `user-${playerId}`,
+    screenName: playerId,
+    teamId: null,
+    isCohostPlayer: false,
+    isAvatarShown: false,
+    avatarUrl: null,
+    hasExtraTime: false,
+    score: 0,
+    streak: 0,
+    hasUsedJoker: false,
+    jokerRoundIndex: null,
+    joinedAt: START,
+    removedAt: null,
+    connectedSocketCount: 0,
+    disconnectedAt: null,
+    leftAt: null,
+    ...overrides,
+  };
 }
 
 function gameLobbyState(
@@ -471,6 +614,7 @@ function submit(
           phaseId: state.cursor.phaseId,
           questionId: currentPlay(state).questionId,
           payload,
+          latencyAllowanceMs: 0,
         },
         now,
         harness.random,
@@ -663,13 +807,13 @@ describe('QuizshowRuntimeService', () => {
         roleRoom('screen'),
       ).players[0]?.avatarUrl,
     ).toBe(avatarUrl);
-    expect(
-      onlyPayload<QuizshowLobby>(
-        harness.records,
-        'lobby:update',
-        roleRoom('players'),
-      ).players[0]?.avatarUrl,
-    ).toBeNull();
+    const playerLobby = onlyPayload<QuizshowPlayerLobby>(
+      harness.records,
+      'lobby:update',
+      roleRoom('players'),
+    );
+    expect(playerLobby).toEqual({ teams: [], playerCount: 1 });
+    expect(playerLobby).not.toHaveProperty('players');
     expect(
       onlyPayload<QuizshowHostLobby>(
         harness.records,
@@ -731,13 +875,20 @@ describe('QuizshowRuntimeService', () => {
     clearRecords(harness);
     await joinPlayer(harness, 'user-dani', 'Dani');
     await jest.advanceTimersByTimeAsync(500);
+    const playerLobby = onlyPayload<QuizshowPlayerLobby>(
+      harness.records,
+      'lobby:update',
+      roleRoom('players'),
+    );
+    expect(playerLobby.playerCount).toBe(4);
+    expect(playerLobby).not.toHaveProperty('players');
     expect(
       onlyPayload<QuizshowLobby>(
         harness.records,
         'lobby:update',
-        roleRoom('players'),
-      ).playerCount,
-    ).toBe(4);
+        roleRoom('screen'),
+      ).players,
+    ).toHaveLength(4);
 
     await openFirstQuestion(harness);
     clearRecords(harness);
@@ -748,10 +899,9 @@ describe('QuizshowRuntimeService', () => {
     expect(emitsOf(harness.records, 'answer:count')).toHaveLength(0);
     await jest.advanceTimersByTimeAsync(1);
     const counts = emitsOf(harness.records, 'answer:count');
-    expect(counts.map((record) => record.room)).toEqual([
-      roleRoom('screen'),
-      roleRoom('hosts'),
-    ]);
+    expect(counts.map((record) => record.room)).toEqual(
+      ROLE_ROOMS.map(roleRoom),
+    );
     expect(counts[0]?.payload).toEqual({
       phaseId: harness.state.cursor.phaseId,
       count: 2,
@@ -1005,7 +1155,7 @@ describe('QuizshowRuntimeService', () => {
     expect(removedIndex).toBeGreaterThanOrEqual(0);
     expect(leaveIndex).toBeGreaterThan(removedIndex);
     expect(harness.records[removedIndex]).toMatchObject({
-      payload: { sessionId: SESSION_ID },
+      payload: { sessionId: SESSION_ID, canRejoin: false },
     });
     expect(harness.records[leaveIndex]).toEqual({
       kind: 'leave',
@@ -1081,6 +1231,7 @@ describe('QuizshowRuntimeService', () => {
     harness.runtime.noteSocketAttached(SESSION_ID, alexId);
     harness.runtime.noteSocketAttached(SESSION_ID, null);
     expect(alex?.connectedSocketCount).toBe(2);
+    expect(alex?.disconnectedAt).toBeNull();
     await jest.advanceTimersByTimeAsync(500);
     expect(
       onlyPayload<QuizshowHostLobby>(
@@ -1090,9 +1241,12 @@ describe('QuizshowRuntimeService', () => {
       ).players[0]?.isConnected,
     ).toBe(true);
     harness.runtime.noteSocketDetached(SESSION_ID, alexId);
+    expect(alex?.disconnectedAt).toBeNull();
     harness.runtime.noteSocketDetached(SESSION_ID, alexId);
+    const lastDetachAt = Date.now();
     harness.runtime.noteSocketDetached(SESSION_ID, alexId);
     expect(alex?.connectedSocketCount).toBe(0);
+    expect(alex?.disconnectedAt).toBe(lastDetachAt);
 
     const socketEmit = jest.fn();
     const socket = { emit: socketEmit } as unknown as Socket;
@@ -1411,5 +1565,581 @@ describe('QuizshowRuntimeService', () => {
       GAME_SESSION_ID,
       new Date(START + 5000),
     );
+  });
+
+  it('withholds unrevealed podium places from screen and phones and shows hosts every place', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    const beaId = await joinPlayer(harness, 'user-bea', 'Bea');
+    const crisId = await joinPlayer(harness, 'user-cris', 'Cris');
+    const { state } = harness;
+    const placings: Array<[string, 1 | 2 | 3, number]> = [
+      [alexId, 1, 300],
+      [beaId, 2, 200],
+      [crisId, 3, 100],
+    ];
+    state.podium = placings.map(
+      ([playerId, place, score]): QuizshowPodiumEntry => {
+        const player = state.players.get(playerId);
+        if (player !== undefined) player.score = score;
+        return {
+          place,
+          kind: 'player',
+          entrantId: playerId,
+          name: player?.screenName ?? '',
+          colorKey: null,
+          score,
+        };
+      },
+    );
+    state.status = 'running';
+    state.cursor = {
+      ...state.cursor,
+      status: 'running',
+      phase: 'podium',
+      phaseId: '9',
+      podiumRevealedCount: 1,
+    };
+    clearRecords(harness);
+
+    await applyEffects(harness, [{ kind: 'podium_shown' }]);
+
+    for (const role of ['screen', 'players'] as const) {
+      const publicPodium = onlyPayload<QuizshowPodiumFrame>(
+        harness.records,
+        'podium',
+        roleRoom(role),
+      );
+      expect(publicPodium.entries.map((entry) => entry.place)).toEqual([3]);
+      expect(publicPodium.revealedCount).toBe(1);
+    }
+    const hostPodium = onlyPayload<QuizshowPodiumFrame>(
+      harness.records,
+      'podium',
+      roleRoom('hosts'),
+    );
+    expect(
+      hostPodium.entries
+        .map((entry) => entry.place)
+        .sort((first, second) => first - second),
+    ).toEqual([1, 2, 3]);
+  });
+
+  it('ranks once per scores emit with 200 players', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    await joinPlayer(harness, 'user-alex', 'Alex');
+    const { state } = harness;
+    for (let playerNumber = 1; playerNumber <= 200; playerNumber += 1) {
+      const playerId = `player-${playerNumber}`;
+      state.players.set(
+        playerId,
+        livePlayer(playerId, {
+          score: playerNumber * 10,
+          joinedAt: START + playerNumber,
+        }),
+      );
+    }
+    state.status = 'running';
+    state.cursor = {
+      ...state.cursor,
+      status: 'running',
+      phase: 'leaderboard',
+      phaseId: '9',
+    };
+    clearRecords(harness);
+    const competitionRanksSpy = jest.spyOn(quizshowScoring, 'competitionRanks');
+
+    await applyEffects(harness, [{ kind: 'scores_shown', scope: 'round' }]);
+
+    expect(competitionRanksSpy).toHaveBeenCalledTimes(1);
+    for (const role of ROLE_ROOMS) {
+      expect(emitsOf(harness.records, 'scores', roleRoom(role))).toHaveLength(
+        1,
+      );
+    }
+    expect(emitsOf(harness.records, 'scores:mine')).toHaveLength(201);
+  });
+
+  it('sends reveal:mine to every eligible player after a rescore and to the favourite author alone', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    const beaId = await joinPlayer(harness, 'user-bea', 'Bea');
+    await openFirstQuestion(harness);
+    await answerTrue(harness, alexId);
+    await answerTrue(harness, beaId);
+    expect(harness.state.cursor.phase).toBe('reveal');
+    clearRecords(harness);
+
+    await applyEffects(harness, [
+      { kind: 'reveal_updated', scope: 'everyone' },
+    ]);
+
+    for (const role of ROLE_ROOMS) {
+      expect(emitsOf(harness.records, 'reveal', roleRoom(role))).toHaveLength(
+        1,
+      );
+    }
+    for (const playerId of [alexId, beaId]) {
+      expect(
+        emitsOf(harness.records, 'reveal:mine', playerRoom(playerId)),
+      ).toHaveLength(1);
+    }
+
+    clearRecords(harness);
+    await applyEffects(harness, [
+      { kind: 'reveal_updated', scope: 'favourite', playerId: alexId },
+    ]);
+
+    expect(
+      emitsOf(harness.records, 'reveal:mine', playerRoom(alexId)),
+    ).toHaveLength(1);
+    expect(
+      emitsOf(harness.records, 'reveal:mine', playerRoom(beaId)),
+    ).toHaveLength(0);
+  });
+
+  it('sends typed answers to hosts alone when a type_answer question is revealed', async () => {
+    const harness = createHarness([
+      snapshotRound('round-1', 'quiz', [typeAnswerQuestion('question-1')]),
+    ]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    await openFirstQuestion(harness);
+    clearRecords(harness);
+
+    await submit(harness, alexId, {
+      type: 'type_answer',
+      text: 'Stonewall Inn',
+    });
+
+    expect(harness.state.cursor.phase).toBe('reveal');
+    expect(
+      emitsOf(harness.records, 'typed:answers').map((record) => record.room),
+    ).toEqual([roleRoom('hosts')]);
+
+    clearRecords(harness);
+    await applyEffects(harness, [{ kind: 'typed_answers_changed' }]);
+
+    expect(
+      emitsOf(harness.records, 'typed:answers').map((record) => record.room),
+    ).toEqual([roleRoom('hosts')]);
+  });
+
+  it('coalesces reactions into one anonymous frame for screen and hosts', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    await joinPlayer(harness, 'user-alex', 'Alex');
+    await jest.advanceTimersByTimeAsync(QUIZSHOW_LOBBY_THROTTLE_MS);
+    clearRecords(harness);
+    const logSpy = jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation(() => undefined);
+
+    await applyEffects(harness, [{ kind: 'reaction', reactionId: 'heart' }]);
+    await applyEffects(harness, [{ kind: 'reaction', reactionId: 'heart' }]);
+    await applyEffects(harness, [{ kind: 'reaction', reactionId: 'clap' }]);
+
+    expect(emitsOf(harness.records, 'reactions')).toHaveLength(0);
+    await jest.advanceTimersByTimeAsync(QUIZSHOW_LIMITS.reactionsFrameMs);
+    const frames = emitsOf(harness.records, 'reactions');
+    expect(frames.map((record) => record.room)).toEqual([
+      roleRoom('screen'),
+      roleRoom('hosts'),
+    ]);
+    const expectedFrame: QuizshowReactionsFrame = {
+      counts: { heart: 2, clap: 1 },
+    };
+    expect(frames[0]?.payload).toEqual(expectedFrame);
+    expect(
+      emitsOf(harness.records, 'reactions', roleRoom('players')),
+    ).toHaveLength(0);
+    expect(logSpy).not.toHaveBeenCalled();
+
+    clearRecords(harness);
+    await jest.advanceTimersByTimeAsync(QUIZSHOW_LIMITS.reactionsFrameMs);
+    expect(emitsOf(harness.records, 'reactions')).toHaveLength(0);
+  });
+
+  it('sends a fresh session:state to every socket of the session for its role', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    addSocket(harness, 'screen-socket', [roleRoom('screen')]);
+    addSocket(
+      harness,
+      'alex-socket',
+      [roleRoom('players'), playerRoom(alexId)],
+      alexId,
+    );
+    addSocket(harness, 'visitor-socket', [roleRoom('players')]);
+    addSocket(harness, 'host-socket', [roleRoom('hosts')]);
+    clearRecords(harness);
+
+    await applyEffects(harness, [{ kind: 'state_reset', scope: 'everyone' }]);
+
+    expect(
+      socketStatesOf(harness.records, 'screen-socket').map(
+        (sessionState) => sessionState.role,
+      ),
+    ).toEqual(['screen']);
+    expect(
+      socketStatesOf(harness.records, 'host-socket').map(
+        (sessionState) => sessionState.role,
+      ),
+    ).toEqual(['host']);
+    const [alexState] = socketStatesOf(
+      harness.records,
+      'alex-socket',
+    ) as QuizshowPlayerState[];
+    expect(alexState?.me?.playerId).toBe(alexId);
+    expect(alexState?.suggestedScreenName).toBe('Alex');
+    const [visitorState] = socketStatesOf(
+      harness.records,
+      'visitor-socket',
+    ) as QuizshowPlayerState[];
+    expect(visitorState?.role).toBe('player');
+    expect(visitorState?.me).toBeNull();
+    expect(visitorState?.suggestedScreenName).toBe('');
+
+    clearRecords(harness);
+    await applyEffects(harness, [{ kind: 'state_reset', scope: 'hosts' }]);
+
+    expect(
+      harness.records.flatMap((record) =>
+        record.kind === 'socket_emit' ? [record.socketId] : [],
+      ),
+    ).toEqual(['host-socket']);
+  });
+
+  it('unbinds every socket of a player who left', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    const socketIds = ['alex-phone', 'alex-laptop'];
+    const sockets = socketIds.map((socketId) =>
+      addSocket(
+        harness,
+        socketId,
+        [roleRoom('players'), playerRoom(alexId)],
+        alexId,
+      ),
+    );
+    harness.runtime.noteSocketAttached(SESSION_ID, alexId);
+    harness.runtime.noteSocketAttached(SESSION_ID, alexId);
+    clearRecords(harness);
+
+    await applyEffects(harness, [{ kind: 'player_left', playerId: alexId }]);
+
+    socketIds.forEach((socketId, index) => {
+      expect(harness.records).toContainEqual({
+        kind: 'socket_leave',
+        socketId,
+        room: playerRoom(alexId),
+      });
+      const socketData = sockets[index]?.data as
+        { playerId: string | null } | undefined;
+      expect(socketData?.playerId).toBeNull();
+      const states = socketStatesOf(
+        harness.records,
+        socketId,
+      ) as QuizshowPlayerState[];
+      expect(states).toHaveLength(1);
+      expect(states[0]?.me).toBeNull();
+    });
+    expect(harness.sockets.rooms.get(playerRoom(alexId))?.size).toBe(0);
+    expect(harness.sockets.rooms.get(roleRoom('players'))?.size).toBe(2);
+    const alex = harness.state.players.get(alexId);
+    expect(alex?.connectedSocketCount).toBe(0);
+    expect(alex?.disconnectedAt).toBe(Date.now());
+  });
+
+  it('unbinds a socket of the leaving player whose bind is still joining the private room', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    const joiningSocket = addSocket(
+      harness,
+      'alex-joining',
+      [roleRoom('players')],
+      alexId,
+    );
+    harness.runtime.noteSocketAttached(SESSION_ID, alexId);
+    clearRecords(harness);
+
+    await applyEffects(harness, [{ kind: 'player_left', playerId: alexId }]);
+
+    const socketData = joiningSocket.data as { playerId: string | null };
+    expect(socketData.playerId).toBeNull();
+    expect(harness.state.players.get(alexId)?.connectedSocketCount).toBe(0);
+    const states = socketStatesOf(
+      harness.records,
+      'alex-joining',
+    ) as QuizshowPlayerState[];
+    expect(states).toHaveLength(1);
+    expect(states[0]?.me).toBeNull();
+  });
+
+  it('unbinds a player removed with a rejoin like a leave and keeps them in the players room', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    const socket = addSocket(
+      harness,
+      'alex-phone',
+      [roleRoom('players'), playerRoom(alexId)],
+      alexId,
+    );
+    harness.runtime.noteSocketAttached(SESSION_ID, alexId);
+    clearRecords(harness);
+
+    await applyEffects(harness, [
+      { kind: 'player_removed', playerId: alexId, canRejoin: true },
+    ]);
+
+    expect(
+      onlyPayload<{ sessionId: string; canRejoin: boolean }>(
+        harness.records,
+        'player:removed',
+        playerRoom(alexId),
+      ),
+    ).toEqual({ sessionId: SESSION_ID, canRejoin: true });
+    const removedIndex = indexOfEmit(
+      harness.records,
+      'player:removed',
+      playerRoom(alexId),
+    );
+    const unbindIndex = harness.records.findIndex(
+      (record) => record.kind === 'socket_leave',
+    );
+    expect(unbindIndex).toBeGreaterThan(removedIndex);
+    expect(harness.records).toContainEqual({
+      kind: 'socket_leave',
+      socketId: 'alex-phone',
+      room: playerRoom(alexId),
+    });
+    expect(
+      harness.records.some(
+        (record) =>
+          record.kind === 'leave' ||
+          (record.kind === 'socket_leave' &&
+            record.room === roleRoom('players')),
+      ),
+    ).toBe(false);
+    expect(
+      harness.sockets.rooms.get(roleRoom('players'))?.has('alex-phone'),
+    ).toBe(true);
+    expect((socket.data as { playerId: string | null }).playerId).toBeNull();
+    expect(harness.state.players.get(alexId)?.connectedSocketCount).toBe(0);
+    const states = socketStatesOf(
+      harness.records,
+      'alex-phone',
+    ) as QuizshowPlayerState[];
+    expect(states).toHaveLength(1);
+    expect(states[0]?.me).toBeNull();
+  });
+
+  it('evicts a player removed without a rejoin from every room of the session', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    const socket = addSocket(
+      harness,
+      'alex-phone',
+      [roleRoom('players'), playerRoom(alexId)],
+      alexId,
+    );
+    clearRecords(harness);
+
+    await applyEffects(harness, [
+      { kind: 'player_removed', playerId: alexId, canRejoin: false },
+    ]);
+
+    expect(
+      onlyPayload<{ sessionId: string; canRejoin: boolean }>(
+        harness.records,
+        'player:removed',
+        playerRoom(alexId),
+      ),
+    ).toEqual({ sessionId: SESSION_ID, canRejoin: false });
+    expect(harness.records).toContainEqual({
+      kind: 'leave',
+      room: playerRoom(alexId),
+      rooms: [...ROLE_ROOMS.map(roleRoom), playerRoom(alexId)],
+    });
+    expect(
+      harness.records.some((record) => record.kind === 'socket_leave'),
+    ).toBe(false);
+    expect((socket.data as { playerId: string | null }).playerId).toBe(alexId);
+    expect(socketStatesOf(harness.records, 'alex-phone')).toHaveLength(0);
+  });
+
+  it('evicts a player who left and is then removed for good from the public rooms by member', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const alexId = await joinPlayer(harness, 'user-alex', 'Alex');
+    const phone = addSocket(
+      harness,
+      'alex-phone',
+      [roleRoom('players'), playerRoom(alexId)],
+      alexId,
+    );
+    Object.assign(phone.data as object, {
+      userId: 'user-alex',
+      role: 'player',
+    });
+    // Another member's phone and a host socket of the same member stay put.
+    const otherPhone = addSocket(harness, 'bea-phone', [roleRoom('players')]);
+    Object.assign(otherPhone.data as object, {
+      userId: 'user-bea',
+      role: 'player',
+    });
+    const hostRemote = addSocket(harness, 'alex-remote', [roleRoom('hosts')]);
+    Object.assign(hostRemote.data as object, {
+      userId: 'user-alex',
+      role: 'host',
+    });
+    harness.runtime.noteSocketAttached(SESSION_ID, alexId);
+    await applyEffects(harness, [{ kind: 'player_left', playerId: alexId }]);
+    expect(
+      harness.sockets.rooms.get(playerRoom(alexId))?.has('alex-phone'),
+    ).toBe(false);
+    clearRecords(harness);
+
+    await applyEffects(harness, [
+      { kind: 'player_removed', playerId: alexId, canRejoin: false },
+    ]);
+
+    expect(harness.records).toContainEqual({
+      kind: 'socket_emit',
+      socketId: 'alex-phone',
+      event: 'player:removed',
+      payload: { sessionId: SESSION_ID, canRejoin: false },
+    });
+    for (const role of ROLE_ROOMS) {
+      expect(harness.records).toContainEqual({
+        kind: 'socket_leave',
+        socketId: 'alex-phone',
+        room: roleRoom(role),
+      });
+    }
+    expect(
+      harness.sockets.rooms.get(roleRoom('players'))?.has('alex-phone'),
+    ).toBe(false);
+    expect(
+      harness.sockets.rooms.get(roleRoom('players'))?.has('bea-phone'),
+    ).toBe(true);
+    expect(
+      harness.sockets.rooms.get(roleRoom('hosts'))?.has('alex-remote'),
+    ).toBe(true);
+    expect(
+      harness.records.some(
+        (record) =>
+          record.kind === 'socket_emit' &&
+          record.socketId !== 'alex-phone' &&
+          record.event === 'player:removed',
+      ),
+    ).toBe(false);
+  });
+
+  it('sends session flags to every role room', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    await joinPlayer(harness, 'user-alex', 'Alex');
+    harness.state.isJoinLocked = true;
+    clearRecords(harness);
+
+    await applyEffects(harness, [{ kind: 'flags_changed' }]);
+
+    for (const role of ROLE_ROOMS) {
+      expect(
+        onlyPayload<{ isJoinLocked: boolean; isAutoAdvanceOn: boolean }>(
+          harness.records,
+          'session:flags',
+          roleRoom(role),
+        ),
+      ).toEqual({ isJoinLocked: true, isAutoAdvanceOn: false });
+    }
+  });
+
+  it('counts paired device sockets and tells hosts', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    await joinPlayer(harness, 'user-alex', 'Alex');
+    harness.state.pairedDevices.push({
+      pairingId: 'pairing-1',
+      kind: 'screen',
+      helperUserId: null,
+      helperName: null,
+      pairedAt: START,
+      revokedAt: null,
+      connectedSocketCount: 0,
+    });
+    const device = harness.state.pairedDevices[0];
+    clearRecords(harness);
+
+    harness.runtime.noteDeviceSocketAttached(SESSION_ID, 'pairing-1');
+
+    expect(device?.connectedSocketCount).toBe(1);
+    expect(
+      emitsOf(harness.records, 'devices:update').map((record) => record.room),
+    ).toEqual([roleRoom('hosts')]);
+    expect(
+      onlyPayload<{ devices: QuizshowPairedDevice[] }>(
+        harness.records,
+        'devices:update',
+        roleRoom('hosts'),
+      ).devices,
+    ).toEqual([
+      expect.objectContaining({ pairingId: 'pairing-1', isConnected: true }),
+    ]);
+
+    clearRecords(harness);
+    harness.runtime.noteDeviceSocketDetached(SESSION_ID, 'pairing-1');
+    harness.runtime.noteDeviceSocketDetached(SESSION_ID, 'pairing-1');
+    expect(device?.connectedSocketCount).toBe(0);
+    // The second detach changed nothing, so hosts hear about the first only.
+    expect(emitsOf(harness.records, 'devices:update')).toHaveLength(1);
+
+    clearRecords(harness);
+    harness.runtime.noteDeviceSocketAttached(SESSION_ID, 'pairing-unknown');
+    harness.runtime.noteDeviceSocketAttached(UNLOADED_SESSION_ID, 'pairing-1');
+    if (device !== undefined) device.revokedAt = START;
+    harness.runtime.noteDeviceSocketAttached(SESSION_ID, 'pairing-1');
+    expect(device?.connectedSocketCount).toBe(0);
+    expect(emitsOf(harness.records, 'devices:update')).toHaveLength(0);
+
+    await applyEffects(harness, [{ kind: 'devices_changed' }]);
+    expect(
+      emitsOf(harness.records, 'devices:update').map((record) => record.room),
+    ).toEqual([roleRoom('hosts')]);
+  });
+
+  it('sends the rematch to the old session role rooms', () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    const rematch: QuizshowRematch = {
+      fromSessionId: SESSION_ID,
+      sessionId: 'session-rematch',
+      joinCode: 'XYZ234',
+      playMode: 'solo',
+    };
+
+    harness.runtime.emitRematch(SESSION_ID, rematch);
+
+    for (const role of ROLE_ROOMS) {
+      expect(
+        onlyPayload<QuizshowRematch>(
+          harness.records,
+          'session:rematch',
+          roleRoom(role),
+        ),
+      ).toEqual(rematch);
+    }
+  });
+
+  it('re-arms the auto-advance timer of an untimed phase on load', async () => {
+    const harness = createHarness([quizRound('round-1', ['question-1'])]);
+    harness.state.status = 'running';
+    harness.state.cursor = {
+      ...harness.state.cursor,
+      status: 'running',
+      phase: 'round_intro',
+      phaseId: '1',
+      deadline: null,
+      autoAdvanceAt: START + 8000,
+    };
+
+    await harness.runtime.getOrLoad(SESSION_ID);
+
+    expect(jest.getTimerCount()).toBe(1);
   });
 });

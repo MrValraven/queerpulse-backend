@@ -13,6 +13,7 @@ import type {
 import {
   TEMPLATE_CARDS_SQL,
   TEMPLATE_DETAIL_SQL,
+  TEMPLATE_PREVIEW_SQL,
   TEMPLATE_ROWS_SQL,
   type TemplateCardRow,
   type TemplateListRow,
@@ -38,6 +39,7 @@ const STORED_UPDATED_AT = '2026-10-19T10:00:00.000Z';
 const SAVED_UPDATED_AT = '2026-10-27T12:00:00.000Z';
 const NEWER_UPDATED_AT = '2026-10-27T13:00:00.000Z';
 const EARLIER_PUBLISHED_AT = new Date('2026-10-20T09:00:00.000Z');
+const EARLIER_CONTENT_UPDATED_AT = new Date('2026-10-22T09:00:00.000Z');
 const OWN_IMAGE = `event-covers/${STAFF_USER_ID}/00000000-0000-4000-8000-000000000001.jpg`;
 const FOREIGN_IMAGE =
   'event-covers/00000000-0000-4000-8000-0000000000aa/00000000-0000-4000-8000-000000000002.jpg';
@@ -55,13 +57,17 @@ function multipleChoiceQuestion(
     type: 'multiple_choice',
     prompt: { en: 'Which one?', pt: 'Qual?' },
     mediaRef: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [
       { id: 'a', text: { en: 'One', pt: 'Um' } },
       { id: 'b', text: { en: 'Two', pt: 'Dois' } },
     ],
-    answer: { correctIndex: 0 },
+    answer: { correctIndexes: [0] },
     acceptedAnswers: [],
     ...overrides,
   } as QuizshowQuestionInput;
@@ -82,6 +88,8 @@ function round(
       writeSeconds: 60,
       voteSeconds: 30,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+      isWarmUp: false,
+      talkSeconds: 0,
     },
     questions,
     ...overrides,
@@ -109,6 +117,7 @@ function storedQuizOf(
     languages: shape.languages,
     screenLanguage: shape.screenLanguage,
     sourceTemplateId: null,
+    sourceTemplate: null,
     updatedAt,
     rounds: shape.rounds.map((storedRound, roundIndex) => ({
       ...storedRound,
@@ -127,6 +136,7 @@ function templateInput(
     card?: QuizshowTemplateCardText;
     staffNotes?: string;
     quiz?: Partial<QuizshowQuizShape> & { expectedUpdatedAt?: string | null };
+    changeNote?: { en: string; pt: string };
   } = {},
 ): QuizshowTemplateInputDto {
   return {
@@ -137,6 +147,9 @@ function templateInput(
       ...completeShape(),
       ...overrides.quiz,
     },
+    ...(overrides.changeNote === undefined
+      ? {}
+      : { changeNote: overrides.changeNote }),
   };
 }
 
@@ -149,6 +162,9 @@ interface StoredTemplate {
   staffNotes: string;
   publishedAt: Date | null;
   publishedByUserId: string | null;
+  contentUpdatedAt: Date | null;
+  changeNoteEn: string;
+  changeNotePt: string;
 }
 
 interface StoredTemplateQuiz {
@@ -264,9 +280,34 @@ function build(
             card_description_pt: template.cardDescriptionPt,
             staff_notes: template.staffNotes,
             published_at: template.publishedAt,
+            content_updated_at: template.contentUpdatedAt,
+            change_note_en: template.changeNoteEn,
+            change_note_pt: template.changeNotePt,
             quiz_id: held.id,
             first_name: publisher?.firstName ?? null,
             last_name: publisher?.lastName ?? null,
+          },
+        ]);
+      }
+      if (sql === TEMPLATE_PREVIEW_SQL) {
+        const template = store.templates.find(
+          (stored) => stored.id === parameters[0],
+        );
+        const held = store.quizzes.find(
+          (storedQuiz) => storedQuiz.templateId === parameters[0],
+        );
+        // The SQL keeps published templates only.
+        if (!template || !held || template.publishedAt === null) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([
+          {
+            id: template.id,
+            card_title_en: template.cardTitleEn,
+            card_title_pt: template.cardTitlePt,
+            card_description_en: template.cardDescriptionEn,
+            card_description_pt: template.cardDescriptionPt,
+            quiz_id: held.id,
           },
         ]);
       }
@@ -333,6 +374,9 @@ function seedTemplate(
     staffNotes: STORED_NOTES,
     publishedAt: null,
     publishedByUserId: null,
+    contentUpdatedAt: null,
+    changeNoteEn: '',
+    changeNotePt: '',
     ...overrides,
   };
   store.templates.push(template);
@@ -386,6 +430,9 @@ describe('QuizshowTemplatesService', () => {
       staffNotes: '',
       publishedAt: null,
       publishedByUserId: null,
+      contentUpdatedAt: null,
+      changeNoteEn: '',
+      changeNotePt: '',
     });
     expect(writeQuiz).toHaveBeenCalledTimes(1);
     const [writeInput, writeManager] = writeQuiz.mock.calls[0] as unknown as [
@@ -415,6 +462,8 @@ describe('QuizshowTemplatesService', () => {
       description: { en: '', pt: '' },
     });
     expect(detail.staffNotes).toBe('');
+    expect(detail.changeNote).toEqual({ en: '', pt: '' });
+    expect(detail.lastPublishedAt).toBeNull();
     expect(detail.quiz.rounds).toEqual([]);
   });
 
@@ -587,6 +636,9 @@ describe('QuizshowTemplatesService', () => {
     const source = seedTemplate(store, {
       publishedAt: EARLIER_PUBLISHED_AT,
       publishedByUserId: OTHER_STAFF_USER_ID,
+      contentUpdatedAt: EARLIER_CONTENT_UPDATED_AT,
+      changeNoteEn: 'Round 2 rewritten',
+      changeNotePt: 'Ronda 2 reescrita',
     });
     const sourceQuiz = store.quizzes[0]!.quiz;
 
@@ -604,6 +656,15 @@ describe('QuizshowTemplatesService', () => {
     expect(detail.status).toBe('draft');
     expect(detail.publishedAt).toBeNull();
     expect(detail.publishedByName).toBeNull();
+    expect(detail.changeNote).toEqual({ en: '', pt: '' });
+    expect(detail.lastPublishedAt).toBeNull();
+    expect(
+      store.templates.find((stored) => stored.id === detail.id),
+    ).toMatchObject({
+      contentUpdatedAt: null,
+      changeNoteEn: '',
+      changeNotePt: '',
+    });
     expect(writeQuiz).toHaveBeenCalledWith(
       {
         target: { kind: 'template', templateId: detail.id },
@@ -637,11 +698,14 @@ describe('QuizshowTemplatesService', () => {
     const columns = updateCall?.[2] as {
       publishedAt: Date;
       publishedByUserId: string;
+      contentUpdatedAt: Date;
     };
     expect(Object.keys(columns).sort()).toEqual([
+      'contentUpdatedAt',
       'publishedAt',
       'publishedByUserId',
     ]);
+    expect(columns.contentUpdatedAt).toBe(columns.publishedAt);
     expect(columns.publishedAt).toBeInstanceOf(Date);
     expect(columns.publishedAt.getTime()).toBeGreaterThanOrEqual(before);
     expect(columns.publishedAt.getTime()).toBeLessThanOrEqual(after);
@@ -660,6 +724,7 @@ describe('QuizshowTemplatesService', () => {
     expect(detail.status).toBe('published');
     expect(detail.publishedAt).toBe(columns.publishedAt.toISOString());
     expect(detail.publishedByName).toBe('Rui Matos');
+    expect(detail.lastPublishedAt).toBe(columns.publishedAt.toISOString());
     expect(detail.quiz.updatedAt).toBe(STORED_UPDATED_AT);
   });
 
@@ -788,12 +853,17 @@ describe('QuizshowTemplatesService', () => {
     seedTemplate(store, {
       publishedAt: EARLIER_PUBLISHED_AT,
       publishedByUserId: STAFF_USER_ID,
+      contentUpdatedAt: EARLIER_CONTENT_UPDATED_AT,
     });
 
     const detail = await service.unpublishTemplate(TEMPLATE_ID, STAFF_USER_ID);
 
     expect(detail.status).toBe('draft');
     expect(detail.publishedAt).toBeNull();
+    expect(detail.lastPublishedAt).toBeNull();
+    expect(store.templates[0]?.contentUpdatedAt).toBe(
+      EARLIER_CONTENT_UPDATED_AT,
+    );
     expect(detail.publishedByName).toBeNull();
     expect(detail.quiz.updatedAt).toBe(STORED_UPDATED_AT);
     expect(templateUpdateCalls(manager)).toEqual([
@@ -961,9 +1031,24 @@ describe('QuizshowTemplatesService', () => {
           card_title_pt: 'Orgulho e história queer',
           card_description_en: 'From Stonewall to today',
           card_description_pt: 'De Stonewall até hoje',
+          content_updated_at: EARLIER_CONTENT_UPDATED_AT,
+          published_at: EARLIER_PUBLISHED_AT,
           languages: 'both',
           round_count: 4,
           question_count: 16,
+          has_adults_rounds: false,
+        },
+        {
+          id: UNKNOWN_TEMPLATE_ID,
+          card_title_en: 'Queer cinema',
+          card_title_pt: 'Cinema queer',
+          card_description_en: 'Films that changed things',
+          card_description_pt: 'Filmes que mudaram tudo',
+          content_updated_at: null,
+          published_at: '2026-10-21T09:00:00.000Z',
+          languages: 'en',
+          round_count: 2,
+          question_count: 6,
           has_adults_rounds: false,
         },
       ],
@@ -978,17 +1063,23 @@ describe('QuizshowTemplatesService', () => {
     );
     expect(cardsSql).not.toContain('staff_notes');
     expect(cardsSql).not.toContain('"answer"');
-    expect(items).toHaveLength(1);
+    expect(cardsSql).toContain(
+      '"template"."content_updated_at" AS "content_updated_at"',
+    );
+    expect(items).toHaveLength(2);
     const card = items[0]!;
     expect(Object.keys(card).sort()).toEqual([
       'description',
       'hasAdultsRounds',
       'id',
       'languages',
+      'lastPublishedAt',
       'questionCount',
       'roundCount',
       'title',
     ]);
+    // A row the backfill has not reached falls back to its publish date.
+    expect(items[1]?.lastPublishedAt).toBe('2026-10-21T09:00:00.000Z');
     expect(card).toEqual({
       id: TEMPLATE_ID,
       title: { en: 'Pride and queer history', pt: 'Orgulho e história queer' },
@@ -1000,6 +1091,224 @@ describe('QuizshowTemplatesService', () => {
       roundCount: 4,
       questionCount: 16,
       hasAdultsRounds: false,
+      lastPublishedAt: EARLIER_CONTENT_UPDATED_AT.toISOString(),
     });
+  });
+
+  it('stores a trimmed change note and moves the content stamp on a save while published', async () => {
+    const { service, store, manager } = build();
+    seedTemplate(store, {
+      publishedAt: EARLIER_PUBLISHED_AT,
+      publishedByUserId: STAFF_USER_ID,
+      contentUpdatedAt: EARLIER_CONTENT_UPDATED_AT,
+    });
+    const before = Date.now();
+
+    const detail = await service.replaceTemplate(
+      TEMPLATE_ID,
+      STAFF_USER_ID,
+      templateInput({
+        changeNote: { en: '  Round 2 rewritten ', pt: 'Ronda 2 reescrita  ' },
+      }),
+    );
+
+    const after = Date.now();
+    const [updateCall] = templateUpdateCalls(manager);
+    const columns = updateCall?.[2] as {
+      changeNoteEn: string;
+      changeNotePt: string;
+      contentUpdatedAt: Date;
+    };
+    expect(columns.changeNoteEn).toBe('Round 2 rewritten');
+    expect(columns.changeNotePt).toBe('Ronda 2 reescrita');
+    expect(columns.contentUpdatedAt).toBeInstanceOf(Date);
+    expect(columns.contentUpdatedAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(columns.contentUpdatedAt.getTime()).toBeLessThanOrEqual(after);
+    expect(detail.changeNote).toEqual({
+      en: 'Round 2 rewritten',
+      pt: 'Ronda 2 reescrita',
+    });
+    expect(detail.lastPublishedAt).toBe(columns.contentUpdatedAt.toISOString());
+    expect(detail.publishedAt).toBe(EARLIER_PUBLISHED_AT.toISOString());
+  });
+
+  it('leaves the content stamp alone on a draft save and keeps the stored note when the body has none', async () => {
+    const { service, store, manager } = build();
+    seedTemplate(store, {
+      changeNoteEn: 'Stored note',
+      changeNotePt: 'Nota guardada',
+    });
+
+    const withoutNote = await service.replaceTemplate(
+      TEMPLATE_ID,
+      STAFF_USER_ID,
+      templateInput(),
+    );
+
+    const [firstUpdate] = templateUpdateCalls(manager);
+    const firstColumns = firstUpdate?.[2] as Record<string, unknown>;
+    expect(Object.keys(firstColumns)).not.toContain('contentUpdatedAt');
+    expect(Object.keys(firstColumns)).not.toContain('changeNoteEn');
+    expect(Object.keys(firstColumns)).not.toContain('changeNotePt');
+    expect(withoutNote.changeNote).toEqual({
+      en: 'Stored note',
+      pt: 'Nota guardada',
+    });
+    expect(withoutNote.lastPublishedAt).toBeNull();
+
+    const withNote = await service.replaceTemplate(
+      TEMPLATE_ID,
+      STAFF_USER_ID,
+      templateInput({
+        quiz: { expectedUpdatedAt: SAVED_UPDATED_AT },
+        changeNote: { en: 'New facts', pt: '' },
+      }),
+    );
+
+    const secondColumns = templateUpdateCalls(manager)[1]?.[2] as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(secondColumns)).not.toContain('contentUpdatedAt');
+    expect(withNote.changeNote).toEqual({ en: 'New facts', pt: '' });
+    expect(store.templates[0]?.contentUpdatedAt).toBeNull();
+  });
+
+  it('reads the detail of a published template with its change note and content stamp', async () => {
+    const { service, store } = build();
+    seedTemplate(store, {
+      publishedAt: EARLIER_PUBLISHED_AT,
+      publishedByUserId: STAFF_USER_ID,
+      contentUpdatedAt: EARLIER_CONTENT_UPDATED_AT,
+      changeNoteEn: 'Round 2 rewritten',
+      changeNotePt: 'Ronda 2 reescrita',
+    });
+
+    const detail = await service.getTemplate(TEMPLATE_ID);
+
+    expect(detail.changeNote).toEqual({
+      en: 'Round 2 rewritten',
+      pt: 'Ronda 2 reescrita',
+    });
+    expect(detail.lastPublishedAt).toBe(
+      EARLIER_CONTENT_UPDATED_AT.toISOString(),
+    );
+    expect(detail.publishedAt).toBe(EARLIER_PUBLISHED_AT.toISOString());
+  });
+
+  it('previews a published template with prompts only, rows in position order', async () => {
+    const { service, store, queries } = build();
+    const wheelRow = round(
+      {
+        kind: 'wheel',
+        title: { en: 'Spin', pt: 'Roda' },
+        contentLabel: 'none',
+      },
+      [],
+    );
+    const adultsRound = round(
+      {
+        title: { en: 'After dark', pt: 'Depois do escuro' },
+        contentLabel: 'adults',
+      },
+      [
+        multipleChoiceQuestion({
+          prompt: { en: 'First prompt', pt: 'Primeira pergunta' },
+          mediaRef: OWN_IMAGE,
+          revealNote: { en: 'Fun fact', pt: 'Curiosidade' },
+        }),
+        multipleChoiceQuestion({
+          prompt: { en: 'Second prompt', pt: 'Segunda pergunta' },
+        }),
+      ],
+    );
+    seedTemplate(
+      store,
+      {
+        publishedAt: EARLIER_PUBLISHED_AT,
+        publishedByUserId: STAFF_USER_ID,
+        contentUpdatedAt: EARLIER_CONTENT_UPDATED_AT,
+        changeNoteEn: 'Round 2 rewritten',
+      },
+      storedQuizOf(
+        completeShape({ rounds: [round(), wheelRow, adultsRound] }),
+        STORED_UPDATED_AT,
+      ),
+    );
+
+    const preview = await service.getTemplatePreview(TEMPLATE_ID);
+
+    expect(queries[0]?.sql).toBe(TEMPLATE_PREVIEW_SQL);
+    expect(queries[0]?.parameters).toEqual([TEMPLATE_ID]);
+    expect(TEMPLATE_PREVIEW_SQL).toContain(
+      '"template"."published_at" IS NOT NULL',
+    );
+    expect(TEMPLATE_PREVIEW_SQL).not.toContain('staff_notes');
+    expect(preview).toEqual({
+      templateId: TEMPLATE_ID,
+      title: STORED_CARD.title,
+      description: STORED_CARD.description,
+      languages: 'both',
+      rounds: [
+        {
+          roundIndex: 0,
+          kind: 'quiz',
+          title: { en: 'Round', pt: 'Ronda' },
+          questionCount: 1,
+          sliceCount: null,
+          contentLabel: 'none',
+          prompts: [{ en: 'Which one?', pt: 'Qual?' }],
+        },
+        {
+          roundIndex: 1,
+          kind: 'wheel',
+          title: { en: 'Spin', pt: 'Roda' },
+          questionCount: 0,
+          sliceCount: null,
+          contentLabel: 'none',
+          prompts: [],
+        },
+        {
+          roundIndex: 2,
+          kind: 'quiz',
+          title: { en: 'After dark', pt: 'Depois do escuro' },
+          questionCount: 2,
+          sliceCount: null,
+          contentLabel: 'adults',
+          prompts: [
+            { en: 'First prompt', pt: 'Primeira pergunta' },
+            { en: 'Second prompt', pt: 'Segunda pergunta' },
+          ],
+        },
+      ],
+    });
+    const payload = JSON.stringify(preview);
+    for (const hiddenKey of [
+      '"answer"',
+      '"options"',
+      '"staffNotes"',
+      '"acceptedAnswers"',
+      '"revealNote"',
+      '"mediaRef"',
+      '"mediaUrl"',
+      '"changeNote"',
+      '"settings"',
+    ]) {
+      expect(payload).not.toContain(hiddenKey);
+    }
+    expect(payload).not.toContain(STORED_NOTES);
+    expect(payload).not.toContain('Fun fact');
+  });
+
+  it('answers template not found for a preview of a draft, an unknown or a malformed id', async () => {
+    const { service, store, quizzes } = build();
+    seedTemplate(store);
+
+    for (const templateId of [TEMPLATE_ID, UNKNOWN_TEMPLATE_ID, 'not-a-uuid']) {
+      const error = await rejectionOf(service.getTemplatePreview(templateId));
+      expect(quizshowCodeOf(error)).toBe('quizshow_template_not_found');
+      expect(statusOf(error)).toBe(404);
+    }
+    expect(quizzes.loadQuizById).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,12 @@
-import { RequestMethod, Type } from '@nestjs/common';
+import { HttpException, RequestMethod, Type } from '@nestjs/common';
+import type { ExecutionContext, PipeTransform } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import type { ThrottlerRequest } from '@nestjs/throttler';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import {
   GUARDS_METADATA,
+  HEADERS_METADATA,
   HTTP_CODE_METADATA,
   METHOD_METADATA,
   MODULE_METADATA,
@@ -11,6 +16,7 @@ import {
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { FEATURE_KEY } from '../common/feature.decorator';
@@ -18,6 +24,7 @@ import { allowsSharedUploads } from '../storage/shared-upload-handlers';
 import { ROLES_KEY } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
+import { HttpThrottlerGuard } from '../security/http-throttler.guard';
 import { AdminQuizshowController } from './admin-quizshow.controller';
 import { AdminQuizshowTemplatesController } from './admin-quizshow-templates.controller';
 import {
@@ -32,11 +39,22 @@ import { QuizshowQuizInputDto } from './dto/quizshow-quiz-input.dto';
 import { QuizshowStaffActionDto } from './dto/quizshow-staff-action.dto';
 import { QuizshowTemplateInputDto } from './dto/quizshow-template.dto';
 import { QuizshowAccessService } from './quizshow-access.service';
+import { QuizshowDevicePairingService } from './quizshow-device-pairing.service';
+import {
+  QuizshowDevicesController,
+  QuizshowPairingClaimDto,
+} from './quizshow-devices.controller';
 import { QuizshowEventController } from './quizshow-event.controller';
 import { QuizshowEventLifecycleListener } from './quizshow-event-lifecycle.listener';
 import { QuizshowGamesController } from './quizshow-games.controller';
 import { QuizshowGamesService } from './quizshow-games.service';
 import { QuizshowGuestPushService } from './quizshow-guest-push.service';
+import {
+  QuizshowHelperPairingThrottlerGuard,
+  QuizshowPairingClaimThrottlerGuard,
+  QuizshowScreenPairingThrottlerGuard,
+} from './quizshow-pairing-throttler.guards';
+import * as quizshowPlayRules from './quizshow-play-rules';
 import { QuizshowPersistenceService } from './quizshow-persistence.service';
 import { QuizshowQuizService } from './quizshow-quiz.service';
 import { QuizshowRetentionService } from './quizshow-retention.service';
@@ -50,6 +68,7 @@ import { QuizshowTemplateRecord } from './entities/quizshow-template.entity';
 
 const THROTTLE_LIMIT_KEY = 'THROTTLER:LIMITdefault';
 const THROTTLE_TTL_KEY = 'THROTTLER:TTLdefault';
+const THROTTLE_SKIP_KEY = 'THROTTLER:SKIPdefault';
 const USER: CurrentUserData = {
   userId: 'e0000000-0000-4000-8000-000000000001',
   restricted: false,
@@ -125,6 +144,7 @@ describe('Pulse Live controllers', () => {
       [QuizshowEventController, 'replaceQuiz'],
       [QuizshowEventController, 'importQuiz'],
       [QuizshowEventController, 'openSession'],
+      [QuizshowEventController, 'refreshLobby'],
       [QuizshowController, 'join'],
     ];
     for (const [controller, methodName] of restrictedWrites) {
@@ -137,6 +157,7 @@ describe('Pulse Live controllers', () => {
       [QuizshowEventController, 'getQuiz'],
       [QuizshowEventController, 'listImportSources'],
       [QuizshowEventController, 'getResults'],
+      [QuizshowEventController, 'getWinBadgesPreview'],
       [QuizshowEventController, 'deleteResults'],
       [QuizshowController, 'listTemplates'],
     ];
@@ -165,9 +186,23 @@ describe('Pulse Live controllers', () => {
     ],
     [
       QuizshowEventController,
+      'refreshLobby',
+      RequestMethod.POST,
+      'sessions/refresh',
+      200,
+    ],
+    [
+      QuizshowEventController,
       'getResults',
       RequestMethod.GET,
       'results',
+      undefined,
+    ],
+    [
+      QuizshowEventController,
+      'getWinBadgesPreview',
+      RequestMethod.GET,
+      'win-badges',
       undefined,
     ],
     [
@@ -241,9 +276,11 @@ describe('Pulse Live controllers', () => {
       getResults: jest.fn().mockResolvedValue({ podium: [] }),
       deleteResults: jest.fn().mockResolvedValue(undefined),
       join: jest.fn().mockResolvedValue({ isRejoin: false }),
+      refreshLobby: jest.fn().mockResolvedValue({ isNoop: false }),
     };
     const templatesService = {
       listPublishedCards: jest.fn().mockResolvedValue({ items: [] }),
+      getTemplatePreview: jest.fn().mockResolvedValue({ id: TEMPLATE_ID }),
     };
     const eventController = new QuizshowEventController(
       quizService as unknown as QuizshowQuizService,
@@ -292,6 +329,10 @@ describe('Pulse Live controllers', () => {
     await expect(quizshowController.join(USER, joinBody)).resolves.toEqual({
       isRejoin: false,
     });
+    await expect(eventController.refreshLobby(USER, SLUG)).resolves.toEqual({
+      isNoop: false,
+    });
+    await quizshowController.getTemplatePreview(TEMPLATE_ID);
 
     expect(quizService.getQuiz).toHaveBeenCalledWith(SLUG, USER.userId);
     expect(quizService.replaceQuiz).toHaveBeenCalledWith(
@@ -320,6 +361,13 @@ describe('Pulse Live controllers', () => {
     );
     expect(templatesService.listPublishedCards).toHaveBeenCalledWith();
     expect(sessionsService.join).toHaveBeenCalledWith(USER, joinBody);
+    expect(sessionsService.refreshLobby).toHaveBeenCalledWith(
+      { kind: 'event', slug: SLUG },
+      USER.userId,
+    );
+    expect(templatesService.getTemplatePreview).toHaveBeenCalledWith(
+      TEMPLATE_ID,
+    );
   });
 
   it('guards game create, PUT, duplicate, import and session open with NotRestrictedGuard and leaves deletes and reads open', () => {
@@ -330,6 +378,7 @@ describe('Pulse Live controllers', () => {
       'duplicateGame',
       'importIntoGame',
       'openSession',
+      'refreshLobby',
     ]) {
       expect(guardsOf(handlerOf(QuizshowGamesController, methodName))).toEqual([
         NotRestrictedGuard,
@@ -364,6 +413,7 @@ describe('Pulse Live controllers', () => {
       undefined,
     ],
     ['openSession', RequestMethod.POST, ':gameId/sessions', undefined],
+    ['refreshLobby', RequestMethod.POST, ':gameId/sessions/refresh', 200],
     ['getResults', RequestMethod.GET, ':gameId/results', undefined],
     ['deleteResults', RequestMethod.DELETE, ':gameId/results', 204],
   ])(
@@ -486,6 +536,7 @@ describe('Pulse Live controllers', () => {
       }),
       getGameResults: jest.fn().mockResolvedValue({ podium: [] }),
       deleteGameResults: jest.fn().mockResolvedValue(undefined),
+      refreshLobby: jest.fn().mockResolvedValue({ isNoop: true }),
     };
     const gamesController = new QuizshowGamesController(
       gamesService as unknown as QuizshowGamesService,
@@ -535,6 +586,9 @@ describe('Pulse Live controllers', () => {
       isGuestPushSent: false,
     });
     await gamesController.getResults(USER, gameId);
+    await expect(gamesController.refreshLobby(USER, gameId)).resolves.toEqual({
+      isNoop: true,
+    });
     await expect(
       gamesController.deleteResults(USER, gameId),
     ).resolves.toBeUndefined();
@@ -569,6 +623,10 @@ describe('Pulse Live controllers', () => {
     );
     expect(sessionsService.getGameResults).toHaveBeenCalledWith(
       gameId,
+      USER.userId,
+    );
+    expect(sessionsService.refreshLobby).toHaveBeenCalledWith(
+      { kind: 'game', gameId },
       USER.userId,
     );
     expect(sessionsService.deleteGameResults).toHaveBeenCalledWith(
@@ -767,6 +825,7 @@ describe('Pulse Live controllers', () => {
       AdminQuizshowController,
       AdminQuizshowTemplatesController,
       QuizshowController,
+      QuizshowDevicesController,
     ]);
     expect(
       Reflect.getMetadata(MODULE_METADATA.PROVIDERS, QuizshowModule),
@@ -782,9 +841,524 @@ describe('Pulse Live controllers', () => {
       QuizshowGateway,
       QuizshowRetentionService,
       QuizshowEventLifecycleListener,
+      QuizshowDevicePairingService,
     ]);
     expect(
       Reflect.getMetadata(MODULE_METADATA.EXPORTS, QuizshowModule),
     ).toBeUndefined();
+  });
+});
+
+/** The protected members the pairing throttler guards override. */
+interface PairingGuardInternals {
+  getTracker(request: Record<string, unknown>): Promise<string>;
+  handleRequest(requestProps: ThrottlerRequest): Promise<boolean>;
+  throwThrottlingException(
+    context: ExecutionContext,
+    detail: { timeToBlockExpire: number },
+  ): Promise<void>;
+}
+
+const pairingGuardInternals = (GuardClass: unknown): PairingGuardInternals =>
+  new (GuardClass as new (...args: unknown[]) => PairingGuardInternals)(
+    {},
+    {},
+    {},
+  );
+
+const headersOf = (handler: object): { name: string; value: string }[] =>
+  (Reflect.getMetadata(HEADERS_METADATA, handler) as
+    { name: string; value: string }[] | undefined) ?? [];
+
+describe('Pulse Live device and join preview routes', () => {
+  const PAIRING_ID = 'e0400000-0000-4000-8000-000000000001';
+  const POLL_TOKEN = 'a'.repeat(43);
+  const DEVICE_HANDLER_NAMES = [
+    'startScreenPairing',
+    'startHelperPairing',
+    'claimPairing',
+    'getJoinPreview',
+  ];
+
+  it('mounts on quizshow with no class guard and no class feature tag', () => {
+    expect(Reflect.getMetadata(PATH_METADATA, QuizshowDevicesController)).toBe(
+      'quizshow',
+    );
+    expect(guardsOf(QuizshowDevicesController)).toEqual([]);
+    expect(
+      Reflect.getMetadata(FEATURE_KEY, QuizshowDevicesController),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ['startScreenPairing', RequestMethod.POST, 'device-pairings/screen', 201],
+    ['startHelperPairing', RequestMethod.POST, 'device-pairings/helper', 201],
+    [
+      'claimPairing',
+      RequestMethod.POST,
+      'device-pairings/:pairingId/claim',
+      200,
+    ],
+    ['getJoinPreview', RequestMethod.GET, 'join-preview/:code', undefined],
+  ])(
+    'serves QuizshowDevicesController.%s on the contract method, path and status',
+    (methodName, method, path, httpCode) => {
+      const handler = handlerOf(QuizshowDevicesController, methodName);
+      expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(method);
+      expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(path);
+      expect(Reflect.getMetadata(HTTP_CODE_METADATA, handler)).toBe(httpCode);
+    },
+  );
+
+  it('makes the screen start, the claim and the preview public and keeps the helper start signed in', () => {
+    const isPublic = (methodName: string): unknown =>
+      Reflect.getMetadata(
+        IS_PUBLIC_KEY,
+        handlerOf(QuizshowDevicesController, methodName),
+      );
+    expect(isPublic('startScreenPairing')).toBe(true);
+    expect(isPublic('claimPairing')).toBe(true);
+    expect(isPublic('getJoinPreview')).toBe(true);
+    expect(isPublic('startHelperPairing')).toBeUndefined();
+  });
+
+  it('tags no device route with a feature, so early access never 404s a TV or a signed-out guest', () => {
+    for (const methodName of DEVICE_HANDLER_NAMES) {
+      expect(
+        Reflect.getMetadata(
+          FEATURE_KEY,
+          handlerOf(QuizshowDevicesController, methodName),
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('starts a screen pairing while Pulse Live is playable and answers 404 when it is not', () => {
+    const pairingService = {
+      startPairing: jest.fn().mockReturnValue({ pairingId: PAIRING_ID }),
+    };
+    const controller = new QuizshowDevicesController(
+      pairingService as unknown as QuizshowDevicePairingService,
+      {} as unknown as QuizshowSessionsService,
+    );
+    const isPlayable = jest
+      .spyOn(quizshowPlayRules, 'isQuizshowPlayable')
+      .mockReturnValue(true);
+    expect(controller.startScreenPairing()).toEqual({ pairingId: PAIRING_ID });
+
+    isPlayable.mockReturnValue(false);
+    let refusal: unknown = null;
+    try {
+      controller.startScreenPairing();
+    } catch (error: unknown) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(HttpException);
+    expect((refusal as HttpException).getStatus()).toBe(404);
+    expect(pairingService.startPairing).toHaveBeenCalledTimes(1);
+    isPlayable.mockRestore();
+  });
+
+  it('guards the starts with their pairing throttlers and the helper start with the member guards first', () => {
+    expect(
+      guardsOf(handlerOf(QuizshowDevicesController, 'startScreenPairing')),
+    ).toEqual([QuizshowScreenPairingThrottlerGuard]);
+    expect(
+      guardsOf(handlerOf(QuizshowDevicesController, 'startHelperPairing')),
+    ).toEqual([
+      ActiveMemberGuard,
+      NotRestrictedGuard,
+      QuizshowHelperPairingThrottlerGuard,
+    ]);
+    expect(
+      guardsOf(handlerOf(QuizshowDevicesController, 'claimPairing')),
+    ).toEqual([QuizshowPairingClaimThrottlerGuard]);
+    expect(
+      guardsOf(handlerOf(QuizshowDevicesController, 'getJoinPreview')),
+    ).toEqual([]);
+  });
+
+  it('skips the global bucket on the claim, throttles the preview to 30 a minute and leaves the starts to their guards', () => {
+    const claim = handlerOf(QuizshowDevicesController, 'claimPairing');
+    const preview = handlerOf(QuizshowDevicesController, 'getJoinPreview');
+    expect(Reflect.getMetadata(THROTTLE_SKIP_KEY, claim)).toBe(true);
+    expect(Reflect.getMetadata(THROTTLE_LIMIT_KEY, claim)).toBeUndefined();
+    expect(Reflect.getMetadata(THROTTLE_LIMIT_KEY, preview)).toBe(30);
+    expect(Reflect.getMetadata(THROTTLE_TTL_KEY, preview)).toBe(60000);
+    for (const methodName of ['startScreenPairing', 'startHelperPairing']) {
+      expect(
+        Reflect.getMetadata(
+          THROTTLE_LIMIT_KEY,
+          handlerOf(QuizshowDevicesController, methodName),
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it('sets no-store on every device route and noindex on the preview', () => {
+    for (const methodName of DEVICE_HANDLER_NAMES) {
+      expect(
+        headersOf(handlerOf(QuizshowDevicesController, methodName)),
+      ).toContainEqual({ name: 'Cache-Control', value: 'no-store' });
+    }
+    expect(
+      headersOf(handlerOf(QuizshowDevicesController, 'getJoinPreview')),
+    ).toContainEqual({ name: 'X-Robots-Tag', value: 'noindex' });
+    expect(
+      headersOf(handlerOf(QuizshowDevicesController, 'claimPairing')),
+    ).not.toContainEqual(expect.objectContaining({ name: 'X-Robots-Tag' }));
+  });
+
+  it('passes the kind, the caller, the pairing id, the poll token and the code to the services', async () => {
+    const pairingStart = {
+      pairingId: PAIRING_ID,
+      pairingCode: '234567',
+      pollToken: POLL_TOKEN,
+      expiresAt: 1_800_000,
+    };
+    const pairingService = {
+      startPairing: jest.fn().mockReturnValue(pairingStart),
+      claimPairing: jest
+        .fn()
+        .mockReturnValue({ status: 'waiting', expiresAt: 1_800_000 }),
+    };
+    const sessionsService = {
+      joinPreview: jest
+        .fn()
+        .mockResolvedValue({ quizTitle: 'Drag herstory', status: 'lobby' }),
+    };
+    const controller = new QuizshowDevicesController(
+      pairingService as unknown as QuizshowDevicePairingService,
+      sessionsService as unknown as QuizshowSessionsService,
+    );
+
+    const isPlayable = jest
+      .spyOn(quizshowPlayRules, 'isQuizshowPlayable')
+      .mockReturnValue(true);
+    expect(controller.startScreenPairing()).toEqual(pairingStart);
+    isPlayable.mockRestore();
+    expect(controller.startHelperPairing(USER)).toEqual(pairingStart);
+    expect(
+      controller.claimPairing(PAIRING_ID, { pollToken: POLL_TOKEN }),
+    ).toEqual({ status: 'waiting', expiresAt: 1_800_000 });
+    await expect(controller.getJoinPreview('qz4-km7')).resolves.toEqual({
+      quizTitle: 'Drag herstory',
+      status: 'lobby',
+    });
+
+    expect(pairingService.startPairing).toHaveBeenNthCalledWith(
+      1,
+      'screen',
+      null,
+    );
+    expect(pairingService.startPairing).toHaveBeenNthCalledWith(
+      2,
+      'helper',
+      USER.userId,
+    );
+    expect(pairingService.claimPairing).toHaveBeenCalledWith(
+      PAIRING_ID,
+      POLL_TOKEN,
+    );
+    expect(sessionsService.joinPreview).toHaveBeenCalledWith('qz4-km7');
+  });
+
+  it('answers the preview with the quiz title and status only', async () => {
+    const sessionsService = {
+      joinPreview: jest.fn().mockResolvedValue({
+        quizTitle: 'Drag herstory',
+        status: 'running',
+        eventTitle: 'Drag quiz night',
+        hostName: 'Philippine',
+        playerCount: 12,
+        isAdultsOnly: true,
+      }),
+    };
+    const controller = new QuizshowDevicesController(
+      {} as unknown as QuizshowDevicePairingService,
+      sessionsService as unknown as QuizshowSessionsService,
+    );
+
+    const preview = await controller.getJoinPreview('QZ4KM7');
+    expect(preview).toEqual({ quizTitle: 'Drag herstory', status: 'running' });
+    expect(Object.keys(preview).sort()).toEqual(['quizTitle', 'status']);
+  });
+
+  it('answers a malformed pairing id with quizshow_pairing_not_found', async () => {
+    const routeArguments = Reflect.getMetadata(
+      ROUTE_ARGS_METADATA,
+      QuizshowDevicesController,
+      'claimPairing',
+    ) as Record<
+      string,
+      { index: number; data?: unknown; pipes?: PipeTransform[] }
+    >;
+    const pairingIdArgument = routeArguments[`${RouteParamtypes.PARAM}:0`];
+    expect(pairingIdArgument).toEqual(
+      expect.objectContaining({ index: 0, data: 'pairingId' }),
+    );
+    const uuidPipe = pairingIdArgument?.pipes?.[0];
+    if (!uuidPipe) {
+      throw new Error('the pairing id has no pipe');
+    }
+    const refusal: unknown = await Promise.resolve(
+      uuidPipe.transform('not-a-pairing-id', { type: 'param' }),
+    ).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(HttpException);
+    expect((refusal as HttpException).getStatus()).toBe(404);
+    expect((refusal as HttpException).getResponse()).toEqual(
+      expect.objectContaining({ code: 'quizshow_pairing_not_found' }),
+    );
+    await expect(
+      Promise.resolve(uuidPipe.transform(PAIRING_ID, { type: 'param' })),
+    ).resolves.toBe(PAIRING_ID);
+  });
+
+  it('reads the claim body as a 43 character poll token', async () => {
+    const parameterTypes = Reflect.getMetadata(
+      'design:paramtypes',
+      QuizshowDevicesController.prototype,
+      'claimPairing',
+    ) as unknown[];
+    expect(parameterTypes[1]).toBe(QuizshowPairingClaimDto);
+
+    const problemsOf = (body: Record<string, unknown>) =>
+      validate(plainToInstance(QuizshowPairingClaimDto, body));
+    await expect(problemsOf({ pollToken: POLL_TOKEN })).resolves.toEqual([]);
+    for (const pollToken of ['a'.repeat(42), 'a'.repeat(44), 43]) {
+      const problems = await problemsOf({ pollToken });
+      expect(problems.map((problem) => problem.property)).toEqual([
+        'pollToken',
+      ]);
+    }
+  });
+});
+
+describe('Pulse Live pairing throttler guards', () => {
+  it('buckets screen starts by IP and helper starts by member', async () => {
+    const screenGuard = pairingGuardInternals(
+      QuizshowScreenPairingThrottlerGuard,
+    );
+    const helperGuard = pairingGuardInternals(
+      QuizshowHelperPairingThrottlerGuard,
+    );
+    await expect(screenGuard.getTracker({ ip: '203.0.113.7' })).resolves.toBe(
+      'quizshow-screen-pairing:203.0.113.7',
+    );
+    await expect(
+      helperGuard.getTracker({ ip: '203.0.113.7', user: USER }),
+    ).resolves.toBe(`quizshow-helper-pairing:${USER.userId}`);
+    await expect(helperGuard.getTracker({ ip: '203.0.113.7' })).resolves.toBe(
+      'quizshow-helper-pairing-ip:203.0.113.7',
+    );
+  });
+
+  it('counts IPv6 screen starts by /64 and gives unparseable addresses one shared bucket', async () => {
+    const screenGuard = pairingGuardInternals(
+      QuizshowScreenPairingThrottlerGuard,
+    );
+    const helperGuard = pairingGuardInternals(
+      QuizshowHelperPairingThrottlerGuard,
+    );
+    const firstTracker = await screenGuard.getTracker({
+      ip: '2001:db8:aa:bb:1111:2222:3333:4444',
+    });
+    const secondTracker = await screenGuard.getTracker({
+      ip: '2001:db8:aa:bb:9999:8888:7777:6666',
+    });
+    const otherNetworkTracker = await screenGuard.getTracker({
+      ip: '2001:db8:aa:cc:1111:2222:3333:4444',
+    });
+    expect(secondTracker).toBe(firstTracker);
+    expect(otherNetworkTracker).not.toBe(firstTracker);
+    await expect(
+      screenGuard.getTracker({ ip: '::ffff:203.0.113.7' }),
+    ).resolves.toBe('quizshow-screen-pairing:203.0.113.7');
+    await expect(
+      screenGuard.getTracker({ ip: 'not-an-address' }),
+    ).resolves.toBe('quizshow-screen-pairing:unknown');
+    await expect(screenGuard.getTracker({})).resolves.toBe(
+      'quizshow-screen-pairing:unknown',
+    );
+    await expect(
+      helperGuard.getTracker({ ip: '2001:db8:aa:bb:1111:2222:3333:4444' }),
+    ).resolves.toBe(
+      await helperGuard.getTracker({ ip: '2001:db8:aa:bb:5555::1' }),
+    );
+  });
+
+  it('runs a claim through a 180 a minute network bucket and a 60 a minute pairing bucket, whatever the skip metadata', async () => {
+    const guard = pairingGuardInternals(
+      QuizshowPairingClaimThrottlerGuard,
+    ) as PairingGuardInternals & {
+      canActivate(context: ExecutionContext): Promise<boolean>;
+    };
+    const handled: ThrottlerRequest[] = [];
+    const handleRequest = jest
+      .spyOn(guard, 'handleRequest')
+      .mockImplementation((requestProps: ThrottlerRequest) => {
+        handled.push(requestProps);
+        return Promise.resolve(true);
+      });
+    const context = {
+      getType: () => 'http',
+      getClass: () => QuizshowDevicesController,
+      getHandler: () => handlerOf(QuizshowDevicesController, 'claimPairing'),
+    } as unknown as ExecutionContext;
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+
+    expect(handleRequest).toHaveBeenCalledTimes(2);
+    const [networkBucket, pairingBucket] = handled;
+    expect(networkBucket).toEqual(
+      expect.objectContaining({ limit: 180, ttl: 60000, blockDuration: 60000 }),
+    );
+    expect(pairingBucket).toEqual(
+      expect.objectContaining({ limit: 60, ttl: 60000, blockDuration: 60000 }),
+    );
+    const pairingId = 'E0400000-0000-4000-8000-000000000001';
+    const venueRequest = {
+      ip: '2001:db8:aa:bb:1111:2222:3333:4444',
+      params: { pairingId },
+    };
+    await expect(
+      networkBucket?.getTracker(venueRequest, context),
+    ).resolves.toBe(
+      await networkBucket?.getTracker(
+        { ip: '2001:db8:aa:bb:9999::1', params: { pairingId: 'x' } },
+        context,
+      ),
+    );
+    await expect(
+      pairingBucket?.getTracker(venueRequest, context),
+    ).resolves.toBe(`quizshow-claim-pairing:${pairingId.toLowerCase()}`);
+    await expect(
+      pairingBucket?.getTracker(
+        { ip: '203.0.113.7', params: { pairingId: 'not-a-pairing-id' } },
+        context,
+      ),
+    ).resolves.toBe('quizshow-claim-pairing:malformed');
+    // The poll token in the body never keys a bucket.
+    const bodyRequest = {
+      ip: '203.0.113.7',
+      params: { pairingId },
+      body: { pollToken: 'a'.repeat(43) },
+    };
+    for (const bucket of [networkBucket, pairingBucket]) {
+      await expect(
+        bucket?.getTracker(bodyRequest, context),
+      ).resolves.not.toContain('aaaa');
+    }
+
+    handleRequest.mockImplementation((requestProps: ThrottlerRequest) =>
+      Promise.resolve(requestProps.limit !== 60),
+    );
+    await expect(guard.canActivate(context)).resolves.toBe(false);
+
+    const refusal: unknown = await guard
+      .throwThrottlingException(context, { timeToBlockExpire: 60 })
+      .catch((error: unknown) => error);
+    expect((refusal as HttpException).getStatus()).toBe(429);
+    expect((refusal as HttpException).getResponse()).toEqual(
+      expect.objectContaining({ code: 'quizshow_pairing_rate_limited' }),
+    );
+    handleRequest.mockRestore();
+  });
+
+  it.each([
+    QuizshowScreenPairingThrottlerGuard,
+    QuizshowHelperPairingThrottlerGuard,
+  ])(
+    '%p allows 10 starts in 10 minutes and refuses with quizshow_pairing_rate_limited',
+    async (GuardClass) => {
+      const guard = pairingGuardInternals(GuardClass);
+      const superHandleRequest = jest
+        .spyOn(
+          HttpThrottlerGuard.prototype as unknown as Pick<
+            PairingGuardInternals,
+            'handleRequest'
+          >,
+          'handleRequest',
+        )
+        .mockResolvedValue(true);
+      await guard.handleRequest({
+        context: {} as never,
+        limit: 999,
+        ttl: 1,
+        blockDuration: 1,
+        throttler: {} as never,
+        generateKey: jest.fn(),
+      } as unknown as ThrottlerRequest);
+      expect(superHandleRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          limit: 10,
+          ttl: 600000,
+          blockDuration: 600000,
+        }),
+      );
+      superHandleRequest.mockRestore();
+
+      const refusal: unknown = await guard
+        .throwThrottlingException({} as ExecutionContext, {
+          timeToBlockExpire: 600,
+        })
+        .catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(HttpException);
+      expect((refusal as HttpException).getStatus()).toBe(429);
+      expect((refusal as HttpException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'quizshow_pairing_rate_limited' }),
+      );
+    },
+  );
+});
+
+describe('Pulse Live Swagger responses', () => {
+  /** The response descriptions `@nestjs/swagger` keeps on a route handler, by status. */
+  const documentedResponses = (
+    handler: (...parameters: never[]) => unknown,
+  ): Record<string, { description?: string }> =>
+    (Reflect.getMetadata('swagger/apiResponse', handler) ?? {}) as Record<
+      string,
+      { description?: string }
+    >;
+
+  it('documents the rematch refusals on both lobby opens', () => {
+    for (const handler of [
+      handlerOf(QuizshowEventController, 'openSession'),
+      handlerOf(QuizshowGamesController, 'openSession'),
+    ]) {
+      const responses = documentedResponses(handler);
+      expect(responses['404']?.description).toContain(
+        'quizshow_rematch_not_found',
+      );
+      expect(responses['409']?.description).toContain(
+        'quizshow_rematch_expired',
+      );
+    }
+  });
+
+  it('documents the append conflict and its four limit refusals on both imports', () => {
+    for (const handler of [
+      handlerOf(QuizshowEventController, 'importQuiz'),
+      handlerOf(QuizshowGamesController, 'importIntoGame'),
+    ]) {
+      const responses = documentedResponses(handler);
+      expect(responses['409']?.description).toContain('quizshow_quiz_changed');
+      for (const code of [
+        'quizshow_import_round_not_found',
+        'quizshow_import_too_many_rounds',
+        'quizshow_import_too_many_questions',
+        'quizshow_import_too_many_wheels',
+      ]) {
+        expect(responses['422']?.description).toContain(code);
+      }
+    }
+  });
+
+  it('documents the join lock refusal on join', () => {
+    expect(
+      documentedResponses(handlerOf(QuizshowController, 'join'))['403']
+        ?.description,
+    ).toContain('quizshow_joining_locked');
   });
 });

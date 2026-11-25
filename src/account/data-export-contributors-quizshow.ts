@@ -17,6 +17,7 @@ interface QuizshowPlayExportRow {
   team_name: string | null;
   score: number;
   is_removed: boolean;
+  left_at: Date | null;
   quiz_snapshot: unknown;
 }
 
@@ -57,6 +58,8 @@ export interface QuizshowPlayExport {
   teamName: string | null;
   score: number;
   wasRemoved: boolean;
+  /** When the member left the game by choice, ISO; null when they did not. */
+  leftAt: string | null;
   answers: QuizshowAnswerExport[];
   votes: QuizshowVoteExport[];
 }
@@ -132,6 +135,7 @@ export class QuizshowPlaysExportContributor implements DataExportContribution {
               "team"."name" AS "team_name",
               "player"."score" AS "score",
               ("player"."removed_at" IS NOT NULL) AS "is_removed",
+              "player"."left_at" AS "left_at",
               "session"."quiz_snapshot" AS "quiz_snapshot"
          FROM "quizshow_players" "player"
          JOIN "quizshow_sessions" "session" ON "session"."id" = "player"."session_id"
@@ -179,6 +183,7 @@ export class QuizshowPlaysExportContributor implements DataExportContribution {
         teamName: row.team_name,
         score: row.score,
         wasRemoved: row.is_removed,
+        leftAt: row.left_at ? row.left_at.toISOString() : null,
         answers: (answersByPlayer.get(row.player_id) ?? []).map((answer) => ({
           questionPrompt: prompts.get(answer.question_id) ?? null,
           answer: answer.payload,
@@ -223,6 +228,13 @@ interface QuizshowQuestionExportRow {
   options: unknown;
   answer: unknown;
   accepted_answers: unknown;
+  media_alt_en: string;
+  media_alt_pt: string;
+  reveal_note_en: string;
+  reveal_note_pt: string;
+  number_unit_en: string;
+  number_unit_pt: string;
+  media_reveal: string;
 }
 
 export interface QuizshowGameQuestionExport {
@@ -232,6 +244,14 @@ export interface QuizshowGameQuestionExport {
   answer: unknown;
   acceptedAnswers: unknown;
   mediaRef: string | null;
+  /** The picture's alt text the member wrote. */
+  mediaAlt: QuizshowText;
+  /** The note shown with the answer at the reveal. */
+  revealNote: QuizshowText;
+  /** The unit after a closest number answer. */
+  numberUnit: QuizshowText;
+  /** 'instant', or 'slow' when the picture unblurs while the question runs. */
+  mediaReveal: string;
 }
 
 export interface QuizshowGameRoundExport {
@@ -304,7 +324,14 @@ export class QuizshowGamesExportContributor implements DataExportContribution {
                     "question"."media_ref" AS "media_ref",
                     "question"."options" AS "options",
                     "question"."answer" AS "answer",
-                    "question"."accepted_answers" AS "accepted_answers"
+                    "question"."accepted_answers" AS "accepted_answers",
+                    "question"."media_alt_en" AS "media_alt_en",
+                    "question"."media_alt_pt" AS "media_alt_pt",
+                    "question"."reveal_note_en" AS "reveal_note_en",
+                    "question"."reveal_note_pt" AS "reveal_note_pt",
+                    "question"."number_unit_en" AS "number_unit_en",
+                    "question"."number_unit_pt" AS "number_unit_pt",
+                    "question"."media_reveal" AS "media_reveal"
                FROM "quizshow_questions" "question"
               WHERE "question"."round_id" = ANY($1::uuid[])
               ORDER BY "question"."position" ASC`,
@@ -331,6 +358,16 @@ export class QuizshowGamesExportContributor implements DataExportContribution {
           answer: question.answer,
           acceptedAnswers: question.accepted_answers,
           mediaRef: question.media_ref,
+          mediaAlt: { en: question.media_alt_en, pt: question.media_alt_pt },
+          revealNote: {
+            en: question.reveal_note_en,
+            pt: question.reveal_note_pt,
+          },
+          numberUnit: {
+            en: question.number_unit_en,
+            pt: question.number_unit_pt,
+          },
+          mediaReveal: question.media_reveal,
         })),
       })),
     }));

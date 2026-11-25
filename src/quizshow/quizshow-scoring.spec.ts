@@ -1,4 +1,6 @@
+import type { QuizshowClosestTolerance } from './quizshow.contract';
 import {
+  closestBandWidth,
   closestNumberOutcomes,
   competitionRanks,
   type QuizAnswerScoringInput,
@@ -14,6 +16,8 @@ import {
 
 const BASE = 1000;
 const LIMIT_MS = 20000;
+const TEN_PERCENT: QuizshowClosestTolerance = { mode: 'percent', amount: 10 };
+const EXACT: QuizshowClosestTolerance = { mode: 'exact', amount: 0 };
 
 function scoringInput(
   overrides: Partial<QuizAnswerScoringInput>,
@@ -21,7 +25,7 @@ function scoringInput(
   return {
     type: 'multiple_choice',
     base: BASE,
-    answerKey: { type: 'multiple_choice', correctIndex: 1 },
+    answerKey: { type: 'multiple_choice', correctIndexes: [1] },
     payload: { type: 'multiple_choice', optionIndex: 1 },
     elapsedMs: 0,
     ownLimitMs: LIMIT_MS,
@@ -29,6 +33,8 @@ function scoringInput(
     streakBefore: 0,
     isJokerActive: false,
     closestOutcome: null,
+    acceptedTexts: new Set<string>(),
+    isWarmUp: false,
     ...overrides,
   };
 }
@@ -94,7 +100,7 @@ describe('Pulse Live scoring', () => {
   });
 
   it('gives the closest players the base and the 10% band half', () => {
-    const tiedOutcomes = closestNumberOutcomes(100, [
+    const tiedOutcomes = closestNumberOutcomes(100, TEN_PERCENT, [
       { playerId: 'p95', value: 95 },
       { playerId: 'p105', value: 105 },
       { playerId: 'p120', value: 120 },
@@ -105,14 +111,18 @@ describe('Pulse Live scoring', () => {
     expect(tiedOutcomes.get('p120')).toBe('none');
     expect(tiedOutcomes.get('p89')).toBe('none');
 
-    const bandOutcomes = closestNumberOutcomes(100, [
+    const bandOutcomes = closestNumberOutcomes(100, TEN_PERCENT, [
       { playerId: 'p98', value: 98 },
       { playerId: 'p91', value: 91 },
     ]);
     expect(bandOutcomes.get('p98')).toBe('closest');
     expect(bandOutcomes.get('p91')).toBe('band');
 
-    const answerKey = { type: 'closest_number' as const, value: 100 };
+    const answerKey = {
+      type: 'closest_number' as const,
+      value: 100,
+      tolerance: TEN_PERCENT,
+    };
     for (const elapsedMs of [0, 10000, 20000]) {
       const closestScore = scoreQuizAnswer(
         scoringInput({
@@ -142,7 +152,7 @@ describe('Pulse Live scoring', () => {
   });
 
   it('keeps a decimal tie fair', () => {
-    const outcomes = closestNumberOutcomes(0.3, [
+    const outcomes = closestNumberOutcomes(0.3, TEN_PERCENT, [
       { playerId: 'below', value: 0.2 },
       { playerId: 'above', value: 0.4 },
     ]);
@@ -151,7 +161,7 @@ describe('Pulse Live scoring', () => {
   });
 
   it('counts an answer exactly at the band edge', () => {
-    const outcomes = closestNumberOutcomes(2, [
+    const outcomes = closestNumberOutcomes(2, TEN_PERCENT, [
       { playerId: 'nearest', value: 2.1 },
       { playerId: 'edgeAbove', value: 2.2 },
       { playerId: 'edgeBelow', value: 1.8 },
@@ -173,13 +183,152 @@ describe('Pulse Live scoring', () => {
     expect(score.pointsAwarded).toBe(0);
   });
 
-  it('gives a truth of 0 a band of 0', () => {
-    const outcomes = closestNumberOutcomes(0, [
+  it('gives a percent tolerance on a truth of 0 a band of 0', () => {
+    expect(closestBandWidth(0, TEN_PERCENT)).toBe(0);
+    const outcomes = closestNumberOutcomes(0, TEN_PERCENT, [
       { playerId: 'near', value: 1 },
       { playerId: 'far', value: 2 },
     ]);
     expect(outcomes.get('near')).toBe('closest');
     expect(outcomes.get('far')).toBe('none');
+  });
+
+  it('scores only the closest answers under an exact tolerance', () => {
+    expect(closestBandWidth(100, EXACT)).toBe(0);
+    const outcomes = closestNumberOutcomes(100, EXACT, [
+      { playerId: 'below', value: 99 },
+      { playerId: 'above', value: 101 },
+      { playerId: 'further', value: 102 },
+    ]);
+    expect(outcomes.get('below')).toBe('closest');
+    expect(outcomes.get('above')).toBe('closest');
+    expect(outcomes.get('further')).toBe('none');
+  });
+
+  it('keeps an absolute band edge inside and the next hundredth outside', () => {
+    const withinFive: QuizshowClosestTolerance = {
+      mode: 'absolute',
+      amount: 5,
+    };
+    expect(closestBandWidth(1970, withinFive)).toBe(5);
+    const outcomes = closestNumberOutcomes(1970, withinFive, [
+      { playerId: 'nearest', value: 1971 },
+      { playerId: 'inside', value: 1974 },
+      { playerId: 'edge', value: 1975 },
+      { playerId: 'outside', value: 1975.01 },
+    ]);
+    expect(outcomes.get('nearest')).toBe('closest');
+    expect(outcomes.get('inside')).toBe('band');
+    expect(outcomes.get('edge')).toBe('band');
+    expect(outcomes.get('outside')).toBe('none');
+  });
+
+  it('measures a percent band from the truth', () => {
+    expect(closestBandWidth(200, TEN_PERCENT)).toBe(20);
+    const outcomes = closestNumberOutcomes(200, TEN_PERCENT, [
+      { playerId: 'nearest', value: 205 },
+      { playerId: 'edge', value: 220 },
+      { playerId: 'outside', value: 221 },
+    ]);
+    expect(outcomes.get('nearest')).toBe('closest');
+    expect(outcomes.get('edge')).toBe('band');
+    expect(outcomes.get('outside')).toBe('none');
+  });
+
+  it('marks every answer tied at the minimum distance closest', () => {
+    const outcomes = closestNumberOutcomes(50, TEN_PERCENT, [
+      { playerId: 'first', value: 48 },
+      { playerId: 'second', value: 52 },
+      { playerId: 'third', value: 48 },
+      { playerId: 'band', value: 54 },
+    ]);
+    expect(outcomes.get('first')).toBe('closest');
+    expect(outcomes.get('second')).toBe('closest');
+    expect(outcomes.get('third')).toBe('closest');
+    expect(outcomes.get('band')).toBe('band');
+  });
+
+  it('scores any option listed among several correct options', () => {
+    const answerKey = {
+      type: 'multiple_choice' as const,
+      correctIndexes: [0, 2],
+    };
+    const listedOption = scoreQuizAnswer(
+      scoringInput({
+        answerKey,
+        payload: { type: 'multiple_choice', optionIndex: 2 },
+      }),
+    );
+    expect(listedOption.isCorrect).toBe(true);
+    expect(listedOption.pointsAwarded).toBe(1100);
+
+    const unlistedOption = scoreQuizAnswer(
+      scoringInput({
+        answerKey,
+        payload: { type: 'multiple_choice', optionIndex: 1 },
+      }),
+    );
+    expect(unlistedOption.isCorrect).toBe(false);
+    expect(unlistedOption.pointsAwarded).toBe(0);
+  });
+
+  it('judges a typed answer right when the host accepted its normalised text', () => {
+    // A four-letter key gets no typo tolerance, so only the accepted text
+    // can make "Grey" right.
+    const answerKey = {
+      type: 'type_answer' as const,
+      text: { en: 'Gray', pt: 'Cinzento' },
+      acceptedAnswers: [],
+    };
+    const beforeAccepting = scoreQuizAnswer(
+      scoringInput({
+        type: 'type_answer',
+        answerKey,
+        payload: { type: 'type_answer', text: 'Grey' },
+      }),
+    );
+    expect(beforeAccepting.isCorrect).toBe(false);
+
+    const afterAccepting = scoreQuizAnswer(
+      scoringInput({
+        type: 'type_answer',
+        answerKey,
+        payload: { type: 'type_answer', text: 'GREY!' },
+        acceptedTexts: new Set(['grey']),
+      }),
+    );
+    expect(afterAccepting.isCorrect).toBe(true);
+    expect(afterAccepting.pointsAwarded).toBe(1100);
+  });
+
+  it('judges a warm-up answer and keeps its points at 0 and its streak as it was', () => {
+    const rightAnswer = scoreQuizAnswer(
+      scoringInput({ isWarmUp: true, streakBefore: 4 }),
+    );
+    expect(rightAnswer).toEqual({
+      isCorrect: true,
+      correctPositions: null,
+      streakAfter: 4,
+      streakBonus: 0,
+      pointsAwarded: 0,
+    });
+
+    const wrongAnswer = scoreQuizAnswer(
+      scoringInput({
+        isWarmUp: true,
+        streakBefore: 4,
+        payload: { type: 'multiple_choice', optionIndex: 0 },
+      }),
+    );
+    expect(wrongAnswer.isCorrect).toBe(false);
+    expect(wrongAnswer.streakAfter).toBe(4);
+    expect(wrongAnswer.pointsAwarded).toBe(0);
+
+    const missingAnswer = scoreQuizAnswer(
+      scoringInput({ isWarmUp: true, streakBefore: 4, payload: null }),
+    );
+    expect(missingAnswer.streakAfter).toBe(4);
+    expect(missingAnswer.pointsAwarded).toBe(0);
   });
 
   it('scores no answer as zero and resets the streak', () => {

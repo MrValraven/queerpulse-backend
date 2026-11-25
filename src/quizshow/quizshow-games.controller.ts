@@ -51,9 +51,10 @@ import type {
 /**
  * Pulse Live games that belong to a member and need no event: the member's
  * games (list, create, read, save, duplicate, delete), importing into a game,
- * opening a live session and the kept results. A game that is not the
+ * opening a live session and loading the latest edits into its lobby, and
+ * the kept results. A game that is not the
  * caller's answers 404 `quizshow_game_not_found`. The writes that reach other
- * members (create, save, duplicate, import, open) refuse a restricted member;
+ * members (create, save, duplicate, import, open, refresh) refuse a restricted member;
  * the reads and both deletes stay open so a restricted owner can clean up.
  */
 @Feature('quizshow')
@@ -181,8 +182,13 @@ export class QuizshowGamesController {
     description:
       '`quizshow_game_adults_rounds_need_switch` or `ACCOUNT_RESTRICTED`.',
   })
+  @ApiConflictResponse({
+    description:
+      'Append only: `quizshow_quiz_changed` (with `updatedAt` and `updatedByName`) when `expectedUpdatedAt` is missing or differs from the stored `updatedAt`.',
+  })
   @ApiUnprocessableEntityResponse({
-    description: '`quizshow_quiz_invalid` (with `problems`).',
+    description:
+      '`quizshow_quiz_invalid` (with `problems`); on an append also `quizshow_import_round_not_found`, `quizshow_import_too_many_rounds`, `quizshow_import_too_many_questions` or `quizshow_import_too_many_wheels`.',
   })
   importIntoGame(
     @CurrentUser() user: CurrentUserData,
@@ -217,7 +223,8 @@ export class QuizshowGamesController {
     description: '`{ sessionId, joinCode, isGuestPushSent }`.',
   })
   @ApiNotFoundResponse({
-    description: '`quizshow_game_not_found`.',
+    description:
+      '`quizshow_game_not_found`, or `quizshow_rematch_not_found` when `rematchOfSessionId` names no finished session of this game.',
   })
   @ApiForbiddenResponse({
     description:
@@ -225,7 +232,7 @@ export class QuizshowGamesController {
   })
   @ApiConflictResponse({
     description:
-      '`quizshow_session_already_open` (with `sessionId` and `joinCode`) or `quizshow_results_exist`.',
+      '`quizshow_session_already_open` (with `sessionId` and `joinCode`), `quizshow_results_exist`, or `quizshow_rematch_expired` when the rematch window of 30 minutes after the end has passed.',
   })
   @ApiUnprocessableEntityResponse({
     description: '`quizshow_quiz_incomplete` (with `problems`).',
@@ -236,6 +243,39 @@ export class QuizshowGamesController {
     @Body() body: QuizshowOpenGameSessionDto,
   ): Promise<QuizshowOpenSessionResult> {
     return this.sessionsService.openGameSession(gameId, user.userId, body);
+  }
+
+  @Post(':gameId/sessions/refresh')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: 'Load the latest saved game into its open lobby (contract 6.10).',
+  })
+  @ApiOkResponse({
+    description:
+      '`{ isNoop }`; `isNoop` is true when the lobby already runs the latest save.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      '`quizshow_game_not_found`, `quizshow_session_not_found` (no open session) or `quizshow_refresh_quiz_gone`.',
+  })
+  @ApiForbiddenResponse({ description: '`ACCOUNT_RESTRICTED`.' })
+  @ApiConflictResponse({
+    description:
+      '`quizshow_not_in_lobby` or `quizshow_refresh_adults_lobby_joined`.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description:
+      '`quizshow_refresh_quiz_incomplete` (with `problems`) or `quizshow_refresh_adults_mismatch`.',
+  })
+  refreshLobby(
+    @CurrentUser() user: CurrentUserData,
+    @Param('gameId') gameId: string,
+  ): Promise<{ isNoop: boolean }> {
+    return this.sessionsService.refreshLobby(
+      { kind: 'game', gameId },
+      user.userId,
+    );
   }
 
   @Get(':gameId/results')

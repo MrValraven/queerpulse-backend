@@ -2,8 +2,12 @@ import { EntityManager, In, IsNull } from 'typeorm';
 import { QuizshowPlayerRecord } from './entities/quizshow-player.entity';
 import { QuizshowResultRecord } from './entities/quizshow-result.entity';
 import { QuizshowTeamRecord } from './entities/quizshow-team.entity';
+import { readResultsWinBadges } from '../quiz-win-badges/quiz-win-badges-results-reads';
 import { quizshowError } from './quizshow-errors';
+import { competitionRanks } from './quizshow-scoring';
+import { normaliseStoredRecap } from './quizshow-stored-shapes';
 import type {
+  QuizshowRecapStanding,
   QuizshowResultsPodiumEntry,
   QuizshowResultsResponse,
 } from './quizshow.contract';
@@ -21,6 +25,57 @@ export interface QuizshowResultsCardInput {
   viewerUserId: string;
   /** An event's host or co-host, or the owner of a game: they see the recap. */
   isOrganizer: boolean;
+}
+
+/**
+ * The recap standings, built at read time from the kept player and team rows
+ * so an erased account drops out with its cascaded row: every player still in
+ * the session (solo) or every team (teams), ranked like the live game ranks
+ * them (score, then name, then id). The ids only feed the ranking and never
+ * reach the card.
+ */
+export async function readRecapStandings(
+  manager: EntityManager,
+  sessionRow: QuizshowResultSessionRow,
+): Promise<QuizshowRecapStanding[]> {
+  if (sessionRow.play_mode === 'teams') {
+    const teams = await manager.find(QuizshowTeamRecord, {
+      where: { sessionId: sessionRow.id },
+    });
+    return competitionRanks(
+      teams.map((team) => ({
+        entrantId: team.id,
+        kind: 'team' as const,
+        name: team.name,
+        colorKey: team.colorKey,
+        score: team.score,
+      })),
+    ).map(({ rank, kind, name, colorKey, score }) => ({
+      rank,
+      kind,
+      name,
+      colorKey,
+      score,
+    }));
+  }
+  const players = await manager.find(QuizshowPlayerRecord, {
+    where: { sessionId: sessionRow.id, removedAt: IsNull(), leftAt: IsNull() },
+  });
+  return competitionRanks(
+    players.map((player) => ({
+      entrantId: player.id,
+      kind: 'player' as const,
+      name: player.screenName,
+      colorKey: null,
+      score: player.score,
+    })),
+  ).map(({ rank, kind, name, colorKey, score }) => ({
+    rank,
+    kind,
+    name,
+    colorKey,
+    score,
+  }));
 }
 
 /**
@@ -134,6 +189,20 @@ export async function buildResultsResponse(
     me,
     playerCount,
     teamCount,
-    recap: isOrganizer ? result.questionStats : null,
+    // A recap stored before live v2 reads with the new keys filled (contract
+    // 6.24). The standings are read from the kept rows, so any a stored
+    // recap still carries go unread.
+    recap: isOrganizer
+      ? {
+          ...normaliseStoredRecap(result.questionStats),
+          standings: await readRecapStandings(manager, sessionRow),
+        }
+      : null,
+    // The winners' badges by screen or team name, plus the viewer's own.
+    winBadges: await readResultsWinBadges(manager, {
+      sessionId: sessionRow.id,
+      viewerUserId,
+      playMode: sessionRow.play_mode,
+    }),
   };
 }

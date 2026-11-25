@@ -183,6 +183,9 @@ export class ContentOwnerErasureService {
     await this.runIsolated('Pulse Live attached organisers', () =>
       this.detachFromQuizshowSessions(userId),
     );
+    await this.runIsolated('Pulse Live paired helper devices', () =>
+      this.detachHelperFromQuizshowPairedDevices(userId),
+    );
   }
 
   private async runIsolated(
@@ -738,6 +741,31 @@ export class ContentOwnerErasureService {
       `UPDATE "quizshow_sessions"
           SET "attached_organiser_user_ids" = array_remove("attached_organiser_user_ids", $1::uuid)
         WHERE $1::uuid = ANY("attached_organiser_user_ids")`,
+      [userId],
+    );
+  }
+
+  /**
+   * `quizshow_sessions.paired_devices` is a jsonb array of the phones and
+   * screens paired to a live game, and each phone names its helper by user id.
+   * It has no FK, so nothing clears the id when the user row goes. One
+   * set-based statement sets `helperUserId` to null in every element that
+   * names the member, open or ended sessions alike, and leaves every other
+   * element as it was. The `@>` filter skips sessions that hold no such
+   * element, so the rest of the table is not rewritten.
+   */
+  private async detachHelperFromQuizshowPairedDevices(
+    userId: string,
+  ): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE "quizshow_sessions"
+          SET "paired_devices" = (
+            SELECT COALESCE(jsonb_agg(
+                     CASE WHEN "device" ->> 'helperUserId' = $1::text
+                          THEN jsonb_set("device", '{helperUserId}', 'null'::jsonb)
+                          ELSE "device" END), '[]'::jsonb)
+              FROM jsonb_array_elements("paired_devices") AS "device")
+        WHERE "paired_devices" @> jsonb_build_array(jsonb_build_object('helperUserId', $1::text))`,
       [userId],
     );
   }

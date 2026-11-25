@@ -12,9 +12,12 @@ type QuizshowPurgeTable = 'quizshow_votes' | 'quizshow_answers';
 
 /**
  * Pulse Live retention. Answers and votes go 30 days after their session
- * ended; abandoned sessions go whole after the same 30 days (players, teams
- * and everything else cascade). Players, teams and results of finished
- * sessions stay for as long as the session keeps its results.
+ * ended; abandoned sessions and finished practice sessions go whole after the
+ * same 30 days (players, teams and everything else cascade), because neither
+ * keeps results. Players, teams and results of finished scored sessions stay
+ * for as long as the session keeps its results, and the host corrections
+ * (`answer_key_overrides`, which hold typed answer text) are cleared on every
+ * session that ended before the same cutoff.
  *
  * The daily sweep also abandons idle open sessions through the runtime and
  * drops lobby opens older than a day: the rate limit only reads the last
@@ -120,7 +123,8 @@ export class QuizshowRetentionService {
            DELETE FROM "quizshow_sessions"
            WHERE "id" IN (
              SELECT "id" FROM "quizshow_sessions"
-             WHERE "status" = 'abandoned' AND "ended_at" < $1
+             WHERE ("status" = 'abandoned' OR ("status" = 'finished' AND "is_practice"))
+               AND "ended_at" < $1
              LIMIT $2
            )
            RETURNING 1
@@ -130,9 +134,31 @@ export class QuizshowRetentionService {
         batchSize,
         maxBatches,
       );
-      if (votesDeleted + answersDeleted + sessionsDeleted > 0) {
+      // The finish write clears the corrections; this pass reaches the
+      // sessions that ended before it did, and any that still hold some.
+      const overridesCleared = await this.deleteInBatches(
+        `WITH "cleared" AS (
+           UPDATE "quizshow_sessions"
+           SET "answer_key_overrides" = '{}'::jsonb
+           WHERE "id" IN (
+             SELECT "id" FROM "quizshow_sessions"
+             WHERE "ended_at" < $1
+               AND "answer_key_overrides" <> '{}'::jsonb
+             LIMIT $2
+           )
+           RETURNING 1
+         )
+         SELECT count(*)::int AS deleted_count FROM "cleared"`,
+        cutoff,
+        batchSize,
+        maxBatches,
+      );
+      if (
+        votesDeleted + answersDeleted + sessionsDeleted + overridesCleared >
+        0
+      ) {
         this.logger.log(
-          `Pulse Live retention removed ${votesDeleted} vote(s), ${answersDeleted} answer(s) and ${sessionsDeleted} abandoned session(s)`,
+          `Pulse Live retention removed ${votesDeleted} vote(s), ${answersDeleted} answer(s) and ${sessionsDeleted} abandoned or practice session(s), and cleared the host corrections of ${overridesCleared} session(s)`,
         );
       }
     } catch (error: unknown) {
@@ -167,6 +193,11 @@ export class QuizshowRetentionService {
     );
   }
 
+  /**
+   * Runs one batched statement until a batch comes back short. Every
+   * statement reports its row count as `deleted_count`, the cleared
+   * corrections pass included.
+   */
   private async deleteInBatches(
     statement: string,
     cutoff: Date,

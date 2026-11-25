@@ -8,6 +8,7 @@ import {
 } from 'typeorm';
 import {
   QUIZSHOW_QUESTION_TYPES,
+  QuizshowMediaReveal,
   QuizshowOption,
   QuizshowQuestionType,
 } from '../quizshow.contract';
@@ -68,4 +69,27 @@ export class QuizshowQuestionRecord {
 
   @Column({ type: 'int', default: 1000 })
   points!: number;
+
+  @Column({ type: 'varchar', length: 200, default: '' })
+  mediaAltEn!: string;
+
+  @Column({ type: 'varchar', length: 200, default: '' })
+  mediaAltPt!: string;
+
+  @Column({ type: 'varchar', length: 200, default: '' })
+  revealNoteEn!: string;
+
+  @Column({ type: 'varchar', length: 200, default: '' })
+  revealNotePt!: string;
+
+  /** '' on every type but closest number. */
+  @Column({ type: 'varchar', length: 20, default: '' })
+  numberUnitEn!: string;
+
+  @Column({ type: 'varchar', length: 20, default: '' })
+  numberUnitPt!: string;
+
+  /** The migration's `CHK_quizshow_questions_media_reveal` keeps it to `QUIZSHOW_MEDIA_REVEALS`. */
+  @Column({ type: 'varchar', length: 10, default: 'instant' })
+  mediaReveal!: QuizshowMediaReveal;
 }

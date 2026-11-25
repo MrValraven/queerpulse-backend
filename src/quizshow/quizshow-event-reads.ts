@@ -1,5 +1,6 @@
 import type { EntityManager } from 'typeorm';
 import { canViewerUseFeature } from '../early-access/early-access-reads';
+import { readNextGameWinBadges } from '../quiz-win-badges/quiz-win-badges-event-reads';
 import { QUIZSHOW_LIMITS, type QuizshowEventDetail } from './quizshow.contract';
 
 /**
@@ -28,6 +29,7 @@ export const EVENT_QUIZSHOW_SUMMARY_SQL = `
       SELECT 1 FROM "quizshow_quizzes" "quiz" WHERE "quiz"."event_id" = $1
     ) AS "has_quiz",
     "open_session"."join_code" AS "join_code",
+    COALESCE("open_session"."is_practice", false) AS "is_practice",
     COALESCE("open_session"."last_host_command_at" <= $6::timestamptz, false) AS "is_idle",
     (
       NOT $4::boolean
@@ -65,7 +67,7 @@ export const EVENT_QUIZSHOW_SUMMARY_SQL = `
     ) AS "has_viewable_results"
   FROM (SELECT 1) AS "anchor"
   LEFT JOIN LATERAL (
-    SELECT "session"."join_code", "session"."last_host_command_at"
+    SELECT "session"."join_code", "session"."last_host_command_at", "session"."is_practice"
     FROM "quizshow_sessions" "session"
     WHERE "session"."event_id" = $1
       AND "session"."status" IN ('lobby', 'running', 'paused')
@@ -76,6 +78,7 @@ export const EVENT_QUIZSHOW_SUMMARY_SQL = `
 interface EventQuizshowSummaryRow {
   has_quiz: boolean;
   join_code: string | null;
+  is_practice: boolean;
   is_idle: boolean;
   is_barred: boolean;
   has_viewable_results: boolean;
@@ -129,13 +132,22 @@ export async function readEventQuizshowSummary(
   );
   const row = rows[0];
   if (!row) {
-    return { hasQuiz: false, liveSessionCode: null, hasResults: false };
+    return {
+      hasQuiz: false,
+      liveSessionCode: null,
+      hasResults: false,
+      winBadges: null,
+    };
   }
-  const isCodeHidden = row.is_idle || row.is_barred;
+  // Guests never see a practice banner (contract 6.9).
+  const isCodeHidden = row.is_idle || row.is_barred || row.is_practice;
   return {
     hasQuiz: row.has_quiz,
     liveSessionCode: isCodeHidden ? null : row.join_code,
     // A barred going guest meets a 404 on the results read, so no card shows.
     hasResults: row.has_viewable_results && !row.is_barred,
+    winBadges: row.has_quiz
+      ? await readNextGameWinBadges(manager, input.eventId)
+      : null,
   };
 }

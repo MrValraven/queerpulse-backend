@@ -46,13 +46,17 @@ function multipleChoiceQuestion(
     type: 'multiple_choice',
     prompt: { en: 'Which one?', pt: 'Qual?' },
     mediaRef: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [
       { id: 'a', text: { en: 'One', pt: 'Um' } },
       { id: 'b', text: { en: 'Two', pt: 'Dois' } },
     ],
-    answer: { correctIndex: 0 },
+    answer: { correctIndexes: [0] },
     acceptedAnswers: [],
     ...overrides,
   } as QuizshowQuestionInput;
@@ -73,6 +77,8 @@ function round(
       writeSeconds: 60,
       voteSeconds: 30,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+      isWarmUp: false,
+      talkSeconds: 0,
     },
     questions,
     ...overrides,
@@ -110,6 +116,7 @@ function storedQuiz(
     languages: 'both',
     screenLanguage: 'en',
     sourceTemplateId: TEMPLATE_ID,
+    sourceTemplate: null,
     updatedAt: STORED_UPDATED_AT,
     rounds: rounds.map((storedRound, roundIndex) => ({
       ...storedRound,
@@ -129,6 +136,7 @@ interface StoredGame {
   ownerUserId: string;
   title: string;
   isAdultsOnly: boolean;
+  sourceTemplateCopiedAt?: Date | null;
 }
 
 function build(
@@ -216,14 +224,22 @@ function build(
     isAdultsEvent: false,
     liveSession: null,
     hasResults: false,
+    lastOpenSettings: null,
   });
-  const writeQuiz = jest.spyOn(quizzes, 'writeQuiz').mockImplementation(() => {
-    callOrder.push('write');
-    return Promise.resolve(NEW_GAME_ID);
-  });
+  // Every games route prepares its shape once and writes through the prepared path.
+  const writeQuiz = jest
+    .spyOn(quizzes, 'writePreparedQuiz')
+    .mockImplementation(() => {
+      callOrder.push('write');
+      return Promise.resolve(NEW_GAME_ID);
+    });
   const resolveImportShape = jest
     .spyOn(quizzes, 'resolveImportShape')
-    .mockResolvedValue({ shape: sourceShape(), sourceTemplateId: null });
+    .mockResolvedValue({
+      shape: sourceShape(),
+      sourceTemplateId: null,
+      sourceTemplateCopiedAt: null,
+    });
   const loadQuizById = jest
     .spyOn(quizzes, 'loadQuizById')
     .mockResolvedValue(storedQuiz());
@@ -232,6 +248,7 @@ function build(
     .mockImplementation((gameId: string) =>
       Promise.resolve(gameResponse(gameId)),
     );
+  const runImport = jest.spyOn(quizzes, 'runImport');
   const listGameImportSources = jest
     .spyOn(quizzes, 'listGameImportSources')
     .mockResolvedValue([]);
@@ -258,6 +275,7 @@ function build(
     callOrder,
     writeQuiz,
     resolveImportShape,
+    runImport,
     loadQuizById,
     buildGameResponse,
     listGameImportSources,
@@ -306,6 +324,8 @@ describe('QuizshowGamesService', () => {
         play_mode: 'teams',
         started_at: new Date('2026-10-20T08:30:00.000Z'),
         player_count: 7,
+        is_practice: true,
+        source_updated_at: '2026-10-19T09:00:00.000Z',
         has_results: false,
       },
       {
@@ -321,6 +341,8 @@ describe('QuizshowGamesService', () => {
         play_mode: null,
         started_at: null,
         player_count: null,
+        is_practice: null,
+        source_updated_at: null,
         has_results: true,
       },
     ]);
@@ -337,6 +359,10 @@ describe('QuizshowGamesService', () => {
     expect(sql).toContain('ORDER BY "quiz"."updated_at" DESC, "quiz"."id"');
     expect(sql).toContain('"kept_session"."results_kept" = true');
     expect(sql).toContain("IN ('lobby', 'running', 'paused')");
+    expect(sql).toContain('"session"."is_practice"');
+    expect(sql).toContain(
+      `("session"."quiz_snapshot" ->> 'sourceUpdatedAt') AS "source_updated_at"`,
+    );
     expect(parameters[0]).toBe(USER_ID);
     expect(response.limit).toBe(50);
     expect(response.games).toEqual([
@@ -353,6 +379,9 @@ describe('QuizshowGamesService', () => {
           playMode: 'teams',
           playerCount: 7,
           startedAt: '2026-10-20T08:30:00.000Z',
+          isPractice: true,
+          // The lobby's snapshot came from a save before the game's latest one.
+          isBehindQuiz: true,
         },
         hasResults: false,
         updatedAt: '2026-10-20T09:00:00.000Z',
@@ -392,6 +421,7 @@ describe('QuizshowGamesService', () => {
           rounds: [],
         },
         sourceTemplateId: null,
+        sourceTemplateCopiedAt: null,
         expectedUpdatedAt: undefined,
       },
       transactionManager,
@@ -405,9 +435,11 @@ describe('QuizshowGamesService', () => {
       round(),
       round({ contentLabel: 'adults' }),
     ]);
+    const copiedAt = new Date('2026-10-20T10:00:00.000Z');
     resolveImportShape.mockResolvedValueOnce({
       shape: adultsShape,
       sourceTemplateId: TEMPLATE_ID,
+      sourceTemplateCopiedAt: copiedAt,
     });
     const source = {
       from: 'template',
@@ -425,12 +457,14 @@ describe('QuizshowGamesService', () => {
       userId: USER_ID,
       shape: { ...adultsShape, title: 'Late night' },
       sourceTemplateId: TEMPLATE_ID,
+      sourceTemplateCopiedAt: copiedAt,
       expectedUpdatedAt: undefined,
     });
 
     resolveImportShape.mockResolvedValueOnce({
       shape: sourceShape([round()]),
       sourceTemplateId: null,
+      sourceTemplateCopiedAt: null,
     });
     await service.createGame(USER_ID, createInput('Early night', source));
     expect(writeQuiz.mock.calls[1]?.[0].target).toEqual({
@@ -513,6 +547,7 @@ describe('QuizshowGamesService', () => {
           rounds: adultsRounds,
         },
         sourceTemplateId: TEMPLATE_ID,
+        sourceTemplateCopiedAt: null,
         expectedUpdatedAt: undefined,
       },
       transactionManager,
@@ -598,6 +633,7 @@ describe('QuizshowGamesService', () => {
     resolveImportShape.mockResolvedValueOnce({
       shape: sourceShape([round({ contentLabel: 'adults' })]),
       sourceTemplateId: TEMPLATE_ID,
+      sourceTemplateCopiedAt: new Date('2026-10-20T10:00:00.000Z'),
     });
 
     const error = await caughtError(
@@ -630,9 +666,11 @@ describe('QuizshowGamesService', () => {
       [round({ contentLabel: 'adults' })],
       'Template title',
     );
+    const copiedAt = new Date('2026-10-20T10:00:00.000Z');
     resolveImportShape.mockResolvedValueOnce({
       shape: importedShape,
       sourceTemplateId: TEMPLATE_ID,
+      sourceTemplateCopiedAt: copiedAt,
     });
     const input = {
       from: 'template',
@@ -655,6 +693,7 @@ describe('QuizshowGamesService', () => {
         rounds: importedShape.rounds,
       },
       sourceTemplateId: TEMPLATE_ID,
+      sourceTemplateCopiedAt: copiedAt,
       expectedUpdatedAt: undefined,
     });
     expect(buildGameResponse).toHaveBeenCalledWith(GAME_ID);
@@ -714,6 +753,61 @@ describe('QuizshowGamesService', () => {
     expect(dataSource.manager.delete).not.toHaveBeenCalled();
   });
 
+  it('passes the append fields of a game import to the shared import path', async () => {
+    const { service, runImport, buildGameResponse } = build({
+      games: [
+        {
+          id: GAME_ID,
+          ownerUserId: USER_ID,
+          title: 'My Friday quiz',
+          isAdultsOnly: true,
+        },
+      ],
+    });
+    runImport.mockResolvedValueOnce(undefined);
+    const input = {
+      from: 'game',
+      gameId: NEW_GAME_ID,
+      mode: 'append',
+      roundIndexes: [0, 2],
+      expectedUpdatedAt: STORED_UPDATED_AT,
+    } as QuizshowImportDto;
+
+    await service.importIntoGame(GAME_ID, USER_ID, input);
+
+    expect(runImport).toHaveBeenCalledWith({
+      target: { kind: 'game', gameId: GAME_ID, isAdultsOnly: true },
+      userId: USER_ID,
+      input,
+      exclusion: { eventSlug: null, gameId: GAME_ID },
+      keptTitle: 'My Friday quiz',
+    });
+    expect(buildGameResponse).toHaveBeenCalledWith(GAME_ID);
+  });
+
+  it('copies the source template stamp on a duplicate', async () => {
+    const copiedAt = new Date('2026-09-01T10:00:00.000Z');
+    const { service, writeQuiz } = build({
+      games: [
+        {
+          id: GAME_ID,
+          ownerUserId: USER_ID,
+          title: 'Friday quiz',
+          isAdultsOnly: false,
+          sourceTemplateCopiedAt: copiedAt,
+        },
+      ],
+    });
+
+    await service.duplicateGame(GAME_ID, USER_ID);
+
+    const written = writeQuiz.mock.calls[0]?.[0];
+    expect(written?.sourceTemplateId).toBe(TEMPLATE_ID);
+    expect(written?.sourceTemplateCopiedAt).toEqual(copiedAt);
+    // The new game starts with no open history: the write carries no open settings.
+    expect(written).not.toHaveProperty('lastOpenSettings');
+  });
+
   it('ends the open session as abandoned before deleting a game', async () => {
     const { service, runtime, dataSource, callOrder } = build();
 
@@ -744,6 +838,24 @@ describe('QuizshowGamesService', () => {
         questionCount: 12,
         hasAdultsRounds: false,
         isSameSeries: false,
+        rounds: [
+          {
+            roundIndex: 0,
+            kind: 'quiz',
+            sliceCount: null,
+            contentLabel: 'none',
+            title: { en: 'Music', pt: 'Música' },
+            questionCount: 6,
+          },
+          {
+            roundIndex: 1,
+            kind: 'quiz',
+            sliceCount: null,
+            contentLabel: 'none',
+            title: { en: 'Film', pt: 'Cinema' },
+            questionCount: 6,
+          },
+        ],
       },
       {
         kind: 'game',
@@ -756,6 +868,16 @@ describe('QuizshowGamesService', () => {
         questionCount: 5,
         hasAdultsRounds: true,
         isSameSeries: false,
+        rounds: [
+          {
+            roundIndex: 0,
+            kind: 'quiz',
+            sliceCount: null,
+            contentLabel: 'adults',
+            title: { en: 'After dark', pt: 'Depois da meia-noite' },
+            questionCount: 5,
+          },
+        ],
       },
     ];
     listGameImportSources.mockResolvedValueOnce(sources);

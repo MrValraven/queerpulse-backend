@@ -11,7 +11,9 @@ import { User } from '../../users/entities/user.entity';
 import {
   QUIZSHOW_PLAY_MODES,
   QUIZSHOW_SESSION_STATUSES,
+  QuizshowAnswerKeyView,
   QuizshowCursor,
+  QuizshowPairedDeviceKind,
   QuizshowPlayMode,
   QuizshowSessionStatus,
 } from '../quizshow.contract';
@@ -22,16 +24,48 @@ import { QuizshowQuizRecord } from './quizshow-quiz.entity';
  * The stored form of the live cursor. The status lives in its own column and
  * `phaseId` is `String(phaseCounter)`. The round number, the up-next card and
  * the spin flag are derived from `wheelProgress` on load, so they are not
- * stored.
+ * stored. The talk start, the auto-advance time and the podium count are
+ * absent on rows written before live v2, so they are optional here.
  */
 export type QuizshowStoredCursor = Omit<
   QuizshowCursor,
-  'status' | 'phaseId' | 'roundNumber' | 'upNext' | 'canSpinForNextRound'
-> & {
-  phaseCounter: number;
-  /** Absent on rows written before the wheel. */
-  wheelProgress?: QuizshowWheelProgress;
-};
+  | 'status'
+  | 'phaseId'
+  | 'roundNumber'
+  | 'upNext'
+  | 'canSpinForNextRound'
+  | 'talkStartsAt'
+  | 'autoAdvanceAt'
+  | 'podiumRevealedCount'
+> &
+  Partial<
+    Pick<
+      QuizshowCursor,
+      'talkStartsAt' | 'autoAdvanceAt' | 'podiumRevealedCount'
+    >
+  > & {
+    phaseCounter: number;
+    /** Absent on rows written before the wheel. */
+    wheelProgress?: QuizshowWheelProgress;
+  };
+
+/**
+ * One paired TV or helper phone as `paired_devices` holds it. The times are
+ * ISO strings. `helperUserId` has no FK, so account erasure scrubs it.
+ */
+export interface QuizshowStoredPairedDevice {
+  pairingId: string;
+  kind: QuizshowPairedDeviceKind;
+  helperUserId: string | null;
+  pairedAt: string;
+  revokedAt: string | null;
+}
+
+/** One host correction as `answer_key_overrides` holds it, keyed by question id. */
+export interface QuizshowStoredAnswerKeyOverride {
+  keyOverride: QuizshowAnswerKeyView | null;
+  acceptedTexts: string[];
+}
 
 /**
  * One live game of a quiz. The join code, the event and the quiz are each held
@@ -64,6 +98,15 @@ export type QuizshowStoredCursor = Omit<
 @Index('IDX_quizshow_sessions_status_ended_at', ['status', 'endedAt'])
 @Index('IDX_quizshow_sessions_event_id', ['eventId'])
 @Index('IDX_quizshow_sessions_quiz_id', ['quizId'])
+// The check `CHK_quizshow_sessions_event_game_number` (null or at least 1) lives in the migration 1840910000000-AddQuizWinBadges.ts only.
+@Index(
+  'UQ_quizshow_sessions_event_game_number',
+  ['eventId', 'eventGameNumber'],
+  {
+    unique: true,
+    where: '"event_game_number" IS NOT NULL',
+  },
+)
 export class QuizshowSessionRecord {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -152,4 +195,28 @@ export class QuizshowSessionRecord {
 
   @Column({ type: 'uuid', array: true, default: () => `'{}'` })
   attachedOrganiserUserIds!: string[];
+
+  /** A practice session writes no `quizshow_results` row when it ends. */
+  @Column({ type: 'boolean', default: false })
+  isPractice!: boolean;
+
+  @Column({ type: 'boolean', default: false })
+  isJoinLocked!: boolean;
+
+  @Column({ type: 'boolean', default: false })
+  isAutoAdvanceOn!: boolean;
+
+  @Column({ type: 'jsonb', default: () => `'[]'` })
+  pairedDevices!: QuizshowStoredPairedDevice[];
+
+  /** Keyed by question id. */
+  @Column({ type: 'jsonb', default: () => `'{}'` })
+  answerKeyOverrides!: Record<string, QuizshowStoredAnswerKeyOverride>;
+  /**
+   * The event game number, stamped once in the finish write: the highest game
+   * number of the event plus one. Null for practice, abandoned, podium-less and
+   * pre-migration sessions; nothing backfills it.
+   */
+  @Column({ type: 'int', nullable: true })
+  eventGameNumber!: number | null;
 }

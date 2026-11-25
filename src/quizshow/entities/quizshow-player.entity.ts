@@ -83,4 +83,8 @@ export class QuizshowPlayerRecord {
 
   @Column({ type: 'timestamptz', precision: 3 })
   joinedAt!: Date;
+
+  /** Set when the player leaves or a host removes them with rejoin allowed; a rejoin clears it. */
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  leftAt!: Date | null;
 }

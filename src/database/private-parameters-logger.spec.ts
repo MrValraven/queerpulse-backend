@@ -156,6 +156,8 @@ describe('touchesPrivateParameterTable', () => {
       'vj_packs',
       'vj_scenes',
       'vj_setlists',
+      'quiz_game_winners',
+      'quiz_badge_wins',
     ]);
   });
 

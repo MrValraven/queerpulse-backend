@@ -8,6 +8,7 @@ import { AddQuizshowGames1837000100000 } from '../migrations/1837000100000-AddQu
 import { AddQuizshowTemplates1837900000000 } from '../migrations/1837900000000-AddQuizshowTemplates';
 import { AddQuizshowWheel1840000000000 } from '../migrations/1840000000000-AddQuizshowWheel';
 import { AddQuizshowWheelTemplates1840100000000 } from '../migrations/1840100000000-AddQuizshowWheelTemplates';
+import { QuizshowLiveV21840900000000 } from '../migrations/1840900000000-QuizshowLiveV2';
 import { QUIZSHOW_TEMPLATE_SEEDS_1837900000000 } from '../migrations/data/quizshow-templates-1837900000000.seed';
 import { QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000 } from '../migrations/data/quizshow-wheel-templates-1840100000000.seed';
 
@@ -18,7 +19,9 @@ import { QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000 } from '../migrations/data/
  * `1837900000000` templates migration with its five seeded drafts, then the
  * `1840000000000` wheel migration that appends `wheel` to the round kind
  * enum, then the `1840100000000` wheel templates migration with its five
- * seeded drafts (up and down inside the templates block). Skipped unless
+ * seeded drafts (up and down inside the templates block), then the
+ * `1840900000000` live v2 migration (inside the templates block, because it
+ * adds template columns). Skipped unless
  * `QUIZSHOW_MIGRATIONS_DATABASE_URL` names a database whose name ends in
  * `_test` (it drops and rebuilds the schema). Run it with, for example:
  *
@@ -26,6 +29,61 @@ import { QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000 } from '../migrations/data/
  *     npx jest src/database/quizshow-migrations.postgres.spec.ts
  */
 const DATABASE_URL = process.env.QUIZSHOW_MIGRATIONS_DATABASE_URL;
+
+interface RecordedStatement {
+  statement: string;
+  parameters: unknown[] | undefined;
+}
+
+/** Every statement and parameter list `up` sends, in order, with no database. */
+async function recordedStatementsOf(
+  migration: QuizshowLiveV21840900000000,
+): Promise<RecordedStatement[]> {
+  const statements: RecordedStatement[] = [];
+  const recordingRunner = {
+    query: (statement: string, parameters?: unknown[]): Promise<void> => {
+      statements.push({ statement, parameters });
+      return Promise.resolve();
+    },
+  } as unknown as QueryRunner;
+  await migration.up(recordingRunner);
+  return statements;
+}
+
+describe('the live v2 seeded closest rows', () => {
+  it('name a closest question of a frozen seed by template, round and question position, with its seeded value', async () => {
+    const statements = await recordedStatementsOf(
+      new QuizshowLiveV21840900000000(),
+    );
+    const seededUpdate = statements.find(({ statement }) =>
+      statement.includes('unnest($8::text[])'),
+    );
+    const parameters = seededUpdate?.parameters as
+      [string[], number[], number[], number[], string[], number[]] | undefined;
+    if (parameters === undefined) {
+      throw new Error('Expected the seeded template update in step 6');
+    }
+    const [templateIds, roundPositions, questionPositions, values, modes] =
+      parameters;
+    expect(templateIds).toHaveLength(14);
+    const seeds = [
+      ...QUIZSHOW_TEMPLATE_SEEDS_1837900000000,
+      ...QUIZSHOW_WHEEL_TEMPLATE_SEEDS_1840100000000,
+    ];
+    templateIds.forEach((templateId, rowIndex) => {
+      const seed = seeds.find((candidate) => candidate.id === templateId);
+      const question = seed?.quiz.rounds[roundPositions[rowIndex] ?? -1]
+        ?.questions[questionPositions[rowIndex] ?? -1] as
+        { type: string; answer: { value: number } } | undefined;
+      expect(question?.type).toBe('closest_number');
+      expect(question?.answer.value).toBe(values[rowIndex]);
+      // A year takes its band from the year rule, never from this list.
+      const value = values[rowIndex] ?? 0;
+      expect(value >= 1000 && value <= 2100).toBe(false);
+    });
+    expect(new Set(modes)).toEqual(new Set(['exact', 'percent']));
+  });
+});
 const describeWithDatabase = DATABASE_URL ? describe : describe.skip;
 
 const ORGANISER_USER = 'd8000000-0000-4000-8000-000000000001';
@@ -1130,6 +1188,444 @@ describeWithDatabase('Pulse Live migrations on real Postgres', () => {
           [SEED_TEMPLATE_IDS],
         );
         expect(originalTemplates).toEqual([{ count: 5 }]);
+      });
+    });
+
+    // Runs after the wheel templates block and before the templates
+    // migration's own down, which drops the template table this one alters.
+    // Its rows go in afterAll, so the template counts below stay as they were.
+    describe('the live v2 migration', () => {
+      const liveV2Migration = new QuizshowLiveV21840900000000();
+      const LIVE_V2_USER = 'd8000000-0000-4000-8000-000000000004';
+      const LIVE_V2_TEMPLATE_ID = 'd8800000-0000-4000-8000-000000000002';
+      const LIVE_V2_QUIZ_ID = 'd8200000-0000-4000-8000-000000000005';
+      const LIVE_V2_ROUND_ID = 'd8600000-0000-4000-8000-000000000002';
+      const MULTIPLE_CHOICE_QUESTION_ID =
+        'd8700000-0000-4000-8000-000000000002';
+      const CLOSEST_QUESTION_ID = 'd8700000-0000-4000-8000-000000000003';
+      const LATE_COPY_QUIZ_ID = 'd8200000-0000-4000-8000-000000000006';
+      const DRAFT_COPY_QUIZ_ID = 'd8200000-0000-4000-8000-000000000007';
+      /** One closest row per year rule case, keyed by question id. */
+      const CLOSEST_CASES: ReadonlyArray<{
+        questionId: string;
+        storedAnswer: string;
+        expectedAnswer: unknown;
+      }> = [
+        {
+          questionId: 'd8700000-0000-4000-8000-000000000004',
+          storedAnswer: '{"value":1995}',
+          expectedAnswer: {
+            value: 1995,
+            tolerance: { mode: 'absolute', amount: 5 },
+          },
+        },
+        {
+          questionId: 'd8700000-0000-4000-8000-000000000005',
+          storedAnswer: '{"value":2100}',
+          expectedAnswer: {
+            value: 2100,
+            tolerance: { mode: 'absolute', amount: 5 },
+          },
+        },
+        {
+          questionId: 'd8700000-0000-4000-8000-000000000006',
+          storedAnswer: '{"value":1000}',
+          expectedAnswer: {
+            value: 1000,
+            tolerance: { mode: 'absolute', amount: 10 },
+          },
+        },
+        {
+          questionId: 'd8700000-0000-4000-8000-000000000007',
+          storedAnswer: '{"value":2101}',
+          expectedAnswer: {
+            value: 2101,
+            tolerance: { mode: 'percent', amount: 10 },
+          },
+        },
+        {
+          questionId: 'd8700000-0000-4000-8000-000000000008',
+          storedAnswer: '{"value":1984.5}',
+          expectedAnswer: {
+            value: 1984.5,
+            tolerance: { mode: 'percent', amount: 10 },
+          },
+        },
+        {
+          questionId: 'd8700000-0000-4000-8000-000000000009',
+          storedAnswer: '{"value":42}',
+          expectedAnswer: {
+            value: 42,
+            tolerance: { mode: 'percent', amount: 10 },
+          },
+        },
+        {
+          questionId: 'd8700000-0000-4000-8000-00000000000a',
+          storedAnswer: '{"value":"1984"}',
+          expectedAnswer: {
+            value: '1984',
+            tolerance: { mode: 'percent', amount: 10 },
+          },
+        },
+        {
+          questionId: 'd8700000-0000-4000-8000-00000000000b',
+          storedAnswer:
+            '{"value":1984,"tolerance":{"mode":"absolute","amount":2}}',
+          expectedAnswer: {
+            value: 1984,
+            tolerance: { mode: 'absolute', amount: 2 },
+          },
+        },
+      ];
+
+      /** The stored answer and units of one question of a seeded template. */
+      const seededQuestionOf = async (
+        templateId: string,
+        roundPosition: number,
+        questionPosition: number,
+      ): Promise<{
+        answer: unknown;
+        number_unit_en: string;
+        number_unit_pt: string;
+      }> => {
+        const rows: {
+          answer: unknown;
+          number_unit_en: string;
+          number_unit_pt: string;
+        }[] = await dataSource.query(
+          `SELECT "question"."answer", "question"."number_unit_en", "question"."number_unit_pt"
+             FROM "quizshow_questions" "question"
+             JOIN "quizshow_rounds" "round" ON "round"."id" = "question"."round_id"
+             JOIN "quizshow_quizzes" "quiz" ON "quiz"."id" = "round"."quiz_id"
+            WHERE "quiz"."template_id" = $1 AND "round"."position" = $2 AND "question"."position" = $3`,
+          [templateId, roundPosition, questionPosition],
+        );
+        if (rows[0] === undefined) {
+          throw new Error(
+            `Expected a seeded question at ${templateId} ${roundPosition}/${questionPosition}`,
+          );
+        }
+        return rows[0];
+      };
+
+      const storedAnswerOf = async (questionId: string): Promise<unknown> => {
+        const rows: { answer: unknown }[] = await dataSource.query(
+          `SELECT "answer" FROM "quizshow_questions" WHERE "id" = $1`,
+          [questionId],
+        );
+        return rows[0]?.answer;
+      };
+
+      const storedSettingsOf = async (roundId: string): Promise<unknown> => {
+        const rows: { settings: unknown }[] = await dataSource.query(
+          `SELECT "settings" FROM "quizshow_rounds" WHERE "id" = $1`,
+          [roundId],
+        );
+        return rows[0]?.settings;
+      };
+
+      /** Every statement `up` sends, in order, without touching the database. */
+      const recordedStatements = async (): Promise<RecordedStatement[]> =>
+        recordedStatementsOf(liveV2Migration);
+
+      beforeAll(async () => {
+        await dataSource.query(
+          `INSERT INTO "users" ("id") VALUES ($1) ON CONFLICT DO NOTHING`,
+          [LIVE_V2_USER],
+        );
+        await dataSource.query(
+          `INSERT INTO "quizshow_templates" ("id", "card_title_en", "card_title_pt", "card_description_en", "card_description_pt", "published_at")
+           VALUES ($1, 'Published quiz', 'Quiz publicado', '', '', '2026-10-01T12:00:00.000Z')`,
+          [LIVE_V2_TEMPLATE_ID],
+        );
+        await dataSource.query(
+          `INSERT INTO "quizshow_quizzes" ("id", "owner_user_id", "source_template_id", "title", "languages", "screen_language", "created_at", "updated_at")
+           VALUES ($1, $2, $3, 'Copied game', 'both', 'en', '2026-10-05T09:30:00.000Z', now())`,
+          [LIVE_V2_QUIZ_ID, LIVE_V2_USER, LIVE_V2_TEMPLATE_ID],
+        );
+        await dataSource.query(
+          `INSERT INTO "quizshow_rounds" ("id", "quiz_id", "position", "kind", "title_en", "title_pt", "content_label", "settings")
+           VALUES ($1, $2, 0, 'quiz', 'Round', 'Ronda', 'none', '{"timeLimitSeconds":20}')`,
+          [LIVE_V2_ROUND_ID, LIVE_V2_QUIZ_ID],
+        );
+        await dataSource.query(
+          `INSERT INTO "quizshow_questions" ("id", "round_id", "position", "type", "prompt_en", "prompt_pt", "answer")
+           VALUES ($1, $3, 0, 'multiple_choice', 'Which one?', 'Qual?', '{"correctIndex":2}'),
+                  ($2, $3, 1, 'closest_number', 'What year?', 'Que ano?', '{"value":1969}')`,
+          [MULTIPLE_CHOICE_QUESTION_ID, CLOSEST_QUESTION_ID, LIVE_V2_ROUND_ID],
+        );
+        for (const [caseIndex, closestCase] of CLOSEST_CASES.entries()) {
+          await dataSource.query(
+            `INSERT INTO "quizshow_questions" ("id", "round_id", "position", "type", "prompt_en", "prompt_pt", "answer")
+             VALUES ($1, $2, $3, 'closest_number', 'How many?', 'Quantos?', $4::jsonb)`,
+            [
+              closestCase.questionId,
+              LIVE_V2_ROUND_ID,
+              caseIndex + 2,
+              closestCase.storedAnswer,
+            ],
+          );
+        }
+        // Created before the template was published: the copy time is the
+        // publish time.
+        await dataSource.query(
+          `INSERT INTO "quizshow_quizzes" ("id", "owner_user_id", "source_template_id", "title", "languages", "screen_language", "created_at", "updated_at")
+           VALUES ($1, $2, $3, 'Imported later', 'both', 'en', '2026-09-20T09:30:00.000Z', now())`,
+          [LATE_COPY_QUIZ_ID, LIVE_V2_USER, LIVE_V2_TEMPLATE_ID],
+        );
+        // A copy of a draft template: the publish time is null, so the copy
+        // time is the creation time.
+        await dataSource.query(
+          `INSERT INTO "quizshow_quizzes" ("id", "owner_user_id", "source_template_id", "title", "languages", "screen_language", "created_at", "updated_at")
+           VALUES ($1, $2, $3, 'Draft copy', 'both', 'en', '2026-09-21T09:30:00.000Z', now())`,
+          [
+            DRAFT_COPY_QUIZ_ID,
+            LIVE_V2_USER,
+            QUIZSHOW_TEMPLATE_SEEDS_1837900000000[0]?.id,
+          ],
+        );
+      });
+
+      afterAll(async () => {
+        await dataSource.query(
+          `DELETE FROM "quizshow_quizzes" WHERE "id" = ANY($1::uuid[])`,
+          [[LIVE_V2_QUIZ_ID, LATE_COPY_QUIZ_ID, DRAFT_COPY_QUIZ_ID]],
+        );
+        await dataSource.query(
+          `DELETE FROM "quizshow_templates" WHERE "id" = $1`,
+          [LIVE_V2_TEMPLATE_ID],
+        );
+        await dataSource.query(`DELETE FROM "users" WHERE "id" = $1`, [
+          LIVE_V2_USER,
+        ]);
+      });
+
+      it('runs outside the migration transaction and appends poll, the 16 team keys and both', async () => {
+        expect(liveV2Migration.transaction).toBe(false);
+        expect(await labelsOf('quizshow_question_type')).toEqual([
+          'multiple_choice',
+          'true_false',
+          'type_answer',
+          'order',
+          'closest_number',
+          'prompt',
+        ]);
+        const tierOneKeys = [
+          'circle',
+          'triangle',
+          'square',
+          'diamond',
+          'star',
+          'hexagon',
+          'heart',
+          'moon',
+        ];
+        expect(await labelsOf('quizshow_team_color_key')).toEqual(tierOneKeys);
+        expect(await labelsOf('quizshow_language')).toEqual(['en', 'pt']);
+
+        await liveV2Migration.up(queryRunner);
+
+        expect(await labelsOf('quizshow_question_type')).toEqual([
+          'multiple_choice',
+          'true_false',
+          'type_answer',
+          'order',
+          'closest_number',
+          'prompt',
+          'poll',
+        ]);
+        expect(await labelsOf('quizshow_team_color_key')).toEqual([
+          ...tierOneKeys,
+          ...tierOneKeys.map((shape) => `${shape}_2`),
+          ...tierOneKeys.map((shape) => `${shape}_3`),
+        ]);
+        expect(await labelsOf('quizshow_language')).toEqual([
+          'en',
+          'pt',
+          'both',
+        ]);
+        await expect(liveV2Migration.down()).rejects.toThrow(
+          /Irreversible: QuizshowLiveV21840900000000/,
+        );
+      });
+
+      it('rewrites stored answers, round settings and the copy and content times', async () => {
+        expect(await storedAnswerOf(MULTIPLE_CHOICE_QUESTION_ID)).toEqual({
+          correctIndexes: [2],
+        });
+        expect(await storedAnswerOf(CLOSEST_QUESTION_ID)).toEqual({
+          value: 1969,
+          tolerance: { mode: 'absolute', amount: 10 },
+        });
+        expect(await storedSettingsOf(LIVE_V2_ROUND_ID)).toEqual({
+          timeLimitSeconds: 20,
+          isWarmUp: false,
+          talkSeconds: 0,
+        });
+
+        const quizzes: { is_copied_at_created_at: boolean }[] =
+          await dataSource.query(
+            `SELECT "source_template_copied_at" = "created_at" AS "is_copied_at_created_at"
+               FROM "quizshow_quizzes" WHERE "id" = $1`,
+            [LIVE_V2_QUIZ_ID],
+          );
+        expect(quizzes).toEqual([{ is_copied_at_created_at: true }]);
+        const copyTimes: { id: string; source_template_copied_at: Date }[] =
+          await dataSource.query(
+            `SELECT "id", "source_template_copied_at" FROM "quizshow_quizzes"
+              WHERE "id" = ANY($1::uuid[]) ORDER BY "id"`,
+            [[LATE_COPY_QUIZ_ID, DRAFT_COPY_QUIZ_ID]],
+          );
+        expect(
+          copyTimes.map((row) => [
+            row.id,
+            new Date(row.source_template_copied_at).toISOString(),
+          ]),
+        ).toEqual([
+          [LATE_COPY_QUIZ_ID, '2026-10-01T12:00:00.000Z'],
+          [DRAFT_COPY_QUIZ_ID, '2026-09-21T09:30:00.000Z'],
+        ]);
+        const templates: { is_content_at_published_at: boolean }[] =
+          await dataSource.query(
+            `SELECT "content_updated_at" = "published_at" AS "is_content_at_published_at"
+               FROM "quizshow_templates" WHERE "id" = $1`,
+            [LIVE_V2_TEMPLATE_ID],
+          );
+        expect(templates).toEqual([{ is_content_at_published_at: true }]);
+
+        const questions: {
+          media_alt_en: string;
+          reveal_note_pt: string;
+          number_unit_en: string;
+          media_reveal: string;
+        }[] = await dataSource.query(
+          `SELECT "media_alt_en", "reveal_note_pt", "number_unit_en", "media_reveal"
+             FROM "quizshow_questions" WHERE "id" = $1`,
+          [MULTIPLE_CHOICE_QUESTION_ID],
+        );
+        expect(questions).toEqual([
+          {
+            media_alt_en: '',
+            reveal_note_pt: '',
+            number_unit_en: '',
+            media_reveal: 'instant',
+          },
+        ]);
+
+        const newColumns: { table_name: string; column_name: string }[] =
+          await dataSource.query(
+            `SELECT "table_name", "column_name" FROM "information_schema"."columns"
+              WHERE ("table_name", "column_name") IN (
+                ('quizshow_questions', 'media_alt_en'), ('quizshow_questions', 'media_alt_pt'),
+                ('quizshow_questions', 'reveal_note_en'), ('quizshow_questions', 'reveal_note_pt'),
+                ('quizshow_questions', 'number_unit_en'), ('quizshow_questions', 'number_unit_pt'),
+                ('quizshow_questions', 'media_reveal'),
+                ('quizshow_sessions', 'is_practice'), ('quizshow_sessions', 'is_join_locked'),
+                ('quizshow_sessions', 'is_auto_advance_on'), ('quizshow_sessions', 'paired_devices'),
+                ('quizshow_sessions', 'answer_key_overrides'),
+                ('quizshow_players', 'left_at'), ('quizshow_teams', 'is_host_made'),
+                ('quizshow_quizzes', 'last_open_settings'), ('quizshow_quizzes', 'source_template_copied_at'),
+                ('quizshow_templates', 'content_updated_at'), ('quizshow_templates', 'change_note_en'),
+                ('quizshow_templates', 'change_note_pt'))`,
+          );
+        expect(newColumns).toHaveLength(19);
+      });
+
+      it('gives a whole year from 1000 to 2100 a band in years and every other closest answer 10%', async () => {
+        for (const closestCase of CLOSEST_CASES) {
+          expect(await storedAnswerOf(closestCase.questionId)).toEqual(
+            closestCase.expectedAnswer,
+          );
+        }
+      });
+
+      it("gives the seeded template questions the demo's tolerance and unit", async () => {
+        const prideHistoryId = 'a7e3b1c0-5eed-4000-8000-000000000001';
+        expect(await seededQuestionOf(prideHistoryId, 1, 4)).toEqual({
+          answer: { value: 8, tolerance: { mode: 'exact', amount: 0 } },
+          number_unit_en: 'stripes',
+          number_unit_pt: 'riscas',
+        });
+        expect(await seededQuestionOf(prideHistoryId, 1, 5)).toEqual({
+          answer: { value: 1989, tolerance: { mode: 'absolute', amount: 10 } },
+          number_unit_en: '',
+          number_unit_pt: '',
+        });
+        const eurovisionId = 'a7e3b1c0-5eed-4000-8000-000000000003';
+        expect(await seededQuestionOf(eurovisionId, 1, 5)).toEqual({
+          answer: { value: 758, tolerance: { mode: 'percent', amount: 10 } },
+          number_unit_en: 'points',
+          number_unit_pt: 'pontos',
+        });
+        const portugueseCultureId = 'a7e3b1c0-5eed-4000-8000-000000000002';
+        expect(await seededQuestionOf(portugueseCultureId, 1, 4)).toEqual({
+          answer: { value: 2000, tolerance: { mode: 'absolute', amount: 5 } },
+          number_unit_en: '',
+          number_unit_pt: '',
+        });
+        const lisbonIconsId = 'a7e3b1c0-5eed-4000-8000-000000000005';
+        expect(await seededQuestionOf(lisbonIconsId, 2, 5)).toEqual({
+          answer: { value: 22, tolerance: { mode: 'percent', amount: 10 } },
+          number_unit_en: 'metres',
+          number_unit_pt: 'metros',
+        });
+      });
+
+      it('changes nothing when steps 5 to 7 run a second time', async () => {
+        const statements = await recordedStatements();
+        // 1 + 16 + 1 enum labels, then steps 4 to 12 (step 6 sends three
+        // updates, 11 and 12 add an update each).
+        expect(statements).toHaveLength(31);
+        const dataStatements = statements.slice(19, 24);
+        expect(dataStatements[0]?.statement).toContain('correctIndexes');
+        expect(dataStatements[1]?.statement).toContain("'absolute'");
+        expect(dataStatements[2]?.statement).toContain('"tolerance"');
+        expect(dataStatements[3]?.statement).toContain('"number_unit_en"');
+        expect(dataStatements[4]?.statement).toContain('"isWarmUp"');
+
+        const prideHistoryId = 'a7e3b1c0-5eed-4000-8000-000000000001';
+        const answersBefore = [
+          await storedAnswerOf(MULTIPLE_CHOICE_QUESTION_ID),
+          await storedAnswerOf(CLOSEST_QUESTION_ID),
+          ...(await Promise.all(
+            CLOSEST_CASES.map((closestCase) =>
+              storedAnswerOf(closestCase.questionId),
+            ),
+          )),
+          await seededQuestionOf(prideHistoryId, 1, 4),
+        ];
+        const settingsBefore = await storedSettingsOf(LIVE_V2_ROUND_ID);
+        for (const { statement, parameters } of dataStatements) {
+          await dataSource.query(statement, parameters);
+        }
+        expect([
+          await storedAnswerOf(MULTIPLE_CHOICE_QUESTION_ID),
+          await storedAnswerOf(CLOSEST_QUESTION_ID),
+          ...(await Promise.all(
+            CLOSEST_CASES.map((closestCase) =>
+              storedAnswerOf(closestCase.questionId),
+            ),
+          )),
+          await seededQuestionOf(prideHistoryId, 1, 4),
+        ]).toEqual(answersBefore);
+        expect(await storedSettingsOf(LIVE_V2_ROUND_ID)).toEqual(
+          settingsBefore,
+        );
+      });
+
+      it('refuses a media reveal outside instant and slow', async () => {
+        const refusal = await failureOf(
+          dataSource.query(
+            `UPDATE "quizshow_questions" SET "media_reveal" = 'fast' WHERE "id" = $1`,
+            [MULTIPLE_CHOICE_QUESTION_ID],
+          ),
+        );
+        expect(refusal.code).toBe('23514');
+        expect(refusal.constraint).toBe('CHK_quizshow_questions_media_reveal');
+        await dataSource.query(
+          `UPDATE "quizshow_questions" SET "media_reveal" = 'slow' WHERE "id" = $1`,
+          [MULTIPLE_CHOICE_QUESTION_ID],
+        );
       });
     });
 

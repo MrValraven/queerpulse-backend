@@ -1,6 +1,7 @@
 import {
   QUIZSHOW_LIMITS,
   QUIZSHOW_PARTY_ROUND_KINDS,
+  type QuizshowClosestTolerance,
   type QuizshowLanguage,
   type QuizshowLanguageMode,
   type QuizshowOption,
@@ -11,6 +12,7 @@ import {
   type QuizshowRoundKind,
 } from './quizshow.contract';
 import {
+  isInWheelRange,
   isWheelRoundKind,
   playableRoundCount,
   wheelSliceRoundIndexes,
@@ -63,7 +65,8 @@ function isBlank(text: string | null | undefined): boolean {
 
 function isOptionCountValid(question: QuizshowQuestionInput): boolean {
   const optionCount = question.options.length;
-  if (question.type === 'multiple_choice') {
+  // A poll takes the multiple choice option rules (contract 6.22).
+  if (question.type === 'multiple_choice' || question.type === 'poll') {
     return (
       optionCount >= QUIZSHOW_LIMITS.multipleChoiceOptionsMin &&
       optionCount <= QUIZSHOW_LIMITS.multipleChoiceOptionsMax
@@ -97,11 +100,20 @@ function hasUniqueWellFormedOptionIds(
 
 function isAnswerInRange(question: QuizshowQuestionInput): boolean {
   if (question.type === 'multiple_choice' && question.answer !== null) {
-    const { correctIndex } = question.answer;
+    // An index outside the options or a repeated one has no code of its own
+    // (decision A21), so it stays this answer problem.
+    const { correctIndexes } = question.answer;
+    if (!Array.isArray(correctIndexes)) {
+      return false;
+    }
     return (
-      Number.isInteger(correctIndex) &&
-      correctIndex >= 0 &&
-      correctIndex < question.options.length
+      new Set(correctIndexes).size === correctIndexes.length &&
+      correctIndexes.every(
+        (optionIndex) =>
+          Number.isInteger(optionIndex) &&
+          optionIndex >= 0 &&
+          optionIndex < question.options.length,
+      )
     );
   }
   if (question.type === 'closest_number' && question.answer !== null) {
@@ -113,6 +125,57 @@ function isAnswerInRange(question: QuizshowQuestionInput): boolean {
     );
   }
   return true;
+}
+
+/** At least one option stays wrong, or the question gives every answer away. */
+function hasTooManyCorrectOptions(question: QuizshowQuestionInput): boolean {
+  if (question.type !== 'multiple_choice' || question.answer === null) {
+    return false;
+  }
+  const { correctIndexes } = question.answer;
+  // An empty list is the completeness problem `correct_option_missing`.
+  return (
+    Array.isArray(correctIndexes) &&
+    correctIndexes.length > 0 &&
+    correctIndexes.length >= question.options.length
+  );
+}
+
+/** Contract 6.1: the amount each tolerance mode allows. */
+function isToleranceInRange(question: QuizshowQuestionInput): boolean {
+  if (question.type !== 'closest_number' || question.answer === null) {
+    return true;
+  }
+  const tolerance = question.answer.tolerance as
+    QuizshowClosestTolerance | null | undefined;
+  if (tolerance === null || typeof tolerance !== 'object') {
+    return false;
+  }
+  const { mode, amount } = tolerance;
+  switch (mode) {
+    case 'exact':
+      return amount === 0;
+    case 'absolute':
+      return (
+        typeof amount === 'number' &&
+        Number.isFinite(amount) &&
+        amount > 0 &&
+        amount <= QUIZSHOW_LIMITS.numberAbsMax
+      );
+    case 'percent':
+      return (
+        Number.isInteger(amount) &&
+        amount >= QUIZSHOW_LIMITS.closestPercentMin &&
+        amount <= QUIZSHOW_LIMITS.closestPercentMax
+      );
+    default:
+      return false;
+  }
+}
+
+/** Contract 6.23: a slow reveal blurs a picture in, so it needs one. */
+function isSlowRevealMissingPicture(question: QuizshowQuestionInput): boolean {
+  return question.mediaReveal === 'slow' && question.mediaRef === null;
 }
 
 function isOrderAnswerPermutation(question: QuizshowQuestionInput): boolean {
@@ -143,6 +206,10 @@ function isAnswerAllowed(
       return false;
     }
   }
+  // A poll has no right answer to store (contract 2.4).
+  if (question.type === 'poll' && question.answer !== null) {
+    return false;
+  }
   if (question.type !== 'type_answer' && question.acceptedAnswers.length > 0) {
     return false;
   }
@@ -157,13 +224,18 @@ function questionStructuralProblems(
 ): QuizshowQuizProblem[] {
   const problems: QuizshowQuizProblem[] = [];
   const isPartyRound = isPartyRoundKind(roundKind);
-  const isTypeAllowed = isPartyRound
-    ? question.type === 'prompt'
-    : question.type !== 'prompt';
-  if (!isTypeAllowed) {
-    problems.push(
-      problem('question_type_not_allowed', roundIndex, questionIndex),
-    );
+  // A poll in a party round names its own problem, so the studio can say why.
+  if (isPartyRound && question.type === 'poll') {
+    problems.push(problem('poll_in_party_round', roundIndex, questionIndex));
+  } else {
+    const isTypeAllowed = isPartyRound
+      ? question.type === 'prompt'
+      : question.type !== 'prompt';
+    if (!isTypeAllowed) {
+      problems.push(
+        problem('question_type_not_allowed', roundIndex, questionIndex),
+      );
+    }
   }
   if (!isOptionCountValid(question)) {
     problems.push(problem('option_count', roundIndex, questionIndex));
@@ -173,6 +245,20 @@ function questionStructuralProblems(
   }
   if (!isAnswerInRange(question)) {
     problems.push(problem('answer_out_of_range', roundIndex, questionIndex));
+  }
+  if (hasTooManyCorrectOptions(question)) {
+    problems.push(
+      problem('too_many_correct_options', roundIndex, questionIndex),
+    );
+  }
+  if (!isToleranceInRange(question)) {
+    problems.push(problem('tolerance_out_of_range', roundIndex, questionIndex));
+  }
+  // Save stores 'instant' on party rows, so only a quiz round can hold 'slow'.
+  if (!isPartyRound && isSlowRevealMissingPicture(question)) {
+    problems.push(
+      problem('slow_reveal_needs_picture', roundIndex, questionIndex),
+    );
   }
   if (!isOrderAnswerPermutation(question)) {
     problems.push(
@@ -205,9 +291,21 @@ export function structuralProblems(
   if (totalQuestions > QUIZSHOW_LIMITS.questionsPerQuizMax) {
     problems.push(problem('too_many_questions', null, null));
   }
+  const firstPlayableRoundIndex = quiz.rounds.findIndex(
+    (round) => !isWheelRoundKind(round.kind),
+  );
   quiz.rounds.forEach((round, roundIndex) => {
     if (round.questions.length > QUIZSHOW_LIMITS.questionsPerRoundMax) {
       problems.push(problem('too_many_questions_in_round', roundIndex, null));
+    }
+    // Contract 6.19: the warm-up opens the night (decision A29). A wheel slice
+    // plays only when the wheel draws it, so a warm-up on one never opens the night.
+    if (
+      round.settings.isWarmUp === true &&
+      (roundIndex !== firstPlayableRoundIndex ||
+        isInWheelRange(quiz.rounds, roundIndex))
+    ) {
+      problems.push(problem('warm_up_not_first', roundIndex, null));
     }
     round.questions.forEach((question, questionIndex) => {
       if (isWheelRoundKind(round.kind)) {
@@ -266,8 +364,20 @@ function questionCompletenessProblems(
         }
       }
     }
-  } else if (question.type !== 'prompt' && question.answer === null) {
+  } else if (
+    question.type !== 'prompt' &&
+    question.type !== 'poll' &&
+    question.answer === null
+  ) {
     problems.push(problem('answer_missing', roundIndex, questionIndex));
+  }
+  if (
+    question.type === 'multiple_choice' &&
+    question.answer !== null &&
+    Array.isArray(question.answer.correctIndexes) &&
+    question.answer.correctIndexes.length === 0
+  ) {
+    problems.push(problem('correct_option_missing', roundIndex, questionIndex));
   }
   if (roundKind === 'lie_detector' && question.type === 'prompt') {
     for (const language of languages) {

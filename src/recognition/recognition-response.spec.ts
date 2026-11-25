@@ -1,4 +1,4 @@
-import { PERK_CATALOG } from './recognition.catalog';
+import { BADGE_CATALOG, PERK_CATALOG } from './recognition.catalog';
 import {
   BADGE_REQUIREMENTS,
   type RecognitionSignals,
@@ -12,6 +12,7 @@ import {
   computeLevel,
 } from './recognition-response';
 import { resolveMonthlyInviteLimit } from '../membership/monthly-invite-limit';
+import type { QuizBadgeForMember } from '../quiz-win-badges/quiz-win-badges-recognition-reads';
 
 // `founding-member` is the only `BADGE_CATALOG` entry with no
 // `BADGE_REQUIREMENTS` wiring, so it's excluded from `locked`/`discoverCount`
@@ -199,6 +200,124 @@ describe('buildBadges', () => {
     ]);
     expect(result.earnedCount).toBe(0);
     expect(result.discoverCount).toBe(OBTAINABLE_BADGE_COUNT);
+  });
+});
+
+/** A quiz badge as `readQuizBadgesForMember` returns it. */
+function quizBadge(
+  definitionId: string,
+  overrides: { hidden?: boolean } = {},
+): QuizBadgeForMember {
+  return {
+    badgeKey: `quiz:${definitionId}`,
+    rarity: 'rare',
+    tint: 'plum',
+    hiddenFromProfile: overrides.hidden === true,
+    awardedAt: new Date('2026-11-20T21:00:00.000Z'),
+    details: {
+      definitionId,
+      name: { en: `Quiz champion ${definitionId}`, pt: null },
+      description: { en: 'Won a game at a QueerPulse quiz night', pt: null },
+      iconKey: 'trophy',
+      winCount: 1,
+      wins: [
+        {
+          wonAt: '2026-11-20T21:00:00.000Z',
+          gameNumber: 1,
+          eventName: 'Tuesday quiz night',
+          eventSlug: 'tuesday-quiz-night',
+          isAdultsOnlyEvent: false,
+        },
+      ],
+    },
+  };
+}
+
+/** Owner signals with every count at zero. */
+function signalsFixture(): RecognitionSignals {
+  return {
+    profileComplete: false,
+    communitiesJoined: 0,
+    audiencedCommunities: 0,
+    personasPublished: 0,
+    vouchCount: 0,
+    connectionCount: 0,
+    eventsAttended: 0,
+    gatheringsAttended: 0,
+    communityPosts: 0,
+    engagedCommunityPosts: 0,
+    endorsementCount: 0,
+    eventsHosted: 0,
+    eventsHeld: 0,
+    tenureDays: 0,
+    verified: false,
+    gettingStartedStepsDone: 0,
+    gettingStartedComplete: false,
+    listingsSaved: 0,
+    articlesSaved: 0,
+    workProfileComplete: false,
+    volunteerSessions: 0,
+    piecesPublished: 0,
+    resourcesApproved: 0,
+  };
+}
+
+describe('quiz badges in the recognition read', () => {
+  it('appends quiz badges to earned in read order with the quiz details', () => {
+    const badges = buildBadges(
+      [{ badgeKey: 'first-gathering', context: null }],
+      null,
+      true,
+      [quizBadge('def-1'), quizBadge('def-2', { hidden: true })],
+    );
+    expect(
+      badges.earned
+        .slice(-2)
+        .map((badge) => [badge.key, badge.cat, badge.hiddenFromProfile]),
+    ).toEqual([
+      ['quiz:def-1', 'Quiz nights', undefined],
+      ['quiz:def-2', 'Quiz nights', true],
+    ]);
+    expect(badges.earned.at(-1)?.xpReward).toBeUndefined();
+    expect(badges.locked.some((badge) => badge.key.startsWith('quiz:'))).toBe(
+      false,
+    );
+    expect(badges.earnedCount).toBe(3);
+    expect(badges.discoverCount).toBe(OBTAINABLE_BADGE_COUNT - 1);
+    expect(badges.earned.at(-2)).toEqual({
+      key: 'quiz:def-1',
+      cat: 'Quiz nights',
+      name: 'Quiz champion def-1',
+      context: 'Won a game at a QueerPulse quiz night',
+      rarity: 'rare',
+      tint: 'plum',
+      hiddenFromProfile: undefined,
+      quiz: quizBadge('def-1').details,
+    });
+  });
+
+  it('leaves a hidden quiz badge out of another viewer read', () => {
+    expect(
+      buildBadges([], null, false, [quizBadge('def-2', { hidden: true })])
+        .earned,
+    ).toEqual([]);
+  });
+
+  it('counts code badges only in the XP breakdown badges row', () => {
+    const recognition = buildRecognition(
+      0,
+      [
+        { badgeKey: 'first-gathering', context: null },
+        { badgeKey: 'quiz:def-1', context: null },
+      ],
+      [],
+      signalsFixture(),
+      [],
+      { quizBadges: [quizBadge('def-1')] },
+    );
+    expect(recognition.xpBreakdown.find((row) => row.key === 'badges')).toEqual(
+      expect.objectContaining({ units: 1, cap: BADGE_CATALOG.length }),
+    );
   });
 });
 

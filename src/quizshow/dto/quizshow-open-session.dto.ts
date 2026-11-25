@@ -1,4 +1,12 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsUUID,
+  Max,
+  Min,
+} from 'class-validator';
 import {
   QUIZSHOW_LIMITS,
   QUIZSHOW_PLAY_MODES,
@@ -32,4 +40,15 @@ export class QuizshowOpenSessionDto {
 
   @IsBoolean()
   shouldReplaceResults!: boolean;
+
+  /** A practice lobby keeps no results and sends no guest push; a draft event
+   *  may host it. */
+  @IsBoolean()
+  isPractice!: boolean;
+
+  /** The finished session this lobby replays. Optional and nullable: a body
+   *  without it or with null opens a fresh lobby. */
+  @IsOptional()
+  @IsUUID()
+  rematchOfSessionId?: string | null;
 }

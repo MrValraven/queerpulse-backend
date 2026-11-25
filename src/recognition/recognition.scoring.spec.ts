@@ -95,6 +95,16 @@ describe('recognition scoring', () => {
     expect(badgeBonusXp(['local-scout', 'decade', 'first-gathering'])).toBe(40);
   });
 
+  it('pays nothing for a quiz badge key', () => {
+    // `event-host` needs somebody else, so it pays its rarity bonus; a held
+    // quiz award key beside it adds nothing to that total.
+    expect(badgeBonusFor('quiz:7d1c0b52-3b1e-4d2f-9a51-0c6a1e1c2f10')).toBe(0);
+    expect(badgeBonusXp(['event-host'])).toBeGreaterThan(0);
+    expect(
+      badgeBonusXp(['event-host', 'quiz:7d1c0b52-3b1e-4d2f-9a51-0c6a1e1c2f10']),
+    ).toBe(badgeBonusXp(['event-host']));
+  });
+
   it('grants first-steps only when getting-started is complete', () => {
     expect(qualifyingBadgeKeys(ZERO)).not.toContain('first-steps');
     expect(

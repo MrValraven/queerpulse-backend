@@ -31,7 +31,7 @@ describe('community badges export contributors', () => {
     giftsSentContributor = new CommunityGiftsSentExportContributor(dataSource);
   });
 
-  it('rides on communities under four keys appended after quizshowGames', () => {
+  it('rides on communities under four keys appended after quizGameWins', () => {
     for (const contributor of [
       badgesContributor,
       eventsAttendedContributor,
@@ -41,7 +41,7 @@ describe('community badges export contributors', () => {
       expect(contributor.category).toBe('communities');
     }
     const csvKeys: readonly string[] = EXPORT_CSV_CATEGORIES;
-    const start = csvKeys.indexOf('quizshowGames');
+    const start = csvKeys.indexOf('quizGameWins');
     expect(start).toBeGreaterThanOrEqual(0);
     expect(csvKeys.slice(start + 1, start + 5)).toEqual([
       'communityBadges',

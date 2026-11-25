@@ -15,13 +15,19 @@ import { UserStatus } from '../users/entities/user.entity';
  * column or a TypeORM `Raw` alias). The status is written as the enum
  * constant, which is trusted code, so the fragment binds no parameter and
  * cannot collide with a caller's own parameter names.
+ *
+ * The column sits in parentheses on purpose. A `Raw` alias arrives unquoted
+ * (`CommunityMember.userId`) and TypeORM only rewrites it to the real column
+ * when the name ends at a space, `=`, `)` or `,`. A bare alias followed by the
+ * newline was read as `userId\n`, left unrewritten, and Postgres failed with
+ * "missing FROM-clause entry for table communitymember".
  */
 export function visibleMemberSql(userIdColumn: string): string {
   return `EXISTS (
     SELECT 1 FROM "users" "visible_user"
     INNER JOIN "profiles" "visible_profile"
       ON "visible_profile"."user_id" = "visible_user"."id"
-    WHERE "visible_user"."id" = ${userIdColumn}
+    WHERE "visible_user"."id" = (${userIdColumn})
       AND "visible_user"."status" = '${UserStatus.Active}'
       AND (
         "visible_profile"."hidden_until" IS NULL

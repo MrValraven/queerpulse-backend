@@ -193,6 +193,7 @@ export class QuizshowAccessService {
         sessionId: In(openSessions.map((session) => session.id)),
         userId,
         removedAt: IsNull(),
+        leftAt: IsNull(),
       },
     });
   }
@@ -205,13 +206,30 @@ export class QuizshowAccessService {
 
   /** An event ban, or a block either way with the host. Organisers are never barred. */
   async isBarredFromEvent(event: Event, userId: string): Promise<boolean> {
-    if (await this.eventsService.isOrganizer(event.id, userId)) return false;
+    return (await this.eventBarCause(event, userId)) !== null;
+  }
+
+  /**
+   * Why a member is barred from an event: `banned` for an event ban,
+   * `blocked` for a block either way with the host, null when nothing bars
+   * them. A ban is checked first. Organisers are never barred. A pairing
+   * host reads the two apart, so a block never shows as a ban.
+   */
+  async eventBarCause(
+    event: Event,
+    userId: string,
+  ): Promise<'banned' | 'blocked' | null> {
+    if (await this.eventsService.isOrganizer(event.id, userId)) return null;
     const isBanned = await this.eventBans.exists({
       where: { eventId: event.id, userId },
     });
-    if (isBanned) return true;
-    if (event.hostId === null) return false;
-    return this.blockFilter.isBlockedEitherWay(event.hostId, userId);
+    if (isBanned) return 'banned';
+    if (event.hostId === null) return null;
+    const isBlocked = await this.blockFilter.isBlockedEitherWay(
+      event.hostId,
+      userId,
+    );
+    return isBlocked ? 'blocked' : null;
   }
 
   async isRestricted(userId: string): Promise<boolean> {
@@ -269,8 +287,9 @@ export class QuizshowAccessService {
     }
 
     if (input.shouldCheckCapacity && !existingPlayer) {
+      // Active players only: a player who left frees their place.
       const activePlayerCount = await this.players.count({
-        where: { sessionId: session.id, removedAt: IsNull() },
+        where: { sessionId: session.id, removedAt: IsNull(), leftAt: IsNull() },
       });
       if (activePlayerCount >= QUIZSHOW_LIMITS.playersPerSessionMax) {
         throw quizshowError('quizshow_session_full');
@@ -309,8 +328,9 @@ export class QuizshowAccessService {
     }
 
     if (input.shouldCheckCapacity && !existingPlayer) {
+      // Active players only: a player who left frees their place.
       const activePlayerCount = await this.players.count({
-        where: { sessionId: session.id, removedAt: IsNull() },
+        where: { sessionId: session.id, removedAt: IsNull(), leftAt: IsNull() },
       });
       if (activePlayerCount >= QUIZSHOW_LIMITS.playersPerSessionMax) {
         throw quizshowError('quizshow_session_full');

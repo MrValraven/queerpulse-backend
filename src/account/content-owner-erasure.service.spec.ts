@@ -494,6 +494,7 @@ describe('ContentOwnerErasureService forum threads', () => {
       'UPDATE "forum_thread" "t" SET "rep',
       'UPDATE "topic_post" SET "author_na',
       'UPDATE "quizshow_sessions" SET "at',
+      'UPDATE "quizshow_sessions" SET "pa',
     ]);
   });
 
@@ -507,7 +508,7 @@ describe('ContentOwnerErasureService forum threads', () => {
       return [];
     });
     dataSource.query.mockImplementation((sql: string) => {
-      if (sql.startsWith('UPDATE "quizshow_sessions"')) {
+      if (sql.includes('"attached_organiser_user_ids" = array_remove')) {
         callOrder.push('detach');
       }
       return Promise.resolve([[], 0]);
@@ -545,6 +546,43 @@ describe('ContentOwnerErasureService forum threads', () => {
     );
     expect(detach.sql).not.toContain('"status"');
     expect(detach.parameters).toEqual([ERASED_USER_ID]);
+  });
+
+  it("nulls the erased member's helper id in every paired device of every Pulse Live session", async () => {
+    const { service, dataSource } = build();
+    await service.eraseFor(ERASED_USER_ID);
+    const pairedDevicesScrub = statements(dataSource).find(({ sql }) =>
+      sql.startsWith('UPDATE "quizshow_sessions" SET "paired_devices"'),
+    );
+    if (!pairedDevicesScrub) {
+      throw new Error('expected the Pulse Live paired device helper scrub');
+    }
+    expect(pairedDevicesScrub.sql).toContain(
+      `jsonb_set("device", '{helperUserId}', 'null'::jsonb)`,
+    );
+    expect(pairedDevicesScrub.sql).toContain(
+      `"device" ->> 'helperUserId' = $1::text`,
+    );
+    expect(pairedDevicesScrub.sql).toContain(
+      `WHERE "paired_devices" @> jsonb_build_array(jsonb_build_object('helperUserId', $1::text))`,
+    );
+    expect(pairedDevicesScrub.sql).not.toContain('"status"');
+    expect(pairedDevicesScrub.parameters).toEqual([ERASED_USER_ID]);
+  });
+
+  it('still scrubs the paired device helper id when the organiser detach fails', async () => {
+    const { service, dataSource } = build();
+    dataSource.query.mockImplementation((sql: string) =>
+      sql.includes('"attached_organiser_user_ids" = array_remove')
+        ? Promise.reject(new Error('detach failed'))
+        : Promise.resolve([[], 0]),
+    );
+    await expect(service.eraseFor(ERASED_USER_ID)).resolves.toBeUndefined();
+    expect(
+      statements(dataSource).some(({ sql }) =>
+        sql.startsWith('UPDATE "quizshow_sessions" SET "paired_devices"'),
+      ),
+    ).toBe(true);
   });
 
   // Funding & Grants: a surviving fundraiser keeps nobody accountable for

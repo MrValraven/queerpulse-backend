@@ -97,7 +97,58 @@ describe('QuizshowRetentionService', () => {
     expect(parameters[0]).toEqual(new Date(NOW - 30 * DAY_MS));
   });
 
-  it('keeps the players, teams and results of finished sessions', async () => {
+  it('deletes finished practice sessions whole after 30 days, since they keep no results', async () => {
+    await service.purgeExpiredPlays();
+    const [statement] = statementsContaining(
+      'DELETE FROM "quizshow_sessions"',
+    )[0] as [string, unknown[]];
+    expect(statement).toContain(
+      `("status" = 'abandoned' OR ("status" = 'finished' AND "is_practice"))`,
+    );
+    expect(statement).toContain('AND "ended_at" < $1');
+  });
+
+  it('clears the host corrections of sessions that ended over 30 days ago, in batches', async () => {
+    query.mockImplementation((statement: string) => {
+      if (statement.includes('SET "answer_key_overrides"')) {
+        return Promise.resolve(
+          statementsContaining('SET "answer_key_overrides"').length === 1
+            ? countRow(BATCH_SIZE)
+            : countRow(1),
+        );
+      }
+      return Promise.resolve(countRow(0));
+    });
+    const logSpy = jest.spyOn(
+      (service as unknown as { logger: { log: (message: string) => void } })
+        .logger,
+      'log',
+    );
+
+    await service.purgeExpiredPlays();
+
+    const clearCalls = statementsContaining('SET "answer_key_overrides"');
+    expect(clearCalls).toHaveLength(2);
+    const [statement, parameters] = clearCalls[0] as [string, unknown[]];
+    expect(statement).toContain(`SET "answer_key_overrides" = '{}'::jsonb`);
+    expect(statement).toContain('"ended_at" < $1');
+    expect(statement).toContain(`"answer_key_overrides" <> '{}'::jsonb`);
+    expect(statement).toContain('LIMIT $2');
+    expect(parameters).toEqual([new Date(NOW - 30 * DAY_MS), BATCH_SIZE]);
+    const order = (query.mock.calls as [string][]).map(([text]) =>
+      text.includes('SET "answer_key_overrides"')
+        ? 'overrides'
+        : text.includes('DELETE FROM "quizshow_sessions"')
+          ? 'sessions'
+          : 'other',
+    );
+    expect(order.indexOf('sessions')).toBeLessThan(order.indexOf('overrides'));
+    expect(logSpy).toHaveBeenCalledWith(
+      'Pulse Live retention removed 0 vote(s), 0 answer(s) and 0 abandoned or practice session(s), and cleared the host corrections of 3 session(s)',
+    );
+  });
+
+  it('keeps the players, teams and results of finished scored sessions', async () => {
     await service.purgeExpiredPlays();
     const statements = (query.mock.calls as [string][]).map(([text]) => text);
     const deletedTables = statements.flatMap((statement) =>
@@ -111,8 +162,12 @@ describe('QuizshowRetentionService', () => {
     const sessionStatement = statements.find((statement) =>
       statement.includes('DELETE FROM "quizshow_sessions"'),
     );
-    expect(sessionStatement).not.toContain(`'finished'`);
     expect(sessionStatement).toContain(`"status" = 'abandoned'`);
+    // A finished session goes only when it was practice.
+    expect(sessionStatement).toContain(
+      `("status" = 'finished' AND "is_practice")`,
+    );
+    expect(sessionStatement?.match(/'finished'/g)).toHaveLength(1);
   });
 
   it('sweeps lobby opens older than a day', async () => {

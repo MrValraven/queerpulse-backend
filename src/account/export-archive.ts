@@ -166,6 +166,9 @@ export const EXPORT_CSV_CATEGORIES = [
   'quizshowPlays',
   // Pulse Live: the games the member owns, with their questions
   'quizshowGames',
+  // Quiz win badges: the badges the member won and the event games they won.
+  'quizBadgeWins',
+  'quizGameWins',
   // Community badges: the member's earned badges, their events attended tally, and the gifts they received and sent.
   'communityBadges',
   'communityEventsAttended',

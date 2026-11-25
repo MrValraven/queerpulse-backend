@@ -60,6 +60,10 @@ function trueFalseQuestion(questionId: string): QuizshowSnapshotQuestion {
     prompt: { en: 'Is it true?', pt: 'É verdade?' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [],
@@ -76,6 +80,10 @@ function promptQuestion(questionId: string): QuizshowSnapshotQuestion {
     prompt: { en: 'Write something', pt: 'Escreve algo' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [],
@@ -109,6 +117,8 @@ function snapshotRound(
       writeSeconds: 60,
       voteSeconds: 30,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+      isWarmUp: false,
+      talkSeconds: 0,
       ...options.settings,
     },
     questions,
@@ -201,6 +211,7 @@ function stateWithQuiz(rounds: QuizshowSnapshotRound[]): QuizshowLiveState {
     languages: 'both',
     screenLanguage: 'en',
     rounds,
+    sourceUpdatedAt: '',
   };
   return createLobbyState({
     sessionId: 'session-1',
@@ -216,6 +227,7 @@ function stateWithQuiz(rounds: QuizshowSnapshotRound[]): QuizshowLiveState {
     playMode: 'solo',
     maxTeamSize: null,
     isReviewOn: false,
+    isPractice: false,
     snapshot,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
@@ -244,6 +256,8 @@ function addPlayer(
     joinedAt: STARTED_AT,
     removedAt: null,
     connectedSocketCount: 1,
+    disconnectedAt: null,
+    leftAt: null,
     ...overrides,
   };
   state.players.set(playerId, player);
@@ -349,6 +363,7 @@ function submit(
     hiddenAt: null,
   };
   play.answers.set(playerId, answer);
+  play.answersById.set(answer.answerId, answer);
   return answer;
 }
 
@@ -1033,7 +1048,7 @@ describe('Pulse Live engine phases: the wheel', () => {
       hostFinishWheel(introState, introState.cursor.phaseId, tick(clock)),
     );
 
-    expect(outsideWheel.code).toBe('quizshow_command_not_allowed');
+    expect(outsideWheel.code).toBe('quizshow_no_wheel_open');
     expect(outsideWheel.cursor).toEqual(introState.cursor);
 
     const state = openFirstWheel(nightA(), clock);
@@ -1047,7 +1062,7 @@ describe('Pulse Live engine phases: the wheel', () => {
     ];
 
     for (const failure of pausedRefusals) {
-      expect(failure.code).toBe('quizshow_command_not_allowed');
+      expect(failure.code).toBe('quizshow_session_paused');
       expect(failure.cursor).toEqual(state.cursor);
     }
     expect(state.cursor.phase).toBe('wheel');
@@ -1151,7 +1166,7 @@ describe('Pulse Live engine phases: the wheel', () => {
       hostSpin(state, state.cursor.phaseId, tick(clock), scriptedRandom()),
     );
 
-    expect(failure.code).toBe('quizshow_command_not_allowed');
+    expect(failure.code).toBe('quizshow_spin_not_available');
     expect(failure.cursor).toEqual(state.cursor);
   });
 
@@ -1198,8 +1213,10 @@ describe('Pulse Live engine phases: the wheel', () => {
       ),
     );
 
-    expect(skip.code).toBe('quizshow_command_not_allowed');
-    expect(addTime.code).toBe('quizshow_command_not_allowed');
+    expect(skip.code).toBe('quizshow_nothing_to_skip');
+    expect(skip.cursor).toEqual(state.cursor);
+    expect(addTime.code).toBe('quizshow_no_timer_running');
+    expect(addTime.cursor).toEqual(state.cursor);
   });
 
   it('ends to the podium from the wheel after a scored question', () => {
@@ -1252,5 +1269,32 @@ describe('Pulse Live engine phases: the wheel', () => {
     expect(state.wheelProgress.wheelBonusAward).toEqual(awardBefore);
     expect(playerOf(state, 'player-1').score).toBe(winnerScore);
     expect(playerOf(state, 'player-2').score).toBe(otherScore);
+  });
+});
+
+describe('Pulse Live engine phases: a warm-up flag on a wheel slice', () => {
+  it('keeps the slice leaderboard, since only a warm-up opening the night skips it', () => {
+    const clock = { now: NOW };
+    const rounds = [
+      quizRound('opener', 1, { title: 'Opener' }),
+      wheelRound('wheel', { wheelPick: 'round', sliceCount: null }),
+      quizRound('music', 1, {
+        title: 'Music',
+        settings: { wheelBonus: 0, isWarmUp: true },
+      }),
+      quizRound('film', 1, { title: 'Film', settings: { wheelBonus: 0 } }),
+    ];
+    const state = openFirstWheel(rounds, clock);
+    spinAndPick(state, clock, 0);
+    expect(state.cursor.phase).toBe('round_intro');
+    expect(state.cursor.roundIndex).toBe(2);
+    nextPhase(state, tick(clock));
+    playQuestionFromRead(state, clock, ['player-1']);
+
+    const fromReveal = nextPhase(state, tick(clock));
+
+    expect(state.cursor.phase).toBe('leaderboard');
+    expect(state.cursor.roundIndex).toBe(2);
+    expect(effectKinds(fromReveal.effects)).toContain('scores_shown');
   });
 });

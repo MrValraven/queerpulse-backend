@@ -1,12 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, type EntityManager } from 'typeorm';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import type { QuizshowStoredPodiumEntry } from './entities/quizshow-result.entity';
-import type { QuizshowStoredCursor } from './entities/quizshow-session.entity';
+import type {
+  QuizshowStoredAnswerKeyOverride,
+  QuizshowStoredCursor,
+  QuizshowStoredPairedDevice,
+} from './entities/quizshow-session.entity';
 import {
   QUIZSHOW_LIMITS,
   type QuizshowAnswerPayload,
   type QuizshowCursor,
+  type QuizshowGivingLink,
   type QuizshowLanguage,
   type QuizshowNextEvent,
   type QuizshowPhase,
@@ -15,13 +21,19 @@ import {
   type QuizshowRecap,
   type QuizshowRecapQuestion,
   type QuizshowScoresScope,
+  type QuizshowScreenLanguage,
   type QuizshowSessionStatus,
   type QuizshowTeamColorKey,
   type QuizshowText,
 } from './quizshow.contract';
-import { entrantTotals, isJokerActiveFor } from './quizshow-engine-state';
+import {
+  entrantTotals,
+  isJokerActiveFor,
+  podiumSteps,
+} from './quizshow-engine-state';
 import type {
   QuizshowLiveAnswer,
+  QuizshowLivePairedDevice,
   QuizshowLivePlayer,
   QuizshowLiveQuestionPlay,
   QuizshowLiveState,
@@ -31,6 +43,15 @@ import type {
   QuizshowPersistOperation,
   QuizshowQuestionLogEntry,
 } from './quizshow-engine-types';
+import {
+  QUIZ_EVENT_GAME_FINISHED,
+  type QuizEventGameFinishedEvent,
+} from './quizshow-game-finished.events';
+import {
+  eventGameWinnersOf,
+  shouldNumberEventGame,
+} from './quizshow-game-winners';
+import { quizshowHelperNameFromFirstName } from './quizshow-helper-name';
 import { isAdultsOnlySession } from './quizshow-play-rules';
 import {
   competitionRanks,
@@ -38,9 +59,9 @@ import {
   teamQuestionPoints,
 } from './quizshow-scoring';
 import {
+  normaliseStoredSnapshot,
   snapshotQuestionAt,
   type QuizshowRandom,
-  type QuizshowSessionSnapshot,
   type QuizshowSnapshotQuestion,
   type QuizshowSnapshotRound,
 } from './quizshow-snapshot';
@@ -86,11 +107,19 @@ interface SessionRow {
   is_review_on: boolean;
   cursor: QuizshowStoredCursor;
   question_log: QuizshowQuestionLogEntry[] | null;
-  quiz_snapshot: QuizshowSessionSnapshot;
+  /** Read through `normaliseStoredSnapshot`: a row frozen before v2 holds the older question shapes. */
+  quiz_snapshot: unknown;
   started_by_user_id: string | null;
   last_host_command_at: Date | string;
   paused_at: Date | string | null;
+  guest_push_sent_at: Date | string | null;
   attached_organiser_user_ids: string[] | null;
+  is_practice: boolean;
+  is_join_locked: boolean;
+  is_auto_advance_on: boolean;
+  paired_devices: QuizshowStoredPairedDevice[] | null;
+  /** Keyed by question id. */
+  answer_key_overrides: Record<string, QuizshowStoredAnswerKeyOverride> | null;
   quiz_owner_user_id: string | null;
   quiz_is_adults_only: boolean;
   /** The event columns read null for a game session (left join). */
@@ -115,6 +144,7 @@ interface PlayerRow {
   has_used_joker: boolean;
   joker_round_index: number | null;
   removed_at: Date | string | null;
+  left_at: Date | string | null;
   joined_at: Date | string;
   profile_avatar_url: string | null;
   profile_photo_visible: boolean | null;
@@ -128,6 +158,17 @@ interface TeamRow {
   has_used_joker: boolean;
   joker_round_index: number | null;
   created_at: Date | string;
+  is_host_made: boolean;
+}
+
+interface HelperNameRow {
+  user_id: string;
+  first_name: string | null;
+}
+
+interface GivingRow {
+  community_slug: string;
+  community_name: string;
 }
 
 interface AnswerRow {
@@ -172,6 +213,41 @@ interface WriteChain {
   token: symbol;
 }
 
+/** The operations an answer write coalesces (contract 7.3). */
+type QuizshowCoalescableOperation = Extract<
+  QuizshowPersistOperation,
+  { type: 'insert_answer' | 'insert_vote' }
+>;
+
+/** The label a failed coalesced write logs, whatever mix of rows it held. */
+const COALESCED_WRITE_LABEL = 'insert_answer+insert_vote';
+
+/** Where one buffered batch ends in its buffer's rows, kept so a failed coalesced write can replay the batches one by one. */
+interface CoalescedBatchEnd {
+  /** The batch's operation types joined by `+`, as an uncoalesced batch logs them. */
+  batchLabel: string;
+  answerEnd: number;
+  voteEnd: number;
+}
+
+/**
+ * One session's answer and vote rows waiting for their coalesced insert
+ * (contract 7.3). The rows are copies taken at enqueue time, like every
+ * prepared write, so a later scoring of the live answer leaves them as sent.
+ */
+interface CoalescedRowBuffer {
+  answers: QuizshowLiveAnswer[];
+  votes: QuizshowLiveVote[];
+  timer: NodeJS.Timeout;
+  batchEnds: CoalescedBatchEnd[];
+}
+
+function isCoalescableOperation(
+  operation: QuizshowPersistOperation,
+): operation is QuizshowCoalescableOperation {
+  return operation.type === 'insert_answer' || operation.type === 'insert_vote';
+}
+
 /** The data source or the manager of an open transaction: both run raw SQL. */
 type QuizshowQueryTarget = Pick<EntityManager, 'query'>;
 
@@ -182,12 +258,27 @@ interface PreparedWrite {
   /** True when it has nothing to run (no field changed, a skipped checkpoint). */
   isEmpty: boolean;
   run: (queryTarget: QuizshowQueryTarget) => Promise<void>;
+  /**
+   * Runs once the write committed, outside the transaction, in batch order.
+   * A throw is logged and swallowed, so the session's queue goes on.
+   */
+  afterCommit?: () => void;
+}
+
+/** The finish CTE's row: the session id and the event game number it took, if any. */
+interface FinishedSessionRow {
+  id: string;
+  event_game_number?: number | null;
 }
 
 /** What the recap needs of one logged question, read from the frozen snapshot at enqueue time. */
 interface RecapSource {
   entry: QuizshowQuestionLogEntry;
   prompt: QuizshowText;
+  /** The round's warm-up setting in the snapshot. */
+  isWarmUp: boolean;
+  /** A host corrected the question (`state.correctedQuestionIds`). */
+  wasCorrected: boolean;
 }
 
 function toEpochMs(value: Date | string): number {
@@ -200,6 +291,22 @@ function toEpochMsOrNull(value: Date | string | null): number | null {
 
 function toDateOrNull(epochMs: number | null): Date | null {
   return epochMs === null ? null : new Date(epochMs);
+}
+
+/** One paired device as `paired_devices` stores it: the memory-only fields stay out and the times turn ISO. */
+export function toStoredPairedDevice(
+  device: QuizshowLivePairedDevice,
+): QuizshowStoredPairedDevice {
+  return {
+    pairingId: device.pairingId,
+    kind: device.kind,
+    helperUserId: device.helperUserId,
+    pairedAt: new Date(device.pairedAt).toISOString(),
+    revokedAt:
+      device.revokedAt === null
+        ? null
+        : new Date(device.revokedAt).toISOString(),
+  };
 }
 
 /** The engine clock of the ending: the `ended` cursor's start, else the time of the enqueue. */
@@ -252,6 +359,9 @@ export function toStoredCursor(
     pausedRemainingMs: cursor.pausedRemainingMs,
     pausedExtraTimeRemainingMs: cursor.pausedExtraTimeRemainingMs,
     isRestartRecovery: cursor.isRestartRecovery,
+    talkStartsAt: cursor.talkStartsAt,
+    autoAdvanceAt: cursor.autoAdvanceAt,
+    podiumRevealedCount: cursor.podiumRevealedCount,
     phaseCounter: state.phaseCounter,
     wheelProgress: structuredClone(state.wheelProgress),
   };
@@ -279,53 +389,67 @@ function storedWheelProgress(
   return legacyProgress;
 }
 
+/** The recap as `quizshow_results.question_stats` stores it: everything but the standings. */
+export type QuizshowStoredRecap = Omit<QuizshowRecap, 'standings'>;
+
 /**
  * The recap stored with the results: per logged question the answer count,
  * the share of eligible players with a full-base answer and the mean answer
  * time. Party questions, skipped questions and questions nobody was eligible
- * for carry null for both numbers. A question that never reached its reveal
- * (the game ended mid-question) counts as skipped.
+ * for carry null for both numbers; poll and warm-up questions have no right
+ * answer to count, so their share is null too (contract 6.24). A question
+ * that never reached its reveal (the game ended mid-question) counts as
+ * skipped.
+ *
+ * The stored recap holds no standings: they name every entrant, and a row
+ * of `question_stats` has no member id an erasure could find. The results
+ * card builds them at read time from the player and team rows.
  */
 export function buildQuizshowRecap(
   sources: readonly RecapSource[],
   aggregateRows: readonly QuestionAggregateRow[],
-): QuizshowRecap {
+): QuizshowStoredRecap {
   const aggregateByQuestion = new Map(
     aggregateRows.map((row) => [row.question_id, row]),
   );
   const isSkippedEntry = (entry: QuizshowQuestionLogEntry): boolean =>
     entry.wasSkipped || entry.revealedAt === null;
-  const questions = sources.map(({ entry, prompt }): QuizshowRecapQuestion => {
-    const wasSkipped = isSkippedEntry(entry);
-    const aggregate = aggregateByQuestion.get(entry.questionId);
-    const answerCount = Number(aggregate?.answer_count ?? 0);
-    const correctCount = Number(aggregate?.correct_count ?? 0);
-    const averageElapsedMs =
-      aggregate?.average_elapsed_ms === null ||
-      aggregate?.average_elapsed_ms === undefined
-        ? null
-        : Number(aggregate.average_elapsed_ms);
-    const isMeasured =
-      isQuizRoundKind(entry.roundKind) &&
-      !wasSkipped &&
-      entry.eligibleCount > 0;
-    return {
-      roundIndex: entry.roundIndex,
-      questionIndex: entry.questionIndex,
-      roundKind: entry.roundKind,
-      type: entry.type,
-      prompt,
-      answerCount,
-      percentCorrect: isMeasured
-        ? Math.round((100 * correctCount) / entry.eligibleCount)
-        : null,
-      averageAnswerMs:
-        isMeasured && averageElapsedMs !== null
-          ? Math.round(averageElapsedMs)
+  const questions = sources.map(
+    ({ entry, prompt, isWarmUp, wasCorrected }): QuizshowRecapQuestion => {
+      const wasSkipped = isSkippedEntry(entry);
+      const aggregate = aggregateByQuestion.get(entry.questionId);
+      const answerCount = Number(aggregate?.answer_count ?? 0);
+      const correctCount = Number(aggregate?.correct_count ?? 0);
+      const averageElapsedMs =
+        aggregate?.average_elapsed_ms === null ||
+        aggregate?.average_elapsed_ms === undefined
+          ? null
+          : Number(aggregate.average_elapsed_ms);
+      const isMeasured =
+        isQuizRoundKind(entry.roundKind) &&
+        !wasSkipped &&
+        entry.eligibleCount > 0;
+      const isJudged = isMeasured && entry.type !== 'poll' && !isWarmUp;
+      return {
+        roundIndex: entry.roundIndex,
+        questionIndex: entry.questionIndex,
+        roundKind: entry.roundKind,
+        type: entry.type,
+        prompt,
+        answerCount,
+        percentCorrect: isJudged
+          ? Math.round((100 * correctCount) / entry.eligibleCount)
           : null,
-      wasSkipped,
-    };
-  });
+        averageAnswerMs:
+          isMeasured && averageElapsedMs !== null
+            ? Math.round(averageElapsedMs)
+            : null,
+        wasSkipped,
+        isWarmUp,
+        wasCorrected,
+      };
+    },
+  );
   return {
     questionsPlayed: sources.filter(({ entry }) => !isSkippedEntry(entry))
       .length,
@@ -337,12 +461,14 @@ export function buildQuizshowRecap(
   };
 }
 
+/** A `both` screen reads English first, with Portuguese as the fallback, as the phases engine does. */
 function truthText(
   truth: QuizshowText | undefined,
-  screenLanguage: QuizshowLanguage,
+  screenLanguage: QuizshowScreenLanguage,
 ): string {
   if (truth === undefined) return '';
-  return truth[screenLanguage] || truth.en || truth.pt;
+  const leadLanguage: QuizshowLanguage = screenLanguage === 'pt' ? 'pt' : 'en';
+  return truth[leadLanguage] || truth.en || truth.pt;
 }
 
 function correctPositionsOf(
@@ -393,14 +519,19 @@ function answeringPhaseId(
  * live state from its rows, and the abandonment and results deletion reads and
  * writes. A failed write logs its operation type, the session id and a code;
  * payloads, answer text, screen names, team names and error messages stay out
- * of the log.
+ * of the log. Answer and vote inserts wait up to `answerWriteCoalesceMs` in a
+ * per-session buffer and join the queue as one multi-row write (contract 7.3).
  */
 @Injectable()
 export class QuizshowPersistenceService {
   private readonly logger = new Logger(QuizshowPersistenceService.name);
   private readonly writeChains = new Map<string, WriteChain>();
+  private readonly coalescedRowBuffers = new Map<string, CoalescedRowBuffer>();
 
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly eventEmitter: EventEmitter2,
+  ) {}
 
   /** The live state of a lobby, running or paused session; null for any other status or an unknown id. */
   async loadLiveState(
@@ -422,7 +553,13 @@ export class QuizshowPersistenceService {
               "session"."started_by_user_id" AS "started_by_user_id",
               "session"."last_host_command_at" AS "last_host_command_at",
               "session"."paused_at" AS "paused_at",
+              "session"."guest_push_sent_at" AS "guest_push_sent_at",
               to_jsonb("session"."attached_organiser_user_ids") AS "attached_organiser_user_ids",
+              "session"."is_practice" AS "is_practice",
+              "session"."is_join_locked" AS "is_join_locked",
+              "session"."is_auto_advance_on" AS "is_auto_advance_on",
+              "session"."paired_devices" AS "paired_devices",
+              "session"."answer_key_overrides" AS "answer_key_overrides",
               "quiz"."owner_user_id" AS "quiz_owner_user_id",
               "quiz"."is_adults_only" AS "quiz_is_adults_only",
               "event"."slug" AS "event_slug",
@@ -444,10 +581,16 @@ export class QuizshowPersistenceService {
     // gone loads as null, as it did with the inner join.
     const isGameSession = sessionRow.event_id === null;
     if (!isGameSession && sessionRow.event_slug === null) return null;
+    // Every player's away clock starts at the load (contract 6.2): the
+    // process that saw their sockets is gone.
+    const loadedAt = Date.now();
+    const storedPairedDevices = sessionRow.paired_devices ?? [];
+    const answerKeyOverrides = sessionRow.answer_key_overrides ?? {};
 
-    const [playerRows, teamRows, nextEvent] = await Promise.all([
-      this.dataSource.query<PlayerRow[]>(
-        `SELECT "player"."id" AS "id",
+    const [playerRows, teamRows, nextEvent, helperNameByUserId, giving] =
+      await Promise.all([
+        this.dataSource.query<PlayerRow[]>(
+          `SELECT "player"."id" AS "id",
                 "player"."user_id" AS "user_id",
                 "player"."is_cohost_player" AS "is_cohost_player",
                 "player"."team_id" AS "team_id",
@@ -459,6 +602,7 @@ export class QuizshowPersistenceService {
                 "player"."has_used_joker" AS "has_used_joker",
                 "player"."joker_round_index" AS "joker_round_index",
                 "player"."removed_at" AS "removed_at",
+                "player"."left_at" AS "left_at",
                 "player"."joined_at" AS "joined_at",
                 "profile"."avatar_url" AS "profile_avatar_url",
                 "profile"."photo_visible" AS "profile_photo_visible"
@@ -466,30 +610,36 @@ export class QuizshowPersistenceService {
          LEFT JOIN "profiles" "profile" ON "profile"."user_id" = "player"."user_id"
          WHERE "player"."session_id" = $1
          ORDER BY "player"."joined_at" ASC, "player"."id" ASC`,
-        [sessionId],
-      ),
-      this.dataSource.query<TeamRow[]>(
-        `SELECT "team"."id" AS "id",
+          [sessionId],
+        ),
+        this.dataSource.query<TeamRow[]>(
+          `SELECT "team"."id" AS "id",
                 "team"."name" AS "name",
                 "team"."color_key" AS "color_key",
                 "team"."score" AS "score",
                 "team"."has_used_joker" AS "has_used_joker",
                 "team"."joker_round_index" AS "joker_round_index",
-                "team"."created_at" AS "created_at"
+                "team"."created_at" AS "created_at",
+                "team"."is_host_made" AS "is_host_made"
          FROM "quizshow_teams" "team"
          WHERE "team"."session_id" = $1
          ORDER BY "team"."created_at" ASC, "team"."id" ASC`,
-        [sessionId],
-      ),
-      isGameSession
-        ? Promise.resolve(null)
-        : this.loadNextEvent(
-            sessionRow.event_series_id,
-            sessionRow.event_series_index,
-          ),
-    ]);
+          [sessionId],
+        ),
+        isGameSession
+          ? Promise.resolve(null)
+          : this.loadNextEvent(
+              sessionRow.event_series_id,
+              sessionRow.event_series_index,
+            ),
+        this.loadHelperNames(storedPairedDevices),
+        // Event sessions only, and never a practice one (contract 6.27).
+        sessionRow.event_id === null || sessionRow.is_practice
+          ? Promise.resolve(null)
+          : this.loadGiving(sessionRow.event_id),
+      ]);
 
-    const snapshot = sessionRow.quiz_snapshot;
+    const snapshot = normaliseStoredSnapshot(sessionRow.quiz_snapshot);
     const storedCursor = sessionRow.cursor;
     const phaseCounter = Number(storedCursor.phaseCounter ?? 0);
     const wheelProgress = storedWheelProgress(storedCursor);
@@ -513,6 +663,11 @@ export class QuizshowPersistenceService {
       pausedExtraTimeRemainingMs:
         storedCursor.pausedExtraTimeRemainingMs ?? null,
       isRestartRecovery: storedCursor.isRestartRecovery === true,
+      // A row stored before live v2 has none of the three (contract 8.2);
+      // the podium count is settled once the podium is rebuilt below.
+      talkStartsAt: storedCursor.talkStartsAt ?? null,
+      autoAdvanceAt: storedCursor.autoAdvanceAt ?? null,
+      podiumRevealedCount: storedCursor.podiumRevealedCount ?? null,
     };
     // An open session is only ever loaded after the process lost it, so a
     // pause taken in a question phase lost that question's play too: the
@@ -537,8 +692,10 @@ export class QuizshowPersistenceService {
       cursor.extraTimeDeadline = null;
       cursor.pausedRemainingMs = null;
       cursor.pausedExtraTimeRemainingMs = null;
+      cursor.talkStartsAt = null;
+      cursor.autoAdvanceAt = null;
       cursor.isRestartRecovery = true;
-      pausedAt = Date.now();
+      pausedAt = loadedAt;
     }
 
     const players = new Map<string, QuizshowLivePlayer>();
@@ -565,6 +722,8 @@ export class QuizshowPersistenceService {
         joinedAt: toEpochMs(row.joined_at),
         removedAt: toEpochMsOrNull(row.removed_at),
         connectedSocketCount: 0,
+        disconnectedAt: loadedAt,
+        leftAt: toEpochMsOrNull(row.left_at),
       });
     }
     const teams = new Map<string, QuizshowLiveTeam>();
@@ -577,8 +736,26 @@ export class QuizshowPersistenceService {
         hasUsedJoker: row.has_used_joker,
         jokerRoundIndex: row.joker_round_index,
         createdAt: toEpochMs(row.created_at),
+        isHostMade: row.is_host_made,
       });
     }
+    const pairedDevices = storedPairedDevices.map(
+      (device): QuizshowLivePairedDevice => ({
+        pairingId: device.pairingId,
+        kind: device.kind,
+        helperUserId: device.helperUserId,
+        helperName:
+          device.helperUserId === null
+            ? null
+            : (helperNameByUserId.get(device.helperUserId) ?? null),
+        pairedAt: new Date(device.pairedAt).getTime(),
+        revokedAt:
+          device.revokedAt === null
+            ? null
+            : new Date(device.revokedAt).getTime(),
+        connectedSocketCount: 0,
+      }),
+    );
     const questionLog = sessionRow.question_log ?? [];
 
     const isScopeAdultsOnly = isGameSession
@@ -624,6 +801,14 @@ export class QuizshowPersistenceService {
         (entry) => entry.revealedAt !== null && !entry.wasSkipped,
       ),
       isScreenMuted: false,
+      isPractice: sessionRow.is_practice,
+      isJoinLocked: sessionRow.is_join_locked,
+      isAutoAdvanceOn: sessionRow.is_auto_advance_on,
+      pairedDevices,
+      guestPushSentAt: toEpochMsOrNull(sessionRow.guest_push_sent_at),
+      giving,
+      adjustRequestIds: [],
+      correctedQuestionIds: new Set(Object.keys(answerKeyOverrides)),
     };
 
     const totals = entrantTotals(state);
@@ -649,8 +834,17 @@ export class QuizshowPersistenceService {
           colorKey: entry.colorKey,
           score: entry.score,
         }));
+      // A podium stored before the paced reveal shows every place, as it
+      // did then (contract 8.2).
+      if (cursor.podiumRevealedCount === null) {
+        cursor.podiumRevealedCount = podiumSteps(state).length;
+      }
     }
-    state.current = await this.loadQuestionPlay(state, random);
+    state.current = await this.loadQuestionPlay(
+      state,
+      random,
+      answerKeyOverrides,
+    );
     // In reveal and scores the stored totals already hold this question's
     // points; the scores frame counts up from the totals before it. In reveal
     // that base waits for the next scores frame; in scores the frame being
@@ -689,7 +883,9 @@ export class QuizshowPersistenceService {
    * Queues the operations of one command as one write behind the session's
    * earlier writes: they commit in one transaction together, or none of them
    * lands. Values are read from `state` now; an operation that cannot be
-   * built drops the whole batch.
+   * built drops the whole batch. A batch of answer and vote inserts only goes
+   * to the session's coalescing buffer; any other batch first moves the
+   * buffered rows into the queue, so it lands after the answers it may score.
    */
   enqueueBatch(
     state: QuizshowLiveState,
@@ -697,6 +893,11 @@ export class QuizshowPersistenceService {
   ): void {
     if (operations.length === 0) return;
     const sessionId = state.sessionId;
+    if (operations.every(isCoalescableOperation)) {
+      this.bufferCoalescedRows(sessionId, operations);
+      return;
+    }
+    this.drainCoalescedRows(sessionId);
     const writes: PreparedWrite[] = [];
     for (const operation of operations) {
       try {
@@ -707,7 +908,41 @@ export class QuizshowPersistenceService {
       }
     }
     const batchLabel = operations.map((operation) => operation.type).join('+');
-    const write = this.batchWrite(writes);
+    this.appendToWriteChain(
+      sessionId,
+      batchLabel,
+      this.batchWrite(writes, sessionId),
+    );
+  }
+
+  /** Resolves once every write queued so far for the session has run, buffered answer and vote rows included. */
+  async flush(sessionId: string): Promise<void> {
+    this.drainCoalescedRows(sessionId);
+    await this.writeChains.get(sessionId)?.tail;
+  }
+
+  /**
+   * Shutdown: resolves once every session's queue is empty, writes queued
+   * meanwhile included. Each round first moves every coalescing buffer into
+   * its queue, so buffered answers are written before the process stops.
+   */
+  async flushAll(): Promise<void> {
+    while (this.writeChains.size > 0 || this.coalescedRowBuffers.size > 0) {
+      for (const sessionId of [...this.coalescedRowBuffers.keys()]) {
+        this.drainCoalescedRows(sessionId);
+      }
+      await Promise.all(
+        [...this.writeChains.values()].map((writeChain) => writeChain.tail),
+      );
+    }
+  }
+
+  /** Runs `write` after the session's earlier writes; a failure logs `batchLabel` and the queue goes on. */
+  private appendToWriteChain(
+    sessionId: string,
+    batchLabel: string,
+    write: () => Promise<void>,
+  ): void {
     const token = Symbol(batchLabel);
     const previous = this.writeChains.get(sessionId)?.tail ?? Promise.resolve();
     const tail = previous
@@ -723,24 +958,146 @@ export class QuizshowPersistenceService {
     this.writeChains.set(sessionId, { tail, token });
   }
 
-  /** Resolves once every write queued so far for the session has run. */
-  async flush(sessionId: string): Promise<void> {
-    await this.writeChains.get(sessionId)?.tail;
+  /**
+   * Copies the batch's rows into the session's buffer. The first row arms an
+   * unref'd timer of `answerWriteCoalesceMs`, so a quiet buffer never holds
+   * the process open; shutdown drains it through `flushAll`.
+   */
+  private bufferCoalescedRows(
+    sessionId: string,
+    operations: readonly QuizshowCoalescableOperation[],
+  ): void {
+    let buffer = this.coalescedRowBuffers.get(sessionId);
+    if (buffer === undefined) {
+      const timer = setTimeout(() => {
+        this.drainCoalescedRows(sessionId);
+      }, QUIZSHOW_LIMITS.answerWriteCoalesceMs);
+      timer.unref();
+      buffer = { answers: [], votes: [], timer, batchEnds: [] };
+      this.coalescedRowBuffers.set(sessionId, buffer);
+    }
+    for (const operation of operations) {
+      if (operation.type === 'insert_answer') {
+        buffer.answers.push(structuredClone(operation.answer));
+      } else {
+        buffer.votes.push({ ...operation.vote });
+      }
+    }
+    buffer.batchEnds.push({
+      batchLabel: operations.map((operation) => operation.type).join('+'),
+      answerEnd: buffer.answers.length,
+      voteEnd: buffer.votes.length,
+    });
   }
 
-  /** Shutdown: resolves once every session's queue is empty, writes queued meanwhile included. */
-  async flushAll(): Promise<void> {
-    while (this.writeChains.size > 0) {
-      await Promise.all(
-        [...this.writeChains.values()].map((writeChain) => writeChain.tail),
-      );
-    }
+  /** Clears the session's timer and queues its buffered rows as one write; nothing happens when no row waits. */
+  private drainCoalescedRows(sessionId: string): void {
+    const buffer = this.coalescedRowBuffers.get(sessionId);
+    if (buffer === undefined) return;
+    clearTimeout(buffer.timer);
+    this.coalescedRowBuffers.delete(sessionId);
+    this.appendToWriteChain(
+      sessionId,
+      COALESCED_WRITE_LABEL,
+      this.coalescedWrite(sessionId, buffer),
+    );
   }
 
   /**
-   * Boot: every running session becomes paused at `now` with no deadlines and
-   * no remaining time; `isRestartRecovery` marks the ones caught in a phase the
-   * resume replays. `last_host_command_at` stays, so the abandonment clock
+   * The write of a drained buffer: every row in one transaction. When it
+   * fails and held more than one batch, each batch is written again on its
+   * own (each still atomic), so one bad row costs its own batch alone and
+   * the other players' answers still land; every batch that fails again
+   * logs its label as an uncoalesced batch does.
+   */
+  private coalescedWrite(
+    sessionId: string,
+    buffer: CoalescedRowBuffer,
+  ): () => Promise<void> {
+    const { answers, votes, batchEnds } = buffer;
+    return async () => {
+      try {
+        await this.batchWrite([
+          this.coalescedInsertWrite(sessionId, answers, votes),
+        ])();
+        return;
+      } catch (error: unknown) {
+        this.logger.error(
+          `Pulse Live write ${COALESCED_WRITE_LABEL} failed for session ${sessionId} (${quizshowWriteFailureCode(error)}) with ${answers.length} answers and ${votes.length} votes in ${batchEnds.length} batches`,
+        );
+      }
+      if (batchEnds.length < 2) return;
+      let answerStart = 0;
+      let voteStart = 0;
+      for (const { batchLabel, answerEnd, voteEnd } of batchEnds) {
+        try {
+          await this.batchWrite([
+            this.coalescedInsertWrite(
+              sessionId,
+              answers.slice(answerStart, answerEnd),
+              votes.slice(voteStart, voteEnd),
+            ),
+          ])();
+        } catch (batchError: unknown) {
+          this.logWriteFailure(batchLabel, sessionId, batchError);
+        }
+        answerStart = answerEnd;
+        voteStart = voteEnd;
+      }
+    };
+  }
+
+  /**
+   * At most two statements, answers first so a vote can name an answer of the
+   * same write: one `INSERT ... SELECT * FROM unnest(...)` per table with one
+   * typed array per column, the columns and order of the single-row inserts.
+   */
+  private coalescedInsertWrite(
+    sessionId: string,
+    answers: readonly QuizshowLiveAnswer[],
+    votes: readonly QuizshowLiveVote[],
+  ): PreparedWrite {
+    const statements: SqlStatement[] = [];
+    if (answers.length > 0) {
+      statements.push({
+        sql: `INSERT INTO "quizshow_answers" ("id", "session_id", "question_id", "player_id", "payload", "received_at", "elapsed_ms", "is_correct", "points_awarded", "vote_option_id", "hidden_at")
+              SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::jsonb[], $6::timestamptz[], $7::integer[], $8::boolean[], $9::integer[], $10::uuid[], $11::timestamptz[])`,
+        params: [
+          answers.map((answer) => answer.answerId),
+          answers.map(() => sessionId),
+          answers.map((answer) => answer.questionId),
+          answers.map((answer) => answer.playerId),
+          answers.map((answer) => JSON.stringify(answer.payload)),
+          answers.map((answer) => new Date(answer.receivedAt)),
+          answers.map((answer) => answer.elapsedMs),
+          answers.map((answer) => answer.isCorrect),
+          answers.map((answer) => answer.pointsAwarded),
+          answers.map((answer) => answer.voteOptionId),
+          answers.map((answer) => toDateOrNull(answer.hiddenAt)),
+        ],
+      });
+    }
+    if (votes.length > 0) {
+      statements.push({
+        sql: `INSERT INTO "quizshow_votes" ("session_id", "question_id", "voter_player_id", "answer_id", "created_at")
+              SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::timestamptz[])`,
+        params: [
+          votes.map(() => sessionId),
+          votes.map((vote) => vote.questionId),
+          votes.map((vote) => vote.voterPlayerId),
+          votes.map((vote) => vote.answerId),
+          votes.map((vote) => new Date(vote.createdAt)),
+        ],
+      });
+    }
+    return this.statementsWrite(statements.length > 1, statements);
+  }
+
+  /**
+   * Boot: every running session becomes paused at `now`, and its deadlines,
+   * remaining time, talk start and auto-advance time are cleared (a pause clears the
+   * auto-advance, contract 6.16); `isRestartRecovery` marks the ones caught
+   * in a phase the resume replays. `last_host_command_at` stays, so the abandonment clock
    * keeps counting from the last host command. Answers the number paused.
    */
   async recoverRunningSessionsAfterRestart(now: Date): Promise<number> {
@@ -754,6 +1111,8 @@ export class QuizshowPersistenceService {
                'extraTimeDeadline', NULL,
                'pausedRemainingMs', NULL,
                'pausedExtraTimeRemainingMs', NULL,
+               'talkStartsAt', NULL,
+               'autoAdvanceAt', NULL,
                'isRestartRecovery', ("cursor" ->> 'phase') = ANY($2::text[])
              )
          WHERE "status" = 'running'
@@ -808,6 +1167,9 @@ export class QuizshowPersistenceService {
              'extraTimeDeadline', NULL,
              'pausedRemainingMs', NULL,
              'pausedExtraTimeRemainingMs', NULL,
+             'talkStartsAt', NULL,
+             'autoAdvanceAt', NULL,
+             'podiumRevealedCount', NULL,
              'isRestartRecovery', false,
              'phaseCounter', COALESCE(("cursor" ->> 'phaseCounter')::int, 0) + 1
            )
@@ -908,10 +1270,85 @@ export class QuizshowPersistenceService {
     };
   }
 
-  /** The play of the question the cursor names in `reveal` or `scores`; null anywhere else. */
+  /**
+   * Each paired helper's name from their profile first name, in one query
+   * for every helper id, through the normaliser the gateway uses at pairing
+   * time (`quizshowHelperNameFromFirstName`), so a reload shows the name the
+   * pairing showed. A helper whose account or profile is gone, or whose first
+   * name gives no name, has no entry, so their device loads with a null name.
+   */
+  private async loadHelperNames(
+    storedDevices: readonly QuizshowStoredPairedDevice[],
+  ): Promise<Map<string, string>> {
+    const helperUserIds = [
+      ...new Set(
+        storedDevices.flatMap((device) =>
+          device.helperUserId === null ? [] : [device.helperUserId],
+        ),
+      ),
+    ];
+    if (helperUserIds.length === 0) return new Map();
+    const rows: HelperNameRow[] = await this.dataSource.query(
+      `SELECT "profile"."user_id" AS "user_id",
+              "profile"."first_name" AS "first_name"
+       FROM "profiles" "profile"
+       WHERE "profile"."user_id" = ANY($1::uuid[])`,
+      [helperUserIds],
+    );
+    const helperNameByUserId = new Map<string, string>();
+    for (const row of rows) {
+      const helperName = quizshowHelperNameFromFirstName(row.first_name);
+      if (helperName !== null) {
+        helperNameByUserId.set(row.user_id, helperName);
+      }
+    }
+    return helperNameByUserId;
+  }
+
+  /**
+   * The support link of the event's community (contract 6.27): a public
+   * community that is live (unarchived), clear of any moderation hide or
+   * removal, and holding at least one giving method. Only its slug and name are read; a
+   * giving method's value never leaves the table.
+   */
+  private async loadGiving(
+    eventId: string,
+  ): Promise<QuizshowGivingLink | null> {
+    const rows: GivingRow[] = await this.dataSource.query(
+      `SELECT "community"."slug" AS "community_slug", "community"."name" AS "community_name"
+         FROM "events" "event"
+         JOIN "communities" "community" ON "community"."id" = "event"."community_id"
+        WHERE "event"."id" = $1
+          AND "community"."archived_at" IS NULL
+          AND "community"."access_tier" = 'public'
+          AND NOT EXISTS (SELECT 1 FROM "content_moderation" "moderation"
+                           WHERE "moderation"."subject_type" = 'community'
+                             AND "moderation"."subject_id" = "community"."slug"
+                             AND ("moderation"."hidden_at" IS NOT NULL OR "moderation"."removed_at" IS NOT NULL))
+          AND EXISTS (SELECT 1 FROM "community_giving_methods" "method" WHERE "method"."community_id" = "community"."id")`,
+      [eventId],
+    );
+    const row = rows[0];
+    if (row === undefined) return null;
+    return {
+      communitySlug: row.community_slug,
+      communityName: row.community_name,
+    };
+  }
+
+  /**
+   * The play of the question the cursor names in `reveal` or `scores`; null
+   * anywhere else. A host correction stored for the question comes back with
+   * it. The streaks before the first scoring lived in memory only, so the
+   * map loads empty and the rescore commands refuse this play (contract 11,
+   * risk 5); the away set loads empty for the same reason.
+   */
   private async loadQuestionPlay(
     state: QuizshowLiveState,
     random: QuizshowRandom,
+    answerKeyOverrides: Readonly<
+      Record<string, QuizshowStoredAnswerKeyOverride>
+    >,
   ): Promise<QuizshowLiveQuestionPlay | null> {
     const { phase, roundIndex, questionIndex } = state.cursor;
     if (
@@ -961,10 +1398,13 @@ export class QuizshowPersistenceService {
     ]);
 
     const openedAt = logEntry.openedAt;
+    // A leave counts like a removal (contract 6.14): a player who left
+    // before the open had no place in the question.
     const eligiblePlayers = [...state.players.values()].filter(
       (player) =>
         player.joinedAt <= openedAt &&
-        (player.removedAt === null || player.removedAt > openedAt),
+        (player.removedAt === null || player.removedAt > openedAt) &&
+        (player.leftAt === null || player.leftAt > openedAt),
     );
 
     // Mirrors the engine's scoring at reveal: every player still in the
@@ -972,12 +1412,14 @@ export class QuizshowPersistenceService {
     // the answers, Lie Detector truth votes pay their voters and a host
     // favourite shows as its bonus on top of the vote points.
     const revealedAt = logEntry.revealedAt;
+    const isStillInAtReveal = (goneAt: number | null): boolean =>
+      goneAt === null || (revealedAt !== null && goneAt > revealedAt);
     const isInSessionAtReveal = (
-      player: Pick<QuizshowLivePlayer, 'removedAt'> | undefined,
+      player: Pick<QuizshowLivePlayer, 'removedAt' | 'leftAt'> | undefined,
     ): boolean =>
       player !== undefined &&
-      (player.removedAt === null ||
-        (revealedAt !== null && player.removedAt > revealedAt));
+      isStillInAtReveal(player.removedAt) &&
+      isStillInAtReveal(player.leftAt);
     const scoredPlayers = eligiblePlayers.filter((player) =>
       isInSessionAtReveal(player),
     );
@@ -1118,6 +1560,8 @@ export class QuizshowPersistenceService {
           )
         : new Map<string, number>();
 
+    const storedOverride: QuizshowStoredAnswerKeyOverride | undefined =
+      answerKeyOverrides[question.id];
     return {
       questionId: question.id,
       roundIndex,
@@ -1139,6 +1583,14 @@ export class QuizshowPersistenceService {
       wasSkipped: logEntry.wasSkipped,
       pointsByPlayer,
       teamPoints,
+      answersById: new Map(
+        [...answers.values()].map((answer) => [answer.answerId, answer]),
+      ),
+      awayPlayerIds: new Set(),
+      streakBeforeByPlayer: new Map(),
+      keyOverride: storedOverride?.keyOverride ?? null,
+      acceptedTexts: new Set(storedOverride?.acceptedTexts ?? []),
+      wasCorrected: storedOverride !== undefined,
     };
   }
 
@@ -1153,8 +1605,8 @@ export class QuizshowPersistenceService {
         const player = operation.player;
         return this.statementsWrite(false, [
           {
-            sql: `INSERT INTO "quizshow_players" ("id", "session_id", "user_id", "is_cohost_player", "team_id", "screen_name", "is_avatar_shown", "has_extra_time", "score", "streak", "has_used_joker", "joker_round_index", "removed_at", "joined_at")
-                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+            sql: `INSERT INTO "quizshow_players" ("id", "session_id", "user_id", "is_cohost_player", "team_id", "screen_name", "is_avatar_shown", "has_extra_time", "score", "streak", "has_used_joker", "joker_round_index", "removed_at", "joined_at", "left_at")
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
             params: [
               player.playerId,
               sessionId,
@@ -1170,6 +1622,7 @@ export class QuizshowPersistenceService {
               player.jokerRoundIndex,
               toDateOrNull(player.removedAt),
               new Date(player.joinedAt),
+              toDateOrNull(player.leftAt),
             ],
           },
         ]);
@@ -1198,6 +1651,9 @@ export class QuizshowPersistenceService {
         if (fields.removedAt !== undefined) {
           assignments.push(['removed_at', toDateOrNull(fields.removedAt)]);
         }
+        if (fields.leftAt !== undefined) {
+          assignments.push(['left_at', toDateOrNull(fields.leftAt)]);
+        }
         return this.statementsWrite(
           false,
           rowUpdate(
@@ -1212,8 +1668,8 @@ export class QuizshowPersistenceService {
         const team = operation.team;
         return this.statementsWrite(false, [
           {
-            sql: `INSERT INTO "quizshow_teams" ("id", "session_id", "name", "color_key", "score", "has_used_joker", "joker_round_index", "created_at")
-                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            sql: `INSERT INTO "quizshow_teams" ("id", "session_id", "name", "color_key", "score", "has_used_joker", "joker_round_index", "created_at", "is_host_made")
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
             params: [
               team.teamId,
               sessionId,
@@ -1223,6 +1679,7 @@ export class QuizshowPersistenceService {
               team.hasUsedJoker,
               team.jokerRoundIndex,
               new Date(team.createdAt),
+              team.isHostMade,
             ],
           },
         ]);
@@ -1469,6 +1926,101 @@ export class QuizshowPersistenceService {
             params: [sessionId, operation.userId],
           },
         ]);
+      case 'set_answer_key_override': {
+        // The merge replaces only this question's entry, so corrections of
+        // earlier questions stay.
+        const storedOverride: QuizshowStoredAnswerKeyOverride = {
+          keyOverride: structuredClone(operation.keyOverride),
+          acceptedTexts: [...operation.acceptedTexts],
+        };
+        return this.statementsWrite(false, [
+          {
+            sql: `UPDATE "quizshow_sessions" SET "answer_key_overrides" = "answer_key_overrides" || jsonb_build_object($2::text, $3::jsonb) WHERE "id" = $1`,
+            params: [
+              sessionId,
+              operation.questionId,
+              JSON.stringify(storedOverride),
+            ],
+          },
+        ]);
+      }
+      case 'adjust_score':
+        // The entrant's new total, so a retried write lands on the same score.
+        return this.statementsWrite(
+          false,
+          rowUpdate(
+            operation.kind === 'player' ? 'quizshow_players' : 'quizshow_teams',
+            sessionId,
+            operation.entrantId,
+            [['score', operation.score]],
+          ),
+        );
+      case 'add_paired_device':
+        // The stored array stays authoritative: account erasure scrubs a
+        // helper id in the row only, so every stored entry is copied as it
+        // is. Only the entries the prune dropped from memory are removed,
+        // with the new device's own id, so a retried write never doubles it;
+        // then the new device is appended. One statement, as the revoke.
+        return this.statementsWrite(false, [
+          {
+            sql: `UPDATE "quizshow_sessions"
+                  SET "paired_devices" = (
+                    SELECT COALESCE(
+                      jsonb_agg("stored"."device" ORDER BY "stored"."position"),
+                      '[]'::jsonb
+                    )
+                    FROM jsonb_array_elements("paired_devices") WITH ORDINALITY AS "stored"("device", "position")
+                    WHERE NOT COALESCE("stored"."device" ->> 'pairingId' = ANY($3::text[]), false)
+                  ) || $2::jsonb
+                  WHERE "id" = $1`,
+            params: [
+              sessionId,
+              JSON.stringify([toStoredPairedDevice(operation.device)]),
+              [...operation.droppedPairingIds, operation.device.pairingId],
+            ],
+          },
+        ]);
+      case 'revoke_paired_device':
+        // Rewrites the array in its stored order with the one pairing's
+        // `revokedAt` set; every other device is copied as it is.
+        return this.statementsWrite(false, [
+          {
+            sql: `UPDATE "quizshow_sessions"
+                  SET "paired_devices" = (
+                    SELECT COALESCE(
+                      jsonb_agg(
+                        CASE WHEN "stored"."device" ->> 'pairingId' = $2
+                          THEN "stored"."device" || jsonb_build_object('revokedAt', $3::text)
+                          ELSE "stored"."device"
+                        END
+                        ORDER BY "stored"."position"
+                      ),
+                      '[]'::jsonb
+                    )
+                    FROM jsonb_array_elements("paired_devices") WITH ORDINALITY AS "stored"("device", "position")
+                  )
+                  WHERE "id" = $1`,
+            params: [
+              sessionId,
+              operation.pairingId,
+              new Date(operation.revokedAt).toISOString(),
+            ],
+          },
+        ]);
+      case 'set_session_flags':
+        return this.statementsWrite(false, [
+          {
+            sql: `UPDATE "quizshow_sessions" SET "is_join_locked" = $2, "is_auto_advance_on" = $3 WHERE "id" = $1`,
+            params: [sessionId, state.isJoinLocked, state.isAutoAdvanceOn],
+          },
+        ]);
+      case 'replace_snapshot':
+        return this.statementsWrite(false, [
+          {
+            sql: `UPDATE "quizshow_sessions" SET "quiz_snapshot" = $2::jsonb WHERE "id" = $1`,
+            params: [sessionId, JSON.stringify(state.snapshot)],
+          },
+        ]);
       case 'finish':
         return this.prepareFinish(state, operation.podium, operation.placings);
       case 'abandon':
@@ -1497,6 +2049,18 @@ export class QuizshowPersistenceService {
    * One transaction: the session turns `finished` with its final cursor and
    * question log, then the results row takes the podium, the placings and the
    * recap built from the log and one aggregate over the session's answers.
+   * A practice session keeps no results (contract 6.9): only the session row
+   * ends.
+   *
+   * The finish clears `answer_key_overrides` on both paths: the host's
+   * accepted texts quote players' typed answers, and the session row
+   * outlives the 30-day purge of answers, so nothing typed stays on it once
+   * the game is over. Nothing reads the overrides after the finish.
+   *
+   * A real event game with a first place takes the next `event_game_number`
+   * of its event in the same UPDATE (contract 5.1). Once that commits, the
+   * after-commit step emits `QUIZ_EVENT_GAME_FINISHED` with the winners read
+   * from the podium at enqueue time (contract 5.2).
    */
   private prepareFinish(
     state: QuizshowLiveState,
@@ -1507,6 +2071,13 @@ export class QuizshowPersistenceService {
     const endedAt = endedAtOf(state);
     const storedCursorJson = JSON.stringify(toStoredCursor(state));
     const questionLog = structuredClone(state.questionLog);
+    const isPractice = state.isPractice;
+    const shouldNumber = shouldNumberEventGame(state, podium);
+    const winners = eventGameWinnersOf(state, podium);
+    const eventId = state.eventId;
+    const eventTitle = state.eventTitle ?? '';
+    const isAdultsOnly = state.isAdultsOnly;
+    let eventGameNumber: number | null = null;
     const podiumJson = JSON.stringify(podium);
     const placingsJson = JSON.stringify(placings);
     const recapSources: RecapSource[] = questionLog.map((entry) => ({
@@ -1518,27 +2089,41 @@ export class QuizshowPersistenceService {
           entry.questionIndex,
         )?.prompt ?? { en: '', pt: '' },
       ),
+      isWarmUp:
+        state.snapshot.rounds[entry.roundIndex]?.settings.isWarmUp === true,
+      wasCorrected: state.correctedQuestionIds.has(entry.questionId),
     }));
     return {
       isTransaction: true,
       isEmpty: false,
       run: async (manager) => {
-        const finishedRows: IdRow[] = await manager.query(
+        const finishedRows: FinishedSessionRow[] = await manager.query(
           `WITH "finished" AS (
              UPDATE "quizshow_sessions"
              SET "status" = 'finished',
                  "ended_at" = $2,
                  "cursor" = $3::jsonb,
                  "question_log" = $4::jsonb,
-                 "paused_at" = NULL
+                 "paused_at" = NULL,
+                 "answer_key_overrides" = '{}'::jsonb,
+                 "event_game_number" = CASE WHEN $5::boolean THEN (SELECT COALESCE(MAX("other"."event_game_number"), 0) + 1 FROM "quizshow_sessions" "other" WHERE "other"."event_id" = "quizshow_sessions"."event_id") ELSE NULL END
              WHERE "id" = $1
                AND "status" IN ${OPEN_STATUSES_SQL}
-             RETURNING "id"
+             RETURNING "id", "event_game_number"
            )
-           SELECT "id" FROM "finished"`,
-          [sessionId, endedAt, storedCursorJson, JSON.stringify(questionLog)],
+           SELECT "id", "event_game_number" FROM "finished"`,
+          [
+            sessionId,
+            endedAt,
+            storedCursorJson,
+            JSON.stringify(questionLog),
+            shouldNumber,
+          ],
         );
-        if (finishedRows.length === 0) return;
+        const returnedGameNumber = finishedRows[0]?.event_game_number;
+        eventGameNumber =
+          typeof returnedGameNumber === 'number' ? returnedGameNumber : null;
+        if (finishedRows.length === 0 || isPractice) return;
         const aggregateRows: QuestionAggregateRow[] = await manager.query(
           `SELECT "answer"."question_id" AS "question_id",
                   COUNT(*)::int AS "answer_count",
@@ -1555,6 +2140,19 @@ export class QuizshowPersistenceService {
            VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)`,
           [sessionId, podiumJson, placingsJson, JSON.stringify(recap)],
         );
+      },
+      afterCommit: () => {
+        if (eventGameNumber === null || eventId === null) return;
+        const finishedEvent: QuizEventGameFinishedEvent = {
+          sessionId,
+          eventId,
+          gameNumber: eventGameNumber,
+          finishedAt: endedAt,
+          eventTitle,
+          isAdultsOnly,
+          winners,
+        };
+        this.eventEmitter.emit(QUIZ_EVENT_GAME_FINISHED, finishedEvent);
       },
     };
   }
@@ -1578,21 +2176,37 @@ export class QuizshowPersistenceService {
    * The write of one batch: a lone plain write runs on the data source;
    * two writes or more, or one that needs a transaction, run in one
    * transaction, so a failure anywhere rolls every one of them back.
+   * Once it resolves, each write's `afterCommit` runs in order; a throw there
+   * logs `sessionId` and a code, and the next step still runs. Coalesced
+   * answer writes carry no after-commit step and pass no session id.
    */
-  private batchWrite(writes: readonly PreparedWrite[]): () => Promise<void> {
+  private batchWrite(
+    writes: readonly PreparedWrite[],
+    sessionId: string | null = null,
+  ): () => Promise<void> {
     const writesToRun = writes.filter((write) => !write.isEmpty);
     return async () => {
       const [onlyWrite] = writesToRun;
       if (onlyWrite === undefined) return;
       if (writesToRun.length === 1 && !onlyWrite.isTransaction) {
         await onlyWrite.run(this.dataSource);
-        return;
+      } else {
+        await this.dataSource.transaction(async (manager) => {
+          for (const write of writesToRun) {
+            await write.run(manager);
+          }
+        });
       }
-      await this.dataSource.transaction(async (manager) => {
-        for (const write of writesToRun) {
-          await write.run(manager);
+      for (const write of writesToRun) {
+        if (write.afterCommit === undefined) continue;
+        try {
+          write.afterCommit();
+        } catch (error: unknown) {
+          this.logger.error(
+            `Pulse Live after-commit step failed for session ${sessionId ?? 'unknown'} (${quizshowWriteFailureCode(error)})`,
+          );
         }
-      });
+      }
     };
   }
 

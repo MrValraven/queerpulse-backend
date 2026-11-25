@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   HttpException,
+  HttpStatus,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -9,6 +10,7 @@ import {
   quizshowCodeOf,
   quizshowError,
   quizshowErrorWithDetails,
+  quizshowErrorWithStatus,
 } from './quizshow-errors';
 import {
   QUIZSHOW_ERROR_CODES,
@@ -32,6 +34,9 @@ const cursorFixture: QuizshowCursor = {
   roundNumber: 1,
   upNext: null,
   canSpinForNextRound: false,
+  talkStartsAt: null,
+  autoAdvanceAt: null,
+  podiumRevealedCount: null,
 };
 
 const REST_ROWS: Array<[QuizshowErrorCode, number]> = [
@@ -188,5 +193,256 @@ describe('quizshow errors', () => {
   ] as const)('names the cause of %s as a socket code', (code, message) => {
     expect(QUIZSHOW_ERRORS[code]).toEqual({ status: null, message });
     expect('cursor' in quizshowAckFailure(code)).toBe(false);
+  });
+});
+
+/** Contract 3.3 plus the coordinator's per-host pairing code: every new code with its status (null for socket codes) and its log message. */
+const PULSE_LIVE_V2_ROWS: Array<[QuizshowErrorCode, number | null, string]> = [
+  ['quizshow_session_not_started', null, "The game hasn't started yet."],
+  ['quizshow_already_started', null, 'The game has already started.'],
+  ['quizshow_session_paused', null, 'The game is paused. Resume it first.'],
+  ['quizshow_session_ended', null, 'This game has ended.'],
+  [
+    'quizshow_spin_not_available',
+    null,
+    'You can spin on a wheel or between rounds.',
+  ],
+  ['quizshow_no_wheel_open', null, 'No wheel is open right now.'],
+  ['quizshow_no_timer_running', null, 'No timer is running to add time to.'],
+  ['quizshow_already_revealed', null, 'The answer is already showing.'],
+  [
+    'quizshow_nothing_to_reveal',
+    null,
+    'No question is taking answers to reveal.',
+  ],
+  ['quizshow_nothing_to_skip', null, "There's no question to skip right now."],
+  ['quizshow_review_not_open', null, "The answers aren't in review right now."],
+  [
+    'quizshow_unhide_review_only',
+    null,
+    'You can show an answer again only while reviewing.',
+  ],
+  [
+    'quizshow_author_removed',
+    null,
+    'The person who wrote this is no longer in the game.',
+  ],
+  [
+    'quizshow_favourite_not_available',
+    null,
+    'Pick a favourite when a written round shows its answers.',
+  ],
+  ['quizshow_teams_off', null, 'This game is played solo, so it has no teams.'],
+  ['quizshow_screen_name_taken', null, 'Someone here already uses that name.'],
+  ['quizshow_joining_locked', 403, 'The host closed joining for this game.'],
+  ['quizshow_not_in_lobby', 409, 'This works only before the game starts.'],
+  ['quizshow_move_during_question', null, 'Move people between questions.'],
+  ['quizshow_player_left', null, 'That person left the game.'],
+  [
+    'quizshow_rescore_not_now',
+    null,
+    "Fix answers while this question's answer is showing.",
+  ],
+  [
+    'quizshow_accept_needs_typed_answer',
+    null,
+    'Only typed answers can be accepted.',
+  ],
+  [
+    'quizshow_change_needs_choice_question',
+    null,
+    'Only a multiple choice or true or false answer can be changed.',
+  ],
+  ['quizshow_answer_text_not_found', null, 'Nobody wrote that answer.'],
+  [
+    'quizshow_answer_already_correct',
+    null,
+    'That answer already counts as correct.',
+  ],
+  [
+    'quizshow_correct_option_not_found',
+    null,
+    "That option isn't in this question.",
+  ],
+  [
+    'quizshow_every_option_correct',
+    null,
+    'At least one option has to stay wrong.',
+  ],
+  [
+    'quizshow_adjust_not_now',
+    null,
+    'Change points while the game runs, before the podium.',
+  ],
+  ['quizshow_adjust_below_zero', null, "A score can't go below 0."],
+  [
+    'quizshow_entrant_not_found',
+    null,
+    "That player or team isn't in this game.",
+  ],
+  ['quizshow_pairing_code_not_found', null, 'No screen is showing that code.'],
+  [
+    'quizshow_pairing_code_expired',
+    null,
+    'That code expired. Show a new one on the other screen.',
+  ],
+  ['quizshow_pairing_code_used', null, 'That code is already paired.'],
+  [
+    'quizshow_paired_devices_full',
+    null,
+    'This game already has 6 paired devices. Unpair one first.',
+  ],
+  [
+    'quizshow_helper_cannot_pair',
+    null,
+    "Only the game's host can pair devices.",
+  ],
+  [
+    'quizshow_helper_is_playing',
+    null,
+    "That person is playing this game, so they can't run it.",
+  ],
+  [
+    'quizshow_device_not_found',
+    null,
+    "That device isn't paired with this game.",
+  ],
+  ['quizshow_device_unpaired', null, 'The host unpaired this screen.'],
+  [
+    'quizshow_device_ticket_expired',
+    null,
+    'This pairing expired. Pair the screen again.',
+  ],
+  ['quizshow_pairing_not_found', 404, 'This code is gone. Show a new one.'],
+  [
+    'quizshow_pairing_rate_limited',
+    429,
+    'Too many pairing codes right now. Try again in a few minutes.',
+  ],
+  [
+    'quizshow_pairing_too_many_tries',
+    null,
+    'Too many wrong codes. Wait a few minutes and try again.',
+  ],
+  [
+    'quizshow_guest_push_cooldown',
+    null,
+    'Guests were told less than 2 hours ago.',
+  ],
+  [
+    'quizshow_guest_push_already_sent',
+    null,
+    "Guests already have this game's code.",
+  ],
+  [
+    'quizshow_guest_push_needs_event',
+    null,
+    "Only an event's game can notify guests.",
+  ],
+  ['quizshow_guest_push_practice', null, 'A practice lobby notifies nobody.'],
+  [
+    'quizshow_refresh_quiz_incomplete',
+    422,
+    'Your latest edits have problems to fix before this lobby can use them.',
+  ],
+  [
+    'quizshow_refresh_adults_mismatch',
+    422,
+    "Your latest edits have an 18+ round this game can't hold.",
+  ],
+  [
+    'quizshow_refresh_adults_lobby_joined',
+    409,
+    "People already joined, so this game can't turn 18+ now. Open a new lobby for the 18+ version.",
+  ],
+  ['quizshow_refresh_quiz_gone', 404, 'This quiz no longer exists.'],
+  [
+    'quizshow_rematch_not_found',
+    404,
+    "There's no finished game here to replay.",
+  ],
+  [
+    'quizshow_rematch_expired',
+    409,
+    'A rematch opens up to 30 minutes after a game ends.',
+  ],
+  ['quizshow_reaction_not_now', null, 'Reactions open between questions.'],
+  [
+    'quizshow_import_round_not_found',
+    422,
+    'One of the chosen rounds is no longer in that quiz.',
+  ],
+  [
+    'quizshow_import_too_many_rounds',
+    422,
+    'Adding these rounds goes over the 10 round limit.',
+  ],
+  [
+    'quizshow_import_too_many_questions',
+    422,
+    'Adding these rounds goes over 100 questions.',
+  ],
+  [
+    'quizshow_import_too_many_wheels',
+    422,
+    'Adding these rounds goes over 3 wheels.',
+  ],
+];
+
+describe('quizshow errors of Pulse Live v2', () => {
+  it.each(PULSE_LIVE_V2_ROWS)(
+    'gives %s the status %s and its log message',
+    (code, status, message) => {
+      expect(QUIZSHOW_ERRORS[code]).toEqual({ status, message });
+    },
+  );
+
+  it('builds the REST body of every new code with an HTTP status', () => {
+    for (const [code, status] of PULSE_LIVE_V2_ROWS) {
+      if (status === null) continue;
+      const error = quizshowError(code);
+      expect(error.getStatus()).toBe(status);
+      expect(error.getResponse()).toEqual({
+        statusCode: status,
+        code,
+        message: QUIZSHOW_ERRORS[code].message,
+      });
+    }
+  });
+
+  it('answers a full pairing code space with 503 and the rate-limit code', () => {
+    const error = quizshowErrorWithStatus(
+      'quizshow_pairing_rate_limited',
+      HttpStatus.SERVICE_UNAVAILABLE,
+    );
+    expect(error.getStatus()).toBe(503);
+    expect(error.getResponse()).toEqual({
+      statusCode: 503,
+      code: 'quizshow_pairing_rate_limited',
+      message: QUIZSHOW_ERRORS.quizshow_pairing_rate_limited.message,
+    });
+    expect(quizshowCodeOf(error)).toBe('quizshow_pairing_rate_limited');
+    expect(QUIZSHOW_ERRORS.quizshow_pairing_rate_limited.status).toBe(
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  });
+
+  it('carries the suggested screen name on a taken name and leaves it out otherwise', () => {
+    expect(
+      quizshowAckFailure('quizshow_screen_name_taken', undefined, {
+        suggestedScreenName: 'Alex 2',
+      }),
+    ).toEqual({
+      ok: false,
+      code: 'quizshow_screen_name_taken',
+      message: 'Someone here already uses that name.',
+      suggestedScreenName: 'Alex 2',
+    });
+    expect(
+      'suggestedScreenName' in quizshowAckFailure('quizshow_screen_name_taken'),
+    ).toBe(false);
+    expect(
+      quizshowAckFailure('quizshow_session_paused', cursorFixture),
+    ).toHaveProperty('cursor', cursorFixture);
   });
 });

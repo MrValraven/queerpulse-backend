@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable } from '@nestjs/common';
 import { DataSource, EntityManager, QueryFailedError } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
@@ -20,6 +20,8 @@ import {
 } from './quizshow-import-sources';
 import {
   buildRoundRows,
+  normaliseStoredQuestion,
+  normalisedScreenLanguage,
   toQuizShape,
   toQuizshowQuiz,
 } from './quizshow-quiz-mapping';
@@ -29,13 +31,27 @@ import {
   structuralProblems,
   type QuizshowValidatableQuiz,
 } from './quizshow-quiz-validation';
+import { withRoundSettingsDefaults } from './quizshow-stored-shapes';
+import { nameOf } from './quizshow-template-reads';
+import {
+  isWheelRoundKind,
+  wheelRoundIndexOfRange,
+  wheelSliceRoundIndexes,
+} from './quizshow-wheel';
+import { QUIZSHOW_LIMITS } from './quizshow.contract';
 import type {
+  QuizshowErrorCode,
   QuizshowGameResponse,
   QuizshowImportSource,
   QuizshowLiveSessionRef,
+  QuizshowQuestionInput,
   QuizshowQuiz,
+  QuizshowQuizChangedDetails,
+  QuizshowQuizProblemCode,
   QuizshowQuizResponse,
   QuizshowQuizShape,
+  QuizshowRoundInput,
+  QuizshowSourceTemplateRef,
 } from './quizshow.contract';
 
 const QUIZ_EVENT_UNIQUE_CONSTRAINT = 'UQ_quizshow_quizzes_event_id';
@@ -52,13 +68,73 @@ export interface QuizshowQuizWriteInput {
   userId: string;
   shape: QuizshowQuizShape;
   sourceTemplateId: string | null;
-  /** undefined skips the stale check (imports and new games). */
+  /** When the quiz copied its source template (contract 6.25); undefined keeps the stored value. */
+  sourceTemplateCopiedAt?: Date | null;
+  /** undefined skips the stale check (replace imports and new games). */
   expectedUpdatedAt: string | null | undefined;
 }
 
 export interface QuizshowImportedShape {
   shape: QuizshowQuizShape;
   sourceTemplateId: string | null;
+  /** Now for a template source; the source quiz's own stamp for an event or a game. */
+  sourceTemplateCopiedAt: Date | null;
+}
+
+/** An import into an event's quiz or a stored game (contract 6.28). */
+export interface QuizshowImportRun {
+  target: Extract<QuizshowQuizTarget, { kind: 'event' } | { kind: 'game' }>;
+  userId: string;
+  input: QuizshowImportDto;
+  exclusion: { eventSlug: string | null; gameId: string | null };
+  /** A game keeps its own title on every import; null takes the source's on replace. */
+  keptTitle: string | null;
+}
+
+/** A stored quiz row with its wire quiz. */
+interface LoadedQuiz {
+  record: QuizshowQuizRecord;
+  quiz: QuizshowQuiz;
+}
+
+/** Which import limit each structural problem code stands for (contract 6.28), checked in this order. */
+const IMPORT_LIMIT_CODES: ReadonlyArray<
+  [QuizshowQuizProblemCode, QuizshowErrorCode]
+> = [
+  ['too_many_rounds', 'quizshow_import_too_many_rounds'],
+  ['too_many_questions', 'quizshow_import_too_many_questions'],
+  ['too_many_wheels', 'quizshow_import_too_many_wheels'],
+];
+
+/** $1 quiz id: the quiz's source template while it is published, with its card title and latest publish. */
+const SOURCE_TEMPLATE_SQL = `
+  SELECT
+    "template"."id" AS "template_id",
+    "template"."card_title_en" AS "card_title_en",
+    "template"."card_title_pt" AS "card_title_pt",
+    "template"."content_updated_at" AS "content_updated_at",
+    "template"."change_note_en" AS "change_note_en",
+    "template"."change_note_pt" AS "change_note_pt"
+  FROM "quizshow_quizzes" "quiz"
+  INNER JOIN "quizshow_templates" "template" ON "template"."id" = "quiz"."source_template_id"
+  WHERE "quiz"."id" = $1
+    AND "template"."published_at" IS NOT NULL
+`;
+
+/** $1 user id: the profile name of the member who last saved a quiz. */
+const QUIZ_EDITOR_NAME_SQL = `
+  SELECT "editor"."first_name" AS "first_name", "editor"."last_name" AS "last_name"
+  FROM "profiles" "editor"
+  WHERE "editor"."user_id" = $1
+`;
+
+interface SourceTemplateRow {
+  template_id: string;
+  card_title_en: string;
+  card_title_pt: string;
+  content_updated_at: Date | string | null;
+  change_note_en: string;
+  change_note_pt: string;
 }
 
 /** $1 template id: the template's quiz id while the template is published. */
@@ -68,7 +144,7 @@ const PUBLISHED_TEMPLATE_QUIZ_SQL = `
   WHERE "template"."id" = $1 AND "template"."published_at" IS NOT NULL
 `;
 
-/** $1 game quiz id: the open session with its player count, and whether kept results exist. */
+/** $1 game quiz id: the open session with its player count, practice flag and snapshot stamp, and whether kept results exist. */
 const GAME_RESPONSE_STATE_SQL = `
   SELECT
     "open_session"."id" AS "session_id",
@@ -77,6 +153,8 @@ const GAME_RESPONSE_STATE_SQL = `
     "open_session"."play_mode" AS "play_mode",
     "open_session"."started_at" AS "started_at",
     "open_session"."player_count" AS "player_count",
+    "open_session"."is_practice" AS "is_practice",
+    "open_session"."source_updated_at" AS "source_updated_at",
     EXISTS (
       SELECT 1
       FROM "quizshow_results" "result"
@@ -92,6 +170,8 @@ const GAME_RESPONSE_STATE_SQL = `
       "session"."status",
       "session"."play_mode",
       "session"."started_at",
+      "session"."is_practice",
+      ("session"."quiz_snapshot" ->> 'sourceUpdatedAt') AS "source_updated_at",
       (
         SELECT COUNT(*)::int FROM "quizshow_players" "player"
         WHERE "player"."session_id" = "session"."id"
@@ -104,7 +184,7 @@ const GAME_RESPONSE_STATE_SQL = `
   ) AS "open_session" ON true
 `;
 
-/** $1 event id: the open session with its player count, and whether kept results exist. */
+/** $1 event id: the open session with its player count, practice flag and snapshot stamp, and whether kept results exist. */
 const QUIZ_RESPONSE_STATE_SQL = `
   SELECT
     "open_session"."id" AS "session_id",
@@ -113,6 +193,8 @@ const QUIZ_RESPONSE_STATE_SQL = `
     "open_session"."play_mode" AS "play_mode",
     "open_session"."started_at" AS "started_at",
     "open_session"."player_count" AS "player_count",
+    "open_session"."is_practice" AS "is_practice",
+    "open_session"."source_updated_at" AS "source_updated_at",
     EXISTS (
       SELECT 1
       FROM "quizshow_results" "result"
@@ -128,6 +210,8 @@ const QUIZ_RESPONSE_STATE_SQL = `
       "session"."status",
       "session"."play_mode",
       "session"."started_at",
+      "session"."is_practice",
+      ("session"."quiz_snapshot" ->> 'sourceUpdatedAt') AS "source_updated_at",
       (
         SELECT COUNT(*)::int FROM "quizshow_players" "player"
         WHERE "player"."session_id" = "session"."id"
@@ -154,13 +238,20 @@ const ORGANISED_EVENT_BY_SLUG_SQL = `
     )
 `;
 
-interface QuizResponseStateRow {
+/** The open session columns a quiz response or a game list row reads. */
+export interface QuizshowLiveSessionRow {
   session_id: string | null;
   join_code: string | null;
   status: QuizshowLiveSessionRef['status'] | null;
   play_mode: QuizshowLiveSessionRef['playMode'] | null;
   started_at: Date | string | null;
   player_count: number | null;
+  is_practice: boolean | null;
+  /** The quiz `updatedAt` the session snapshot was built from; null on a snapshot stored before v2. */
+  source_updated_at: string | null;
+}
+
+interface QuizResponseStateRow extends QuizshowLiveSessionRow {
   has_results: boolean;
 }
 
@@ -178,23 +269,214 @@ function toIsoString(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
 }
 
-function toLiveSessionRef(
-  state: QuizResponseStateRow | undefined,
+/**
+ * The open session of a quiz. `quizUpdatedAt` is the stored quiz's stamp:
+ * a lobby whose snapshot came from another save is behind (contract 6.10).
+ * A snapshot stored before v2 has no stamp and reads as '', so an old lobby
+ * reads as behind, which it is. A running session is never behind.
+ */
+export function toLiveSessionRef(
+  state: QuizshowLiveSessionRow | undefined,
+  quizUpdatedAt: string | null,
 ): QuizshowLiveSessionRef | null {
-  return state?.session_id &&
-    state.join_code &&
-    state.status &&
-    state.play_mode &&
-    state.started_at
-    ? {
-        sessionId: state.session_id,
-        joinCode: state.join_code,
-        status: state.status,
-        playMode: state.play_mode,
-        playerCount: state.player_count ?? 0,
-        startedAt: toIsoString(state.started_at),
-      }
-    : null;
+  if (
+    !state?.session_id ||
+    !state.join_code ||
+    !state.status ||
+    !state.play_mode ||
+    !state.started_at
+  ) {
+    return null;
+  }
+  return {
+    sessionId: state.session_id,
+    joinCode: state.join_code,
+    status: state.status,
+    playMode: state.play_mode,
+    playerCount: state.player_count ?? 0,
+    startedAt: toIsoString(state.started_at),
+    isPractice: state.is_practice === true,
+    isBehindQuiz:
+      state.status === 'lobby' &&
+      quizUpdatedAt !== null &&
+      (state.source_updated_at ?? '') !== quizUpdatedAt,
+  };
+}
+
+/** Contract 2.4: MC `correctIndexes` are stored sorted ascending. */
+function withSortedCorrectIndexes(
+  question: QuizshowQuestionInput,
+): QuizshowQuestionInput {
+  if (
+    question.type !== 'multiple_choice' ||
+    question.answer === null ||
+    !Array.isArray(question.answer.correctIndexes)
+  ) {
+    return question;
+  }
+  return {
+    ...question,
+    answer: {
+      ...question.answer,
+      correctIndexes: [...question.answer.correctIndexes].sort(
+        (first, second) => first - second,
+      ),
+    },
+  };
+}
+
+/**
+ * Decision A22: a studio page cached before the deploy saves the old shapes
+ * (MC `correctIndex`, a closest answer without a tolerance, questions and
+ * rounds missing the v2 fields and settings). Each round and question goes through the read
+ * normalisers first, so validation and the write see the v2 shape. Idempotent.
+ */
+export function normalisedInputRounds(
+  rounds: QuizshowValidatableQuiz['rounds'],
+): QuizshowRoundInput[] {
+  return rounds.map((round) => ({
+    ...round,
+    settings: withRoundSettingsDefaults(round.settings),
+    questions: round.questions.map((question) =>
+      withSortedCorrectIndexes(
+        normaliseStoredQuestion(
+          question as unknown as Readonly<Record<string, unknown>>,
+        ),
+      ),
+    ),
+  }));
+}
+
+/**
+ * The shape a write stores: normalised rows, and a screen language the quiz's
+ * languages allow (contract 6.26). Each entry point runs it once and hands the
+ * result to `assertPreparedShapeAllowed` and `writePreparedQuiz`.
+ */
+export function prepareQuizShape(shape: QuizshowQuizShape): QuizshowQuizShape {
+  return {
+    ...shape,
+    screenLanguage: normalisedScreenLanguage(
+      shape.languages,
+      shape.screenLanguage,
+    ),
+    rounds: normalisedInputRounds(shape.rounds),
+  };
+}
+
+/** The template line of a quiz (contract 6.25); null when either stamp is missing. */
+function toSourceTemplateRef(
+  row: SourceTemplateRow | undefined,
+  copiedAt: Date | null,
+): QuizshowSourceTemplateRef | null {
+  if (!row || row.content_updated_at === null || copiedAt === null) {
+    return null;
+  }
+  const lastPublishedAt = new Date(row.content_updated_at);
+  return {
+    templateId: row.template_id,
+    title: { en: row.card_title_en, pt: row.card_title_pt },
+    copiedAt: copiedAt.toISOString(),
+    lastPublishedAt: lastPublishedAt.toISOString(),
+    hasUpdate: lastPublishedAt.getTime() > copiedAt.getTime(),
+    changeNote: { en: row.change_note_en, pt: row.change_note_pt },
+  };
+}
+
+/**
+ * A chosen wheel keeps the slices it brought: its slice count is pinned to
+ * the size of its source range, so an Auto wheel (or one whose source range
+ * ran short of its count) never takes a chosen row that follows it in the
+ * append as one more slice. A wheel that brought fewer than the minimum is
+ * left as it is, the same rule `withTrailingWheelPinned` keeps.
+ */
+function withChosenWheelPinned(
+  sourceRounds: readonly QuizshowRoundInput[],
+  round: QuizshowRoundInput,
+  roundIndex: number,
+): QuizshowRoundInput {
+  if (!isWheelRoundKind(round.kind)) return round;
+  const sliceCount = wheelSliceRoundIndexes(sourceRounds, roundIndex).length;
+  if (sliceCount < QUIZSHOW_LIMITS.wheelSlicesMin) return round;
+  return { ...round, settings: { ...round.settings, sliceCount } };
+}
+
+/**
+ * The chosen source rows of an append, in source order (contract 6.28). null
+ * takes every row as it is; a chosen wheel row brings every slice row of its
+ * range and keeps that many slices (`withChosenWheelPinned`).
+ * An empty choice names no round, so it gets the round refusal and writes nothing.
+ */
+function chosenSourceRounds(
+  sourceRounds: readonly QuizshowRoundInput[],
+  roundIndexes: readonly number[] | null | undefined,
+): QuizshowRoundInput[] {
+  if (roundIndexes === null || roundIndexes === undefined) {
+    return [...sourceRounds];
+  }
+  if (roundIndexes.length === 0) {
+    throw quizshowError('quizshow_import_round_not_found');
+  }
+  const chosenIndexes = new Set<number>();
+  for (const roundIndex of roundIndexes) {
+    if (
+      !Number.isInteger(roundIndex) ||
+      roundIndex < 0 ||
+      roundIndex >= sourceRounds.length
+    ) {
+      throw quizshowError('quizshow_import_round_not_found');
+    }
+    chosenIndexes.add(roundIndex);
+    for (const sliceRoundIndex of wheelSliceRoundIndexes(
+      sourceRounds,
+      roundIndex,
+    )) {
+      chosenIndexes.add(sliceRoundIndex);
+    }
+  }
+  return sourceRounds.flatMap((round, roundIndex) =>
+    chosenIndexes.has(roundIndex)
+      ? [withChosenWheelPinned(sourceRounds, round, roundIndex)]
+      : [],
+  );
+}
+
+/**
+ * Rows appended after a wheel would read as its slices when the wheel's range
+ * reaches the end of the target (an Auto wheel takes up to 8). Pinning that
+ * wheel's slice count to the slices it holds now keeps the target's meaning,
+ * so every appended row stays a plain round, a source slice row chosen
+ * without its own wheel included. A wheel holding fewer than the minimum
+ * slices is left as it is: a pinned count under the minimum would refuse the
+ * studio's next save, and that wheel already shows its too-few-slices problem.
+ */
+function withTrailingWheelPinned(
+  rounds: readonly QuizshowRoundInput[],
+): QuizshowRoundInput[] {
+  const lastRowIndex = rounds.length - 1;
+  const lastRow = rounds[lastRowIndex];
+  if (!lastRow) return [...rounds];
+  const wheelRowIndex = isWheelRoundKind(lastRow.kind)
+    ? lastRowIndex
+    : wheelRoundIndexOfRange(rounds, lastRowIndex);
+  if (wheelRowIndex === null) return [...rounds];
+  const sliceCount = wheelSliceRoundIndexes(rounds, wheelRowIndex).length;
+  if (sliceCount < QUIZSHOW_LIMITS.wheelSlicesMin) return [...rounds];
+  return rounds.map((round, roundIndex) =>
+    roundIndex === wheelRowIndex
+      ? { ...round, settings: { ...round.settings, sliceCount } }
+      : round,
+  );
+}
+
+/** The 422 of an append whose merged quiz breaks a limit; any other problem is the quiz invalid refusal. */
+function assertAppendWithinLimits(shape: QuizshowValidatableQuiz): void {
+  const problems = structuralProblems(shape);
+  if (problems.length === 0) return;
+  const problemCodes = new Set(problems.map((problem) => problem.code));
+  for (const [problemCode, errorCode] of IMPORT_LIMIT_CODES) {
+    if (problemCodes.has(problemCode)) throw quizshowError(errorCode);
+  }
+  throw quizshowErrorWithDetails('quizshow_quiz_invalid', { problems });
 }
 
 /**
@@ -224,9 +506,9 @@ export class QuizshowQuizService {
   ): Promise<QuizshowQuizResponse> {
     const event = await this.loadOrganisedEvent(slug, userId);
     // Sound because IsQuizshowAnswerForType fixes each answer's shape and structuralProblems rejects the rest.
-    const inputShape = input as unknown as QuizshowQuizShape;
+    const inputShape = prepareQuizShape(input as unknown as QuizshowQuizShape);
     const target: QuizshowQuizTarget = { kind: 'event', event };
-    this.assertShapeAllowed(target, inputShape);
+    this.assertPreparedShapeAllowed(target, inputShape);
     const storedQuiz = await this.loadQuiz(event.id);
     const storedMediaRefs = (storedQuiz?.rounds ?? []).flatMap((round) =>
       round.questions.map((question) => question.mediaRef),
@@ -240,7 +522,7 @@ export class QuizshowQuizService {
         );
       }
     }
-    await this.writeQuiz({
+    await this.writePreparedQuiz({
       target,
       userId,
       shape: inputShape,
@@ -256,21 +538,97 @@ export class QuizshowQuizService {
     input: QuizshowImportDto,
   ): Promise<QuizshowQuizResponse> {
     const event = await this.loadOrganisedEvent(slug, userId);
-    const { shape, sourceTemplateId } = await this.resolveImportShape(
+    await this.runImport({
+      target: { kind: 'event', event },
+      userId,
       input,
-      userId,
-      { eventSlug: slug, gameId: null },
-    );
-    const target: QuizshowQuizTarget = { kind: 'event', event };
-    this.assertShapeAllowed(target, shape);
-    await this.writeQuiz({
-      target,
-      userId,
-      shape,
-      sourceTemplateId,
-      expectedUpdatedAt: undefined,
+      exclusion: { eventSlug: slug, gameId: null },
+      keptTitle: null,
     });
     return this.buildResponse(event);
+  }
+
+  /**
+   * Contract 6.28. Replace (the default) swaps the target's quiz for the
+   * source's. Append keeps the target's title, languages, screen language
+   * and rows, then adds the chosen source rows with fresh ids, guarded by the
+   * target's `updatedAt` at the check here and again under the row lock.
+   */
+  async runImport(run: QuizshowImportRun): Promise<void> {
+    const { target, userId, input } = run;
+    const imported = await this.resolveImportShape(
+      input,
+      userId,
+      run.exclusion,
+    );
+    if ((input.mode ?? 'replace') === 'replace') {
+      const shape = prepareQuizShape(
+        run.keptTitle === null
+          ? imported.shape
+          : { ...imported.shape, title: run.keptTitle },
+      );
+      this.assertPreparedShapeAllowed(target, shape);
+      await this.writePreparedQuiz({
+        target,
+        userId,
+        shape,
+        sourceTemplateId: imported.sourceTemplateId,
+        sourceTemplateCopiedAt: imported.sourceTemplateCopiedAt,
+        expectedUpdatedAt: undefined,
+      });
+      return;
+    }
+    const stored = await this.loadTargetQuiz(target);
+    const storedUpdatedAt = stored ? stored.quiz.updatedAt : null;
+    // Decision A23: an append without a token answers the same conflict, so the studio reloads.
+    if (
+      input.expectedUpdatedAt === undefined ||
+      input.expectedUpdatedAt !== storedUpdatedAt
+    ) {
+      throw await this.quizChangedError(
+        stored?.record ?? null,
+        this.dataSource.manager,
+      );
+    }
+    const chosenRounds = chosenSourceRounds(
+      imported.shape.rounds,
+      input.roundIndexes,
+    );
+    const baseShape: QuizshowQuizShape = stored
+      ? toQuizShape(stored.quiz)
+      : {
+          ...imported.shape,
+          title: run.keptTitle ?? imported.shape.title,
+          rounds: [],
+        };
+    const mergedShape = prepareQuizShape({
+      ...baseShape,
+      rounds: [...withTrailingWheelPinned(baseShape.rounds), ...chosenRounds],
+    });
+    assertAppendWithinLimits(mergedShape);
+    this.assertAdultsRuleMet(target, mergedShape);
+    // Contract 6.25: a template append names the source only on a quiz with none; one that has a source keeps its id.
+    const storedSourceTemplateId = stored?.record.sourceTemplateId ?? null;
+    const isNewTemplateSource =
+      input.from === 'template' && storedSourceTemplateId === null;
+    // An append from the quiz's own template brings its latest rows, so the copy is as new as this append (contract 13).
+    const isOwnTemplateSource =
+      input.from === 'template' &&
+      storedSourceTemplateId !== null &&
+      imported.sourceTemplateId === storedSourceTemplateId;
+    await this.writePreparedQuiz({
+      target,
+      userId,
+      shape: mergedShape,
+      sourceTemplateId: isNewTemplateSource
+        ? imported.sourceTemplateId
+        : storedSourceTemplateId,
+      sourceTemplateCopiedAt:
+        isNewTemplateSource || isOwnTemplateSource
+          ? imported.sourceTemplateCopiedAt
+          : undefined,
+      expectedUpdatedAt: input.expectedUpdatedAt,
+    });
   }
 
   /** Events the caller organises with a quiz, newest first, then the caller's games. */
@@ -327,6 +685,8 @@ export class QuizshowQuizService {
       return {
         shape: toQuizShape(templateQuiz),
         sourceTemplateId: templateId,
+        // Contract 6.25: the copy is as new as this import.
+        sourceTemplateCopiedAt: new Date(),
       };
     }
     if (input.from === 'event') {
@@ -336,23 +696,25 @@ export class QuizshowQuizService {
       ) {
         throw quizshowError('quizshow_import_same_event');
       }
-      const sourceQuiz = await this.loadOrganisedSourceQuiz(
+      const source = await this.loadOrganisedSourceQuiz(
         input.eventSlug,
         userId,
       );
       return {
-        shape: toQuizShape(sourceQuiz),
-        sourceTemplateId: sourceQuiz.sourceTemplateId,
+        shape: toQuizShape(source.quiz),
+        sourceTemplateId: source.record.sourceTemplateId,
+        sourceTemplateCopiedAt: source.record.sourceTemplateCopiedAt,
       };
     }
-    const sourceQuiz = await this.loadOwnedSourceQuiz(
+    const source = await this.loadOwnedSourceQuiz(
       input.gameId,
       userId,
       exclusion.gameId,
     );
     return {
-      shape: toQuizShape(sourceQuiz),
-      sourceTemplateId: sourceQuiz.sourceTemplateId,
+      shape: toQuizShape(source.quiz),
+      sourceTemplateId: source.record.sourceTemplateId,
+      sourceTemplateCopiedAt: source.record.sourceTemplateCopiedAt,
     };
   }
 
@@ -374,8 +736,9 @@ export class QuizshowQuizService {
       quiz,
       problems: completenessProblems(quiz),
       isAdultsEvent: record.isAdultsOnly,
-      liveSession: toLiveSessionRef(state),
+      liveSession: toLiveSessionRef(state, quiz.updatedAt),
       hasResults: state?.has_results === true,
+      lastOpenSettings: record.lastOpenSettings ?? null,
     };
   }
 
@@ -384,11 +747,11 @@ export class QuizshowQuizService {
     eventId: string,
     manager?: EntityManager,
   ): Promise<QuizshowQuiz | null> {
-    const entityManager = manager ?? this.dataSource.manager;
-    const quiz = await entityManager.findOne(QuizshowQuizRecord, {
-      where: { eventId },
-    });
-    return quiz ? this.assembleQuiz(quiz, entityManager) : null;
+    const loaded = await this.loadQuizWithRecord(
+      { eventId },
+      manager ?? this.dataSource.manager,
+    );
+    return loaded?.quiz ?? null;
   }
 
   /** A stored quiz by its own id (a game's id is its quiz id), or null. */
@@ -396,14 +759,41 @@ export class QuizshowQuizService {
     quizId: string,
     manager?: EntityManager,
   ): Promise<QuizshowQuiz | null> {
-    const entityManager = manager ?? this.dataSource.manager;
-    const quiz = await entityManager.findOne(QuizshowQuizRecord, {
-      where: { id: quizId },
-    });
-    return quiz ? this.assembleQuiz(quiz, entityManager) : null;
+    const loaded = await this.loadQuizWithRecord(
+      { id: quizId },
+      manager ?? this.dataSource.manager,
+    );
+    return loaded?.quiz ?? null;
   }
 
-  /** A quiz row with its rounds and questions in position order. */
+  private async loadQuizWithRecord(
+    where: { eventId: string } | { id: string },
+    entityManager: EntityManager,
+  ): Promise<LoadedQuiz | null> {
+    const record = await entityManager.findOne(QuizshowQuizRecord, { where });
+    if (!record) return null;
+    return { record, quiz: await this.assembleQuiz(record, entityManager) };
+  }
+
+  /** The stored quiz an import writes into; a game id that names no row reads as game not found. */
+  private async loadTargetQuiz(
+    target: QuizshowImportRun['target'],
+  ): Promise<LoadedQuiz | null> {
+    if (target.kind === 'event') {
+      return this.loadQuizWithRecord(
+        { eventId: target.event.id },
+        this.dataSource.manager,
+      );
+    }
+    const loaded = await this.loadQuizWithRecord(
+      { id: target.gameId },
+      this.dataSource.manager,
+    );
+    if (!loaded) throw quizshowError('quizshow_game_not_found');
+    return loaded;
+  }
+
+  /** A quiz row with its rounds, its questions in position order and its template line. */
   private async assembleQuiz(
     quiz: QuizshowQuizRecord,
     entityManager: EntityManager,
@@ -412,17 +802,56 @@ export class QuizshowQuizService {
       where: { quizId: quiz.id },
       order: { position: 'ASC' },
     });
-    const questions =
+    const [questions, sourceTemplate] = await Promise.all([
       rounds.length === 0
-        ? []
-        : await entityManager
+        ? Promise.resolve([])
+        : entityManager
             .createQueryBuilder(QuizshowQuestionRecord, 'question')
             .where('question.roundId IN (:...roundIds)', {
               roundIds: rounds.map((round) => round.id),
             })
             .orderBy('question.position', 'ASC')
-            .getMany();
-    return toQuizshowQuiz(quiz, rounds, questions);
+            .getMany(),
+      this.readSourceTemplate(quiz, entityManager),
+    ]);
+    return toQuizshowQuiz(quiz, rounds, questions, sourceTemplate);
+  }
+
+  /** Contract 6.25; a quiz without a source or a copied stamp skips the query. */
+  private async readSourceTemplate(
+    quiz: QuizshowQuizRecord,
+    entityManager: EntityManager,
+  ): Promise<QuizshowSourceTemplateRef | null> {
+    const copiedAt = quiz.sourceTemplateCopiedAt ?? null;
+    if (quiz.sourceTemplateId === null || copiedAt === null) return null;
+    const rows: SourceTemplateRow[] = await entityManager.query(
+      SOURCE_TEMPLATE_SQL,
+      [quiz.id],
+    );
+    return toSourceTemplateRef(rows[0], copiedAt);
+  }
+
+  /**
+   * Contract 6.29 item 54: the 409 names who saved the stored quiz and when.
+   * The name is null when the account is gone or no row is stored.
+   */
+  private async quizChangedError(
+    stored: QuizshowQuizRecord | null,
+    entityManager: EntityManager,
+  ): Promise<HttpException> {
+    const editorUserId = stored?.updatedByUserId ?? null;
+    const nameRows: { first_name: string | null; last_name: string | null }[] =
+      editorUserId === null
+        ? []
+        : await entityManager.query(QUIZ_EDITOR_NAME_SQL, [editorUserId]);
+    const editorRow = nameRows[0];
+    return quizshowErrorWithDetails('quizshow_quiz_changed', {
+      // null when the target has no quiz: its token named one that is gone, or a save was expected on none.
+      updatedAt: stored ? stored.updatedAt.toISOString() : null,
+      updatedByName: editorRow
+        ? nameOf(editorRow.first_name, editorRow.last_name)
+        : null,
+    } satisfies QuizshowQuizChangedDetails);
   }
 
   private async loadOrganisedEvent(
@@ -438,7 +867,7 @@ export class QuizshowQuizService {
   private async loadOrganisedSourceQuiz(
     sourceSlug: string | undefined,
     userId: string,
-  ): Promise<QuizshowQuiz> {
+  ): Promise<LoadedQuiz> {
     const rows: { event_id: string }[] =
       sourceSlug === undefined
         ? []
@@ -447,11 +876,14 @@ export class QuizshowQuizService {
             userId,
           ]);
     const sourceEventId = rows[0]?.event_id;
-    const sourceQuiz = sourceEventId
-      ? await this.loadQuiz(sourceEventId)
+    const source = sourceEventId
+      ? await this.loadQuizWithRecord(
+          { eventId: sourceEventId },
+          this.dataSource.manager,
+        )
       : null;
-    if (!sourceQuiz) throw quizshowError('quizshow_import_source_not_found');
-    return sourceQuiz;
+    if (!source) throw quizshowError('quizshow_import_source_not_found');
+    return source;
   }
 
   /** The quiz of a published template; a draft or unknown id reads as template not found. */
@@ -475,7 +907,7 @@ export class QuizshowQuizService {
     sourceGameId: string | undefined,
     userId: string,
     excludedGameId: string | null,
-  ): Promise<QuizshowQuiz> {
+  ): Promise<LoadedQuiz> {
     if (sourceGameId === undefined || sourceGameId === excludedGameId) {
       throw quizshowError('quizshow_import_source_not_found');
     }
@@ -488,17 +920,33 @@ export class QuizshowQuizService {
       }
       throw error;
     }
-    const sourceQuiz = await this.loadQuizById(sourceGame.id);
-    if (!sourceQuiz) throw quizshowError('quizshow_import_source_not_found');
-    return sourceQuiz;
+    const source = await this.loadQuizWithRecord(
+      { id: sourceGame.id },
+      this.dataSource.manager,
+    );
+    if (!source) throw quizshowError('quizshow_import_source_not_found');
+    return source;
   }
 
   /**
-   * Structural problems for every target, then the 18+ rule: an event needs
-   * its 18+ flag (the event code), a game needs its 18+ switch (the game
-   * code), and a template allows adults rounds.
+   * For a caller holding a raw shape (the templates service): normalises the
+   * rows (decision A22), then runs `assertPreparedShapeAllowed`.
    */
   assertShapeAllowed(
+    target: QuizshowQuizTarget,
+    shape: QuizshowValidatableQuiz,
+  ): void {
+    this.assertPreparedShapeAllowed(target, {
+      ...shape,
+      rounds: normalisedInputRounds(shape.rounds),
+    });
+  }
+
+  /**
+   * Structural problems for every target, then the 18+ rule. The shape has
+   * been through `prepareQuizShape` or `normalisedInputRounds` already.
+   */
+  assertPreparedShapeAllowed(
     target: QuizshowQuizTarget,
     shape: QuizshowValidatableQuiz,
   ): void {
@@ -506,6 +954,17 @@ export class QuizshowQuizService {
     if (problems.length > 0) {
       throw quizshowErrorWithDetails('quizshow_quiz_invalid', { problems });
     }
+    this.assertAdultsRuleMet(target, shape);
+  }
+
+  /**
+   * The 18+ rule: an event needs its 18+ flag (the event code), a game needs
+   * its 18+ switch (the game code), and a template allows adults rounds.
+   */
+  private assertAdultsRuleMet(
+    target: QuizshowQuizTarget,
+    shape: QuizshowValidatableQuiz,
+  ): void {
     if (target.kind === 'template') return;
     if (!hasAdultsRound(shape)) return;
     if (target.kind === 'event') {
@@ -519,12 +978,23 @@ export class QuizshowQuizService {
     }
   }
 
+  /** For a caller holding a raw shape (the templates service): `prepareQuizShape`, then `writePreparedQuiz`. */
+  writeQuiz(
+    input: QuizshowQuizWriteInput,
+    manager?: EntityManager,
+  ): Promise<string> {
+    return this.writePreparedQuiz(
+      { ...input, shape: prepareQuizShape(input.shape) },
+      manager,
+    );
+  }
+
   /**
-   * Replaces the target's quiz with the shape and returns the quiz id. With a
-   * manager the write joins that transaction; without one it opens its own,
-   * and a racing first save of an event answers as a stale quiz.
+   * Replaces the target's quiz with a prepared shape and returns the quiz id.
+   * With a manager the write joins that transaction; without one it opens
+   * its own, and a racing first save of an event answers as a stale quiz.
    */
-  async writeQuiz(
+  async writePreparedQuiz(
     input: QuizshowQuizWriteInput,
     manager?: EntityManager,
   ): Promise<string> {
@@ -537,10 +1007,11 @@ export class QuizshowQuizService {
       if (input.target.kind !== 'event' || !isEventUniqueViolation(error)) {
         throw error;
       }
-      const winningQuiz = await this.loadQuiz(input.target.event.id);
-      throw quizshowErrorWithDetails('quizshow_quiz_changed', {
-        updatedAt: winningQuiz?.updatedAt ?? null,
-      });
+      const winningQuiz = await this.dataSource.manager.findOne(
+        QuizshowQuizRecord,
+        { where: { eventId: input.target.event.id } },
+      );
+      throw await this.quizChangedError(winningQuiz, this.dataSource.manager);
     }
   }
 
@@ -578,16 +1049,18 @@ export class QuizshowQuizService {
     if (input.expectedUpdatedAt !== undefined) {
       const storedUpdatedAt = stored ? stored.updatedAt.toISOString() : null;
       if (storedUpdatedAt !== input.expectedUpdatedAt) {
-        throw quizshowErrorWithDetails('quizshow_quiz_changed', {
-          updatedAt: storedUpdatedAt,
-        });
+        throw await this.quizChangedError(stored, manager);
       }
     }
+    const { shape } = input;
     const quizColumns = {
-      title: input.shape.title,
-      languages: input.shape.languages,
-      screenLanguage: input.shape.screenLanguage,
+      title: shape.title,
+      languages: shape.languages,
+      screenLanguage: shape.screenLanguage,
       sourceTemplateId: input.sourceTemplateId,
+      ...(input.sourceTemplateCopiedAt === undefined
+        ? {}
+        : { sourceTemplateCopiedAt: input.sourceTemplateCopiedAt }),
       updatedByUserId: input.userId,
       updatedAt: new Date(),
       ...(target.kind === 'game' || target.kind === 'new_game'
@@ -615,7 +1088,7 @@ export class QuizshowQuizService {
       });
       quizId = (insertResult.identifiers[0] as { id: string }).id;
     }
-    const rows = buildRoundRows(quizId, input.shape.rounds);
+    const rows = buildRoundRows(quizId, shape.rounds);
     if (rows.rounds.length > 0) {
       await manager.insert(QuizshowRoundRecord, rows.rounds);
     }
@@ -650,16 +1123,18 @@ export class QuizshowQuizService {
   }
 
   private async buildResponse(event: Event): Promise<QuizshowQuizResponse> {
-    const [quiz, state] = await Promise.all([
-      this.loadQuiz(event.id),
+    const [loaded, state] = await Promise.all([
+      this.loadQuizWithRecord({ eventId: event.id }, this.dataSource.manager),
       this.readResponseState(event.id),
     ]);
+    const quiz = loaded?.quiz ?? null;
     return {
       quiz,
       problems: quiz ? completenessProblems(quiz) : [],
       isAdultsEvent: this.access.isAdultsEvent(event),
-      liveSession: toLiveSessionRef(state),
+      liveSession: toLiveSessionRef(state, quiz?.updatedAt ?? null),
       hasResults: state?.has_results === true,
+      lastOpenSettings: loaded?.record.lastOpenSettings ?? null,
     };
   }
 }

@@ -22,6 +22,11 @@ import {
   RecognitionSignals,
   xpBreakdown,
 } from './recognition.scoring';
+import {
+  QUIZ_BADGE_CATEGORY,
+  type QuizBadgeDetailsDTO,
+} from '../quiz-win-badges/quiz-win-badges.contract';
+import type { QuizBadgeForMember } from '../quiz-win-badges/quiz-win-badges-recognition-reads';
 
 /**
  * Response shapes matched exactly to the frontend's
@@ -83,6 +88,8 @@ export interface BadgeDTO {
    *  from how other people see them. Another member's view never carries the
    *  field because the badge itself is omitted from that response. */
   hiddenFromProfile?: boolean;
+  /** Present only on an admin quiz badge. */
+  quiz?: QuizBadgeDetailsDTO;
 }
 export interface BadgesDTO {
   earnedCount: number;
@@ -282,11 +289,14 @@ export function buildLevelLadder(currentLevel: number): LevelLadderRowDTO[] {
 
 /** `signals` drives locked-badge `progress` and is owner-only (mirrors
  *  `xpBreakdown` below) — pass `null` for a non-owner view so a stranger
- *  can't read e.g. "6 of 10 gatherings attended" off someone else's page. */
+ *  can't read e.g. "6 of 10 gatherings attended" off someone else's page.
+ *  `quizBadges` are the member's admin quiz badges in read order; they join
+ *  `earned` after the code badges and never appear in `locked` or `seasonal`. */
 export function buildBadges(
   earned: EarnedAwardRow[],
   signals: RecognitionSignals | null = null,
   isOwnerView = true,
+  quizBadges: readonly QuizBadgeForMember[] = [],
 ): BadgesDTO {
   const earnedByKey = new Map(earned.map((row) => [row.badgeKey, row]));
   const earnedBadges: BadgeDTO[] = [];
@@ -346,6 +356,21 @@ export function buildBadges(
     // else: catalogue entry with no `BADGE_REQUIREMENTS` wiring (e.g.
     // `founding-member`) — omitted from the locked grid rather than shown
     // with earning instructions that lead nowhere (COM-14).
+  }
+  for (const quizBadge of quizBadges) {
+    // A hidden quiz badge follows the code badge rule: kept and marked for
+    // its owner, left out of every other viewer's read.
+    if (quizBadge.hiddenFromProfile && !isOwnerView) continue;
+    earnedBadges.push({
+      key: quizBadge.badgeKey,
+      cat: QUIZ_BADGE_CATEGORY,
+      name: quizBadge.details.name.en,
+      context: quizBadge.details.description.en,
+      rarity: quizBadge.rarity,
+      tint: quizBadge.tint,
+      hiddenFromProfile: quizBadge.hiddenFromProfile ? true : undefined,
+      quiz: quizBadge.details,
+    });
   }
   return {
     earnedCount: earnedBadges.length,
@@ -601,6 +626,11 @@ export function buildXpBreakdown(
   ];
 }
 
+/** Every `BADGE_CATALOG` key, the only keys the XP breakdown badges row counts. */
+const CODE_CATALOGUE_BADGE_KEYS: ReadonlySet<string> = new Set(
+  BADGE_CATALOG.map((badgeDefinition) => badgeDefinition.key),
+);
+
 /**
  * `options.resolveInviteLimit` is the member's invite limit rule (see
  * `buildPerks`). `options.isOwnerView` decides whether a badge
@@ -617,24 +647,28 @@ export function buildRecognition(
   options: {
     resolveInviteLimit?: InviteLimitResolver;
     isOwnerView?: boolean;
+    /** The member's quiz badges, as `readQuizBadgesForMember` returns them. */
+    quizBadges?: readonly QuizBadgeForMember[];
   } = {},
 ): RecognitionDTO {
   const level = computeLevel(totalXp);
   const isOwnerView = options.isOwnerView ?? signals !== null;
+  // The badges row of the XP breakdown counts code catalogue badges only, so
+  // a held quiz award key never reads as "23 of 20" there.
+  const heldCodeBadgeKeys = earned
+    .map((award) => award.badgeKey)
+    .filter((badgeKey) => CODE_CATALOGUE_BADGE_KEYS.has(badgeKey));
   return {
     level,
     levelLadder: buildLevelLadder(level.level),
-    badges: buildBadges(earned, signals, isOwnerView),
+    badges: buildBadges(earned, signals, isOwnerView, options.quizBadges),
     perks: buildPerks(
       level.level,
       totalXp,
       claimed,
       options.resolveInviteLimit,
     ),
-    xpBreakdown: buildXpBreakdown(
-      signals,
-      earned.map((a) => a.badgeKey),
-    ),
+    xpBreakdown: buildXpBreakdown(signals, heldCodeBadgeKeys),
     xpLedger: signals ? buildXpLedger(ledgerRows) : [],
   };
 }

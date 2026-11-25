@@ -1,4 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
+import { IsNull } from 'typeorm';
 import type { Event } from '../events/entities/event.entity';
 import type { Profile } from '../users/entities/profile.entity';
 import type { QuizshowPlayerRecord } from './entities/quizshow-player.entity';
@@ -246,6 +247,42 @@ describe('QuizshowAccessService', () => {
     expect(await clean.service.isBarredFromEvent(buildEvent(), MEMBER_ID)).toBe(
       false,
     );
+  });
+
+  it('names why a member is barred: a ban first, then a block, and nothing for an organiser', async () => {
+    const banned = buildService({ isBanned: true, isBlocked: true });
+    expect(await banned.service.eventBarCause(buildEvent(), MEMBER_ID)).toBe(
+      'banned',
+    );
+    const blocked = buildService({ isBlocked: true });
+    expect(await blocked.service.eventBarCause(buildEvent(), MEMBER_ID)).toBe(
+      'blocked',
+    );
+    const organiser = buildService({ isBanned: true, isBlocked: true });
+    expect(
+      await organiser.service.eventBarCause(buildEvent(), COHOST_ID),
+    ).toBeNull();
+    const clean = buildService();
+    expect(
+      await clean.service.eventBarCause(buildEvent(), MEMBER_ID),
+    ).toBeNull();
+  });
+
+  it('counts only players who neither left nor were removed toward event and game capacity', async () => {
+    const eventCheck = buildService({ activePlayerCount: 149 });
+    await eventCheck.service.assertMayPlay(mayPlayInput(MEMBER_ID));
+    expect(eventCheck.players.count).toHaveBeenCalledWith({
+      where: { sessionId: session.id, removedAt: IsNull(), leftAt: IsNull() },
+    });
+    const gameCheck = buildService({ activePlayerCount: 149 });
+    await gameCheck.service.assertMayPlay(gameMayPlayInput(MEMBER_ID));
+    expect(gameCheck.players.count).toHaveBeenCalledWith({
+      where: {
+        sessionId: gameSession.id,
+        removedAt: IsNull(),
+        leftAt: IsNull(),
+      },
+    });
   });
 
   it('treats an event with no host as unblocked', async () => {

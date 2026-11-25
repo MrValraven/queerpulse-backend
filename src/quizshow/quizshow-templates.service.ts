@@ -19,16 +19,19 @@ import {
 import {
   TEMPLATE_CARDS_SQL,
   TEMPLATE_DETAIL_SQL,
+  TEMPLATE_PREVIEW_SQL,
   TEMPLATE_ROWS_SQL,
   missingCardFields,
   templateAuditName,
   toTemplateCard,
   toTemplateDetail,
+  toTemplatePreview,
   toTemplateRow,
   withCopySuffix,
   type TemplateCardRow,
   type TemplateDetailRow,
   type TemplateListRow,
+  type TemplatePreviewRow,
 } from './quizshow-template-reads';
 import type {
   QuizshowQuiz,
@@ -36,6 +39,7 @@ import type {
   QuizshowTemplateCard,
   QuizshowTemplateCardText,
   QuizshowTemplateDetail,
+  QuizshowTemplatePreview,
   QuizshowTemplateRow,
 } from './quizshow.contract';
 
@@ -118,7 +122,26 @@ export class QuizshowTemplatesService {
     return { items: rows.map(toTemplateCard) };
   }
 
-  /** A draft with the default card, no notes and a blank quiz. */
+  /**
+   * What a host sees before adding rounds from a published template: the card
+   * text and each row's prompts. A draft or a missing template reads as not
+   * found, the same as a malformed id.
+   */
+  async getTemplatePreview(
+    templateId: string,
+  ): Promise<QuizshowTemplatePreview> {
+    assertTemplateId(templateId);
+    const rows: TemplatePreviewRow[] = await this.dataSource.query(
+      TEMPLATE_PREVIEW_SQL,
+      [templateId],
+    );
+    const row = rows[0];
+    const quiz = row ? await this.quizzes.loadQuizById(row.quiz_id) : null;
+    if (!row || !quiz) throw quizshowError('quizshow_template_not_found');
+    return toTemplatePreview(row, quiz);
+  }
+
+  /** A draft with the default card, empty staff notes, an empty change note and a blank quiz. */
   async createTemplate(userId: string): Promise<QuizshowTemplateDetail> {
     const templateId = await this.dataSource.transaction(
       async (manager: EntityManager) => {
@@ -142,7 +165,7 @@ export class QuizshowTemplatesService {
     return this.readDetail(templateId);
   }
 
-  /** A draft copy: suffixed card titles, the same description, notes and quiz, and no source. */
+  /** A draft copy: suffixed card titles, the same description, notes and quiz, a null source, an empty change note and a null content stamp. */
   async duplicateTemplate(
     templateId: string,
     userId: string,
@@ -184,7 +207,10 @@ export class QuizshowTemplatesService {
   /**
    * Saves the card, the notes and the quiz in one transaction. The quiz write
    * is guarded by `quiz.expectedUpdatedAt`; a stale token answers quiz changed
-   * with the current `updatedAt` and rolls the card and notes back too.
+   * with the current `updatedAt` and rolls the card and notes back too. The
+   * change note is stored when the body carries one, so an older staff page
+   * keeps the stored note. A save while published moves `contentUpdatedAt`,
+   * which tells host copies made before it that the template has an update.
    */
   async replaceTemplate(
     templateId: string,
@@ -197,7 +223,11 @@ export class QuizshowTemplatesService {
     const target: QuizshowQuizTarget = { kind: 'template', templateId };
     await this.dataSource.transaction(async (manager: EntityManager) => {
       // Serialises the save with a publish, which validates the quiz under its own lock.
-      await this.loadTemplate(templateId, manager, 'for_no_key_update');
+      const template = await this.loadTemplate(
+        templateId,
+        manager,
+        'for_no_key_update',
+      );
       const storedQuiz = await this.loadTemplateQuiz(templateId, manager);
       this.quizzes.assertShapeAllowed(target, inputShape);
       const storedMediaRefs = storedQuiz.rounds.flatMap((round) =>
@@ -225,15 +255,28 @@ export class QuizshowTemplatesService {
       await manager.update(
         QuizshowTemplateRecord,
         { id: templateId },
-        { ...cardColumnsOf(input.card), staffNotes: input.staffNotes },
+        {
+          ...cardColumnsOf(input.card),
+          staffNotes: input.staffNotes,
+          ...(input.changeNote === undefined
+            ? {}
+            : {
+                changeNoteEn: input.changeNote.en.trim(),
+                changeNotePt: input.changeNote.pt.trim(),
+              }),
+          ...(template.publishedAt === null
+            ? {}
+            : { contentUpdatedAt: new Date() }),
+        },
       );
     });
     return this.readDetail(templateId);
   }
 
   /**
-   * Checks the card, then the quiz, and stamps the publish date and the staff
-   * member. Republishing stamps them again. The quiz `updatedAt` stays as it is.
+   * Checks the card, then the quiz, and stamps the publish date, the content
+   * date and the staff member. Republishing stamps them again. The quiz
+   * `updatedAt` stays as it is.
    */
   async publishTemplate(
     templateId: string,
@@ -261,10 +304,15 @@ export class QuizshowTemplatesService {
       if (problems.length > 0) {
         throw quizshowErrorWithDetails('quizshow_quiz_invalid', { problems });
       }
+      const publishedAt = new Date();
       await manager.update(
         QuizshowTemplateRecord,
         { id: templateId },
-        { publishedAt: new Date(), publishedByUserId: userId },
+        {
+          publishedAt,
+          publishedByUserId: userId,
+          contentUpdatedAt: publishedAt,
+        },
       );
       await this.modAudit.writeAuditLog(
         null,
@@ -280,7 +328,10 @@ export class QuizshowTemplatesService {
     return this.readDetail(templateId);
   }
 
-  /** Back to draft with an audit row; a draft answers its detail with no write. */
+  /**
+   * Back to draft with an audit row; a draft answers its detail with no write.
+   * `contentUpdatedAt` stays as it is; the next publish stamps it again.
+   */
   async unpublishTemplate(
     templateId: string,
     userId: string,
@@ -340,6 +391,9 @@ export class QuizshowTemplatesService {
       staffNotes: values.staffNotes,
       publishedAt: null,
       publishedByUserId: null,
+      contentUpdatedAt: null,
+      changeNoteEn: '',
+      changeNotePt: '',
     });
     return (insertResult.identifiers[0] as { id: string }).id;
   }

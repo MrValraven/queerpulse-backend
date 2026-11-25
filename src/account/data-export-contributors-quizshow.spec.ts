@@ -12,6 +12,7 @@ const UNKNOWN_QUESTION_ID = '76000000-0000-4000-8000-000000000003';
 const STARTED = new Date('2026-10-10T20:00:00.000Z');
 const ANSWERED = new Date('2026-10-10T20:05:00.000Z');
 const VOTED = new Date('2026-10-10T20:06:00.000Z');
+const LEFT = new Date('2026-10-10T20:30:00.000Z');
 
 const SNAPSHOT = {
   title: 'Friday quiz',
@@ -38,6 +39,7 @@ function playRow(overrides: Record<string, unknown> = {}) {
     team_name: 'Rainbow',
     score: 2500,
     is_removed: false,
+    left_at: null,
     quiz_snapshot: SNAPSHOT,
     ...overrides,
   };
@@ -84,6 +86,7 @@ describe('QuizshowPlaysExportContributor', () => {
         teamName: 'Rainbow',
         score: 2500,
         wasRemoved: false,
+        leftAt: null,
         answers: [
           {
             questionPrompt: {
@@ -139,6 +142,19 @@ describe('QuizshowPlaysExportContributor', () => {
       null,
     ]);
     expect(play.votes).toEqual([]);
+  });
+
+  it("exports the member's own left_at as an ISO time beside removed_at", async () => {
+    query
+      .mockResolvedValueOnce([playRow({ left_at: LEFT })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const plays = await contributor.buildContribution('member-1');
+    expect(plays).toHaveLength(1);
+    expect(plays[0]!.leftAt).toBe('2026-10-10T20:30:00.000Z');
+    expect(plays[0]!.wasRemoved).toBe(false);
+    const playSql = String((query.mock.calls[0] as unknown[])[0]);
+    expect(playSql).toContain('"player"."left_at" AS "left_at"');
   });
 
   it('exports nothing for a member who never played', async () => {
@@ -283,6 +299,13 @@ describe('QuizshowGamesExportContributor', () => {
           options: [],
           answer: { text: 'one' },
           accepted_answers: ['uno'],
+          media_alt_en: '',
+          media_alt_pt: '',
+          reveal_note_en: '',
+          reveal_note_pt: '',
+          number_unit_en: '',
+          number_unit_pt: '',
+          media_reveal: 'instant',
         },
         {
           round_id: ROUND_ONE_ID,
@@ -293,6 +316,13 @@ describe('QuizshowGamesExportContributor', () => {
           options: [],
           answer: { isTrue: true },
           accepted_answers: [],
+          media_alt_en: '',
+          media_alt_pt: '',
+          reveal_note_en: '',
+          reveal_note_pt: '',
+          number_unit_en: '',
+          number_unit_pt: '',
+          media_reveal: 'instant',
         },
       ]);
     const games = await contributor.buildContribution('member-1');
@@ -317,6 +347,10 @@ describe('QuizshowGamesExportContributor', () => {
                 answer: { text: 'one' },
                 acceptedAnswers: ['uno'],
                 mediaRef: null,
+                mediaAlt: { en: '', pt: '' },
+                revealNote: { en: '', pt: '' },
+                numberUnit: { en: '', pt: '' },
+                mediaReveal: 'instant',
               },
               {
                 type: 'true_false',
@@ -325,6 +359,10 @@ describe('QuizshowGamesExportContributor', () => {
                 answer: { isTrue: true },
                 acceptedAnswers: [],
                 mediaRef: 'media/key.png',
+                mediaAlt: { en: '', pt: '' },
+                revealNote: { en: '', pt: '' },
+                numberUnit: { en: '', pt: '' },
+                mediaReveal: 'instant',
               },
             ],
           },
@@ -341,6 +379,72 @@ describe('QuizshowGamesExportContributor', () => {
     const questionSql = String((query.mock.calls[2] as unknown[])[0]);
     expect(roundSql).toContain('ORDER BY "round"."position"');
     expect(questionSql).toContain('ORDER BY "question"."position"');
+  });
+
+  it("exports the member's picture alt text, reveal notes, number units and picture reveal", async () => {
+    query
+      .mockResolvedValueOnce([
+        {
+          id: GAME_ID,
+          title: 'Pub game',
+          is_adults_only: false,
+          languages: 'both',
+          screen_language: 'en',
+          created_at: CREATED,
+          updated_at: UPDATED,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: ROUND_ONE_ID,
+          quiz_id: GAME_ID,
+          kind: 'quiz',
+          title_en: 'Numbers',
+          title_pt: 'Numeros',
+          content_label: 'none',
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          round_id: ROUND_ONE_ID,
+          type: 'closest_number',
+          prompt_en: 'How tall is the cypress?',
+          prompt_pt: 'Que altura tem o cipreste?',
+          media_ref: 'media/cypress.png',
+          options: [],
+          answer: { value: 22, tolerance: { mode: 'percent', amount: 10 } },
+          accepted_answers: [],
+          media_alt_en: 'A wide cypress over a garden',
+          media_alt_pt: 'Um cipreste largo sobre um jardim',
+          reveal_note_en: 'Planted in the 1800s',
+          reveal_note_pt: 'Plantado no seculo XIX',
+          number_unit_en: 'metres',
+          number_unit_pt: 'metros',
+          media_reveal: 'slow',
+        },
+      ]);
+    const [game] = await contributor.buildContribution('member-1');
+    expect(game?.rounds[0]?.questions[0]).toMatchObject({
+      mediaAlt: {
+        en: 'A wide cypress over a garden',
+        pt: 'Um cipreste largo sobre um jardim',
+      },
+      revealNote: { en: 'Planted in the 1800s', pt: 'Plantado no seculo XIX' },
+      numberUnit: { en: 'metres', pt: 'metros' },
+      mediaReveal: 'slow',
+    });
+    const questionSql = String((query.mock.calls[2] as unknown[])[0]);
+    for (const column of [
+      'media_alt_en',
+      'media_alt_pt',
+      'reveal_note_en',
+      'reveal_note_pt',
+      'number_unit_en',
+      'number_unit_pt',
+      'media_reveal',
+    ]) {
+      expect(questionSql).toContain(`"question"."${column}"`);
+    }
   });
 
   it('reads only games owned by the member', async () => {

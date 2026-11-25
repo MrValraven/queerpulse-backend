@@ -1,20 +1,30 @@
 import {
+  QUIZSHOW_LIMITS,
   QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
   type QuizshowPlayMode,
+  type QuizshowPodiumEntry,
 } from './quizshow.contract';
+import * as quizshowScoring from './quizshow-scoring';
 import { emptyWheelProgress } from './quizshow-wheel';
 import {
   activePlayers,
   advanceCursor,
+  buildRankIndex,
   createLobbyState,
   eligiblePlayersNow,
   entrantTotals,
+  isActivePlayer,
+  isAwayAt,
   isEligible,
   isJokerActiveFor,
   ownDeadline,
+  podiumSteps,
+  rankOf,
   recordAttachedOrganiser,
   refuse,
+  revealedPodiumPlaces,
   setSessionStatus,
+  statusRefusalCode,
   toMe,
 } from './quizshow-engine-state';
 import type {
@@ -46,6 +56,8 @@ function snapshotRound(
       writeSeconds: 60,
       voteSeconds: 30,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+      isWarmUp: false,
+      talkSeconds: 0,
     },
     questions: [
       {
@@ -54,6 +66,10 @@ function snapshotRound(
         prompt: { en: 'Is it true?', pt: 'É verdade?' },
         mediaRef: null,
         mediaUrl: null,
+        mediaAlt: { en: '', pt: '' },
+        mediaReveal: 'instant',
+        revealNote: { en: '', pt: '' },
+        numberUnit: { en: '', pt: '' },
         timeLimitSeconds: null,
         points: 1000,
         options: [],
@@ -70,6 +86,7 @@ const SNAPSHOT: QuizshowSessionSnapshot = {
   languages: 'both',
   screenLanguage: 'en',
   rounds: [snapshotRound('round-one'), snapshotRound('round-two')],
+  sourceUpdatedAt: '2026-11-24T10:00:00.000Z',
 };
 
 function lobbyState(
@@ -93,6 +110,7 @@ function lobbyState(
     snapshot,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
+    isPractice: false,
     startedAt: STARTED_AT,
   });
 }
@@ -117,6 +135,8 @@ function livePlayer(
     joinedAt: STARTED_AT,
     removedAt: null,
     connectedSocketCount: 1,
+    disconnectedAt: null,
+    leftAt: null,
     ...overrides,
   };
 }
@@ -133,6 +153,7 @@ function liveTeam(
     hasUsedJoker: false,
     jokerRoundIndex: null,
     createdAt: STARTED_AT,
+    isHostMade: false,
     ...overrides,
   };
 }
@@ -167,6 +188,27 @@ function questionPlay(
     wasSkipped: false,
     pointsByPlayer: new Map(),
     teamPoints: new Map(),
+    answersById: new Map(),
+    awayPlayerIds: new Set(),
+    streakBeforeByPlayer: new Map(),
+    keyOverride: null,
+    acceptedTexts: new Set(),
+    wasCorrected: false,
+  };
+}
+
+function podiumEntry(
+  place: 1 | 2 | 3,
+  entrantId: string,
+  score: number,
+): QuizshowPodiumEntry {
+  return {
+    place,
+    kind: 'player',
+    entrantId,
+    name: `${entrantId} name`,
+    colorKey: null,
+    score,
   };
 }
 
@@ -185,6 +227,14 @@ describe('Pulse Live engine state', () => {
     expect(state.players.size).toBe(0);
     expect(state.teams.size).toBe(0);
     expect(state.questionLog).toEqual([]);
+    expect(state.isPractice).toBe(false);
+    expect(state.isJoinLocked).toBe(false);
+    expect(state.isAutoAdvanceOn).toBe(false);
+    expect(state.pairedDevices).toEqual([]);
+    expect(state.guestPushSentAt).toBeNull();
+    expect(state.giving).toBeNull();
+    expect(state.adjustRequestIds).toEqual([]);
+    expect(state.correctedQuestionIds.size).toBe(0);
     expect(state).not.toHaveProperty('startedAt');
     expect(state.cursor).toEqual({
       phaseId: '0',
@@ -199,6 +249,9 @@ describe('Pulse Live engine state', () => {
       pausedRemainingMs: null,
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
+      talkStartsAt: null,
+      autoAdvanceAt: null,
+      podiumRevealedCount: null,
       roundNumber: 0,
       upNext: { kind: 'round', roundIndex: 0 },
       canSpinForNextRound: false,
@@ -565,5 +618,214 @@ describe('Pulse Live engine state', () => {
     expect(withCursor.failure.cursor).not.toBe(state.cursor);
     if (withoutCursor.ok) throw new Error('Expected a refusal');
     expect(withoutCursor.failure).not.toHaveProperty('cursor');
+  });
+
+  it('carries a suggested screen name on a refusal when given one', () => {
+    const state = lobbyState();
+
+    const outcome = refuse('quizshow_screen_name_taken', state, false, {
+      suggestedScreenName: 'Alex 2',
+    });
+
+    if (outcome.ok) throw new Error('Expected a refusal');
+    expect(outcome.failure.code).toBe('quizshow_screen_name_taken');
+    expect(outcome.failure.suggestedScreenName).toBe('Alex 2');
+  });
+
+  it('clears the talk, auto-advance and podium fields on every advance', () => {
+    const state = lobbyState();
+    state.cursor.talkStartsAt = 5_000;
+    state.cursor.autoAdvanceAt = 9_000;
+    state.cursor.podiumRevealedCount = 2;
+
+    advanceCursor(state, {
+      phase: 'round_intro',
+      roundIndex: 0,
+      questionIndex: null,
+      now: 2_000,
+      durationMs: null,
+      extraTimeMs: null,
+    });
+
+    expect(state.cursor.talkStartsAt).toBeNull();
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    expect(state.cursor.podiumRevealedCount).toBeNull();
+  });
+});
+
+describe('statusRefusalCode', () => {
+  it.each([
+    ['finished', 'lobby', 'quizshow_session_ended'],
+    ['abandoned', 'running', 'quizshow_session_ended'],
+    ['finished', 'open', 'quizshow_session_ended'],
+    ['running', 'lobby', 'quizshow_already_started'],
+    ['paused', 'lobby', 'quizshow_already_started'],
+    ['lobby', 'running', 'quizshow_session_not_started'],
+    ['lobby', 'open', 'quizshow_session_not_started'],
+    ['paused', 'running', 'quizshow_session_paused'],
+  ] as const)(
+    'names %s when the command needs %s',
+    (status, required, expectedCode) => {
+      expect(statusRefusalCode(status, required)).toBe(expectedCode);
+    },
+  );
+});
+
+describe('player activity', () => {
+  it('counts a player as active only while neither removed nor left', () => {
+    expect(isActivePlayer({ removedAt: null, leftAt: null })).toBe(true);
+    expect(isActivePlayer({ removedAt: 4_000, leftAt: null })).toBe(false);
+    expect(isActivePlayer({ removedAt: null, leftAt: 4_000 })).toBe(false);
+  });
+
+  it('drops a left player from solo entrants and keeps their team score', () => {
+    const soloState = lobbyState('solo');
+    addPlayers(soloState, [
+      livePlayer('player-stays', { score: 300 }),
+      livePlayer('player-left', { score: 900, leftAt: 5_000 }),
+    ]);
+
+    expect(activePlayers(soloState).map((player) => player.playerId)).toEqual([
+      'player-stays',
+    ]);
+    expect(entrantTotals(soloState).map((entry) => entry.entrantId)).toEqual([
+      'player-stays',
+    ]);
+
+    const teamsState = lobbyState('teams');
+    addTeams(teamsState, [liveTeam('team-one', { score: 700 })]);
+    addPlayers(teamsState, [
+      livePlayer('member-left', { teamId: 'team-one', leftAt: 5_000 }),
+    ]);
+
+    expect(entrantTotals(teamsState)).toEqual([
+      expect.objectContaining({ entrantId: 'team-one', score: 700 }),
+    ]);
+  });
+
+  it('marks a player away once their last socket left awayAfterMs ago', () => {
+    const disconnectedAt = 10_000;
+    const awayPlayer = { connectedSocketCount: 0, disconnectedAt };
+
+    expect(
+      isAwayAt(awayPlayer, disconnectedAt + QUIZSHOW_LIMITS.awayAfterMs - 1),
+    ).toBe(false);
+    expect(
+      isAwayAt(awayPlayer, disconnectedAt + QUIZSHOW_LIMITS.awayAfterMs),
+    ).toBe(true);
+    expect(
+      isAwayAt(
+        { connectedSocketCount: 1, disconnectedAt },
+        disconnectedAt + QUIZSHOW_LIMITS.awayAfterMs,
+      ),
+    ).toBe(false);
+    expect(
+      isAwayAt({ connectedSocketCount: 0, disconnectedAt: null }, 1_000_000),
+    ).toBe(false);
+  });
+
+  it('uses 20 seconds as the away threshold', () => {
+    expect(
+      isAwayAt({ connectedSocketCount: 0, disconnectedAt: 0 }, 19_999),
+    ).toBe(false);
+    expect(
+      isAwayAt({ connectedSocketCount: 0, disconnectedAt: 0 }, 20_000),
+    ).toBe(true);
+  });
+});
+
+describe('rank index', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('ranks ties together with one competitionRanks call', () => {
+    const state = lobbyState('solo');
+    addPlayers(state, [
+      livePlayer('player-a', { score: 500, joinedAt: 2_000 }),
+      livePlayer('player-b', { score: 500, joinedAt: 3_000 }),
+      livePlayer('player-c', { score: 100, joinedAt: 4_000 }),
+    ]);
+    const competitionRanksSpy = jest.spyOn(quizshowScoring, 'competitionRanks');
+
+    const rankIndex = buildRankIndex(state);
+
+    expect(competitionRanksSpy).toHaveBeenCalledTimes(1);
+    expect(rankIndex.ranked.map((entry) => entry.rank)).toEqual([1, 1, 3]);
+    expect(rankOf(rankIndex, 'player-a')).toBe(1);
+    expect(rankOf(rankIndex, 'player-b')).toBe(1);
+    expect(rankOf(rankIndex, 'player-c')).toBe(3);
+  });
+
+  it('ranks an unknown or missing entrant after everyone', () => {
+    const state = lobbyState('solo');
+    addPlayers(state, [
+      livePlayer('player-a', { score: 500 }),
+      livePlayer('player-b', { score: 100 }),
+    ]);
+
+    const rankIndex = buildRankIndex(state);
+
+    expect(rankOf(rankIndex, 'player-unknown')).toBe(3);
+    expect(rankOf(rankIndex, null)).toBe(3);
+  });
+});
+
+describe('podium steps', () => {
+  it('orders the distinct places 3, 2, 1', () => {
+    expect(
+      podiumSteps({
+        podium: [
+          podiumEntry(1, 'player-a', 900),
+          podiumEntry(2, 'player-b', 700),
+          podiumEntry(3, 'player-c', 500),
+        ],
+      }),
+    ).toEqual([3, 2, 1]);
+    expect(
+      podiumSteps({
+        podium: [
+          podiumEntry(1, 'player-a', 900),
+          podiumEntry(1, 'player-b', 900),
+          podiumEntry(3, 'player-c', 500),
+        ],
+      }),
+    ).toEqual([3, 1]);
+    expect(podiumSteps({ podium: [] })).toEqual([]);
+    expect(podiumSteps({ podium: null })).toEqual([]);
+  });
+
+  function podiumState(podiumRevealedCount: number | null): QuizshowLiveState {
+    const state = lobbyState('solo');
+    state.podium = [
+      podiumEntry(1, 'player-a', 900),
+      podiumEntry(2, 'player-b', 700),
+      podiumEntry(3, 'player-c', 500),
+    ];
+    advanceCursor(state, {
+      phase: 'podium',
+      roundIndex: null,
+      questionIndex: null,
+      now: 2_000,
+      durationMs: null,
+      extraTimeMs: null,
+    });
+    state.cursor.podiumRevealedCount = podiumRevealedCount;
+    return state;
+  }
+
+  it('reveals the places counted so far on the podium', () => {
+    expect([...(revealedPodiumPlaces(podiumState(0)) ?? [])]).toEqual([]);
+    expect([...(revealedPodiumPlaces(podiumState(1)) ?? [])]).toEqual([3]);
+    expect([...(revealedPodiumPlaces(podiumState(null)) ?? [])]).toEqual([
+      3, 2, 1,
+    ]);
+  });
+
+  it('withholds nothing outside the podium phase', () => {
+    const state = lobbyState('solo');
+    state.podium = [podiumEntry(1, 'player-a', 900)];
+
+    expect(revealedPodiumPlaces(state)).toBeNull();
   });
 });

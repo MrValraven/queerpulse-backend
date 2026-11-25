@@ -15,6 +15,9 @@ import { quizshowError } from './quizshow-errors';
 import { toQuizShape } from './quizshow-quiz-mapping';
 import {
   QuizshowQuizService,
+  prepareQuizShape,
+  toLiveSessionRef,
+  type QuizshowLiveSessionRow,
   type QuizshowQuizTarget,
 } from './quizshow-quiz.service';
 import { hasAdultsRound } from './quizshow-quiz-validation';
@@ -25,7 +28,6 @@ import {
   type QuizshowGameResponse,
   type QuizshowGameSummary,
   type QuizshowImportSource,
-  type QuizshowLiveSessionRef,
   type QuizshowQuizShape,
 } from './quizshow.contract';
 
@@ -49,7 +51,8 @@ const GAME_COUNT_SQL = `
 
 /**
  * $1 owner id, $2 limit: the member's games, last edited first, with their
- * counts, the open session with its player count, and whether kept results exist.
+ * counts, the open session with its player count, practice flag and snapshot
+ * stamp, and whether kept results exist.
  */
 export const GAME_LIST_SQL = `
   SELECT
@@ -74,6 +77,8 @@ export const GAME_LIST_SQL = `
     "open_session"."play_mode" AS "play_mode",
     "open_session"."started_at" AS "started_at",
     "open_session"."player_count" AS "player_count",
+    "open_session"."is_practice" AS "is_practice",
+    "open_session"."source_updated_at" AS "source_updated_at",
     EXISTS (
       SELECT 1
       FROM "quizshow_results" "result"
@@ -89,6 +94,8 @@ export const GAME_LIST_SQL = `
       "session"."status",
       "session"."play_mode",
       "session"."started_at",
+      "session"."is_practice",
+      ("session"."quiz_snapshot" ->> 'sourceUpdatedAt') AS "source_updated_at",
       (
         SELECT COUNT(*)::int FROM "quizshow_players" "player"
         WHERE "player"."session_id" = "session"."id"
@@ -130,25 +137,21 @@ interface SessionGameRow {
   owner_user_id: string;
 }
 
-interface GameListRow {
+interface GameListRow extends QuizshowLiveSessionRow {
   id: string;
   title: string;
   is_adults_only: boolean;
   updated_at: Date | string;
   round_count: number;
   question_count: number;
-  session_id: string | null;
-  join_code: string | null;
-  status: QuizshowLiveSessionRef['status'] | null;
-  play_mode: QuizshowLiveSessionRef['playMode'] | null;
-  started_at: Date | string | null;
-  player_count: number | null;
   has_results: boolean;
 }
 
 interface NewGamePlan {
   shape: QuizshowQuizShape;
   sourceTemplateId: string | null;
+  /** Contract 6.25: set with a template source, carried over on a copy. */
+  sourceTemplateCopiedAt: Date | null;
   isAdultsOnly: boolean;
 }
 
@@ -157,30 +160,16 @@ function toIsoString(value: Date | string): string {
 }
 
 function toGameSummary(row: GameListRow): QuizshowGameSummary {
-  const liveSession: QuizshowLiveSessionRef | null =
-    row.session_id &&
-    row.join_code &&
-    row.status &&
-    row.play_mode &&
-    row.started_at
-      ? {
-          sessionId: row.session_id,
-          joinCode: row.join_code,
-          status: row.status,
-          playMode: row.play_mode,
-          playerCount: row.player_count ?? 0,
-          startedAt: toIsoString(row.started_at),
-        }
-      : null;
+  const updatedAt = toIsoString(row.updated_at);
   return {
     id: row.id,
     title: row.title,
     roundCount: row.round_count,
     questionCount: row.question_count,
     isAdultsOnly: row.is_adults_only,
-    liveSession,
+    liveSession: toLiveSessionRef(row, updatedAt),
     hasResults: row.has_results === true,
-    updatedAt: toIsoString(row.updated_at),
+    updatedAt,
   };
 }
 
@@ -222,17 +211,20 @@ export class QuizshowGamesService {
       return this.insertNewGame(userId, {
         shape: { title, languages: 'both', screenLanguage: 'en', rounds: [] },
         sourceTemplateId: null,
+        sourceTemplateCopiedAt: null,
         isAdultsOnly: false,
       });
     }
-    const { shape, sourceTemplateId } = await this.quizzes.resolveImportShape(
-      input.source,
-      userId,
-      { eventSlug: null, gameId: null },
-    );
+    // A new game has nothing to append to, so every source copies whole.
+    const { shape, sourceTemplateId, sourceTemplateCopiedAt } =
+      await this.quizzes.resolveImportShape(input.source, userId, {
+        eventSlug: null,
+        gameId: null,
+      });
     return this.insertNewGame(userId, {
       shape: { ...shape, title },
       sourceTemplateId,
+      sourceTemplateCopiedAt,
       isAdultsOnly: hasAdultsRound(shape),
     });
   }
@@ -250,13 +242,14 @@ export class QuizshowGamesService {
   ): Promise<QuizshowGameResponse> {
     await this.access.loadOwnedGame(gameId, userId);
     // Sound because IsQuizshowAnswerForType fixes each answer's shape and structuralProblems rejects the rest.
-    const inputShape = input as unknown as QuizshowQuizShape;
+    // Decision A22: prepared once, so rows a cached studio page sends in the old shape read as v2 from here on.
+    const inputShape = prepareQuizShape(input as unknown as QuizshowQuizShape);
     const target: QuizshowQuizTarget = {
       kind: 'game',
       gameId,
       isAdultsOnly: input.isAdultsOnly,
     };
-    this.quizzes.assertShapeAllowed(target, inputShape);
+    this.quizzes.assertPreparedShapeAllowed(target, inputShape);
     const storedQuiz = await this.quizzes.loadQuizById(gameId);
     const storedMediaRefs = (storedQuiz?.rounds ?? []).flatMap((round) =>
       round.questions.map((question) => question.mediaRef),
@@ -270,7 +263,7 @@ export class QuizshowGamesService {
         );
       }
     }
-    await this.quizzes.writeQuiz({
+    await this.quizzes.writePreparedQuiz({
       target,
       userId,
       shape: inputShape,
@@ -290,7 +283,10 @@ export class QuizshowGamesService {
     });
   }
 
-  /** A new game with the same title, switch and rounds; sessions and results stay with the source. */
+  /**
+   * A new game with the same title, switch, rounds and source template stamp;
+   * sessions, results and the last open settings stay with the source.
+   */
   async duplicateGame(
     gameId: string,
     userId: string,
@@ -301,35 +297,28 @@ export class QuizshowGamesService {
     return this.insertNewGame(userId, {
       shape: { ...toQuizShape(sourceQuiz), title: sourceGame.title },
       sourceTemplateId: sourceQuiz.sourceTemplateId,
+      sourceTemplateCopiedAt: sourceGame.sourceTemplateCopiedAt ?? null,
       isAdultsOnly: sourceGame.isAdultsOnly,
     });
   }
 
-  /** Replaces the rounds, languages and source template from the source; the game keeps its own title and switch. */
+  /**
+   * Contract 6.28: replace swaps the rounds, languages and source template for
+   * the source's; append adds the chosen source rows after the game's own.
+   * The game keeps its own title and switch either way.
+   */
   async importIntoGame(
     gameId: string,
     userId: string,
     input: QuizshowImportDto,
   ): Promise<QuizshowGameResponse> {
     const game = await this.access.loadOwnedGame(gameId, userId);
-    const { shape, sourceTemplateId } = await this.quizzes.resolveImportShape(
+    await this.quizzes.runImport({
+      target: { kind: 'game', gameId, isAdultsOnly: game.isAdultsOnly },
+      userId,
       input,
-      userId,
-      { eventSlug: null, gameId },
-    );
-    const gameShape: QuizshowQuizShape = { ...shape, title: game.title };
-    const target: QuizshowQuizTarget = {
-      kind: 'game',
-      gameId,
-      isAdultsOnly: game.isAdultsOnly,
-    };
-    this.quizzes.assertShapeAllowed(target, gameShape);
-    await this.quizzes.writeQuiz({
-      target,
-      userId,
-      shape: gameShape,
-      sourceTemplateId,
-      expectedUpdatedAt: undefined,
+      exclusion: { eventSlug: null, gameId },
+      keptTitle: game.title,
     });
     return this.quizzes.buildGameResponse(gameId);
   }
@@ -432,8 +421,8 @@ export class QuizshowGamesService {
       ownerUserId: userId,
       isAdultsOnly: plan.isAdultsOnly,
     };
-    const { shape } = plan;
-    this.quizzes.assertShapeAllowed(target, shape);
+    const shape = prepareQuizShape(plan.shape);
+    this.quizzes.assertPreparedShapeAllowed(target, shape);
     const gameId = await this.dataSource.transaction(
       async (manager: EntityManager) => {
         await manager.query(MEMBER_LOCK_SQL, [
@@ -448,12 +437,13 @@ export class QuizshowGamesService {
         ) {
           throw quizshowError('quizshow_game_limit_reached');
         }
-        return this.quizzes.writeQuiz(
+        return this.quizzes.writePreparedQuiz(
           {
             target,
             userId,
             shape,
             sourceTemplateId: plan.sourceTemplateId,
+            sourceTemplateCopiedAt: plan.sourceTemplateCopiedAt,
             expectedUpdatedAt: undefined,
           },
           manager,

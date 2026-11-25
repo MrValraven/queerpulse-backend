@@ -10,12 +10,16 @@ import {
 } from './quizshow.contract';
 import {
   buildSessionSnapshot,
+  effectiveAnswerKey,
   extraTimeMs,
   generateJoinCode,
   isLastQuestionOfRound,
+  normaliseStoredSnapshot,
   openLimitMs,
   type QuizshowRandom,
+  type QuizshowSnapshotQuestion,
   questionCount,
+  readPhaseMsFor,
   shuffleAvoidingOrder,
   snapshotQuestionAt,
   toAnswerKeyView,
@@ -59,6 +63,8 @@ const SETTINGS: QuizshowRoundSettings = {
   writeSeconds: 60,
   voteSeconds: 30,
   ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  isWarmUp: false,
+  talkSeconds: 0,
 };
 
 function text(value: string): { en: string; pt: string } {
@@ -73,6 +79,10 @@ const BASE = {
   prompt: text('prompt'),
   mediaRef: null,
   mediaUrl: null,
+  mediaAlt: text(''),
+  mediaReveal: 'instant' as const,
+  revealNote: text('Fun fact'),
+  numberUnit: text(''),
   timeLimitSeconds: null,
   points: 1000,
 };
@@ -82,7 +92,7 @@ const MULTIPLE_CHOICE: QuizshowQuestion = {
   id: 'q-mc',
   type: 'multiple_choice',
   options: options(['a', 'b', 'c', 'd']),
-  answer: { correctIndex: 2 },
+  answer: { correctIndexes: [2] },
   acceptedAnswers: [],
 };
 const TRUE_FALSE: QuizshowQuestion = {
@@ -114,9 +124,10 @@ const CLOSEST: QuizshowQuestion = {
   id: 'q-cn',
   type: 'closest_number',
   options: [],
-  answer: { value: 1969 },
+  answer: { value: 1969, tolerance: { mode: 'percent', amount: 10 } },
   acceptedAnswers: [],
   timeLimitSeconds: 15,
+  numberUnit: text('year'),
 };
 const LIE_DETECTOR: QuizshowQuestion = {
   ...BASE,
@@ -124,6 +135,14 @@ const LIE_DETECTOR: QuizshowQuestion = {
   type: 'prompt',
   options: [],
   answer: { truth: text('the secret truth') },
+  acceptedAnswers: [],
+};
+const POLL: QuizshowQuestion = {
+  ...BASE,
+  id: 'q-po',
+  type: 'poll',
+  options: options(['c', 'a', 'b']),
+  answer: null,
   acceptedAnswers: [],
 };
 const CAPTION: QuizshowQuestion = {
@@ -156,6 +175,7 @@ function buildQuiz(): QuizshowQuiz {
     languages: 'both',
     screenLanguage: 'en',
     sourceTemplateId: null,
+    sourceTemplate: null,
     updatedAt: '2026-10-19T10:00:00.000Z',
     rounds: [
       round(
@@ -241,6 +261,7 @@ describe('quizshow snapshot', () => {
           question,
           roundIndex,
           questionIndex,
+          'both',
         );
         const keys = collectKeys(view);
         FORBIDDEN_KEYS.forEach((forbidden) => {
@@ -261,8 +282,10 @@ describe('quizshow snapshot', () => {
         at(multipleChoiceRound.questions, 0),
         0,
         0,
+        'both',
+        null,
       ).answerKey,
-    ).toEqual({ type: 'multiple_choice', correctIndex: 2 });
+    ).toEqual({ type: 'multiple_choice', correctIndexes: [2] });
     expect(
       toAnswerKeyView(
         multipleChoiceRound,
@@ -290,7 +313,11 @@ describe('quizshow snapshot', () => {
         multipleChoiceRound,
         at(multipleChoiceRound.questions, 4),
       ),
-    ).toEqual({ type: 'closest_number', value: 1969 });
+    ).toEqual({
+      type: 'closest_number',
+      value: 1969,
+      tolerance: { mode: 'percent', amount: 10 },
+    });
 
     const lieRound = at(snapshot.rounds, 1);
     expect(toAnswerKeyView(lieRound, at(lieRound.questions, 0))).toEqual({
@@ -303,14 +330,20 @@ describe('quizshow snapshot', () => {
       toAnswerKeyView(captionRound, at(captionRound.questions, 0)),
     ).toBeNull();
     expect(
-      toHostQuestionView(captionRound, at(captionRound.questions, 0), 2, 0)
-        .answerKey,
+      toHostQuestionView(
+        captionRound,
+        at(captionRound.questions, 0),
+        2,
+        0,
+        'both',
+        null,
+      ).answerKey,
     ).toBeNull();
   });
 
   it('builds the round card and the effective question limit', () => {
     const snapshot = buildSessionSnapshot(buildQuiz(), seededRandom(3));
-    expect(toRoundCard(at(snapshot.rounds, 0), 0)).toEqual({
+    expect(toRoundCard(at(snapshot.rounds, 0), 0, 'teams')).toEqual({
       roundIndex: 0,
       kind: 'quiz',
       title: text('r1'),
@@ -318,19 +351,21 @@ describe('quizshow snapshot', () => {
       questionCount: 5,
       isJokerAllowed: true,
       isSpeedBonusOn: true,
+      isWarmUp: false,
+      talkSeconds: 0,
     });
     const quizRound = at(snapshot.rounds, 0);
     expect(
-      toQuestionView(quizRound, at(quizRound.questions, 4), 0, 4)
+      toQuestionView(quizRound, at(quizRound.questions, 4), 0, 4, 'both')
         .timeLimitSeconds,
     ).toBe(15);
     expect(
-      toQuestionView(quizRound, at(quizRound.questions, 0), 0, 0)
+      toQuestionView(quizRound, at(quizRound.questions, 0), 0, 0, 'both')
         .timeLimitSeconds,
     ).toBe(20);
     const lieRound = at(snapshot.rounds, 1);
     expect(
-      toQuestionView(lieRound, at(lieRound.questions, 0), 1, 0)
+      toQuestionView(lieRound, at(lieRound.questions, 0), 1, 0, 'both')
         .timeLimitSeconds,
     ).toBe(60);
   });
@@ -350,7 +385,7 @@ describe('quizshow snapshot', () => {
       },
       seededRandom(3),
     );
-    expect(toRoundCard(at(snapshot.rounds, 1), 1)).toEqual({
+    expect(toRoundCard(at(snapshot.rounds, 1), 1, 'teams')).toEqual({
       roundIndex: 1,
       kind: 'wheel',
       title: text('w1'),
@@ -358,6 +393,8 @@ describe('quizshow snapshot', () => {
       questionCount: 0,
       isJokerAllowed: false,
       isSpeedBonusOn: false,
+      isWarmUp: false,
+      talkSeconds: 0,
     });
   });
 
@@ -415,5 +452,233 @@ describe('quizshow snapshot', () => {
     expect(snapshotQuestionAt(snapshot, 1, 0)?.id).toBe('q-ld');
     expect(snapshotQuestionAt(snapshot, 1, 1)).toBeNull();
     expect(snapshotQuestionAt(snapshot, 9, 0)).toBeNull();
+  });
+
+  it('records the quiz version the snapshot was built from', () => {
+    const snapshot = buildSessionSnapshot(buildQuiz(), seededRandom(3));
+    expect(snapshot.sourceUpdatedAt).toBe('2026-10-19T10:00:00.000Z');
+  });
+
+  it('keeps poll options in authored order and gives a poll no key', () => {
+    const snapshot = buildSessionSnapshot(
+      { ...buildQuiz(), rounds: [round('quiz', [POLL], 'r1')] },
+      seededRandom(7),
+    );
+    const pollRound = at(snapshot.rounds, 0);
+    const poll = at(pollRound.questions, 0);
+    expect(poll.shownOptions?.map((option) => option.id)).toEqual([
+      'c',
+      'a',
+      'b',
+    ]);
+    expect(toAnswerKeyView(pollRound, poll)).toBeNull();
+    expect(
+      toHostQuestionView(pollRound, poll, 0, 0, 'both', null).answerKey,
+    ).toBeNull();
+  });
+
+  describe('read phase length', () => {
+    function readQuestion(
+      promptEn: string,
+      promptPt: string,
+      authoredOptions: QuizshowOption[] = [],
+      shownOptions: QuizshowOption[] | null = null,
+    ): QuizshowSnapshotQuestion {
+      return {
+        ...BASE,
+        id: 'q-read',
+        type: 'order',
+        prompt: { en: promptEn, pt: promptPt },
+        options: authoredOptions,
+        answer: null,
+        acceptedAnswers: [],
+        shownOptions,
+      };
+    }
+
+    function letters(count: number): string {
+      return 'x'.repeat(count);
+    }
+
+    it('starts at the 3000 ms floor for an empty prompt', () => {
+      expect(readPhaseMsFor(readQuestion('', ''), 'en')).toBe(3000);
+    });
+
+    it('adds 25 ms per character over the 1500 ms base', () => {
+      expect(
+        readPhaseMsFor(readQuestion(letters(200), letters(200)), 'en'),
+      ).toBe(6500);
+    });
+
+    it('stops at the 8000 ms ceiling', () => {
+      expect(
+        readPhaseMsFor(readQuestion(letters(400), letters(400)), 'pt'),
+      ).toBe(8000);
+    });
+
+    it('takes the longer language when the screen shows both', () => {
+      const question = readQuestion(letters(100), letters(200));
+      expect(readPhaseMsFor(question, 'both')).toBe(6500);
+      expect(readPhaseMsFor(question, 'en')).toBe(4000);
+    });
+
+    it('counts the shown options of an order question', () => {
+      const authored = [
+        { id: 'a', text: text(letters(40)) },
+        { id: 'b', text: text(letters(40)) },
+      ];
+      const shown = [
+        { id: 'b', text: text(letters(80)) },
+        { id: 'a', text: text(letters(80)) },
+      ];
+      expect(
+        readPhaseMsFor(readQuestion(letters(40), letters(40), authored), 'en'),
+      ).toBe(4500);
+      expect(
+        readPhaseMsFor(
+          readQuestion(letters(40), letters(40), authored, shown),
+          'en',
+        ),
+      ).toBe(6500);
+    });
+
+    it('sends the read length on a quiz question and 0 on a party question', () => {
+      const snapshot = buildSessionSnapshot(buildQuiz(), seededRandom(3));
+      const quizRound = at(snapshot.rounds, 0);
+      const quizQuestion = at(quizRound.questions, 0);
+      expect(toQuestionView(quizRound, quizQuestion, 0, 0, 'both').readMs).toBe(
+        readPhaseMsFor(quizQuestion, 'both'),
+      );
+      const lieRound = at(snapshot.rounds, 1);
+      expect(
+        toQuestionView(lieRound, at(lieRound.questions, 0), 1, 0, 'both')
+          .readMs,
+      ).toBe(0);
+    });
+  });
+
+  it('gives a talk beat in teams play and none in solo play', () => {
+    const talkRound = round('quiz', [MULTIPLE_CHOICE], 'r1');
+    talkRound.settings = { ...SETTINGS, isWarmUp: true, talkSeconds: 20 };
+    const snapshot = buildSessionSnapshot(
+      { ...buildQuiz(), rounds: [talkRound] },
+      seededRandom(3),
+    );
+    const teamsCard = toRoundCard(at(snapshot.rounds, 0), 0, 'teams');
+    expect(teamsCard.talkSeconds).toBe(20);
+    expect(teamsCard.isWarmUp).toBe(true);
+    expect(toRoundCard(at(snapshot.rounds, 0), 0, 'solo').talkSeconds).toBe(0);
+  });
+
+  it('shows the reveal note to hosts and keeps it off the public view', () => {
+    const snapshot = buildSessionSnapshot(buildQuiz(), seededRandom(3));
+    const quizRound = at(snapshot.rounds, 0);
+    const closest = at(quizRound.questions, 4);
+    const view = toQuestionView(quizRound, closest, 0, 4, 'both');
+    expect('revealNote' in view).toBe(false);
+    expect(view.numberUnit).toEqual(text('year'));
+    expect(view.mediaReveal).toBe('instant');
+    expect(view.mediaAlt).toEqual(text(''));
+    expect(
+      toHostQuestionView(quizRound, closest, 0, 4, 'both', null).revealNote,
+    ).toEqual(text('Fun fact'));
+  });
+
+  it('judges by the host correction when there is one', () => {
+    const snapshot = buildSessionSnapshot(buildQuiz(), seededRandom(3));
+    const quizRound = at(snapshot.rounds, 0);
+    const multipleChoice = at(quizRound.questions, 0);
+    const correction = {
+      type: 'multiple_choice' as const,
+      correctIndexes: [1, 2],
+    };
+    expect(effectiveAnswerKey(quizRound, multipleChoice, correction)).toEqual(
+      correction,
+    );
+    expect(effectiveAnswerKey(quizRound, multipleChoice, null)).toEqual({
+      type: 'multiple_choice',
+      correctIndexes: [2],
+    });
+    expect(
+      toHostQuestionView(quizRound, multipleChoice, 0, 0, 'both', correction)
+        .answerKey,
+    ).toEqual(correction);
+  });
+
+  it('reads a snapshot stored before v2 as it was authored', () => {
+    const storedOptions = options(['a', 'b', 'c']);
+    const stored = {
+      title: 'Old night',
+      languages: 'en',
+      screenLanguage: 'en',
+      rounds: [
+        {
+          id: 'r1',
+          kind: 'quiz',
+          title: text('r1'),
+          contentLabel: 'none',
+          settings: {
+            timeLimitSeconds: 20,
+            isSpeedBonusOn: true,
+            isJokerAllowed: true,
+            writeSeconds: 60,
+            voteSeconds: 30,
+          },
+          questions: [
+            {
+              id: 'q-mc',
+              type: 'multiple_choice',
+              prompt: text('prompt'),
+              mediaRef: null,
+              mediaUrl: null,
+              timeLimitSeconds: null,
+              points: 1000,
+              options: storedOptions,
+              answer: { correctIndex: 1 },
+              acceptedAnswers: [],
+              shownOptions: storedOptions,
+            },
+            {
+              id: 'q-cn',
+              type: 'closest_number',
+              prompt: text('prompt'),
+              mediaRef: null,
+              mediaUrl: null,
+              timeLimitSeconds: null,
+              points: 1000,
+              options: [],
+              answer: { value: 1969 },
+              acceptedAnswers: [],
+              shownOptions: null,
+            },
+          ],
+        },
+      ],
+    };
+    const snapshot = normaliseStoredSnapshot(stored);
+    expect(snapshot.sourceUpdatedAt).toBe('');
+    expect(snapshot.screenLanguage).toBe('en');
+    const storedRound = at(snapshot.rounds, 0);
+    expect(storedRound.settings).toEqual(SETTINGS);
+    const multipleChoice = at(storedRound.questions, 0);
+    expect(multipleChoice.answer).toEqual({ correctIndexes: [1] });
+    expect(multipleChoice.shownOptions).toEqual(storedOptions);
+    expect(multipleChoice.mediaAlt).toEqual({ en: '', pt: '' });
+    expect(multipleChoice.revealNote).toEqual({ en: '', pt: '' });
+    expect(multipleChoice.numberUnit).toEqual({ en: '', pt: '' });
+    expect(multipleChoice.mediaReveal).toBe('instant');
+    expect(at(storedRound.questions, 1).answer).toEqual({
+      value: 1969,
+      tolerance: { mode: 'absolute', amount: 10 },
+    });
+    expect(normaliseStoredSnapshot(snapshot)).toEqual(snapshot);
+  });
+
+  it('reads a snapshot built after v2 unchanged', () => {
+    const built = buildSessionSnapshot(buildQuiz(), seededRandom(3));
+    const reread = normaliseStoredSnapshot(
+      JSON.parse(JSON.stringify(built)) as unknown,
+    );
+    expect(reread).toEqual(built);
   });
 });

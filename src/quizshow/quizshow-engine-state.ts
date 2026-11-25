@@ -3,14 +3,17 @@
  * moving the cursor, reading who plays and building command outcomes. Pure:
  * every time comes in as a `now` argument.
  */
-import type {
-  QuizshowErrorCode,
-  QuizshowMe,
-  QuizshowPhase,
-  QuizshowSessionStatus,
-  QuizshowTeamColorKey,
+import {
+  QUIZSHOW_LIMITS,
+  type QuizshowAckFailure,
+  type QuizshowErrorCode,
+  type QuizshowMe,
+  type QuizshowPhase,
+  type QuizshowSessionStatus,
+  type QuizshowTeamColorKey,
 } from './quizshow.contract';
 import { quizshowAckFailure } from './quizshow-errors';
+import { competitionRanks } from './quizshow-scoring';
 import { emptyWheelProgress, progressCursorFields } from './quizshow-wheel';
 import type {
   QuizshowCommandOutcome,
@@ -40,6 +43,13 @@ export type QuizshowLobbyStateInput = Omit<
   | 'lastHostCommandAt'
   | 'isScreenMuted'
   | 'wheelProgress'
+  | 'isJoinLocked'
+  | 'isAutoAdvanceOn'
+  | 'pairedDevices'
+  | 'guestPushSentAt'
+  | 'giving'
+  | 'adjustRequestIds'
+  | 'correctedQuestionIds'
 > & { startedAt: number };
 
 export interface QuizshowCursorAdvance {
@@ -80,6 +90,9 @@ export function createLobbyState(
       pausedRemainingMs: null,
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
+      talkStartsAt: null,
+      autoAdvanceAt: null,
+      podiumRevealedCount: null,
       ...progressCursorFields(input.snapshot.rounds, wheelProgress, 'lobby'),
     },
     wheelProgress,
@@ -97,6 +110,13 @@ export function createLobbyState(
     attachedOrganiserUserIds: new Set(attachedOrganiserUserIds),
     hasScoredQuestion: false,
     isScreenMuted: false,
+    isJoinLocked: false,
+    isAutoAdvanceOn: false,
+    pairedDevices: [],
+    guestPushSentAt: null,
+    giving: null,
+    adjustRequestIds: [],
+    correctedQuestionIds: new Set(),
   };
 }
 
@@ -104,7 +124,9 @@ export function createLobbyState(
  * Moves to the next phase: a new phase id, the transition it came from, fresh
  * deadlines, no paused remainder, the session status copied in and the four
  * progress fields recomputed. Callers change `wheelProgress` first and call
- * this last, so the fields see the new progress.
+ * this last, so the fields see the new progress. The talk, auto-advance and
+ * podium fields belong to one phase each, so every transition clears them;
+ * the talk, auto-advance and podium callers set them right after this call.
  */
 export function advanceCursor(
   state: QuizshowLiveState,
@@ -127,6 +149,9 @@ export function advanceCursor(
     pausedRemainingMs: null,
     pausedExtraTimeRemainingMs: null,
     isRestartRecovery: false,
+    talkStartsAt: null,
+    autoAdvanceAt: null,
+    podiumRevealedCount: null,
     ...progressCursorFields(
       state.snapshot.rounds,
       state.wheelProgress,
@@ -145,10 +170,46 @@ export function setSessionStatus(
   state.cursor.status = status;
 }
 
+/** Why a command that needs `required` cannot run in the session's status (contract 3.1). */
+export function statusRefusalCode(
+  status: QuizshowSessionStatus,
+  required: 'lobby' | 'running' | 'open',
+): QuizshowErrorCode {
+  if (status === 'finished' || status === 'abandoned') {
+    return 'quizshow_session_ended';
+  }
+  if (required === 'lobby') return 'quizshow_already_started';
+  if (status === 'lobby') return 'quizshow_session_not_started';
+  return 'quizshow_session_paused'; // required 'running', status 'paused'
+}
+
+/** Still playing: neither removed by a host nor gone with a leave (contract 6.14). */
+export function isActivePlayer(
+  player: Pick<QuizshowLivePlayer, 'removedAt' | 'leftAt'>,
+): boolean {
+  return player.removedAt === null && player.leftAt === null;
+}
+
+/**
+ * No socket connected for at least `awayAfterMs` (contract 6.2). A player who
+ * never disconnected, or whose last socket left moments ago, still counts as
+ * here, so a quick reload does not cost them a question.
+ */
+export function isAwayAt(
+  player: Pick<QuizshowLivePlayer, 'connectedSocketCount' | 'disconnectedAt'>,
+  now: number,
+): boolean {
+  return (
+    player.connectedSocketCount === 0 &&
+    player.disconnectedAt !== null &&
+    now - player.disconnectedAt >= QUIZSHOW_LIMITS.awayAfterMs
+  );
+}
+
 /** Players still in the session, in joined order. */
 export function activePlayers(state: QuizshowLiveState): QuizshowLivePlayer[] {
   return [...state.players.values()]
-    .filter((player) => player.removedAt === null)
+    .filter(isActivePlayer)
     .sort((first, second) => first.joinedAt - second.joinedAt);
 }
 
@@ -209,7 +270,7 @@ export function isJokerActiveFor(
   return holder !== null && holder.jokerRoundIndex === roundIndex;
 }
 
-/** Who competes: active players in solo play, teams in teams play (created order). */
+/** Who competes: active players in solo play, teams in teams play (created order); a team keeps its score when members leave. */
 export function entrantTotals(
   state: QuizshowLiveState,
 ): QuizshowEntrantTotal[] {
@@ -231,6 +292,52 @@ export function entrantTotals(
       colorKey: team.colorKey,
       score: team.score,
     }));
+}
+
+/** Every entrant with its competition rank, sorted once, and an id lookup into it (contract 7.1). */
+export interface QuizshowRankIndex {
+  ranked: ReadonlyArray<QuizshowEntrantTotal & { rank: number }>;
+  rankByEntrantId: ReadonlyMap<string, number>;
+}
+
+/**
+ * One `competitionRanks` sort for a whole frame batch, so building a frame per
+ * player reads ranks from the map. Phases and frames both use it; frames
+ * re-exports it under the contract's import path.
+ */
+export function buildRankIndex(state: QuizshowLiveState): QuizshowRankIndex {
+  const ranked = competitionRanks(entrantTotals(state));
+  const rankByEntrantId = new Map<string, number>();
+  for (const entry of ranked) rankByEntrantId.set(entry.entrantId, entry.rank);
+  return { ranked, rankByEntrantId };
+}
+
+/** The entrant's rank; an unknown or null id ranks after every entrant. */
+export function rankOf(
+  index: QuizshowRankIndex,
+  entrantId: string | null,
+): number {
+  const lastRank = index.ranked.length + 1;
+  if (entrantId === null) return lastRank;
+  return index.rankByEntrantId.get(entrantId) ?? lastRank;
+}
+
+/** The distinct podium places, revealed in the order 3, 2, 1 (contract 6.7). */
+export function podiumSteps(
+  state: Pick<QuizshowLiveState, 'podium'>,
+): Array<1 | 2 | 3> {
+  const places = new Set((state.podium ?? []).map((entry) => entry.place));
+  return ([3, 2, 1] as const).filter((place) => places.has(place));
+}
+
+/** Places shown so far while the phase is podium; null in every other phase (nothing withheld). */
+export function revealedPodiumPlaces(
+  state: QuizshowLiveState,
+): ReadonlySet<number> | null {
+  if (state.cursor.phase !== 'podium') return null;
+  const steps = podiumSteps(state);
+  const revealedCount = state.cursor.podiumRevealedCount ?? steps.length;
+  return new Set<number>(steps.slice(0, revealedCount));
 }
 
 /** The player's own `me` frame; the joker fields are the team's in teams play. */
@@ -269,15 +376,19 @@ export function succeed<Success extends object>(
   return { ok: true, success, effects };
 }
 
-/** A refused command; with `withCursor` the ack carries a copy of the current cursor. */
+/**
+ * A refused command; with `withCursor` the ack carries a copy of the current
+ * cursor, and `extra` adds a suggested screen name to a name refusal.
+ */
 export function refuse<Success extends object = Record<string, never>>(
   code: QuizshowErrorCode,
   state: QuizshowLiveState,
   withCursor: boolean,
+  extra?: Pick<QuizshowAckFailure, 'suggestedScreenName'>,
 ): QuizshowCommandOutcome<Success> {
   const failure = withCursor
-    ? quizshowAckFailure(code, { ...state.cursor })
-    : quizshowAckFailure(code);
+    ? quizshowAckFailure(code, { ...state.cursor }, extra)
+    : quizshowAckFailure(code, undefined, extra);
   return { ok: false, failure, effects: [] };
 }
 

@@ -2,18 +2,24 @@
  * Pulse Live (`quizshow`) server to client frames and `session:state`, one
  * builder per frame and role. Pure: every builder only reads the live state.
  *
- * Privacy boundary: the screen and players see no answer key, truth or vote
- * count before `reveal`; no frame carries a user id, member slug or profile
- * name; `avatarUrl` reaches the screen and hosts only, while `isAvatarShown`.
+ * Privacy boundary: the screen and players see no answer key, truth, reveal
+ * note or vote count before `reveal`; no frame carries a user id, member slug
+ * or profile name; `avatarUrl` reaches the screen and hosts only, while
+ * `isAvatarShown`. During a host-paced podium the screen and players see only
+ * the places revealed so far (contract 6.7).
  */
 import {
   QUIZSHOW_LIMITS,
+  type QuizshowAnswerCountFrame,
+  type QuizshowAnswerKeyView,
   type QuizshowDistribution,
+  type QuizshowGivingLink,
   type QuizshowHostLobby,
   type QuizshowHostPlayer,
   type QuizshowHostQuestionView,
   type QuizshowHostState,
   type QuizshowHostTeam,
+  type QuizshowHostTypedAnswers,
   type QuizshowHostVoteOptions,
   type QuizshowLeaderboardEntry,
   type QuizshowLobby,
@@ -24,11 +30,14 @@ import {
   type QuizshowMyScores,
   type QuizshowMyVote,
   type QuizshowOption,
+  type QuizshowPairedDevice,
   type QuizshowPartyRevealEntry,
   type QuizshowPhase,
   type QuizshowPhaseChangeFrame,
+  type QuizshowPlayerLobby,
   type QuizshowPlayerState,
   type QuizshowPodiumEntry,
+  type QuizshowPodiumFrame,
   type QuizshowQuestionView,
   type QuizshowReveal,
   type QuizshowReviewList,
@@ -39,18 +48,25 @@ import {
   type QuizshowSessionEnd,
   type QuizshowSessionState,
   type QuizshowStateBase,
+  type QuizshowText,
+  type QuizshowTypedAnswerGroup,
   type QuizshowVoteOptions,
   type QuizshowWheelBonusView,
   type QuizshowWheelView,
 } from './quizshow.contract';
+import { normaliseAnswerText } from './quizshow-answer-normaliser';
 import {
   activePlayers,
+  buildRankIndex,
   eligiblePlayersNow,
-  entrantTotals,
+  isActivePlayer,
   isEligible,
   isJokerActiveFor,
+  podiumSteps,
+  rankOf,
+  revealedPodiumPlaces,
   toMe,
-  type QuizshowEntrantTotal,
+  type QuizshowRankIndex,
 } from './quizshow-engine-state';
 import type {
   QuizshowLiveAnswer,
@@ -60,13 +76,9 @@ import type {
   QuizshowLiveTeam,
   QuizshowLiveVoteOption,
 } from './quizshow-engine-types';
+import { closestNumberOutcomes, type ClosestOutcome } from './quizshow-scoring';
 import {
-  closestNumberOutcomes,
-  competitionRanks,
-  type ClosestOutcome,
-} from './quizshow-scoring';
-import {
-  toAnswerKeyView,
+  effectiveAnswerKey,
   toHostQuestionView,
   toQuestionView,
   toRoundCard,
@@ -75,23 +87,21 @@ import {
 } from './quizshow-snapshot';
 import { wheelBonusViewForCursor, wheelViewForCursor } from './quizshow-wheel';
 
+/** Contract 7.1 names frames as the home of the rank index; it lives in engine state so phases can share it. */
+export { buildRankIndex } from './quizshow-engine-state';
+
 export type QuizshowRoleRoom = 'screen' | 'players' | 'hosts';
+
+/** Who a withholding frame is for: the screen and players see revealed podium places only, hosts see every place. */
+export type QuizshowFrameAudience = 'public' | 'hosts';
 
 export type QuizshowSessionStateViewer =
   | { role: 'screen' }
   | { role: 'host' }
   | { role: 'player'; playerId: string | null; suggestedScreenName: string };
 
-export interface QuizshowAnswerCountFrame {
-  phaseId: string;
-  count: number;
-  total: number;
-}
-
-export interface QuizshowPodiumFrame {
-  phaseId: string;
-  entries: QuizshowPodiumEntry[];
-}
+/** The most distinct wrong spellings `typed:answers` lists (contract 2.6). */
+const TYPED_ANSWER_GROUPS_MAX = 30;
 
 /** Phases that show the current question: `read` to `scores` in a quiz round, `write` to `reveal` in a party round. */
 const QUESTION_PHASES: ReadonlySet<QuizshowPhase> = new Set<QuizshowPhase>([
@@ -177,9 +187,11 @@ function publicQuestionView(
     shown.question,
     shown.roundIndex,
     shown.questionIndex,
+    state.snapshot.languages,
   );
 }
 
+/** The host view shows a host correction in `answerKey` once one was made (contract 6.4 rule 8). */
 function hostQuestionView(
   state: QuizshowLiveState,
 ): QuizshowHostQuestionView | null {
@@ -190,6 +202,8 @@ function hostQuestionView(
     shown.question,
     shown.roundIndex,
     shown.questionIndex,
+    state.snapshot.languages,
+    shown.play?.keyOverride ?? null,
   );
 }
 
@@ -197,7 +211,9 @@ function currentRoundCard(state: QuizshowLiveState): QuizshowRoundCard | null {
   const { phase, roundIndex } = state.cursor;
   if (ROUNDLESS_PHASES.has(phase) || roundIndex === null) return null;
   const round = state.snapshot.rounds[roundIndex];
-  return round === undefined ? null : toRoundCard(round, roundIndex);
+  return round === undefined
+    ? null
+    : toRoundCard(round, roundIndex, state.playMode);
 }
 
 /** The wheel view is the same for every role: it holds no answer and no secret. */
@@ -219,7 +235,7 @@ function isPlayerActive(
 ): boolean {
   if (playerId === null) return false;
   const player = state.players.get(playerId);
-  return player !== undefined && player.removedAt === null;
+  return player !== undefined && isActivePlayer(player);
 }
 
 function activePlayerOf(
@@ -228,7 +244,7 @@ function activePlayerOf(
 ): QuizshowLivePlayer | null {
   if (playerId === null) return null;
   const player = state.players.get(playerId);
-  return player !== undefined && player.removedAt === null ? player : null;
+  return player !== undefined && isActivePlayer(player) ? player : null;
 }
 
 function teamsInCreatedOrder(state: QuizshowLiveState): QuizshowLiveTeam[] {
@@ -258,36 +274,74 @@ function toLobbyPlayer(
   };
 }
 
+/** Members per team in one pass over the active players (contract 7.1), so a 24 team lobby costs one walk. */
+function memberCountsByTeam(
+  players: readonly QuizshowLivePlayer[],
+): Map<string, number> {
+  const memberCounts = new Map<string, number>();
+  for (const player of players) {
+    if (player.teamId === null) continue;
+    memberCounts.set(player.teamId, (memberCounts.get(player.teamId) ?? 0) + 1);
+  }
+  return memberCounts;
+}
+
 function toLobbyTeam(
   team: QuizshowLiveTeam,
-  players: readonly QuizshowLivePlayer[],
+  memberCounts: ReadonlyMap<string, number>,
 ): QuizshowLobbyTeam {
   return {
     teamId: team.teamId,
     name: team.name,
     colorKey: team.colorKey,
-    memberCount: players.filter((player) => player.teamId === team.teamId)
-      .length,
+    memberCount: memberCounts.get(team.teamId) ?? 0,
+    isHostMade: team.isHostMade,
   };
 }
 
-/** `lobby:update` for the screen (with avatars) or the players room (avatars always null). */
+function lobbyTeams(
+  state: QuizshowLiveState,
+  players: readonly QuizshowLivePlayer[],
+): QuizshowLobbyTeam[] {
+  const memberCounts = memberCountsByTeam(players);
+  return teamsInCreatedOrder(state).map((team) =>
+    toLobbyTeam(team, memberCounts),
+  );
+}
+
+/**
+ * `lobby:update` for the screen: the roster with avatars. The players room
+ * gets `buildPlayerLobby`. The audience argument stays so every call site
+ * names the screen.
+ */
 export function buildLobby(
   state: QuizshowLiveState,
-  audience: 'screen' | 'players',
+  _audience: 'screen',
 ): QuizshowLobby {
   const players = activePlayers(state);
-  const isAvatarAudience = audience === 'screen';
   return {
-    players: players.map((player) => toLobbyPlayer(player, isAvatarAudience)),
-    teams: teamsInCreatedOrder(state).map((team) => toLobbyTeam(team, players)),
+    players: players.map((player) => toLobbyPlayer(player, true)),
+    teams: lobbyTeams(state, players),
     playerCount: players.length,
   };
 }
 
-/** `lobby:update` for the hosts room: avatars, scores, jokers and connection state. */
+/**
+ * `lobby:update` and the lobby of `session:state` for the players room (W2):
+ * team cards and the head count only, so a lobby tick stays small for every
+ * phone.
+ */
+export function buildPlayerLobby(
+  state: QuizshowLiveState,
+): QuizshowPlayerLobby {
+  const players = activePlayers(state);
+  return { teams: lobbyTeams(state, players), playerCount: players.length };
+}
+
+/** `lobby:update` for the hosts room: avatars, scores, streaks, jokers and connection state. */
 export function buildHostLobby(state: QuizshowLiveState): QuizshowHostLobby {
   const players = activePlayers(state);
+  const memberCounts = memberCountsByTeam(players);
   return {
     players: players.map((player): QuizshowHostPlayer => ({
       ...toLobbyPlayer(player, true),
@@ -295,15 +349,43 @@ export function buildHostLobby(state: QuizshowLiveState): QuizshowHostLobby {
       hasExtraTime: player.hasExtraTime,
       hasUsedJoker: toMe(state, player.playerId).hasUsedJoker,
       score: player.score,
+      streak: player.streak,
       isConnected: player.connectedSocketCount > 0,
+      disconnectedAt: player.disconnectedAt,
       joinedAt: player.joinedAt,
     })),
     teams: teamsInCreatedOrder(state).map((team): QuizshowHostTeam => ({
-      ...toLobbyTeam(team, players),
+      ...toLobbyTeam(team, memberCounts),
       score: team.score,
       hasUsedJoker: team.hasUsedJoker,
     })),
     playerCount: players.length,
+  };
+}
+
+/** `devices:update` and the host state: unrevoked pairings in paired order; a helper's name only on a helper (contract 6.5). */
+export function buildPairedDevices(
+  state: QuizshowLiveState,
+): QuizshowPairedDevice[] {
+  return state.pairedDevices
+    .filter((device) => device.revokedAt === null)
+    .map((device): QuizshowPairedDevice => ({
+      pairingId: device.pairingId,
+      kind: device.kind,
+      helperName: device.kind === 'helper' ? device.helperName : null,
+      pairedAt: device.pairedAt,
+      isConnected: device.connectedSocketCount > 0,
+    }));
+}
+
+/** `session:flags` to every role room (contract 6.15, 6.16). */
+export function buildSessionFlags(state: QuizshowLiveState): {
+  isJoinLocked: boolean;
+  isAutoAdvanceOn: boolean;
+} {
+  return {
+    isJoinLocked: state.isJoinLocked,
+    isAutoAdvanceOn: state.isAutoAdvanceOn,
   };
 }
 
@@ -381,13 +463,12 @@ export function buildReviewList(
   };
 }
 
+/** One map read (W1): a vote round reads it once per option. */
 function answerById(
   play: QuizshowLiveQuestionPlay,
   answerId: string,
 ): QuizshowLiveAnswer | undefined {
-  return [...play.answers.values()].find(
-    (answer) => answer.answerId === answerId,
-  );
+  return play.answersById.get(answerId);
 }
 
 /** The truth always shows; a submission shows while it is not hidden and its author is still in the session. */
@@ -405,7 +486,13 @@ function isVoteOptionVisible(
   );
 }
 
-function visibleVoteOptions(
+/**
+ * The vote options a voter may see. The runtime computes them once per
+ * `vote:options` fan-out and passes them to every `buildVoteOptions` call
+ * (W1). It needs the state beside the play: an option hides once its author
+ * leaves the session.
+ */
+export function visibleVoteOptions(
   state: QuizshowLiveState,
   play: QuizshowLiveQuestionPlay,
 ): QuizshowLiveVoteOption[] {
@@ -420,14 +507,20 @@ function votingPlay(state: QuizshowLiveState): QuizshowLiveQuestionPlay | null {
   return play !== null && play.voteOptions !== null ? play : null;
 }
 
-/** `vote:options` during `vote`: visible options with no author and no truth flag; `ownOptionId` is the receiving player's own answer. */
+/**
+ * `vote:options` during `vote`: visible options with no author and no truth
+ * flag; `ownOptionId` is the receiving player's own answer. `visibleOptions`
+ * is the list `visibleVoteOptions` built for the whole fan-out; without it
+ * this call builds its own.
+ */
 export function buildVoteOptions(
   state: QuizshowLiveState,
   forPlayerId: string | null,
+  visibleOptions?: readonly QuizshowLiveVoteOption[],
 ): QuizshowVoteOptions | null {
   const play = votingPlay(state);
   if (play === null) return null;
-  const options = visibleVoteOptions(state, play);
+  const options = visibleOptions ?? visibleVoteOptions(state, play);
   const ownOption =
     forPlayerId === null
       ? undefined
@@ -484,12 +577,23 @@ function revealPhaseId(state: QuizshowLiveState): string {
   return state.cursor.phaseId;
 }
 
+/** The key the question is judged by tonight: a host correction when one was made (contract 6.4 rule 8). */
+function shownAnswerKey(
+  shown: QuizshowShownQuestion,
+): QuizshowAnswerKeyView | null {
+  return effectiveAnswerKey(
+    shown.round,
+    shown.question,
+    shown.play?.keyOverride ?? null,
+  );
+}
+
 function correctPositionsOf(
-  question: QuizshowSnapshotQuestion,
+  answerKey: QuizshowAnswerKeyView | null,
   answer: QuizshowLiveAnswer,
 ): number {
-  if (question.type !== 'order' || answer.payload.type !== 'order') return 0;
-  const orderedIds = question.answer?.orderedIds ?? [];
+  if (answerKey?.type !== 'order' || answer.payload.type !== 'order') return 0;
+  const orderedIds = answerKey.orderedIds;
   const submittedIds = answer.payload.orderedIds;
   return orderedIds.filter(
     (optionId, position) => submittedIds[position] === optionId,
@@ -506,7 +610,8 @@ function eligibleAnswersOf(
   });
 }
 
-function multipleChoiceDistribution(
+/** Multiple choice and poll: picks per shown option. Which options are right rides in `correct`, null on a poll. */
+function optionsDistribution(
   question: QuizshowSnapshotQuestion,
   answers: readonly QuizshowLiveAnswer[],
 ): QuizshowDistribution {
@@ -514,7 +619,12 @@ function multipleChoiceDistribution(
     question.shownOptions ?? question.options;
   const counts = shownOptions.map(() => 0);
   for (const answer of answers) {
-    if (answer.payload.type !== 'multiple_choice') continue;
+    if (
+      answer.payload.type !== 'multiple_choice' &&
+      answer.payload.type !== 'poll'
+    ) {
+      continue;
+    }
     const optionIndex = answer.payload.optionIndex;
     const count = counts[optionIndex];
     if (count !== undefined) counts[optionIndex] = count + 1;
@@ -549,16 +659,16 @@ function typedDistribution(
 }
 
 function orderDistribution(
-  question: QuizshowSnapshotQuestion,
+  answerKey: QuizshowAnswerKeyView | null,
   answers: readonly QuizshowLiveAnswer[],
 ): QuizshowDistribution {
   const itemCount =
-    question.type === 'order' ? (question.answer?.orderedIds.length ?? 0) : 0;
+    answerKey?.type === 'order' ? answerKey.orderedIds.length : 0;
   let exactCount = 0;
   let partialCount = 0;
   let noneCount = 0;
   for (const answer of answers) {
-    const correctPositions = correctPositionsOf(question, answer);
+    const correctPositions = correctPositionsOf(answerKey, answer);
     if (itemCount > 0 && correctPositions === itemCount) exactCount += 1;
     else if (correctPositions > 0) partialCount += 1;
     else noneCount += 1;
@@ -566,9 +676,9 @@ function orderDistribution(
   return { kind: 'order', exactCount, partialCount, noneCount };
 }
 
-/** The closest players' names in joined order, the first one's value, and how many others landed inside the 10% band. */
+/** The closest players' names in joined order, the first one's value, and how many others landed inside the question's tolerance band (contract 6.1). */
 function closestDistribution(
-  question: QuizshowSnapshotQuestion,
+  answerKey: QuizshowAnswerKeyView | null,
   answers: readonly QuizshowLiveAnswer[],
   eligiblePlayers: readonly QuizshowLivePlayer[],
 ): QuizshowDistribution {
@@ -577,14 +687,14 @@ function closestDistribution(
       ? [{ playerId: answer.playerId, value: answer.payload.value }]
       : [],
   );
-  const truth =
-    question.type === 'closest_number'
-      ? (question.answer?.value ?? null)
-      : null;
   const outcomes =
-    truth === null
-      ? new Map<string, ClosestOutcome>()
-      : closestNumberOutcomes(truth, submittedValues);
+    answerKey?.type === 'closest_number'
+      ? closestNumberOutcomes(
+          answerKey.value,
+          answerKey.tolerance,
+          submittedValues,
+        )
+      : new Map<string, ClosestOutcome>();
   const closestPlayers = eligiblePlayers.filter(
     (player) => outcomes.get(player.playerId) === 'closest',
   );
@@ -663,28 +773,44 @@ function votesDistribution(
 
 function buildDistribution(
   state: QuizshowLiveState,
-  question: QuizshowSnapshotQuestion,
+  shown: QuizshowShownQuestion,
   play: QuizshowLiveQuestionPlay,
   eligiblePlayers: readonly QuizshowLivePlayer[],
 ): QuizshowDistribution {
   const answers = eligibleAnswersOf(play, eligiblePlayers);
+  const question = shown.question;
   switch (question.type) {
     case 'multiple_choice':
-      return multipleChoiceDistribution(question, answers);
+    case 'poll':
+      return optionsDistribution(question, answers);
     case 'true_false':
       return trueFalseDistribution(answers);
     case 'type_answer':
       return typedDistribution(answers);
     case 'order':
-      return orderDistribution(question, answers);
+      return orderDistribution(shownAnswerKey(shown), answers);
     case 'closest_number':
-      return closestDistribution(question, answers, eligiblePlayers);
+      return closestDistribution(
+        shownAnswerKey(shown),
+        answers,
+        eligiblePlayers,
+      );
     case 'prompt':
       return votesDistribution(state, play);
   }
 }
 
-/** `reveal` in `reveal` and `scores`: the correct answer and the distribution, authors named by screen name. */
+/** The question's reveal note while either language holds text; it rides `reveal` only, so the public never sees it before then. */
+function revealNoteOf(question: QuizshowSnapshotQuestion): QuizshowText | null {
+  const note = question.revealNote;
+  return note.en === '' && note.pt === '' ? null : note;
+}
+
+/**
+ * `reveal` in `reveal` and `scores`: the correct answer (a host correction
+ * when one was made), the distribution with authors named by screen name, the
+ * reveal note and whether a host corrected the question.
+ */
 export function buildReveal(state: QuizshowLiveState): QuizshowReveal | null {
   if (!REVEAL_PHASES.has(state.cursor.phase)) return null;
   const shown = shownQuestion(state);
@@ -694,22 +820,65 @@ export function buildReveal(state: QuizshowLiveState): QuizshowReveal | null {
   return {
     phaseId: revealPhaseId(state),
     questionId: play.questionId,
-    correct: toAnswerKeyView(shown.round, shown.question),
+    correct: shownAnswerKey(shown),
     answeredCount: eligibleAnswersOf(play, eligiblePlayers).length,
     eligibleCount: eligiblePlayers.length,
-    distribution: buildDistribution(
-      state,
-      shown.question,
-      play,
-      eligiblePlayers,
-    ),
+    distribution: buildDistribution(state, shown, play, eligiblePlayers),
+    note: revealNoteOf(shown.question),
+    wasCorrected: play.wasCorrected,
   };
 }
 
-function rankedEntrants(
+/**
+ * `typed:answers` for hosts in `reveal` and `scores` of a type_answer
+ * question (contract 6.4 rule 9): the eligible answers judged wrong, grouped
+ * by the text the accept command compares, each with its earliest spelling,
+ * most written first, at most 30 groups. Answers whose text normalises to ''
+ * stay out of every group.
+ */
+export function buildTypedAnswers(
   state: QuizshowLiveState,
-): Array<QuizshowEntrantTotal & { rank: number }> {
-  return competitionRanks(entrantTotals(state));
+): QuizshowHostTypedAnswers | null {
+  if (!REVEAL_PHASES.has(state.cursor.phase)) return null;
+  const shown = shownQuestion(state);
+  const play = shown?.play ?? null;
+  if (shown === null || play === null) return null;
+  if (shown.question.type !== 'type_answer') return null;
+  const wrongAnswers = eligibleAnswersOf(play, eligiblePlayersNow(state))
+    .filter((answer) => answer.isCorrect === false)
+    .sort(
+      (firstAnswer, secondAnswer) =>
+        firstAnswer.receivedAt - secondAnswer.receivedAt,
+    );
+  const groupsByText = new Map<string, QuizshowTypedAnswerGroup>();
+  for (const answer of wrongAnswers) {
+    if (answer.payload.type !== 'type_answer') continue;
+    const normalisedText = normaliseAnswerText(answer.payload.text);
+    // Text that folds to nothing (punctuation or symbols alone) cannot be accepted, since the accept frame needs 1 to 80 characters.
+    if (normalisedText === '') continue;
+    const group = groupsByText.get(normalisedText);
+    if (group === undefined) {
+      groupsByText.set(normalisedText, {
+        normalisedText,
+        sampleText: answer.payload.text,
+        count: 1,
+      });
+    } else {
+      group.count += 1;
+    }
+  }
+  const groups = [...groupsByText.values()]
+    .sort(
+      (firstGroup, secondGroup) =>
+        secondGroup.count - firstGroup.count ||
+        firstGroup.sampleText.localeCompare(secondGroup.sampleText, 'en'),
+    )
+    .slice(0, TYPED_ANSWER_GROUPS_MAX);
+  return {
+    phaseId: revealPhaseId(state),
+    questionId: play.questionId,
+    groups,
+  };
 }
 
 /** The entrant a player competes as: themselves in solo play, their team in teams play. */
@@ -720,18 +889,15 @@ function entrantIdOf(
   return state.playMode === 'solo' ? player.playerId : player.teamId;
 }
 
-function rankOf(
-  ranked: ReadonlyArray<QuizshowEntrantTotal & { rank: number }>,
-  entrantId: string | null,
-): number {
-  const entry = ranked.find((ranking) => ranking.entrantId === entrantId);
-  return entry?.rank ?? ranked.length + 1;
-}
-
-/** `reveal:mine` for an eligible player still in the session, in `reveal` and `scores`. */
+/**
+ * `reveal:mine` for an eligible player still in the session, in `reveal` and
+ * `scores`. A fan-out passes one `rankIndex` to every call (W1); without it
+ * this call ranks on its own.
+ */
 export function buildMyReveal(
   state: QuizshowLiveState,
   playerId: string,
+  rankIndex?: QuizshowRankIndex,
 ): QuizshowMyReveal | null {
   if (!REVEAL_PHASES.has(state.cursor.phase)) return null;
   const shown = shownQuestion(state);
@@ -740,7 +906,9 @@ export function buildMyReveal(
   if (shown === null || play === null || player === null) return null;
   if (!play.eligiblePlayerIds.has(playerId)) return null;
   const answer = play.answers.get(playerId);
-  const isPartyQuestion = shown.question.type === 'prompt';
+  // Party questions and polls are never judged right or wrong (contract 6.22).
+  const isUnjudgedQuestion =
+    shown.question.type === 'prompt' || shown.question.type === 'poll';
   const team =
     state.playMode === 'teams' && player.teamId !== null
       ? (state.teams.get(player.teamId) ?? null)
@@ -750,11 +918,11 @@ export function buildMyReveal(
     questionId: play.questionId,
     hasAnswered: answer !== undefined,
     ownAnswerId: answer?.answerId ?? null,
-    isCorrect: isPartyQuestion ? null : (answer?.isCorrect ?? false),
+    isCorrect: isUnjudgedQuestion ? null : (answer?.isCorrect ?? false),
     correctPositions:
       shown.question.type === 'order' && answer !== undefined
         ? (answer.correctPositions ??
-          correctPositionsOf(shown.question, answer))
+          correctPositionsOf(shownAnswerKey(shown), answer))
         : null,
     pointsAwarded: play.pointsByPlayer.get(playerId) ?? 0,
     streakBonus: answer?.streakBonus ?? 0,
@@ -762,7 +930,10 @@ export function buildMyReveal(
     streak: player.streak,
     score: player.score,
     teamScore: state.playMode === 'teams' ? (team?.score ?? 0) : null,
-    rank: rankOf(rankedEntrants(state), entrantIdOf(state, player)),
+    rank: rankOf(
+      rankIndex ?? buildRankIndex(state),
+      entrantIdOf(state, player),
+    ),
   };
 }
 
@@ -795,16 +966,57 @@ function previousScoreOf(state: QuizshowLiveState, entrantId: string): number {
   return state.scoresAtLastFrame.get(entrantId) ?? 0;
 }
 
-/** `scores` in `scores`, `leaderboard` and `podium`: the top of the competition ranking. */
-export function buildScores(state: QuizshowLiveState): QuizshowScores | null {
+/**
+ * The leaderboard streak (contract 6.18): the player's own in solo play, the
+ * best among a team's active members in teams play (0 with none). One pass
+ * over the players per frame.
+ */
+function streaksByEntrant(state: QuizshowLiveState): Map<string, number> {
+  const streaks = new Map<string, number>();
+  for (const player of activePlayers(state)) {
+    const entrantId = entrantIdOf(state, player);
+    if (entrantId === null) continue;
+    streaks.set(
+      entrantId,
+      Math.max(streaks.get(entrantId) ?? 0, player.streak),
+    );
+  }
+  return streaks;
+}
+
+/** A podium place the host has not revealed yet; `revealedPlaces` is null outside the podium phase, where nothing is withheld. */
+function isWithheldRank(
+  rank: number,
+  revealedPlaces: ReadonlySet<number> | null,
+): boolean {
+  return (
+    revealedPlaces !== null && isPodiumPlace(rank) && !revealedPlaces.has(rank)
+  );
+}
+
+/**
+ * `scores` in `scores`, `leaderboard` and `podium`: the top of the
+ * competition ranking. A fan-out passes one `rankIndex` (W1). During the
+ * podium the public copy leaves out every podium place not revealed yet,
+ * while hosts get every entry (contract 6.7).
+ */
+export function buildScores(
+  state: QuizshowLiveState,
+  rankIndex?: QuizshowRankIndex,
+  audience: QuizshowFrameAudience = 'public',
+): QuizshowScores | null {
   const scope = scoresScopeOf(state.cursor.phase);
   if (scope === null) return null;
-  const ranked = rankedEntrants(state);
+  const { ranked } = rankIndex ?? buildRankIndex(state);
+  const revealedPlaces =
+    audience === 'hosts' ? null : revealedPodiumPlaces(state);
+  const streaks = streaksByEntrant(state);
   return {
     phaseId: state.cursor.phaseId,
     scope,
     entries: ranked
       .slice(0, QUIZSHOW_LIMITS.leaderboardTopCount)
+      .filter((entry) => !isWithheldRank(entry.rank, revealedPlaces))
       .map((entry): QuizshowLeaderboardEntry => ({
         rank: entry.rank,
         kind: entry.kind,
@@ -813,37 +1025,62 @@ export function buildScores(state: QuizshowLiveState): QuizshowScores | null {
         colorKey: entry.colorKey,
         score: entry.score,
         previousScore: previousScoreOf(state, entry.entrantId),
+        streak: streaks.get(entry.entrantId) ?? 0,
       })),
     entrantCount: ranked.length,
   };
 }
 
-/** `scores:mine`: the player's rank and score (their team's in teams play) and their own total. */
+/**
+ * `scores:mine`: the player's rank and score (their team's in teams play) and
+ * their own total. Null while the player's entrant sits on a podium place not
+ * revealed yet (contract 6.7), so no phone learns its place early.
+ */
 export function buildMyScores(
   state: QuizshowLiveState,
   playerId: string,
+  rankIndex?: QuizshowRankIndex,
 ): QuizshowMyScores | null {
   if (scoresScopeOf(state.cursor.phase) === null) return null;
   const player = activePlayerOf(state, playerId);
   if (player === null) return null;
-  const ranked = rankedEntrants(state);
   const entrantId = entrantIdOf(state, player);
-  const entry = ranked.find((ranking) => ranking.entrantId === entrantId);
+  const rank = rankOf(rankIndex ?? buildRankIndex(state), entrantId);
+  // Only a podium rank can be withheld, so most players skip the revealed-places lookup.
+  if (
+    isPodiumPlace(rank) &&
+    isWithheldRank(rank, revealedPodiumPlaces(state))
+  ) {
+    return null;
+  }
   return {
     phaseId: state.cursor.phaseId,
-    rank: rankOf(ranked, entrantId),
-    score: entry?.score ?? 0,
+    rank,
+    score: entrantScoreOf(state, player),
     previousScore: entrantId === null ? 0 : previousScoreOf(state, entrantId),
     ownScore: player.score,
   };
+}
+
+/** The score `entrantTotals` ranks the player's entrant by: their own in solo play, their team's in teams play (0 without a team). */
+function entrantScoreOf(
+  state: QuizshowLiveState,
+  player: QuizshowLivePlayer,
+): number {
+  if (state.playMode === 'solo') return player.score;
+  if (player.teamId === null) return 0;
+  return state.teams.get(player.teamId)?.score ?? 0;
 }
 
 function isPodiumPlace(rank: number): rank is 1 | 2 | 3 {
   return rank === 1 || rank === 2 || rank === 3;
 }
 
-/** The stored podium (players removed since left out), or one ranked from the totals. */
-function podiumEntries(state: QuizshowLiveState): QuizshowPodiumEntry[] {
+/** The stored podium (players gone since left out), or one ranked from the totals. */
+function podiumEntries(
+  state: QuizshowLiveState,
+  rankIndex?: QuizshowRankIndex,
+): QuizshowPodiumEntry[] {
   if (state.podium !== null) {
     return state.podium
       .filter(
@@ -852,7 +1089,8 @@ function podiumEntries(state: QuizshowLiveState): QuizshowPodiumEntry[] {
       )
       .map((entry) => ({ ...entry }));
   }
-  return rankedEntrants(state).flatMap((entry): QuizshowPodiumEntry[] =>
+  const { ranked } = rankIndex ?? buildRankIndex(state);
+  return ranked.flatMap((entry): QuizshowPodiumEntry[] =>
     isPodiumPlace(entry.rank)
       ? [
           {
@@ -868,15 +1106,49 @@ function podiumEntries(state: QuizshowLiveState): QuizshowPodiumEntry[] {
   );
 }
 
-/** `podium` during the podium phase. */
-export function buildPodiumFrame(
+/** Podium entries for the audience: in the podium phase the public sees revealed places only; hosts and `ended` see every entry. */
+function podiumEntriesFor(
   state: QuizshowLiveState,
-): QuizshowPodiumFrame | null {
-  if (state.cursor.phase !== 'podium') return null;
-  return { phaseId: state.cursor.phaseId, entries: podiumEntries(state) };
+  audience: QuizshowFrameAudience,
+  rankIndex?: QuizshowRankIndex,
+): QuizshowPodiumEntry[] {
+  const entries = podiumEntries(state, rankIndex);
+  const revealedPlaces =
+    audience === 'hosts' ? null : revealedPodiumPlaces(state);
+  if (revealedPlaces === null) return entries;
+  return entries.filter((entry) => revealedPlaces.has(entry.place));
 }
 
-/** `session:end` to every room; results exist only for a finished session. */
+/**
+ * `podium` during the podium phase, one per audience (contract 6.7): the
+ * screen and players get the places revealed so far, hosts every entry.
+ * `revealedCount` falls back to every step for a podium shown without a
+ * count.
+ */
+export function buildPodiumFrame(
+  state: QuizshowLiveState,
+  audience: QuizshowFrameAudience,
+): QuizshowPodiumFrame | null {
+  if (state.cursor.phase !== 'podium') return null;
+  return {
+    phaseId: state.cursor.phaseId,
+    entries: podiumEntriesFor(state, audience),
+    revealedCount:
+      state.cursor.podiumRevealedCount ?? podiumSteps(state).length,
+  };
+}
+
+/** The community support link, only on the `ended` state of a finished session that was not a practice (contract 6.27). */
+function givingOf(state: QuizshowLiveState): QuizshowGivingLink | null {
+  // The load already leaves `giving` null on a practice; this check holds even if a later load path forgets.
+  return state.cursor.phase === 'ended' &&
+    state.status === 'finished' &&
+    !state.isPractice
+    ? state.giving
+    : null;
+}
+
+/** `session:end` to every room; results exist only for a finished session that was not a practice (contract 6.9). */
 export function buildSessionEnd(state: QuizshowLiveState): QuizshowSessionEnd {
   const isFinished = state.status === 'finished';
   return {
@@ -884,19 +1156,32 @@ export function buildSessionEnd(state: QuizshowLiveState): QuizshowSessionEnd {
     status: isFinished ? 'finished' : 'abandoned',
     podium: isFinished ? podiumEntries(state) : [],
     nextEvent: state.nextEvent,
-    hasResults: isFinished,
+    hasResults: isFinished && !state.isPractice,
+    isPractice: state.isPractice,
+    giving: givingOf(state),
   };
 }
 
-function sessionPodium(state: QuizshowLiveState): QuizshowPodiumEntry[] | null {
-  if (state.cursor.phase === 'podium') return podiumEntries(state);
+function sessionPodium(
+  state: QuizshowLiveState,
+  audience: QuizshowFrameAudience,
+  rankIndex: QuizshowRankIndex,
+): QuizshowPodiumEntry[] | null {
+  if (state.cursor.phase === 'podium') {
+    return podiumEntriesFor(state, audience, rankIndex);
+  }
   if (state.cursor.phase === 'ended' && state.status === 'finished') {
-    return podiumEntries(state);
+    return podiumEntries(state, rankIndex);
   }
   return null;
 }
 
-function stateBase(state: QuizshowLiveState): QuizshowStateBase {
+/** Fields every role's `session:state` shares; `scores` and `podium` follow the audience's withholding (contract 6.7). */
+function stateBase(
+  state: QuizshowLiveState,
+  audience: QuizshowFrameAudience,
+  rankIndex: QuizshowRankIndex,
+): QuizshowStateBase {
   return {
     sessionId: state.sessionId,
     eventSlug: state.eventSlug,
@@ -911,15 +1196,19 @@ function stateBase(state: QuizshowLiveState): QuizshowStateBase {
     playMode: state.playMode,
     maxTeamSize: state.maxTeamSize,
     isReviewOn: state.isReviewOn,
+    isPractice: state.isPractice,
+    isJoinLocked: state.isJoinLocked,
+    isAutoAdvanceOn: state.isAutoAdvanceOn,
+    giving: givingOf(state),
     isScreenMuted: state.isScreenMuted,
     cursor: { ...state.cursor },
     rounds: state.snapshot.rounds.map((round, roundIndex) =>
-      toRoundCard(round, roundIndex),
+      toRoundCard(round, roundIndex, state.playMode),
     ),
     round: currentRoundCard(state),
     reveal: buildReveal(state),
-    scores: buildScores(state),
-    podium: sessionPodium(state),
+    scores: buildScores(state, rankIndex, audience),
+    podium: sessionPodium(state, audience, rankIndex),
     nextEvent: state.cursor.phase === 'ended' ? state.nextEvent : null,
     wheel: wheelOf(state),
     wheelBonus: wheelBonusOf(state),
@@ -935,10 +1224,12 @@ function answerCountOf(
     : { count: answerCount.count, total: answerCount.total };
 }
 
+/** One rank index serves the whole state (W1): `scores`, `podium`, `myReveal` and `myScores` all read it. */
 function playerSessionState(
   state: QuizshowLiveState,
   viewer: { playerId: string | null; suggestedScreenName: string },
 ): QuizshowPlayerState {
+  const rankIndex = buildRankIndex(state);
   const player = activePlayerOf(state, viewer.playerId);
   const shown = shownQuestion(state);
   const play = shown?.play ?? null;
@@ -964,9 +1255,10 @@ function playerSessionState(
       ? null
       : { questionId: vote.questionId, optionId: vote.optionId };
   return {
-    ...stateBase(state),
+    ...stateBase(state, 'public', rankIndex),
     role: 'player',
-    lobby: buildLobby(state, 'players'),
+    lobby: buildPlayerLobby(state),
+    answerCount: answerCountOf(state),
     question: publicQuestionView(state),
     voteOptions:
       player === null
@@ -982,8 +1274,10 @@ function playerSessionState(
         isEligible(state, player.playerId)),
     myAnswer,
     myVote,
-    myReveal: player === null ? null : buildMyReveal(state, player.playerId),
-    myScores: player === null ? null : buildMyScores(state, player.playerId),
+    myReveal:
+      player === null ? null : buildMyReveal(state, player.playerId, rankIndex),
+    myScores:
+      player === null ? null : buildMyScores(state, player.playerId, rankIndex),
   };
 }
 
@@ -1014,7 +1308,7 @@ export function buildSessionState(
 ): QuizshowSessionState {
   if (viewer.role === 'screen') {
     return {
-      ...stateBase(state),
+      ...stateBase(state, 'public', buildRankIndex(state)),
       role: 'screen',
       lobby: buildLobby(state, 'screen'),
       question: publicQuestionView(state),
@@ -1024,13 +1318,16 @@ export function buildSessionState(
   }
   if (viewer.role === 'host') {
     return {
-      ...stateBase(state),
+      ...stateBase(state, 'hosts', buildRankIndex(state)),
       role: 'host',
       lobby: buildHostLobby(state),
       question: hostQuestionView(state),
       answerCount: answerCountOf(state),
       voteOptions: buildHostVoteOptions(state),
       reviewList: buildReviewList(state),
+      pairedDevices: buildPairedDevices(state),
+      typedAnswers: buildTypedAnswers(state),
+      guestPushSentAt: state.guestPushSentAt,
     };
   }
   return playerSessionState(state, viewer);

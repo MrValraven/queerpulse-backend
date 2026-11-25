@@ -19,11 +19,27 @@ import {
   QuizshowTemplateQuizInputDto,
 } from './quizshow-template.dto';
 import {
+  QuizshowAcceptAnswerPayload,
+  QuizshowAdjustPointsPayload,
   QuizshowAnswerSubmitPayload,
+  QuizshowAttachPayload,
+  QuizshowChangeCorrectAnswerPayload,
+  QuizshowCreateTeamsPayload,
   QuizshowJokerPayload,
+  QuizshowLeavePayload,
   QuizshowLobbyJoinPayload,
+  QuizshowMovePlayerPayload,
+  QuizshowNotifyGuestsPayload,
+  QuizshowPairDevicePayload,
   QuizshowPhaseCommandPayload,
+  QuizshowReactionPayload,
+  QuizshowRemovePlayerPayload,
+  QuizshowRenamePlayerPayload,
+  QuizshowSessionPingPayload,
+  QuizshowSetAutoAdvancePayload,
+  QuizshowSetJoinLockPayload,
   QuizshowSetScreenMutedPayload,
+  QuizshowUnpairDevicePayload,
 } from './quizshow-socket-payloads';
 
 type PlainObject = Record<string, unknown>;
@@ -159,7 +175,7 @@ describe('quizshow request bodies', () => {
       buildQuiz({
         rounds: [
           buildRound({
-            questions: [buildQuestion({ answer: { correctIndex: 1 } })],
+            questions: [buildQuestion({ answer: { correctIndexes: [1] } })],
           }),
         ],
       }),
@@ -241,6 +257,7 @@ describe('quizshow request bodies', () => {
       isReviewOn: true,
       notifyGuests: true,
       shouldReplaceResults: false,
+      isPractice: false,
     };
     const solo = await validateBody(QuizshowOpenSessionDto, {
       ...baseBody,
@@ -586,6 +603,7 @@ describe('quizshow request bodies', () => {
       maxTeamSize: null,
       isReviewOn: true,
       shouldReplaceResults: false,
+      isPractice: false,
     };
     const accepted = await validateBody(QuizshowOpenGameSessionDto, {
       ...baseBody,
@@ -702,5 +720,518 @@ describe('quizshow request bodies', () => {
     });
     expect(pastTheRows.errorProperties).toEqual(['roundIndex']);
     expect(pastTheRows.constraintNames).toEqual(['max']);
+  });
+});
+
+describe('quizshow v2 quiz input fields', () => {
+  function quizWithQuestion(question: PlainObject): PlainObject {
+    return buildQuiz({ rounds: [buildRound({ questions: [question] })] });
+  }
+
+  it('accepts multiple choice correctIndexes and refuses a bare number, too many entries or a negative index', async () => {
+    for (const correctIndexes of [[], [0], [0, 1]]) {
+      const accepted = await validateBody(
+        QuizshowQuizInputDto,
+        quizWithQuestion(buildQuestion({ answer: { correctIndexes } })),
+      );
+      expect(accepted.errorCount).toBe(0);
+    }
+    const refusedAnswers: PlainObject[] = [
+      { correctIndexes: [0, 1, 2, 3, 4] },
+      { correctIndexes: [-1] },
+      { correctIndexes: [0.5] },
+      { correctIndexes: 1 },
+    ];
+    for (const answer of refusedAnswers) {
+      const refused = await validateBody(
+        QuizshowQuizInputDto,
+        quizWithQuestion(buildQuestion({ answer })),
+      );
+      expect(refused.errorCount).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts a closest answer with a tolerance and refuses one with a bad mode or amount', async () => {
+    const closestQuestion = (answer: PlainObject): PlainObject =>
+      buildQuestion({ type: 'closest_number', options: [], answer });
+    const accepted = await validateBody(
+      QuizshowQuizInputDto,
+      quizWithQuestion(
+        closestQuestion({
+          value: 1990,
+          tolerance: { mode: 'percent', amount: 10 },
+        }),
+      ),
+    );
+    expect(accepted.errorCount).toBe(0);
+    const refusedAnswers: PlainObject[] = [
+      { value: 1990, tolerance: { mode: 'relative', amount: 10 } },
+      { value: 1990, tolerance: { mode: 'absolute', amount: 'ten' } },
+      { value: 1990, tolerance: { mode: 'exact' } },
+      { value: 1990, tolerance: { mode: 'exact', amount: 0, unit: 'years' } },
+    ];
+    for (const answer of refusedAnswers) {
+      const refused = await validateBody(
+        QuizshowQuizInputDto,
+        quizWithQuestion(closestQuestion(answer)),
+      );
+      expect(refused.errorCount).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts the answer shapes a studio page cached before v2 saves and refuses them mixed or malformed', async () => {
+    const closestQuestion = (answer: PlainObject): PlainObject =>
+      buildQuestion({ type: 'closest_number', options: [], answer });
+    const acceptedQuestions: PlainObject[] = [
+      buildQuestion({ answer: { correctIndex: 1 } }),
+      closestQuestion({ value: 1990 }),
+    ];
+    for (const question of acceptedQuestions) {
+      const accepted = await validateBody(
+        QuizshowQuizInputDto,
+        quizWithQuestion(question),
+      );
+      expect(accepted.errorCount).toBe(0);
+    }
+    const refusedQuestions: PlainObject[] = [
+      buildQuestion({ answer: { correctIndex: 1, correctIndexes: [1] } }),
+      buildQuestion({ answer: { correctIndex: -1 } }),
+      buildQuestion({ answer: { correctIndex: 0.5 } }),
+      buildQuestion({ answer: { correctIndex: '1' } }),
+      closestQuestion({ value: 1990, correctIndex: 0 }),
+      closestQuestion({ tolerance: { mode: 'percent', amount: 10 } }),
+    ];
+    for (const question of refusedQuestions) {
+      const refused = await validateBody(
+        QuizshowQuizInputDto,
+        quizWithQuestion(question),
+      );
+      expect(refused.errorCount).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts a poll with a null answer and refuses a poll with any answer', async () => {
+    const accepted = await validateBody(
+      QuizshowQuizInputDto,
+      quizWithQuestion(buildQuestion({ type: 'poll', answer: null })),
+    );
+    expect(accepted.errorCount).toBe(0);
+    for (const answer of [{}, { correctIndexes: [0] }]) {
+      const refused = await validateBody(
+        QuizshowQuizInputDto,
+        quizWithQuestion(buildQuestion({ type: 'poll', answer })),
+      );
+      expect(refused.errorCount).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts the picture, note and unit fields at their limits and refuses them past the limits', async () => {
+    const accepted = await validateBody(
+      QuizshowQuizInputDto,
+      quizWithQuestion(
+        buildQuestion({
+          mediaAlt: { en: 'a'.repeat(200), pt: '' },
+          mediaReveal: 'slow',
+          revealNote: { en: '', pt: 'n'.repeat(200) },
+          numberUnit: { en: 'u'.repeat(20), pt: 'anos' },
+        }),
+      ),
+    );
+    expect(accepted.errorCount).toBe(0);
+    const refusedFields: PlainObject[] = [
+      { mediaAlt: { en: 'a'.repeat(201), pt: '' } },
+      { mediaAlt: { en: '' } },
+      { revealNote: { en: 'n'.repeat(201), pt: '' } },
+      { numberUnit: { en: '', pt: 'u'.repeat(21) } },
+      { mediaReveal: 'fade' },
+    ];
+    for (const fields of refusedFields) {
+      const refused = await validateBody(
+        QuizshowQuizInputDto,
+        quizWithQuestion(buildQuestion(fields)),
+      );
+      expect(refused.errorCount).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts warm-up and talk time settings and refuses a non-boolean warm-up or 15 talk seconds', async () => {
+    const settings = {
+      timeLimitSeconds: 20,
+      isSpeedBonusOn: true,
+      isJokerAllowed: true,
+      writeSeconds: 60,
+      voteSeconds: 30,
+    };
+    for (const talkSeconds of [0, 10, 20, 30]) {
+      const accepted = await validateBody(QuizshowRoundSettingsDto, {
+        ...settings,
+        isWarmUp: true,
+        talkSeconds,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    const refusedFields: Array<[string, unknown]> = [
+      ['isWarmUp', 'yes'],
+      ['talkSeconds', 15],
+    ];
+    for (const [property, value] of refusedFields) {
+      const refused = await validateBody(QuizshowRoundSettingsDto, {
+        ...settings,
+        [property]: value,
+      });
+      expect(refused.errorProperties).toEqual([property]);
+    }
+  });
+
+  it('accepts screenLanguage both and refuses an unknown screen language', async () => {
+    const both = await validateBody(
+      QuizshowQuizInputDto,
+      buildQuiz({ screenLanguage: 'both' }),
+    );
+    expect(both.errorCount).toBe(0);
+    const unknown = await validateBody(
+      QuizshowQuizInputDto,
+      buildQuiz({ screenLanguage: 'fr' }),
+    );
+    expect(unknown.errorProperties).toEqual(['screenLanguage']);
+  });
+});
+
+describe('quizshow v2 open, import and template bodies', () => {
+  const openBody = {
+    playMode: 'solo',
+    maxTeamSize: null,
+    isReviewOn: true,
+    notifyGuests: false,
+    shouldReplaceResults: false,
+    isPractice: true,
+  };
+
+  it('requires a boolean isPractice on both open bodies', async () => {
+    for (const dtoClass of [
+      QuizshowOpenSessionDto,
+      QuizshowOpenGameSessionDto,
+    ]) {
+      const accepted = await validateBody(dtoClass, openBody);
+      expect(accepted.errorCount).toBe(0);
+      const withoutPractice: PlainObject = { ...openBody };
+      delete withoutPractice.isPractice;
+      const missing = await validateBody(dtoClass, withoutPractice);
+      expect(missing.errorProperties).toEqual(['isPractice']);
+      const nonBoolean = await validateBody(dtoClass, {
+        ...openBody,
+        isPractice: 'yes',
+      });
+      expect(nonBoolean.errorProperties).toEqual(['isPractice']);
+    }
+  });
+
+  it('accepts a missing, null or uuid rematchOfSessionId and refuses a malformed one', async () => {
+    for (const rematchOfSessionId of [undefined, null, sampleUuid]) {
+      const accepted = await validateBody(QuizshowOpenSessionDto, {
+        ...openBody,
+        rematchOfSessionId,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    const malformed = await validateBody(QuizshowOpenGameSessionDto, {
+      ...openBody,
+      rematchOfSessionId: 'session-1',
+    });
+    expect(malformed.errorProperties).toEqual(['rematchOfSessionId']);
+  });
+
+  it('accepts an append import with rows and a token and refuses a bad mode, row list or token', async () => {
+    const source = { from: 'game', gameId: sampleUuid };
+    const append = await validateBody(QuizshowImportDto, {
+      ...source,
+      mode: 'append',
+      roundIndexes: [0, 2],
+      expectedUpdatedAt: '2026-11-24T10:00:00.000Z',
+    });
+    expect(append.errorCount).toBe(0);
+    const nulls = await validateBody(QuizshowImportDto, {
+      ...source,
+      mode: 'replace',
+      roundIndexes: null,
+      expectedUpdatedAt: null,
+    });
+    expect(nulls.errorCount).toBe(0);
+    const refusedFields: Array<[string, unknown]> = [
+      ['mode', 'merge'],
+      ['roundIndexes', [-1]],
+      ['roundIndexes', [1.5]],
+      ['roundIndexes', Array.from({ length: 14 }, (_value, index) => index)],
+      ['roundIndexes', 3],
+      ['expectedUpdatedAt', 'yesterday'],
+    ];
+    for (const [property, value] of refusedFields) {
+      const refused = await validateBody(QuizshowImportDto, {
+        ...source,
+        [property]: value,
+      });
+      expect(refused.errorProperties).toEqual([property]);
+    }
+  });
+
+  it('trims a template change note, accepts a body without one and refuses one over 300', async () => {
+    const trimmed = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        changeNote: { en: '  New final round  ', pt: '  Nova ronda final ' },
+      }),
+    );
+    expect(trimmed.errorCount).toBe(0);
+    expect(trimmed.instance.changeNote?.en).toBe('New final round');
+    expect(trimmed.instance.changeNote?.pt).toBe('Nova ronda final');
+    const atLimit = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        changeNote: { en: 'x'.repeat(300), pt: '' },
+      }),
+    );
+    expect(atLimit.errorCount).toBe(0);
+    const tooLong = await validateBody(
+      QuizshowTemplateInputDto,
+      buildTemplateInput({
+        changeNote: { en: '', pt: 'y'.repeat(301) },
+      }),
+    );
+    expect(tooLong.errorProperties).toEqual(['changeNote']);
+  });
+});
+
+describe('quizshow v2 socket payloads', () => {
+  it('accepts an empty leave, ping and notify payload and refuses any key on them', async () => {
+    for (const dtoClass of [
+      QuizshowLeavePayload,
+      QuizshowSessionPingPayload,
+      QuizshowNotifyGuestsPayload,
+    ]) {
+      const accepted = await validateBody(dtoClass, {});
+      expect(accepted.errorCount).toBe(0);
+      const unknownKey = await validateBody(dtoClass, { playerId: sampleUuid });
+      expect(unknownKey.errorProperties).toEqual(['playerId']);
+    }
+  });
+
+  it('accepts every reaction id and refuses an unknown one', async () => {
+    for (const reactionId of [
+      'heart',
+      'fire',
+      'clap',
+      'laugh',
+      'wow',
+      'party',
+    ]) {
+      const accepted = await validateBody(QuizshowReactionPayload, {
+        reactionId,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    const refused = await validateBody(QuizshowReactionPayload, {
+      reactionId: 'thumbs',
+    });
+    expect(refused.errorProperties).toEqual(['reactionId']);
+  });
+
+  it('accepts an accepted answer of 1..80 characters and refuses an empty or longer one', async () => {
+    const body = { phaseId: '7', questionId: sampleUuid };
+    for (const normalisedText of ['a', 'x'.repeat(80)]) {
+      const accepted = await validateBody(QuizshowAcceptAnswerPayload, {
+        ...body,
+        normalisedText,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    for (const normalisedText of ['', 'x'.repeat(81)]) {
+      const refused = await validateBody(QuizshowAcceptAnswerPayload, {
+        ...body,
+        normalisedText,
+      });
+      expect(refused.errorProperties).toEqual(['normalisedText']);
+    }
+  });
+
+  it('accepts a multiple choice or true or false key change and refuses a mixed, empty or unknown one', async () => {
+    const body = { phaseId: '7', questionId: sampleUuid };
+    const acceptedAnswers: PlainObject[] = [
+      { type: 'multiple_choice', correctIndexes: [0, 2] },
+      { type: 'true_false', isTrue: false },
+    ];
+    for (const answer of acceptedAnswers) {
+      const accepted = await validateBody(QuizshowChangeCorrectAnswerPayload, {
+        ...body,
+        answer,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    const refusedAnswers: PlainObject[] = [
+      { type: 'multiple_choice', correctIndexes: [] },
+      { type: 'multiple_choice', correctIndexes: [0, 1, 2, 3, 4] },
+      { type: 'multiple_choice', correctIndexes: [0], isTrue: true },
+      { type: 'true_false' },
+      { type: 'true_false', isTrue: true, correctIndexes: [0] },
+      { type: 'order', orderedIds: ['a'] },
+    ];
+    for (const answer of refusedAnswers) {
+      const refused = await validateBody(QuizshowChangeCorrectAnswerPayload, {
+        ...body,
+        answer,
+      });
+      expect(refused.errorProperties).toEqual(['answer']);
+    }
+  });
+
+  it('accepts a whole non-zero delta up to 5000 either way and refuses 0, 5001 or a fraction', async () => {
+    const body = { entrantId: sampleUuid, requestId: sampleUuid };
+    for (const delta of [250, -5000, 5000]) {
+      const accepted = await validateBody(QuizshowAdjustPointsPayload, {
+        ...body,
+        delta,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    for (const delta of [0, 5001, -5001, 1.5]) {
+      const refused = await validateBody(QuizshowAdjustPointsPayload, {
+        ...body,
+        delta,
+      });
+      expect(refused.errorProperties).toEqual(['delta']);
+    }
+    const badRequestId = await validateBody(QuizshowAdjustPointsPayload, {
+      ...body,
+      delta: 10,
+      requestId: 'request-1',
+    });
+    expect(badRequestId.errorProperties).toEqual(['requestId']);
+  });
+
+  it('accepts a pairing code from 2 to 9 and refuses one with a 1 or of the wrong length', async () => {
+    const accepted = await validateBody(QuizshowPairDevicePayload, {
+      pairingCode: '234567',
+    });
+    expect(accepted.errorCount).toBe(0);
+    for (const pairingCode of ['123456', '23456', '2345678', 234567]) {
+      const refused = await validateBody(QuizshowPairDevicePayload, {
+        pairingCode,
+      });
+      expect(refused.errorProperties).toEqual(['pairingCode']);
+    }
+  });
+
+  it('accepts an unpair by pairing id and refuses a malformed one', async () => {
+    const accepted = await validateBody(QuizshowUnpairDevicePayload, {
+      pairingId: sampleUuid,
+    });
+    expect(accepted.errorCount).toBe(0);
+    const refused = await validateBody(QuizshowUnpairDevicePayload, {
+      pairingId: 'pairing-1',
+    });
+    expect(refused.errorProperties).toEqual(['pairingId']);
+  });
+
+  it('accepts 1 to 24 team names and refuses none, 25, an empty one or one over 40', async () => {
+    for (const names of [
+      ['Owls'],
+      Array.from({ length: 24 }, (_value, index) => `Team ${index + 1}`),
+    ]) {
+      const accepted = await validateBody(QuizshowCreateTeamsPayload, {
+        names,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    for (const names of [
+      [],
+      Array.from({ length: 25 }, (_value, index) => `Team ${index + 1}`),
+      ['Owls', ''],
+      ['x'.repeat(41)],
+      ['Owls', 7],
+    ]) {
+      const refused = await validateBody(QuizshowCreateTeamsPayload, {
+        names,
+      });
+      expect(refused.errorProperties).toEqual(['names']);
+    }
+  });
+
+  it('accepts a host rename of 1..30 characters and refuses an empty or longer one', async () => {
+    const accepted = await validateBody(QuizshowRenamePlayerPayload, {
+      playerId: sampleUuid,
+      screenName: 'Sam',
+    });
+    expect(accepted.errorCount).toBe(0);
+    for (const screenName of ['', 'x'.repeat(31)]) {
+      const refused = await validateBody(QuizshowRenamePlayerPayload, {
+        playerId: sampleUuid,
+        screenName,
+      });
+      expect(refused.errorProperties).toEqual(['screenName']);
+    }
+  });
+
+  it('accepts a move to a team id and refuses a malformed team id', async () => {
+    const accepted = await validateBody(QuizshowMovePlayerPayload, {
+      playerId: sampleUuid,
+      teamId: sampleUuid,
+    });
+    expect(accepted.errorCount).toBe(0);
+    const refused = await validateBody(QuizshowMovePlayerPayload, {
+      playerId: sampleUuid,
+      teamId: 'team-1',
+    });
+    expect(refused.errorProperties).toEqual(['teamId']);
+  });
+
+  it('accepts a remove with and without canRejoin and refuses a non-boolean', async () => {
+    for (const extra of [{}, { canRejoin: true }, { canRejoin: false }]) {
+      const accepted = await validateBody(QuizshowRemovePlayerPayload, {
+        playerId: sampleUuid,
+        ...extra,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    const refused = await validateBody(QuizshowRemovePlayerPayload, {
+      playerId: sampleUuid,
+      canRejoin: 'yes',
+    });
+    expect(refused.errorProperties).toEqual(['canRejoin']);
+  });
+
+  it('accepts boolean join lock and auto-advance switches and refuses anything else', async () => {
+    const lockOn = await validateBody(QuizshowSetJoinLockPayload, {
+      isLocked: true,
+    });
+    expect(lockOn.errorCount).toBe(0);
+    const lockRefused = await validateBody(QuizshowSetJoinLockPayload, {
+      isLocked: 'yes',
+    });
+    expect(lockRefused.errorProperties).toEqual(['isLocked']);
+    const autoOff = await validateBody(QuizshowSetAutoAdvancePayload, {
+      isOn: false,
+    });
+    expect(autoOff.errorCount).toBe(0);
+    const autoRefused = await validateBody(QuizshowSetAutoAdvancePayload, {
+      isOn: 1,
+    });
+    expect(autoRefused.errorProperties).toEqual(['isOn']);
+  });
+
+  it('accepts an attach with or without a device ticket and refuses a non-string or oversized ticket', async () => {
+    const body = { sessionId: sampleUuid, as: 'screen' };
+    for (const extra of [{}, { deviceTicket: 'header.claims.signature' }]) {
+      const accepted = await validateBody(QuizshowAttachPayload, {
+        ...body,
+        ...extra,
+      });
+      expect(accepted.errorCount).toBe(0);
+    }
+    for (const deviceTicket of [42, 'x'.repeat(2049)]) {
+      const refused = await validateBody(QuizshowAttachPayload, {
+        ...body,
+        deviceTicket,
+      });
+      expect(refused.errorProperties).toEqual(['deviceTicket']);
+    }
   });
 });

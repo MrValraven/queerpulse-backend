@@ -1,11 +1,20 @@
 import { Logger } from '@nestjs/common';
+import type { EventEmitter2 } from '@nestjs/event-emitter';
 import type { DataSource, EntityManager } from 'typeorm';
-import { QUIZSHOW_WHEEL_SETTINGS_DEFAULTS } from './quizshow.contract';
+import { BLOCKED_TERMS } from '../common/blocked-terms';
+import {
+  QUIZSHOW_LIMITS,
+  QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  type QuizshowRoundSettings,
+} from './quizshow.contract';
 import { createLobbyState } from './quizshow-engine-state';
+import { QUIZ_EVENT_GAME_FINISHED } from './quizshow-game-finished.events';
 import type {
+  QuizshowLiveAnswer,
   QuizshowLivePlayer,
   QuizshowLiveState,
   QuizshowLiveTeam,
+  QuizshowLiveVote,
   QuizshowQuestionLogEntry,
 } from './quizshow-engine-types';
 import {
@@ -14,6 +23,7 @@ import {
   QuizshowPersistenceService,
   toStoredCursor,
 } from './quizshow-persistence.service';
+import { quizshowHelperNameFromFirstName } from './quizshow-helper-name';
 import { streakBonusFor } from './quizshow-scoring';
 import type {
   QuizshowRandom,
@@ -63,10 +73,12 @@ function buildService(responder: Responder = () => []) {
       },
     ),
   };
+  const eventEmitter = { emit: jest.fn() };
   const service = new QuizshowPersistenceService(
     dataSource as unknown as DataSource,
+    eventEmitter as unknown as EventEmitter2,
   );
-  return { service, dataSource, recordedQueries };
+  return { service, dataSource, recordedQueries, eventEmitter };
 }
 
 function createGate(): { promise: Promise<void>; release: () => void } {
@@ -81,13 +93,23 @@ function settle(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-const ROUND_SETTINGS = {
+const ROUND_SETTINGS: QuizshowRoundSettings = {
   timeLimitSeconds: 20,
   isSpeedBonusOn: true,
   isJokerAllowed: true,
   writeSeconds: 60,
   voteSeconds: 30,
   ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  isWarmUp: false,
+  talkSeconds: 0,
+};
+
+/** The four question fields live v2 added, at their defaults. */
+const V2_QUESTION_FIELDS = {
+  mediaAlt: { en: '', pt: '' },
+  mediaReveal: 'instant' as const,
+  revealNote: { en: '', pt: '' },
+  numberUnit: { en: '', pt: '' },
 };
 
 const QUIZ_ROUND: QuizshowSnapshotRound = {
@@ -103,13 +125,14 @@ const QUIZ_ROUND: QuizshowSnapshotRound = {
       prompt: { en: 'Who sang Believe?', pt: 'Quem cantou Believe?' },
       mediaRef: null,
       mediaUrl: null,
+      ...V2_QUESTION_FIELDS,
       timeLimitSeconds: null,
       points: 1000,
       options: [
         { id: 'cher', text: { en: 'Cher', pt: 'Cher' } },
         { id: 'kylie', text: { en: 'Kylie', pt: 'Kylie' } },
       ],
-      answer: { correctIndex: 0 },
+      answer: { correctIndexes: [0] },
       acceptedAnswers: [],
       shownOptions: [
         { id: 'cher', text: { en: 'Cher', pt: 'Cher' } },
@@ -122,6 +145,7 @@ const QUIZ_ROUND: QuizshowSnapshotRound = {
       prompt: { en: 'Order the decades', pt: 'Ordena as décadas' },
       mediaRef: null,
       mediaUrl: null,
+      ...V2_QUESTION_FIELDS,
       timeLimitSeconds: null,
       points: 1000,
       options: [
@@ -152,6 +176,7 @@ const LIE_ROUND: QuizshowSnapshotRound = {
       },
       mediaRef: null,
       mediaUrl: null,
+      ...V2_QUESTION_FIELDS,
       timeLimitSeconds: null,
       points: 1000,
       options: [],
@@ -175,6 +200,7 @@ const CAPTION_ROUND: QuizshowSnapshotRound = {
       prompt: { en: '', pt: '' },
       mediaRef: 'event-covers/caption.png',
       mediaUrl: null,
+      ...V2_QUESTION_FIELDS,
       timeLimitSeconds: null,
       points: 1000,
       options: [],
@@ -190,6 +216,7 @@ const SNAPSHOT: QuizshowSessionSnapshot = {
   languages: 'both',
   screenLanguage: 'en',
   rounds: [QUIZ_ROUND, LIE_ROUND, CAPTION_ROUND],
+  sourceUpdatedAt: '2026-10-19T18:00:00.000Z',
 };
 
 function logEntry(
@@ -319,6 +346,7 @@ function lobbyState(
     snapshot,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
+    isPractice: false,
     startedAt: STARTED_AT,
   });
 }
@@ -340,6 +368,8 @@ function livePlayer(playerId: string): QuizshowLivePlayer {
     joinedAt: 2_000,
     removedAt: null,
     connectedSocketCount: 1,
+    disconnectedAt: null,
+    leftAt: null,
   };
 }
 
@@ -352,8 +382,36 @@ function liveTeam(teamId: string): QuizshowLiveTeam {
     hasUsedJoker: false,
     jokerRoundIndex: null,
     createdAt: 1_500,
+    isHostMade: false,
   };
 }
+
+/** An event session at its ended phase with one player, `p1` (member `user-1`, screen name Ana). */
+function endedEventState(): QuizshowLiveState {
+  const state = lobbyState();
+  state.players.set('p1', {
+    ...livePlayer('p1'),
+    userId: 'user-1',
+    screenName: 'Ana',
+  });
+  state.status = 'finished';
+  state.cursor = {
+    ...state.cursor,
+    status: 'finished',
+    phase: 'ended',
+    phaseStartedAt: 120_000,
+  };
+  return state;
+}
+
+/** The finish of `endedEventState`: `p1` alone in first place. */
+const WINNING_FINISH = {
+  type: 'finish' as const,
+  podium: [
+    { place: 1 as const, kind: 'player' as const, entrantId: 'p1', score: 900 },
+  ],
+  placings: { p1: 1 },
+};
 
 function sessionRow(overrides: Record<string, unknown>) {
   return {
@@ -384,7 +442,13 @@ function sessionRow(overrides: Record<string, unknown>) {
     started_by_user_id: 'cohost-user',
     last_host_command_at: new Date(40_000),
     paused_at: null,
+    guest_push_sent_at: null,
     attached_organiser_user_ids: ['cohost-user'],
+    is_practice: false,
+    is_join_locked: false,
+    is_auto_advance_on: false,
+    paired_devices: [],
+    answer_key_overrides: {},
     quiz_owner_user_id: null,
     quiz_is_adults_only: false,
     event_slug: 'pride-night',
@@ -434,6 +498,7 @@ function playerRow(overrides: Record<string, unknown>) {
     has_used_joker: false,
     joker_round_index: null,
     removed_at: null,
+    left_at: null,
     joined_at: new Date(5_000),
     profile_avatar_url: null,
     profile_photo_visible: true,
@@ -461,6 +526,8 @@ function loadResponder(rows: {
   nextEvents?: unknown[];
   answers?: unknown[];
   votes?: unknown[];
+  helperNames?: unknown[];
+  giving?: unknown[];
 }): Responder {
   return (sql) => {
     if (sql.includes('FROM "quizshow_sessions" "session"')) return rows.session;
@@ -475,6 +542,10 @@ function loadResponder(rows: {
       return rows.answers ?? [];
     }
     if (sql.includes('FROM "quizshow_votes" "vote"')) return rows.votes ?? [];
+    if (sql.includes('FROM "profiles" "profile"')) {
+      return rows.helperNames ?? [];
+    }
+    if (sql.includes('FROM "events" "event"')) return rows.giving ?? [];
     return [];
   };
 }
@@ -534,6 +605,8 @@ describe('QuizshowPersistenceService', () => {
       'extraTimeDeadline',
       'pausedRemainingMs',
       'pausedExtraTimeRemainingMs',
+      'talkStartsAt',
+      'autoAdvanceAt',
     ]) {
       expect(sql).toContain(`'${clearedField}', NULL`);
     }
@@ -612,6 +685,7 @@ describe('QuizshowPersistenceService', () => {
             has_used_joker: false,
             joker_round_index: null,
             created_at: new Date(3_000),
+            is_host_made: false,
           },
           {
             id: 'team-blue',
@@ -621,6 +695,7 @@ describe('QuizshowPersistenceService', () => {
             has_used_joker: true,
             joker_round_index: 1,
             created_at: new Date(3_500),
+            is_host_made: false,
           },
         ],
         nextEvents: [
@@ -661,7 +736,7 @@ describe('QuizshowPersistenceService', () => {
     expect(state.eventTitle).toBe('Pride night');
     expect(state.hostUserId).toBe('host-user');
     expect(state.openedByUserId).toBe('cohost-user');
-    expect(state.snapshot).toBe(SNAPSHOT);
+    expect(state.snapshot).toEqual(SNAPSHOT);
     expect(state.phaseCounter).toBe(7);
     // The stored cursor predates the wheel: the load recomputes the round
     // count and the other derived fields from the in-order progress.
@@ -681,6 +756,9 @@ describe('QuizshowPersistenceService', () => {
       roundNumber: 1,
       upNext: null,
       canSpinForNextRound: false,
+      talkStartsAt: null,
+      autoAdvanceAt: null,
+      podiumRevealedCount: null,
     });
     expect(state.wheelProgress).toEqual({
       ...emptyWheelProgress(),
@@ -718,6 +796,7 @@ describe('QuizshowPersistenceService', () => {
       hasUsedJoker: true,
       jokerRoundIndex: 1,
       createdAt: 3_500,
+      isHostMade: false,
     });
 
     expect(state.scoresAtLastFrame).toEqual(
@@ -1001,7 +1080,7 @@ describe('QuizshowPersistenceService', () => {
     expect(loggerErrorSpy.mock.calls).toEqual([
       ['Pulse Live write insert_player failed for session session-1 (23505)'],
       [
-        'Pulse Live write insert_answer failed for session session-1 (TypeError)',
+        'Pulse Live write insert_answer+insert_vote failed for session session-1 (TypeError) with 1 answers and 0 votes in 1 batches',
       ],
     ]);
     const loggedText = JSON.stringify(loggerErrorSpy.mock.calls);
@@ -1060,6 +1139,9 @@ describe('QuizshowPersistenceService', () => {
       pausedRemainingMs: null,
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
+      talkStartsAt: null,
+      autoAdvanceAt: null,
+      podiumRevealedCount: null,
       phaseCounter: 0,
       wheelProgress: emptyWheelProgress(),
     });
@@ -1176,6 +1258,8 @@ describe('QuizshowPersistenceService', () => {
           percentCorrect: Math.round((100 * 2) / 4),
           averageAnswerMs: 1500,
           wasSkipped: false,
+          isWarmUp: false,
+          wasCorrected: false,
         },
         {
           roundIndex: 0,
@@ -1187,6 +1271,8 @@ describe('QuizshowPersistenceService', () => {
           percentCorrect: null,
           averageAnswerMs: null,
           wasSkipped: true,
+          isWarmUp: false,
+          wasCorrected: false,
         },
         {
           roundIndex: 1,
@@ -1201,9 +1287,12 @@ describe('QuizshowPersistenceService', () => {
           percentCorrect: null,
           averageAnswerMs: null,
           wasSkipped: false,
+          isWarmUp: false,
+          wasCorrected: false,
         },
       ],
     });
+    expect(finishUpdate?.sql).toContain(`"answer_key_overrides" = '{}'::jsonb`);
   });
 
   it('deletes kept results and every row that names a player', async () => {
@@ -1449,6 +1538,115 @@ describe('QuizshowPersistenceService', () => {
     ).toBe(false);
   });
 
+  it('stamps the event game number and emits the winners after the commit', async () => {
+    const { service, eventEmitter, recordedQueries } = buildService((sql) =>
+      sql.includes('WITH "finished"')
+        ? [{ id: SESSION_ID, event_game_number: 2 }]
+        : [],
+    );
+    let queryCountAtEmit = 0;
+    eventEmitter.emit.mockImplementation(() => {
+      queryCountAtEmit = recordedQueries.length;
+      return true;
+    });
+
+    service.enqueue(endedEventState(), WINNING_FINISH);
+    await service.flush(SESSION_ID);
+
+    const [finishUpdate] = recordedQueries;
+    expect(finishUpdate?.sql).toContain(
+      '"event_game_number" = CASE WHEN $5::boolean THEN',
+    );
+    expect(finishUpdate?.sql).toContain('RETURNING "id", "event_game_number"');
+    expect(finishUpdate?.sql).toContain(
+      'SELECT "id", "event_game_number" FROM "finished"',
+    );
+    expect(finishUpdate?.params[4]).toBe(true);
+    expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+    expect(eventEmitter.emit).toHaveBeenCalledWith(QUIZ_EVENT_GAME_FINISHED, {
+      sessionId: SESSION_ID,
+      eventId: 'event-1',
+      gameNumber: 2,
+      finishedAt: new Date(120_000),
+      eventTitle: 'Pride night',
+      isAdultsOnly: false,
+      winners: [{ userId: 'user-1', screenName: 'Ana', teamName: null }],
+    });
+    // The finish update, the answer aggregate and the results insert all ran first.
+    expect(queryCountAtEmit).toBe(3);
+  });
+
+  it('numbers from the highest game number of the event whatever results remain', async () => {
+    const { service, recordedQueries } = buildService();
+
+    service.enqueue(endedEventState(), WINNING_FINISH);
+    await service.flush(SESSION_ID);
+
+    const [finishUpdate] = recordedQueries;
+    expect(finishUpdate?.sql).toContain(
+      'SELECT COALESCE(MAX("other"."event_game_number"), 0) + 1 FROM "quizshow_sessions" "other" WHERE "other"."event_id" = "quizshow_sessions"."event_id"',
+    );
+    expect(finishUpdate?.sql).toContain('ELSE NULL END');
+    expect(finishUpdate?.sql).not.toContain('quizshow_results');
+  });
+
+  it('emits nothing when the finish matched no open session', async () => {
+    const { service, eventEmitter, recordedQueries } = buildService(() => []);
+
+    service.enqueue(endedEventState(), WINNING_FINISH);
+    await service.flush(SESSION_ID);
+
+    expect(recordedQueries).toHaveLength(1);
+    expect(recordedQueries[0]?.params[4]).toBe(true);
+    expect(eventEmitter.emit).not.toHaveBeenCalled();
+  });
+
+  it('emits nothing when the write fails', async () => {
+    const { service, eventEmitter } = buildService((sql) => {
+      if (sql.includes('WITH "finished"')) {
+        return [{ id: SESSION_ID, event_game_number: 3 }];
+      }
+      if (sql.includes('INSERT INTO "quizshow_results"')) {
+        throw Object.assign(new Error('duplicate results row'), {
+          code: '23505',
+        });
+      }
+      return [];
+    });
+
+    service.enqueue(endedEventState(), WINNING_FINISH);
+    await service.flush(SESSION_ID);
+
+    expect(eventEmitter.emit).not.toHaveBeenCalled();
+    expect(loggerErrorSpy).toHaveBeenCalledTimes(1);
+    expect(loggerErrorSpy).toHaveBeenCalledWith(
+      'Pulse Live write finish failed for session session-1 (23505)',
+    );
+  });
+
+  it('keeps the queue going when the emit throws', async () => {
+    const { service, eventEmitter, recordedQueries } = buildService((sql) =>
+      sql.includes('WITH "finished"')
+        ? [{ id: SESSION_ID, event_game_number: 4 }]
+        : [],
+    );
+    eventEmitter.emit.mockImplementation(() => {
+      throw new Error('listener text that stays out of the log');
+    });
+    const state = endedEventState();
+
+    service.enqueue(state, WINNING_FINISH);
+    service.enqueue(state, { type: 'set_session_flags' });
+    await service.flush(SESSION_ID);
+
+    expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+    expect(loggerErrorSpy).toHaveBeenCalledTimes(1);
+    expect(loggerErrorSpy).toHaveBeenCalledWith(
+      'Pulse Live after-commit step failed for session session-1 (Error)',
+    );
+    expect(recordedQueries.at(-1)?.sql).toContain('"is_join_locked" = $2');
+  });
+
   it('abandons an unloaded session at the ended phase', async () => {
     const { service, recordedQueries } = buildService();
     const now = new Date('2026-10-19T23:00:00.000Z');
@@ -1545,6 +1743,7 @@ describe('QuizshowPersistenceService', () => {
             has_used_joker: false,
             joker_round_index: null,
             created_at: new Date(3_000),
+            is_host_made: false,
           },
         ],
         answers: [
@@ -1691,7 +1890,16 @@ describe('QuizshowPersistenceService', () => {
     };
     const runningInOpen = buildService(
       loadResponder({
-        session: [sessionRow({ status: 'running', cursor: runningCursor })],
+        session: [
+          sessionRow({
+            status: 'running',
+            cursor: {
+              ...runningCursor,
+              talkStartsAt: 30_000,
+              autoAdvanceAt: 60_000,
+            },
+          }),
+        ],
       }),
     );
     const runningInLeaderboard = buildService(
@@ -1730,6 +1938,8 @@ describe('QuizshowPersistenceService', () => {
         extraTimeDeadline: null,
         pausedRemainingMs: null,
         pausedExtraTimeRemainingMs: null,
+        talkStartsAt: null,
+        autoAdvanceAt: null,
         isRestartRecovery: true,
       }),
     );
@@ -1869,6 +2079,8 @@ describe('QuizshowPersistenceService', () => {
         {
           entry: logEntry({ questionId: 'question-choice', eligibleCount: 2 }),
           prompt: { en: 'Who sang Believe?', pt: 'Quem cantou Believe?' },
+          isWarmUp: false,
+          wasCorrected: false,
         },
         {
           entry: logEntry({
@@ -1880,6 +2092,8 @@ describe('QuizshowPersistenceService', () => {
             wasSkipped: false,
           }),
           prompt: { en: 'Order the decades', pt: 'Ordena as décadas' },
+          isWarmUp: false,
+          wasCorrected: false,
         },
       ],
       [
@@ -1982,6 +2196,7 @@ describe('QuizshowPersistenceService', () => {
             has_used_joker: false,
             joker_round_index: null,
             created_at: new Date(3_000),
+            is_host_made: false,
           },
         ],
         answers: [choiceAnswer],
@@ -2075,6 +2290,7 @@ describe('QuizshowPersistenceService', () => {
             has_used_joker: false,
             joker_round_index: null,
             created_at: new Date(3_000),
+            is_host_made: false,
           },
         ],
         answers: [choiceAnswer],
@@ -2423,6 +2639,9 @@ describe('QuizshowPersistenceService', () => {
       pausedRemainingMs: null,
       pausedExtraTimeRemainingMs: null,
       isRestartRecovery: false,
+      talkStartsAt: null,
+      autoAdvanceAt: null,
+      podiumRevealedCount: null,
       phaseCounter: 10,
       wheelProgress: spunWheelProgress(),
     });
@@ -2790,5 +3009,1204 @@ describe('QuizshowPersistenceService', () => {
     ).toBe(false);
     expect(recap.questions[0]?.percentCorrect).toBe(50);
     expect(recap.questions[1]?.percentCorrect).toBeNull();
+  });
+});
+
+/** A quiz round whose questions score 0: the first playable row of a warm-up night. */
+const WARM_UP_ROUND: QuizshowSnapshotRound = {
+  ...QUIZ_ROUND,
+  id: 'round-warm-up',
+  settings: { ...ROUND_SETTINGS, isWarmUp: true },
+  questions: QUIZ_ROUND.questions.slice(0, 1),
+};
+
+const POLL_OPTIONS = [
+  { id: 'pop', text: { en: 'Pop', pt: 'Pop' } },
+  { id: 'disco', text: { en: 'Disco', pt: 'Disco' } },
+];
+
+/** A quiz round with a poll and the order question. */
+const POLL_ROUND: QuizshowSnapshotRound = {
+  ...QUIZ_ROUND,
+  id: 'round-poll',
+  questions: [
+    {
+      id: 'question-poll',
+      type: 'poll',
+      prompt: { en: 'Pick a genre', pt: 'Escolhe um género' },
+      mediaRef: null,
+      mediaUrl: null,
+      ...V2_QUESTION_FIELDS,
+      timeLimitSeconds: null,
+      points: 1000,
+      options: POLL_OPTIONS,
+      answer: null,
+      acceptedAnswers: [],
+      shownOptions: POLL_OPTIONS,
+    },
+    ...QUIZ_ROUND.questions.slice(1),
+  ],
+};
+
+const RECAP_SNAPSHOT: QuizshowSessionSnapshot = {
+  ...SNAPSHOT,
+  rounds: [WARM_UP_ROUND, POLL_ROUND],
+};
+
+/** A snapshot frozen before live v2: single-correct MC and only the question fields and keys it had then. */
+const PRE_V2_SNAPSHOT = {
+  title: 'Pride night quiz',
+  languages: 'both',
+  screenLanguage: 'en',
+  rounds: [
+    {
+      id: 'round-quiz',
+      kind: 'quiz',
+      title: { en: 'Icons', pt: 'Ícones' },
+      contentLabel: 'none',
+      settings: SETTINGS_BEFORE_WHEEL,
+      questions: [
+        {
+          id: 'question-choice',
+          type: 'multiple_choice',
+          prompt: { en: 'Who sang Believe?', pt: 'Quem cantou Believe?' },
+          mediaRef: null,
+          mediaUrl: null,
+          timeLimitSeconds: null,
+          points: 1000,
+          options: [
+            { id: 'cher', text: { en: 'Cher', pt: 'Cher' } },
+            { id: 'kylie', text: { en: 'Kylie', pt: 'Kylie' } },
+          ],
+          answer: { correctIndex: 0 },
+          acceptedAnswers: [],
+          shownOptions: [
+            { id: 'cher', text: { en: 'Cher', pt: 'Cher' } },
+            { id: 'kylie', text: { en: 'Kylie', pt: 'Kylie' } },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+/** A stored cursor as live v2 writes it, in `reveal` on the MC question. */
+function storedRevealCursor(overrides: Record<string, unknown> = {}) {
+  return {
+    phase: 'reveal',
+    roundIndex: 0,
+    questionIndex: 0,
+    roundCount: 3,
+    phaseStartedAt: 30_000,
+    deadline: null,
+    extraTimeDeadline: null,
+    pausedRemainingMs: null,
+    pausedExtraTimeRemainingMs: null,
+    isRestartRecovery: false,
+    talkStartsAt: null,
+    autoAdvanceAt: null,
+    podiumRevealedCount: null,
+    phaseCounter: 6,
+    wheelProgress: { ...emptyWheelProgress(), playedRoundIndexes: [0] },
+    ...overrides,
+  };
+}
+
+const GIVING_SELECT = `SELECT "community"."slug" AS "community_slug", "community"."name" AS "community_name"`;
+
+describe('QuizshowPersistenceService live v2', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  /** Runs one operation through the queue and answers the statements it sent. */
+  async function writeOf(
+    state: QuizshowLiveState,
+    operation: Parameters<QuizshowPersistenceService['enqueue']>[1],
+  ) {
+    const { service, recordedQueries } = buildService();
+    service.enqueue(state, operation);
+    await service.flush(state.sessionId);
+    return recordedQueries;
+  }
+
+  it('merges a host correction into answer_key_overrides under the question id', async () => {
+    const queries = await writeOf(lobbyState(), {
+      type: 'set_answer_key_override',
+      questionId: 'question-choice',
+      keyOverride: { type: 'multiple_choice', correctIndexes: [1] },
+      acceptedTexts: ['cher'],
+    });
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.sql).toBe(
+      `UPDATE "quizshow_sessions" SET "answer_key_overrides" = "answer_key_overrides" || jsonb_build_object($2::text, $3::jsonb) WHERE "id" = $1`,
+    );
+    expect(queries[0]?.params).toEqual([
+      SESSION_ID,
+      'question-choice',
+      JSON.stringify({
+        keyOverride: { type: 'multiple_choice', correctIndexes: [1] },
+        acceptedTexts: ['cher'],
+      }),
+    ]);
+  });
+
+  it('writes an adjusted total to the player or the team of the session', async () => {
+    const playerQueries = await writeOf(lobbyState(), {
+      type: 'adjust_score',
+      kind: 'player',
+      entrantId: 'player-ana',
+      score: 1_500,
+    });
+    const teamQueries = await writeOf(lobbyState(), {
+      type: 'adjust_score',
+      kind: 'team',
+      entrantId: 'team-red',
+      score: 0,
+    });
+
+    expect(playerQueries[0]?.sql).toBe(
+      `UPDATE "quizshow_players" SET "score" = $3 WHERE "session_id" = $1 AND "id" = $2`,
+    );
+    expect(playerQueries[0]?.params).toEqual([SESSION_ID, 'player-ana', 1_500]);
+    expect(teamQueries[0]?.sql).toBe(
+      `UPDATE "quizshow_teams" SET "score" = $3 WHERE "session_id" = $1 AND "id" = $2`,
+    );
+    expect(teamQueries[0]?.params).toEqual([SESSION_ID, 'team-red', 0]);
+  });
+
+  it('appends a paired device with ISO times, removes the dropped ids and copies every other stored entry as it is', async () => {
+    const state = lobbyState();
+    // Memory still holds the helper id that account erasure scrubbed in the row.
+    state.pairedDevices = [
+      {
+        pairingId: 'pairing-helper',
+        kind: 'helper',
+        helperUserId: 'erased-helper-user',
+        helperName: 'Sam',
+        pairedAt: Date.parse('2026-11-24T19:00:00.000Z'),
+        revokedAt: Date.parse('2026-11-24T19:30:00.000Z'),
+        connectedSocketCount: 0,
+      },
+    ];
+    const addedScreen = {
+      pairingId: 'pairing-tv',
+      kind: 'screen' as const,
+      helperUserId: null,
+      helperName: null,
+      pairedAt: Date.parse('2026-11-24T20:00:00.000Z'),
+      revokedAt: null,
+      connectedSocketCount: 2,
+    };
+    state.pairedDevices.push(addedScreen);
+
+    const queries = await writeOf(state, {
+      type: 'add_paired_device',
+      device: addedScreen,
+      droppedPairingIds: ['pairing-old'],
+    });
+
+    expect(queries).toHaveLength(1);
+    const sql = queries[0]?.sql ?? '';
+    expect(sql).toContain('SET "paired_devices" = (');
+    expect(sql).toContain(
+      `jsonb_agg("stored"."device" ORDER BY "stored"."position")`,
+    );
+    expect(sql).toContain(
+      `FROM jsonb_array_elements("paired_devices") WITH ORDINALITY AS "stored"("device", "position")`,
+    );
+    expect(sql).toContain(
+      `WHERE NOT COALESCE("stored"."device" ->> 'pairingId' = ANY($3::text[]), false)`,
+    );
+    expect(sql).toContain(') || $2::jsonb');
+    // Only the new device is written from memory; the stored helper entry is
+    // never rewritten, so its scrubbed helper id stays scrubbed.
+    expect(queries[0]?.params).toEqual([
+      SESSION_ID,
+      JSON.stringify([
+        {
+          pairingId: 'pairing-tv',
+          kind: 'screen',
+          helperUserId: null,
+          pairedAt: '2026-11-24T20:00:00.000Z',
+          revokedAt: null,
+        },
+      ]),
+      ['pairing-old', 'pairing-tv'],
+    ]);
+    expect(JSON.stringify(queries[0]?.params)).not.toContain(
+      'erased-helper-user',
+    );
+  });
+
+  it('rewrites the revoked pairing in place and keeps the array order', async () => {
+    const queries = await writeOf(lobbyState(), {
+      type: 'revoke_paired_device',
+      pairingId: 'pairing-tv',
+      revokedAt: Date.parse('2026-11-24T21:00:00.000Z'),
+    });
+
+    expect(queries).toHaveLength(1);
+    const sql = queries[0]?.sql ?? '';
+    expect(sql).toContain('SET "paired_devices" = (');
+    expect(sql).toContain(`CASE WHEN "stored"."device" ->> 'pairingId' = $2`);
+    expect(sql).toContain(
+      `THEN "stored"."device" || jsonb_build_object('revokedAt', $3::text)`,
+    );
+    expect(sql).toContain('ORDER BY "stored"."position"');
+    expect(sql).toContain(
+      `FROM jsonb_array_elements("paired_devices") WITH ORDINALITY AS "stored"("device", "position")`,
+    );
+    expect(sql).toContain(`'[]'::jsonb`);
+    expect(sql).toContain('WHERE "id" = $1');
+    expect(queries[0]?.params).toEqual([
+      SESSION_ID,
+      'pairing-tv',
+      '2026-11-24T21:00:00.000Z',
+    ]);
+  });
+
+  it('writes both session flags from the state', async () => {
+    const state = lobbyState();
+    state.isJoinLocked = true;
+    state.isAutoAdvanceOn = false;
+
+    const queries = await writeOf(state, { type: 'set_session_flags' });
+
+    expect(queries[0]?.sql).toBe(
+      `UPDATE "quizshow_sessions" SET "is_join_locked" = $2, "is_auto_advance_on" = $3 WHERE "id" = $1`,
+    );
+    expect(queries[0]?.params).toEqual([SESSION_ID, true, false]);
+  });
+
+  it('replaces the stored snapshot with the one the state holds', async () => {
+    const state = lobbyState();
+    state.snapshot = RECAP_SNAPSHOT;
+
+    const queries = await writeOf(state, { type: 'replace_snapshot' });
+
+    expect(queries[0]?.sql).toBe(
+      `UPDATE "quizshow_sessions" SET "quiz_snapshot" = $2::jsonb WHERE "id" = $1`,
+    );
+    expect(queries[0]?.params).toEqual([
+      SESSION_ID,
+      JSON.stringify(RECAP_SNAPSHOT),
+    ]);
+  });
+
+  it('writes left_at on players and is_host_made on teams', async () => {
+    const leftPlayer = { ...livePlayer('player-ana'), leftAt: 70_000 };
+    const insertQueries = await writeOf(lobbyState(), {
+      type: 'insert_player',
+      player: leftPlayer,
+    });
+    const leaveQueries = await writeOf(lobbyState(), {
+      type: 'update_player',
+      playerId: 'player-ana',
+      fields: { leftAt: 70_000 },
+    });
+    const rejoinQueries = await writeOf(lobbyState(), {
+      type: 'update_player',
+      playerId: 'player-ana',
+      fields: { leftAt: null },
+    });
+    const teamQueries = await writeOf(lobbyState(), {
+      type: 'insert_team',
+      team: { ...liveTeam('team-1'), isHostMade: true },
+    });
+
+    expect(insertQueries[0]?.sql).toContain('"joined_at", "left_at")');
+    expect(insertQueries[0]?.sql).toContain('$14, $15)');
+    expect(insertQueries[0]?.params[14]).toEqual(new Date(70_000));
+    expect(leaveQueries[0]?.sql).toBe(
+      `UPDATE "quizshow_players" SET "left_at" = $3 WHERE "session_id" = $1 AND "id" = $2`,
+    );
+    expect(leaveQueries[0]?.params).toEqual([
+      SESSION_ID,
+      'player-ana',
+      new Date(70_000),
+    ]);
+    expect(rejoinQueries[0]?.params).toEqual([SESSION_ID, 'player-ana', null]);
+    expect(teamQueries[0]?.sql).toContain('"created_at", "is_host_made")');
+    expect(teamQueries[0]?.sql).toContain('$8, $9)');
+    expect(teamQueries[0]?.params[8]).toBe(true);
+  });
+
+  it('checkpoints the talk, auto-advance and podium cursor keys', async () => {
+    const state = lobbyState();
+    state.status = 'running';
+    state.cursor = {
+      ...state.cursor,
+      status: 'running',
+      phase: 'podium',
+      talkStartsAt: null,
+      autoAdvanceAt: 99_000,
+      podiumRevealedCount: 2,
+    };
+
+    const queries = await writeOf(state, { type: 'checkpoint' });
+
+    expect(JSON.parse(String(queries[0]?.params[2]))).toEqual(
+      expect.objectContaining({
+        talkStartsAt: null,
+        autoAdvanceAt: 99_000,
+        podiumRevealedCount: 2,
+      }),
+    );
+  });
+
+  it('ends a practice session with no results row', async () => {
+    const { service, recordedQueries } = buildService((sql) =>
+      sql.includes('WITH "finished" AS (') ? [{ id: SESSION_ID }] : [],
+    );
+    const state = lobbyState();
+    state.isPractice = true;
+    state.status = 'finished';
+    state.cursor = {
+      ...state.cursor,
+      status: 'finished',
+      phase: 'ended',
+      phaseStartedAt: 120_000,
+    };
+    state.questionLog.push(logEntry({ questionId: 'question-choice' }));
+
+    service.enqueue(state, { type: 'finish', podium: [], placings: {} });
+    await service.flush(SESSION_ID);
+
+    expect(recordedQueries).toHaveLength(1);
+    expect(recordedQueries[0]?.sql).toContain(`SET "status" = 'finished'`);
+    // A practice finish clears the host's accepted texts as a scored one does.
+    expect(recordedQueries[0]?.sql).toContain(
+      `"answer_key_overrides" = '{}'::jsonb`,
+    );
+    expect(
+      recordedQueries.some((query) =>
+        query.sql.includes('INSERT INTO "quizshow_results"'),
+      ),
+    ).toBe(false);
+    expect(
+      recordedQueries.some((query) =>
+        query.sql.includes('GROUP BY "answer"."question_id"'),
+      ),
+    ).toBe(false);
+  });
+
+  it('numbers nothing for a practice finish and emits nothing', async () => {
+    const { service, eventEmitter, recordedQueries } = buildService((sql) =>
+      sql.includes('WITH "finished"')
+        ? [{ id: SESSION_ID, event_game_number: null }]
+        : [],
+    );
+    const state = endedEventState();
+    state.isPractice = true;
+
+    service.enqueue(state, WINNING_FINISH);
+    await service.flush(SESSION_ID);
+
+    expect(recordedQueries).toHaveLength(1);
+    expect(recordedQueries[0]?.params[4]).toBe(false);
+    expect(
+      recordedQueries.some((query) =>
+        query.sql.includes('INSERT INTO "quizshow_results"'),
+      ),
+    ).toBe(false);
+    expect(eventEmitter.emit).not.toHaveBeenCalled();
+  });
+
+  it('stores warm-up and corrected flags with the recap and leaves the standings out', async () => {
+    const { service, recordedQueries } = buildService((sql) => {
+      if (sql.includes('WITH "finished" AS (')) return [{ id: SESSION_ID }];
+      if (sql.includes('GROUP BY "answer"."question_id"')) {
+        return [
+          {
+            question_id: 'question-choice',
+            answer_count: 3,
+            correct_count: 3,
+            average_elapsed_ms: 1_000,
+          },
+          {
+            question_id: 'question-poll',
+            answer_count: 3,
+            correct_count: 0,
+            average_elapsed_ms: 2_000,
+          },
+          {
+            question_id: 'question-order',
+            answer_count: 3,
+            correct_count: 1,
+            average_elapsed_ms: 3_000,
+          },
+        ];
+      }
+      return [];
+    });
+    const state = lobbyState(RECAP_SNAPSHOT);
+    for (const [playerId, screenName, score] of [
+      ['player-caz', 'Caz', 500],
+      ['player-bea', 'Bea', 2_000],
+      ['player-ana', 'Ana', 2_000],
+    ] as const) {
+      state.players.set(playerId, {
+        ...livePlayer(playerId),
+        screenName,
+        score,
+      });
+    }
+    state.status = 'finished';
+    state.cursor = {
+      ...state.cursor,
+      status: 'finished',
+      phase: 'ended',
+      phaseStartedAt: 120_000,
+    };
+    state.questionLog.push(
+      logEntry({ questionId: 'question-choice', eligibleCount: 3 }),
+      logEntry({
+        questionId: 'question-poll',
+        roundIndex: 1,
+        type: 'poll',
+        eligibleCount: 3,
+      }),
+      logEntry({
+        questionId: 'question-order',
+        roundIndex: 1,
+        questionIndex: 1,
+        type: 'order',
+        eligibleCount: 3,
+      }),
+    );
+    state.correctedQuestionIds = new Set(['question-order']);
+
+    service.enqueue(state, {
+      type: 'finish',
+      podium: [],
+      placings: { 'player-ana': 1, 'player-bea': 1, 'player-caz': 3 },
+    });
+    await service.flush(SESSION_ID);
+
+    const resultsInsert = recordedQueries.find((query) =>
+      query.sql.includes('INSERT INTO "quizshow_results"'),
+    );
+    const recap = JSON.parse(String(resultsInsert?.params[3])) as Record<
+      string,
+      unknown
+    >;
+    // Standings name every entrant with no member id, so the results card
+    // builds them at read time from the player and team rows.
+    expect(recap).not.toHaveProperty('standings');
+    expect(Object.keys(recap).sort()).toEqual([
+      'answersGiven',
+      'questions',
+      'questionsPlayed',
+    ]);
+    expect(String(resultsInsert?.params[3])).not.toContain('Caz');
+    expect(recap.questions).toEqual([
+      expect.objectContaining({
+        type: 'multiple_choice',
+        percentCorrect: null,
+        averageAnswerMs: 1_000,
+        isWarmUp: true,
+        wasCorrected: false,
+      }),
+      expect.objectContaining({
+        type: 'poll',
+        percentCorrect: null,
+        averageAnswerMs: 2_000,
+        isWarmUp: false,
+        wasCorrected: false,
+      }),
+      expect.objectContaining({
+        type: 'order',
+        percentCorrect: 33,
+        averageAnswerMs: 3_000,
+        isWarmUp: false,
+        wasCorrected: true,
+      }),
+    ]);
+  });
+
+  it('loads a pre-v2 row with normalised questions, null cursor keys and the full podium', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(77_000);
+    const { service } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            event_id: 'event-1',
+            quiz_snapshot: PRE_V2_SNAPSHOT,
+            cursor: {
+              phase: 'podium',
+              roundIndex: null,
+              questionIndex: null,
+              roundCount: 1,
+              phaseStartedAt: 90_000,
+              deadline: null,
+              extraTimeDeadline: null,
+              pausedRemainingMs: null,
+              pausedExtraTimeRemainingMs: null,
+              isRestartRecovery: false,
+              phaseCounter: 12,
+            },
+            question_log: [logEntry({ questionId: 'question-choice' })],
+          }),
+        ],
+        players: [
+          playerRow({ id: 'player-ana', screen_name: 'Ana', score: 3_000 }),
+          playerRow({ id: 'player-bea', screen_name: 'Bea', score: 2_000 }),
+          playerRow({ id: 'player-caz', screen_name: 'Caz', score: 1_000 }),
+          playerRow({
+            id: 'player-dee',
+            screen_name: 'Dee',
+            score: 4_000,
+            left_at: new Date(60_000),
+          }),
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state).not.toBeNull();
+    if (state === null) return;
+    const question = state.snapshot.rounds[0]?.questions[0];
+    expect(question?.answer).toEqual({ correctIndexes: [0] });
+    expect(question?.mediaAlt).toEqual({ en: '', pt: '' });
+    expect(question?.mediaReveal).toBe('instant');
+    expect(state.snapshot.rounds[0]?.settings.isWarmUp).toBe(false);
+    expect(state.snapshot.rounds[0]?.settings.talkSeconds).toBe(0);
+    expect(state.snapshot.sourceUpdatedAt).toBe('');
+    expect(state.cursor.talkStartsAt).toBeNull();
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    // The left player is out of the entrants, so the podium is Ana, Bea, Caz.
+    expect(state.podium?.map((entry) => entry.name)).toEqual([
+      'Ana',
+      'Bea',
+      'Caz',
+    ]);
+    expect(state.cursor.podiumRevealedCount).toBe(3);
+    expect(state.players.get('player-dee')?.leftAt).toBe(60_000);
+    expect(state.players.get('player-ana')?.leftAt).toBeNull();
+    expect(
+      [...state.players.values()].every(
+        (player) => player.disconnectedAt === 77_000,
+      ),
+    ).toBe(true);
+    expect(state.isPractice).toBe(false);
+    expect(state.isJoinLocked).toBe(false);
+    expect(state.isAutoAdvanceOn).toBe(false);
+    expect(state.pairedDevices).toEqual([]);
+    expect(state.guestPushSentAt).toBeNull();
+    expect(state.adjustRequestIds).toEqual([]);
+    expect(state.correctedQuestionIds).toEqual(new Set());
+  });
+
+  it('keeps a stored podium count and reads the session flags', async () => {
+    const { service } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            cursor: storedRevealCursor({
+              phase: 'podium',
+              roundIndex: null,
+              questionIndex: null,
+              podiumRevealedCount: 1,
+            }),
+            is_join_locked: true,
+            is_auto_advance_on: true,
+            guest_push_sent_at: new Date(60_000),
+          }),
+        ],
+        players: [
+          playerRow({ id: 'player-ana', screen_name: 'Ana', score: 3_000 }),
+          playerRow({ id: 'player-bea', screen_name: 'Bea', score: 2_000 }),
+        ],
+        teams: [],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.cursor.podiumRevealedCount).toBe(1);
+    expect(state?.isJoinLocked).toBe(true);
+    expect(state?.isAutoAdvanceOn).toBe(true);
+    expect(state?.guestPushSentAt).toBe(60_000);
+  });
+
+  it('loads the host correction of the current question and leaves the rescore memory empty', async () => {
+    const { service } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            cursor: storedRevealCursor(),
+            question_log: [logEntry({ questionId: 'question-choice' })],
+            answer_key_overrides: {
+              'question-choice': {
+                keyOverride: { type: 'multiple_choice', correctIndexes: [1] },
+                acceptedTexts: [],
+              },
+              'question-earlier': {
+                keyOverride: null,
+                acceptedTexts: ['kylie'],
+              },
+            },
+          }),
+        ],
+        players: [
+          playerRow({ id: 'player-ana', joined_at: new Date(5_000) }),
+          playerRow({ id: 'player-bea', joined_at: new Date(5_100) }),
+        ],
+        answers: [
+          answerRow({
+            id: 'answer-ana',
+            player_id: 'player-ana',
+            question_id: 'question-choice',
+            payload: { type: 'multiple_choice', optionIndex: 1 },
+            is_correct: true,
+            points_awarded: 1_000,
+          }),
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    const current = state?.current ?? null;
+    expect(current).not.toBeNull();
+    if (current === null || state === null) return;
+    expect(current.keyOverride).toEqual({
+      type: 'multiple_choice',
+      correctIndexes: [1],
+    });
+    expect(current.acceptedTexts).toEqual(new Set());
+    expect(current.wasCorrected).toBe(true);
+    expect(current.streakBeforeByPlayer.size).toBe(0);
+    expect(current.awayPlayerIds.size).toBe(0);
+    expect(current.answersById.get('answer-ana')).toBe(
+      current.answers.get('player-ana'),
+    );
+    expect(state.correctedQuestionIds).toEqual(
+      new Set(['question-choice', 'question-earlier']),
+    );
+  });
+
+  it('loads a play with no correction as uncorrected', async () => {
+    const { service } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            cursor: storedRevealCursor(),
+            question_log: [logEntry({ questionId: 'question-choice' })],
+          }),
+        ],
+        players: [playerRow({ id: 'player-ana' })],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.current?.keyOverride).toBeNull();
+    expect(state?.current?.acceptedTexts).toEqual(new Set());
+    expect(state?.current?.wasCorrected).toBe(false);
+  });
+
+  it('loads paired devices with the helper first names from one query', async () => {
+    const { service, recordedQueries } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            paired_devices: [
+              {
+                pairingId: 'pairing-tv',
+                kind: 'screen',
+                helperUserId: null,
+                pairedAt: '2026-11-24T20:00:00.000Z',
+                revokedAt: null,
+              },
+              {
+                pairingId: 'pairing-helper',
+                kind: 'helper',
+                helperUserId: 'helper-user',
+                pairedAt: '2026-11-24T20:01:00.000Z',
+                revokedAt: '2026-11-24T20:30:00.000Z',
+              },
+              {
+                pairingId: 'pairing-gone',
+                kind: 'helper',
+                helperUserId: 'gone-user',
+                pairedAt: '2026-11-24T20:02:00.000Z',
+                revokedAt: null,
+              },
+            ],
+          }),
+        ],
+        helperNames: [{ user_id: 'helper-user', first_name: 'Rui' }],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.pairedDevices).toEqual([
+      {
+        pairingId: 'pairing-tv',
+        kind: 'screen',
+        helperUserId: null,
+        helperName: null,
+        pairedAt: Date.parse('2026-11-24T20:00:00.000Z'),
+        revokedAt: null,
+        connectedSocketCount: 0,
+      },
+      {
+        pairingId: 'pairing-helper',
+        kind: 'helper',
+        helperUserId: 'helper-user',
+        helperName: 'Rui',
+        pairedAt: Date.parse('2026-11-24T20:01:00.000Z'),
+        revokedAt: Date.parse('2026-11-24T20:30:00.000Z'),
+        connectedSocketCount: 0,
+      },
+      {
+        pairingId: 'pairing-gone',
+        kind: 'helper',
+        helperUserId: 'gone-user',
+        helperName: null,
+        pairedAt: Date.parse('2026-11-24T20:02:00.000Z'),
+        revokedAt: null,
+        connectedSocketCount: 0,
+      },
+    ]);
+    const helperQueries = recordedQueries.filter((query) =>
+      query.sql.includes('FROM "profiles" "profile"'),
+    );
+    expect(helperQueries).toHaveLength(1);
+    expect(helperQueries[0]?.params).toEqual([['helper-user', 'gone-user']]);
+  });
+
+  it('names reloaded helpers by the pairing-time rule: trimmed, and null for a blank or blocked first name', async () => {
+    const helperDevice = (pairingId: string, helperUserId: string) => ({
+      pairingId,
+      kind: 'helper',
+      helperUserId,
+      pairedAt: '2026-11-24T20:01:00.000Z',
+      revokedAt: null,
+    });
+    const { service } = buildService(
+      loadResponder({
+        session: [
+          sessionRow({
+            paired_devices: [
+              helperDevice('pairing-padded', 'padded-user'),
+              helperDevice('pairing-blank', 'blank-user'),
+              helperDevice('pairing-blocked', 'blocked-user'),
+            ],
+          }),
+        ],
+        helperNames: [
+          { user_id: 'padded-user', first_name: '  Rui  ' },
+          { user_id: 'blank-user', first_name: '   ' },
+          { user_id: 'blocked-user', first_name: BLOCKED_TERMS[0] ?? '' },
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(
+      state?.pairedDevices.map((device) => [
+        device.pairingId,
+        device.helperName,
+      ]),
+    ).toEqual([
+      ['pairing-padded', quizshowHelperNameFromFirstName('  Rui  ')],
+      ['pairing-blank', null],
+      ['pairing-blocked', null],
+    ]);
+    expect(state?.pairedDevices[0]?.helperName).toBe('Rui');
+  });
+
+  it('sends no helper name query when no helper is paired', async () => {
+    const { service, recordedQueries } = buildService(
+      loadResponder({ session: [sessionRow({})] }),
+    );
+
+    await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(
+      recordedQueries.some((query) =>
+        query.sql.includes('FROM "profiles" "profile"'),
+      ),
+    ).toBe(false);
+  });
+
+  it('resolves the giving link of a public community with a giving method', async () => {
+    const { service, recordedQueries } = buildService(
+      loadResponder({
+        session: [sessionRow({})],
+        giving: [
+          { community_slug: 'lisbon-queer-hikers', community_name: 'Hikers' },
+        ],
+      }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.giving).toEqual({
+      communitySlug: 'lisbon-queer-hikers',
+      communityName: 'Hikers',
+    });
+    const givingQuery = recordedQueries.find((query) =>
+      query.sql.includes('FROM "events" "event"'),
+    );
+    expect(givingQuery?.params).toEqual(['event-1']);
+    const sql = givingQuery?.sql ?? '';
+    // Only the slug and the name are selected: no giving method value.
+    expect(sql.slice(0, sql.indexOf('FROM')).trim()).toBe(GIVING_SELECT);
+    expect(sql).toContain(
+      `JOIN "communities" "community" ON "community"."id" = "event"."community_id"`,
+    );
+    expect(sql).toContain(`"community"."archived_at" IS NULL`);
+    expect(sql).toContain(`"community"."access_tier" = 'public'`);
+    expect(sql).toContain(`"moderation"."subject_type" = 'community'`);
+    expect(sql).toContain(`"moderation"."subject_id" = "community"."slug"`);
+    expect(sql).toContain(
+      `("moderation"."hidden_at" IS NOT NULL OR "moderation"."removed_at" IS NOT NULL)`,
+    );
+    expect(sql).toContain(
+      `EXISTS (SELECT 1 FROM "community_giving_methods" "method" WHERE "method"."community_id" = "community"."id")`,
+    );
+  });
+
+  it.each([
+    ['a hidden or removed community'],
+    ['an archived community'],
+    ['a request tier community'],
+    ['a community with no giving method'],
+  ])('reads no giving link for %s (the query matches no row)', async () => {
+    const { service } = buildService(
+      loadResponder({ session: [sessionRow({})], giving: [] }),
+    );
+
+    const state = await service.loadLiveState(SESSION_ID, RANDOM);
+
+    expect(state?.giving).toBeNull();
+  });
+
+  it('sends no giving query for a game session or a practice session', async () => {
+    const givingRow = {
+      community_slug: 'lisbon-queer-hikers',
+      community_name: 'Hikers',
+    };
+    const gameLoad = buildService(
+      loadResponder({ session: [gameSessionRow({})], giving: [givingRow] }),
+    );
+    const practiceLoad = buildService(
+      loadResponder({
+        session: [sessionRow({ is_practice: true })],
+        giving: [givingRow],
+      }),
+    );
+
+    const gameState = await gameLoad.service.loadLiveState(SESSION_ID, RANDOM);
+    const practiceState = await practiceLoad.service.loadLiveState(
+      SESSION_ID,
+      RANDOM,
+    );
+
+    expect(gameState?.giving).toBeNull();
+    expect(practiceState?.giving).toBeNull();
+    expect(practiceState?.isPractice).toBe(true);
+    for (const recordedQueries of [
+      gameLoad.recordedQueries,
+      practiceLoad.recordedQueries,
+    ]) {
+      expect(
+        recordedQueries.some((query) =>
+          query.sql.includes('FROM "events" "event"'),
+        ),
+      ).toBe(false);
+    }
+  });
+});
+
+describe('QuizshowPersistenceService answer write coalescing', () => {
+  let loggerErrorSpy: jest.SpyInstance;
+  const coalesceMs = QUIZSHOW_LIMITS.answerWriteCoalesceMs;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    loggerErrorSpy = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  function bufferedAnswer(
+    answerId: string,
+    playerId: string,
+    text = 'Ana Banana',
+  ): QuizshowLiveAnswer {
+    return {
+      answerId,
+      playerId,
+      questionId: 'question-type',
+      phaseId: '4',
+      payload: { type: 'type_answer', text },
+      receivedAt: 21_000,
+      elapsedMs: 1_000,
+      isCorrect: null,
+      correctPositions: null,
+      pointsAwarded: 0,
+      streakBonus: 0,
+      voteOptionId: null,
+      hiddenAt: null,
+    };
+  }
+
+  function bufferedVote(
+    voterPlayerId: string,
+    answerId: string,
+  ): QuizshowLiveVote {
+    return {
+      voterPlayerId,
+      questionId: 'question-lie',
+      optionId: 'option-1',
+      answerId,
+      createdAt: 40_000,
+    };
+  }
+
+  function sqlHeads(recordedQueries: readonly RecordedQuery[]): string[] {
+    return recordedQueries.map(
+      (query) => query.sql.split('(')[0]?.split('SET')[0]?.trim() ?? '',
+    );
+  }
+
+  it('writes three answer batches inside the window as one insert with three rows', async () => {
+    const { service, dataSource, recordedQueries } = buildService();
+    const state = lobbyState();
+    const firstAnswer = bufferedAnswer('answer-ana', 'player-ana');
+
+    service.enqueue(state, { type: 'insert_answer', answer: firstAnswer });
+    await jest.advanceTimersByTimeAsync(50);
+    service.enqueue(state, {
+      type: 'insert_answer',
+      answer: bufferedAnswer('answer-bea', 'player-bea'),
+    });
+    await jest.advanceTimersByTimeAsync(50);
+    service.enqueue(state, {
+      type: 'insert_answer',
+      answer: bufferedAnswer('answer-caz', 'player-caz'),
+    });
+    // The rows are copies: scoring the live answer later leaves the write as sent.
+    firstAnswer.isCorrect = true;
+    await jest.advanceTimersByTimeAsync(coalesceMs - 101);
+    expect(recordedQueries).toHaveLength(0);
+
+    await jest.advanceTimersByTimeAsync(1);
+    await service.flush(SESSION_ID);
+
+    expect(recordedQueries).toHaveLength(1);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    const [answerInsert] = recordedQueries;
+    expect(answerInsert?.sql).toContain('INSERT INTO "quizshow_answers"');
+    expect(answerInsert?.sql).toContain(
+      'SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::jsonb[], $6::timestamptz[], $7::integer[], $8::boolean[], $9::integer[], $10::uuid[], $11::timestamptz[])',
+    );
+    expect(answerInsert?.params).toEqual([
+      ['answer-ana', 'answer-bea', 'answer-caz'],
+      [SESSION_ID, SESSION_ID, SESSION_ID],
+      ['question-type', 'question-type', 'question-type'],
+      ['player-ana', 'player-bea', 'player-caz'],
+      Array.from({ length: 3 }, () =>
+        JSON.stringify({ type: 'type_answer', text: 'Ana Banana' }),
+      ),
+      Array.from({ length: 3 }, () => new Date(21_000)),
+      [1_000, 1_000, 1_000],
+      [null, null, null],
+      [0, 0, 0],
+      [null, null, null],
+      [null, null, null],
+    ]);
+  });
+
+  it('writes answers and votes of one window in one transaction, answers first', async () => {
+    const { service, dataSource, recordedQueries } = buildService();
+    const state = lobbyState();
+
+    service.enqueueBatch(state, [
+      {
+        type: 'insert_answer',
+        answer: bufferedAnswer('answer-ana', 'player-ana'),
+      },
+      { type: 'insert_vote', vote: bufferedVote('player-bea', 'answer-ana') },
+    ]);
+    await jest.advanceTimersByTimeAsync(coalesceMs);
+    await service.flush(SESSION_ID);
+
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(sqlHeads(recordedQueries)).toEqual([
+      'INSERT INTO "quizshow_answers"',
+      'INSERT INTO "quizshow_votes"',
+    ]);
+    expect(
+      recordedQueries.every((query) => query.transactionNumber === 1),
+    ).toBe(true);
+    expect(recordedQueries[1]?.sql).toContain(
+      'SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::timestamptz[])',
+    );
+    expect(recordedQueries[1]?.params).toEqual([
+      [SESSION_ID],
+      ['question-lie'],
+      ['player-bea'],
+      ['answer-ana'],
+      [new Date(40_000)],
+    ]);
+  });
+
+  it('writes buffered answers before a later scoring batch', async () => {
+    const { service, recordedQueries } = buildService();
+    const state = lobbyState();
+    state.status = 'running';
+
+    service.enqueue(state, {
+      type: 'insert_answer',
+      answer: bufferedAnswer('answer-ana', 'player-ana'),
+    });
+    service.enqueueBatch(state, [
+      {
+        type: 'save_scoring',
+        questionId: 'question-type',
+        answers: [
+          { answerId: 'answer-ana', isCorrect: true, pointsAwarded: 1_100 },
+        ],
+        players: [{ playerId: 'player-ana', score: 1_100, streak: 1 }],
+        teams: [],
+      },
+      { type: 'checkpoint' },
+    ]);
+    await service.flush(SESSION_ID);
+
+    expect(sqlHeads(recordedQueries)).toEqual([
+      'INSERT INTO "quizshow_answers"',
+      'UPDATE "quizshow_answers" "answer"',
+      'UPDATE "quizshow_players" "player"',
+      'UPDATE "quizshow_sessions"',
+    ]);
+    // The scoring batch moved the buffer into the queue and cleared its timer.
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('flush writes the buffer without waiting for the timer', async () => {
+    const { service, recordedQueries } = buildService();
+    const state = lobbyState();
+
+    service.enqueue(state, {
+      type: 'insert_answer',
+      answer: bufferedAnswer('answer-ana', 'player-ana'),
+    });
+    expect(jest.getTimerCount()).toBe(1);
+    await service.flush(SESSION_ID);
+
+    expect(sqlHeads(recordedQueries)).toEqual([
+      'INSERT INTO "quizshow_answers"',
+    ]);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('flushAll writes the buffers of two sessions', async () => {
+    const { service, recordedQueries } = buildService();
+    const firstState = lobbyState();
+    const secondState = lobbyState();
+    secondState.sessionId = 'session-2';
+
+    service.enqueue(firstState, {
+      type: 'insert_answer',
+      answer: bufferedAnswer('answer-ana', 'player-ana'),
+    });
+    service.enqueue(secondState, {
+      type: 'insert_vote',
+      vote: bufferedVote('player-bea', 'answer-caz'),
+    });
+    await service.flushAll();
+
+    expect(recordedQueries).toHaveLength(2);
+    expect(
+      recordedQueries.map((query) => [
+        query.sql.split('(')[0]?.trim(),
+        (
+          query.params[query.sql.includes('quizshow_votes') ? 0 : 1] as string[]
+        )[0],
+      ]),
+    ).toEqual([
+      ['INSERT INTO "quizshow_answers"', SESSION_ID],
+      ['INSERT INTO "quizshow_votes"', 'session-2'],
+    ]);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('logs a failed coalesced write with its row counts and no text, then writes each batch alone', async () => {
+    const leakingMessage = 'duplicate answer Ana Banana';
+    let answerInsertCount = 0;
+    const { service, recordedQueries } = buildService((sql, params) => {
+      if (sql.includes('INSERT INTO "quizshow_answers"')) {
+        answerInsertCount += 1;
+        const answerIds = params[0] as string[];
+        if (answerIds.includes('answer-bad')) {
+          throw Object.assign(new Error(leakingMessage), {
+            code: '23505',
+            detail: leakingMessage,
+          });
+        }
+      }
+      return [];
+    });
+    const state = lobbyState();
+
+    service.enqueue(state, {
+      type: 'insert_answer',
+      answer: bufferedAnswer('answer-ana', 'player-ana'),
+    });
+    service.enqueue(state, {
+      type: 'insert_answer',
+      answer: bufferedAnswer('answer-bad', 'player-bea'),
+    });
+    service.enqueueBatch(state, [
+      {
+        type: 'insert_answer',
+        answer: bufferedAnswer('answer-caz', 'player-caz'),
+      },
+      { type: 'insert_vote', vote: bufferedVote('player-caz', 'answer-ana') },
+    ]);
+    await service.flush(SESSION_ID);
+
+    expect(loggerErrorSpy.mock.calls).toEqual([
+      [
+        'Pulse Live write insert_answer+insert_vote failed for session session-1 (23505) with 3 answers and 1 votes in 3 batches',
+      ],
+      ['Pulse Live write insert_answer failed for session session-1 (23505)'],
+    ]);
+    const loggedText = JSON.stringify(loggerErrorSpy.mock.calls);
+    expect(loggedText).not.toContain('Ana Banana');
+    expect(loggedText).not.toContain('answer-');
+    // One coalesced try, then each of the three batches on its own.
+    expect(answerInsertCount).toBe(4);
+    const landedAnswerIds = recordedQueries
+      .filter(
+        (query) =>
+          query.sql.includes('INSERT INTO "quizshow_answers"') &&
+          !(query.params[0] as string[]).includes('answer-bad'),
+      )
+      .map((query) => query.params[0]);
+    expect(landedAnswerIds).toEqual([['answer-ana'], ['answer-caz']]);
+    expect(sqlHeads(recordedQueries).at(-1)).toBe(
+      'INSERT INTO "quizshow_votes"',
+    );
   });
 });

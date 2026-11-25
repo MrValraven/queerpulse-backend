@@ -1,7 +1,11 @@
+import { BLOCKED_TERMS } from '../common/blocked-terms';
 import {
   QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
   type QuizshowAckFailure,
   type QuizshowAnswerPayload,
+  type QuizshowClosestTolerance,
+  type QuizshowErrorCode,
+  type QuizshowOption,
   type QuizshowPlayMode,
   type QuizshowRoundKind,
   type QuizshowText,
@@ -9,24 +13,32 @@ import {
 import {
   abandonIfIdle,
   closeIfEveryoneDone,
+  currentPlayContext,
   hostAddTime,
   hostEnd,
+  hostFinishWheel,
   hostHideAnswer,
   hostNext,
   hostPause,
   hostPickFavourite,
   hostRemovePlayer,
+  hostRenameTeam,
   hostResume,
   hostReveal,
+  hostSetAutoAdvance,
   hostSetScreenMuted,
   hostShowAnswers,
   hostSkip,
+  hostSpin,
   hostStart,
+  leaveLobby,
+  scoreQuizQuestion,
   timerElapsed,
   type QuizshowHostOutcome,
 } from './quizshow-engine-phases';
 import { createLobbyState, setSessionStatus } from './quizshow-engine-state';
 import type {
+  QuizshowCommandOutcome,
   QuizshowEngineEffect,
   QuizshowLiveAnswer,
   QuizshowLivePlayer,
@@ -59,6 +71,10 @@ function trueFalseQuestion(questionId: string): QuizshowSnapshotQuestion {
     prompt: { en: 'Is it true?', pt: 'É verdade?' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [],
@@ -78,6 +94,10 @@ function promptQuestion(
     prompt: { en: 'Write something', pt: 'Escreve algo' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: { en: '', pt: '' },
+    mediaReveal: 'instant',
+    revealNote: { en: '', pt: '' },
+    numberUnit: { en: '', pt: '' },
     timeLimitSeconds: null,
     points: 1000,
     options: [],
@@ -104,9 +124,96 @@ function snapshotRound(
       writeSeconds: 60,
       voteSeconds: 30,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+      isWarmUp: false,
+      talkSeconds: 0,
     },
     questions,
   };
+}
+
+const NO_TEXT: QuizshowText = { en: '', pt: '' };
+
+function multipleChoiceQuestion(
+  questionId: string,
+  correctIndexes: number[],
+): QuizshowSnapshotQuestion {
+  const options: QuizshowOption[] = [
+    { id: `${questionId}-red`, text: { en: 'Red', pt: 'Vermelho' } },
+    { id: `${questionId}-green`, text: { en: 'Green', pt: 'Verde' } },
+    { id: `${questionId}-blue`, text: { en: 'Blue', pt: 'Azul' } },
+  ];
+  return {
+    id: questionId,
+    type: 'multiple_choice',
+    prompt: { en: 'Which colours?', pt: 'Que cores?' },
+    mediaRef: null,
+    mediaUrl: null,
+    mediaAlt: NO_TEXT,
+    mediaReveal: 'instant',
+    revealNote: NO_TEXT,
+    numberUnit: NO_TEXT,
+    timeLimitSeconds: null,
+    points: 1000,
+    options,
+    answer: { correctIndexes },
+    acceptedAnswers: [],
+    shownOptions: options,
+  };
+}
+
+function closestQuestion(
+  questionId: string,
+  value: number,
+  tolerance: QuizshowClosestTolerance,
+): QuizshowSnapshotQuestion {
+  return {
+    id: questionId,
+    type: 'closest_number',
+    prompt: { en: 'What year?', pt: 'Que ano?' },
+    mediaRef: null,
+    mediaUrl: null,
+    mediaAlt: NO_TEXT,
+    mediaReveal: 'instant',
+    revealNote: NO_TEXT,
+    numberUnit: { en: 'years', pt: 'anos' },
+    timeLimitSeconds: null,
+    points: 1000,
+    options: [],
+    answer: { value, tolerance },
+    acceptedAnswers: [],
+    shownOptions: null,
+  };
+}
+
+function pollQuestion(questionId: string): QuizshowSnapshotQuestion {
+  const options: QuizshowOption[] = [
+    { id: `${questionId}-pop`, text: { en: 'Pop', pt: 'Pop' } },
+    { id: `${questionId}-disco`, text: { en: 'Disco', pt: 'Disco' } },
+  ];
+  return {
+    id: questionId,
+    type: 'poll',
+    prompt: { en: 'Which one tonight?', pt: 'Qual hoje?' },
+    mediaRef: null,
+    mediaUrl: null,
+    mediaAlt: NO_TEXT,
+    mediaReveal: 'instant',
+    revealNote: NO_TEXT,
+    numberUnit: NO_TEXT,
+    timeLimitSeconds: null,
+    points: 1000,
+    options,
+    answer: null,
+    acceptedAnswers: [],
+    shownOptions: options,
+  };
+}
+
+function withRoundSettings(
+  round: QuizshowSnapshotRound,
+  settings: Partial<QuizshowSnapshotRound['settings']>,
+): QuizshowSnapshotRound {
+  return { ...round, settings: { ...round.settings, ...settings } };
 }
 
 function quizRound(
@@ -132,12 +239,14 @@ function stateWithQuiz(options: {
   playMode?: QuizshowPlayMode;
   rounds: QuizshowSnapshotRound[];
   isReviewOn?: boolean;
+  isPractice?: boolean;
 }): QuizshowLiveState {
   const snapshot: QuizshowSessionSnapshot = {
     title: 'Pride night quiz',
     languages: 'both',
     screenLanguage: 'en',
     rounds: options.rounds,
+    sourceUpdatedAt: '',
   };
   return createLobbyState({
     sessionId: 'session-1',
@@ -153,6 +262,7 @@ function stateWithQuiz(options: {
     playMode: options.playMode ?? 'solo',
     maxTeamSize: null,
     isReviewOn: options.isReviewOn ?? true,
+    isPractice: options.isPractice ?? false,
     snapshot,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
@@ -181,6 +291,8 @@ function addPlayer(
     joinedAt: STARTED_AT,
     removedAt: null,
     connectedSocketCount: 1,
+    disconnectedAt: null,
+    leftAt: null,
     ...overrides,
   };
   state.players.set(playerId, player);
@@ -200,6 +312,7 @@ function addTeam(
     hasUsedJoker: false,
     jokerRoundIndex: null,
     createdAt: STARTED_AT,
+    isHostMade: false,
     ...overrides,
   };
   state.teams.set(teamId, team);
@@ -347,6 +460,7 @@ function submit(
     hiddenAt: null,
   };
   play.answers.set(playerId, answer);
+  play.answersById.set(answer.answerId, answer);
   return answer;
 }
 
@@ -429,7 +543,7 @@ function writeEveryCaption(
 }
 
 describe('Pulse Live engine phases', () => {
-  it("starts at round 0's intro and drops empty teams", () => {
+  it("starts at round 0's intro and drops empty teams, host-made ones included", () => {
     const state = stateWithQuiz({
       playMode: 'teams',
       rounds: [quizRound('round-one', ['question-1'])],
@@ -437,6 +551,7 @@ describe('Pulse Live engine phases', () => {
     addTeam(state, 'team-a');
     addTeam(state, 'team-b', { colorKey: 'triangle' });
     addTeam(state, 'team-c', { colorKey: 'square' });
+    addTeam(state, 'team-d', { colorKey: 'diamond', isHostMade: true });
     addPlayer(state, 'player-1', { teamId: 'team-a' });
     addPlayer(state, 'player-2', {
       teamId: 'team-c',
@@ -452,9 +567,10 @@ describe('Pulse Live engine phases', () => {
     expect(state.cursor.roundIndex).toBe(0);
     expect(state.cursor.questionIndex).toBeNull();
     expect([...state.teams.keys()]).toEqual(['team-a']);
+    // A host-made team still empty at the start goes too (contract 6.11).
     expect(findPersist(outcome.effects, 'delete_teams')).toEqual({
       type: 'delete_teams',
-      teamIds: ['team-b', 'team-c'],
+      teamIds: ['team-b', 'team-c', 'team-d'],
     });
     expect(effectKinds(outcome.effects)).toEqual(
       expect.arrayContaining(['lobby_changed', 'phase_changed']),
@@ -478,7 +594,7 @@ describe('Pulse Live engine phases', () => {
     expect(state.lastHostCommandAt).toBe(NOW);
   });
 
-  it("shows a quiz question for four seconds, then opens it with the round's limit", () => {
+  it("shows a short quiz question for the 3 s read floor, then opens it with the round's limit", () => {
     const state = stateWithQuiz({
       rounds: [quizRound('round-one', ['question-1'])],
     });
@@ -489,30 +605,31 @@ describe('Pulse Live engine phases', () => {
     const readPhaseId = state.cursor.phaseId;
 
     expect(state.cursor.phase).toBe('read');
-    expect(state.cursor.deadline).toBe(NOW + 5000);
+    expect(state.cursor.deadline).toBe(NOW + 4000);
     expect(state.cursor.extraTimeDeadline).toBeNull();
+    expect(state.cursor.talkStartsAt).toBeNull();
     expect(findEffect(read.effects, 'timer')).toEqual({
       kind: 'timer',
       phaseId: readPhaseId,
-      fireAt: NOW + 5000,
+      fireAt: NOW + 4000,
     });
     expect(currentPlay(state).eligiblePlayerIds).toEqual(new Set(['player-1']));
 
-    expect(timerElapsed(state, readPhaseId, NOW + 4999)).toEqual([
-      { kind: 'timer', phaseId: readPhaseId, fireAt: NOW + 5000 },
+    expect(timerElapsed(state, readPhaseId, NOW + 3999)).toEqual([
+      { kind: 'timer', phaseId: readPhaseId, fireAt: NOW + 4000 },
     ]);
     expect(state.cursor.phase).toBe('read');
 
-    const opened = timerElapsed(state, readPhaseId, NOW + 5000);
+    const opened = timerElapsed(state, readPhaseId, NOW + 4000);
 
     expect(state.cursor.phase).toBe('open');
-    expect(state.cursor.phaseStartedAt).toBe(NOW + 5000);
-    expect(state.cursor.deadline).toBe(NOW + 25_000);
-    expect(state.cursor.extraTimeDeadline).toBe(NOW + 35_000);
+    expect(state.cursor.phaseStartedAt).toBe(NOW + 4000);
+    expect(state.cursor.deadline).toBe(NOW + 24_000);
+    expect(state.cursor.extraTimeDeadline).toBe(NOW + 34_000);
     expect(findEffect(opened, 'timer')).toEqual({
       kind: 'timer',
       phaseId: state.cursor.phaseId,
-      fireAt: NOW + 25_500,
+      fireAt: NOW + 24_500,
     });
     expect(timerElapsed(state, readPhaseId, NOW + 6000)).toEqual([]);
   });
@@ -1070,7 +1187,8 @@ describe('Pulse Live engine phases', () => {
     expect(answerOf(captionState, 'player-1').pointsAwarded).toBe(750);
     expect(findEffect(favourite.effects, 'reveal_updated')).toEqual({
       kind: 'reveal_updated',
-      favouriteAuthorPlayerId: 'player-1',
+      scope: 'favourite',
+      playerId: 'player-1',
     });
     expect(findPersist(favourite.effects, 'save_scoring')).toBeDefined();
 
@@ -1204,7 +1322,8 @@ describe('Pulse Live engine phases', () => {
         NOW + 3000,
       ),
     );
-    expect(refusal.code).toBe('quizshow_command_not_allowed');
+    expect(refusal.code).toBe('quizshow_unhide_review_only');
+    expect(refusal.cursor).toEqual(state.cursor);
 
     const hidden = expectSuccess(
       hostHideAnswer(
@@ -1256,7 +1375,7 @@ describe('Pulse Live engine phases', () => {
     addPlayer(state, 'player-1', { score: 300, streak: 2 });
     startGame(state, NOW);
     expect(expectFailure(hostSkip(state, state.cursor.phaseId, NOW)).code).toBe(
-      'quizshow_command_not_allowed',
+      'quizshow_nothing_to_skip',
     );
     nextPhase(state, NOW);
     const openAt = requireNumber(state.cursor.deadline);
@@ -1378,8 +1497,12 @@ describe('Pulse Live engine phases', () => {
 
     expectSuccess(hostEnd(teamsState, teamsState.cursor.phaseId, NOW + 1000));
     expect(teamsState.cursor.phase).toBe('podium');
+    // Two places, so two host-paced steps before host:next finishes (contract 6.7).
+    nextPhase(teamsState, NOW + 2000);
+    nextPhase(teamsState, NOW + 3000);
+    expect(teamsState.cursor.podiumRevealedCount).toBe(2);
 
-    const finished = nextPhase(teamsState, NOW + 2000);
+    const finished = nextPhase(teamsState, NOW + 4000);
 
     expect(teamsState.status).toBe('finished');
     expect(teamsState.cursor.status).toBe('finished');
@@ -1712,7 +1835,7 @@ describe('Pulse Live engine phases', () => {
     expect(state.cursor.phase).toBe('read');
     expect(state.cursor.phaseId).not.toBe(pausedPhaseId);
     expect(state.cursor.isRestartRecovery).toBe(false);
-    expect(state.cursor.deadline).toBe(resumeAt + 4000);
+    expect(state.cursor.deadline).toBe(resumeAt + 3000);
     expect(state.questionLog).toHaveLength(1);
     expect(state.questionLog[0]?.openedAt).toBe(resumeAt);
     expect(currentPlay(state).answers.size).toBe(0);
@@ -1722,7 +1845,7 @@ describe('Pulse Live engine phases', () => {
     expect(findEffect(resumed.effects, 'timer')).toEqual({
       kind: 'timer',
       phaseId: state.cursor.phaseId,
-      fireAt: resumeAt + 4000,
+      fireAt: resumeAt + 3000,
     });
   });
 
@@ -1896,6 +2019,7 @@ describe('Pulse Live engine phases', () => {
     expect(findEffect(firstRemoval.effects, 'player_removed')).toEqual({
       kind: 'player_removed',
       playerId: 'player-2',
+      canRejoin: false,
     });
     expect(effectKinds(firstRemoval.effects)).toContain('lobby_changed');
 
@@ -2004,8 +2128,1430 @@ describe('Pulse Live engine phases', () => {
     setSessionStatus(state, 'finished');
 
     expect(expectFailure(hostSetScreenMuted(state, false, NOW + 20)).code).toBe(
-      'quizshow_command_not_allowed',
+      'quizshow_session_ended',
     );
     expect(state.isScreenMuted).toBe(true);
+  });
+});
+
+describe('Pulse Live engine phases: refusal causes (contract 3.2)', () => {
+  function lobbyState(): QuizshowLiveState {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1', 'question-2'])],
+    });
+    addTeam(state, 'team-a');
+    addPlayer(state, 'player-1');
+    return state;
+  }
+
+  /** Running, on round 0's intro. */
+  function introState(): QuizshowLiveState {
+    const state = lobbyState();
+    startGame(state, NOW);
+    return state;
+  }
+
+  function readState(): QuizshowLiveState {
+    const state = introState();
+    nextPhase(state, NOW);
+    return state;
+  }
+
+  function openState(): QuizshowLiveState {
+    const state = lobbyState();
+    openFirstQuizQuestion(state, NOW);
+    return state;
+  }
+
+  function revealState(): QuizshowLiveState {
+    const state = openState();
+    expectSuccess(hostReveal(state, state.cursor.phaseId, NOW + 30_000));
+    return state;
+  }
+
+  function scoresState(): QuizshowLiveState {
+    const state = revealState();
+    nextPhase(state, NOW + 31_000);
+    expect(state.cursor.phase).toBe('scores');
+    return state;
+  }
+
+  function pausedState(): QuizshowLiveState {
+    const state = introState();
+    expectSuccess(hostPause(state, state.cursor.phaseId, NOW + 10));
+    return state;
+  }
+
+  function finishedState(): QuizshowLiveState {
+    const state = lobbyState();
+    setSessionStatus(state, 'finished');
+    return state;
+  }
+
+  /** Running with the cursor still on a phase `host:next` cannot leave. */
+  function runningOnPhase(phase: 'lobby' | 'ended'): QuizshowLiveState {
+    const state = lobbyState();
+    setSessionStatus(state, 'running');
+    state.cursor.phase = phase;
+    return state;
+  }
+
+  function reviewStateWithLeftAuthor(): {
+    state: QuizshowLiveState;
+    answerId: string;
+  } {
+    const state = stateWithQuiz({
+      rounds: [captionRound('round-captions')],
+      isReviewOn: true,
+    });
+    addPlayer(state, 'player-1');
+    addPlayer(state, 'player-2');
+    startGame(state, NOW);
+    nextPhase(state, NOW);
+    submit(state, 'player-1', { type: 'prompt', text: 'Kept' }, NOW + 1000);
+    const answer = submit(
+      state,
+      'player-2',
+      { type: 'prompt', text: 'Gone' },
+      NOW + 1000,
+    );
+    closeIfEveryoneDone(state, NOW + 1000, seededRandom());
+    expect(state.cursor.phase).toBe('review');
+    expectSuccess(
+      hostHideAnswer(
+        state,
+        { answerId: answer.answerId, isHidden: true },
+        HOST_USER_ID,
+        NOW + 2000,
+      ),
+    );
+    playerOf(state, 'player-2').leftAt = NOW + 2500;
+    return { state, answerId: answer.answerId };
+  }
+
+  const rows: Array<{
+    label: string;
+    run: () => { state: QuizshowLiveState; outcome: QuizshowHostOutcome };
+    code: QuizshowErrorCode;
+  }> = [
+    {
+      label: 'hostStart once the game runs',
+      run: () => {
+        const state = introState();
+        return {
+          state,
+          outcome: hostStart(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_already_started',
+    },
+    {
+      label: 'hostStart on a finished session',
+      run: () => {
+        const state = finishedState();
+        return {
+          state,
+          outcome: hostStart(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostNext in the lobby status',
+      run: () => {
+        const state = lobbyState();
+        return {
+          state,
+          outcome: hostNext(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_not_started',
+    },
+    {
+      label: 'hostNext while paused',
+      run: () => {
+        const state = pausedState();
+        return {
+          state,
+          outcome: hostNext(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_paused',
+    },
+    {
+      label: 'hostNext with the cursor on the lobby phase',
+      run: () => {
+        const state = runningOnPhase('lobby');
+        return {
+          state,
+          outcome: hostNext(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_not_started',
+    },
+    {
+      label: 'hostNext with the cursor on the ended phase',
+      run: () => {
+        const state = runningOnPhase('ended');
+        return {
+          state,
+          outcome: hostNext(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostSpin while paused',
+      run: () => {
+        const state = pausedState();
+        return {
+          state,
+          outcome: hostSpin(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_paused',
+    },
+    {
+      label: 'hostSpin outside a wheel or a leaderboard',
+      run: () => {
+        const state = introState();
+        return {
+          state,
+          outcome: hostSpin(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_spin_not_available',
+    },
+    {
+      label: 'hostFinishWheel in the lobby status',
+      run: () => {
+        const state = lobbyState();
+        return {
+          state,
+          outcome: hostFinishWheel(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_not_started',
+    },
+    {
+      label: 'hostFinishWheel running with no wheel open',
+      run: () => {
+        const state = introState();
+        return {
+          state,
+          outcome: hostFinishWheel(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_no_wheel_open',
+    },
+    {
+      label: 'hostPause in the lobby',
+      run: () => {
+        const state = lobbyState();
+        return {
+          state,
+          outcome: hostPause(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_not_started',
+    },
+    {
+      label: 'hostPause on a finished session',
+      run: () => {
+        const state = finishedState();
+        return {
+          state,
+          outcome: hostPause(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostResume in the lobby',
+      run: () => {
+        const state = lobbyState();
+        return {
+          state,
+          outcome: hostResume(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_not_started',
+    },
+    {
+      label: 'hostResume on a finished session',
+      run: () => {
+        const state = finishedState();
+        return {
+          state,
+          outcome: hostResume(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostAddTime while paused',
+      run: () => {
+        const state = pausedState();
+        return {
+          state,
+          outcome: hostAddTime(
+            state,
+            { phaseId: state.cursor.phaseId, seconds: 10, expectedDeadline: 0 },
+            NOW + 100,
+          ),
+        };
+      },
+      code: 'quizshow_session_paused',
+    },
+    {
+      label: 'hostAddTime in an untimed phase',
+      run: () => {
+        const state = introState();
+        return {
+          state,
+          outcome: hostAddTime(
+            state,
+            { phaseId: state.cursor.phaseId, seconds: 10, expectedDeadline: 0 },
+            NOW + 100,
+          ),
+        };
+      },
+      code: 'quizshow_no_timer_running',
+    },
+    {
+      label: 'hostReveal while paused',
+      run: () => {
+        const state = pausedState();
+        return {
+          state,
+          outcome: hostReveal(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_paused',
+    },
+    {
+      label: 'hostReveal in reveal',
+      run: () => {
+        const state = revealState();
+        return {
+          state,
+          outcome: hostReveal(state, state.cursor.phaseId, NOW + 31_000),
+        };
+      },
+      code: 'quizshow_already_revealed',
+    },
+    {
+      label: 'hostReveal in scores',
+      run: () => {
+        const state = scoresState();
+        return {
+          state,
+          outcome: hostReveal(state, state.cursor.phaseId, NOW + 32_000),
+        };
+      },
+      code: 'quizshow_already_revealed',
+    },
+    {
+      label: 'hostReveal in read',
+      run: () => {
+        const state = readState();
+        return {
+          state,
+          outcome: hostReveal(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_nothing_to_reveal',
+    },
+    {
+      label: 'hostSkip while paused',
+      run: () => {
+        const state = pausedState();
+        return {
+          state,
+          outcome: hostSkip(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_paused',
+    },
+    {
+      label: 'hostSkip with no question in play',
+      run: () => {
+        const state = introState();
+        return {
+          state,
+          outcome: hostSkip(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_nothing_to_skip',
+    },
+    {
+      label: 'hostShowAnswers while paused',
+      run: () => {
+        const state = pausedState();
+        return {
+          state,
+          outcome: hostShowAnswers(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_paused',
+    },
+    {
+      label: 'hostShowAnswers outside review',
+      run: () => {
+        const state = openState();
+        return {
+          state,
+          outcome: hostShowAnswers(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_review_not_open',
+    },
+    {
+      label: 'hostHideAnswer on a finished session',
+      run: () => {
+        const state = finishedState();
+        return {
+          state,
+          outcome: hostHideAnswer(
+            state,
+            { answerId: 'answer-1', isHidden: true },
+            HOST_USER_ID,
+            NOW + 100,
+          ),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostHideAnswer showing again an answer whose author left',
+      run: () => {
+        const { state, answerId } = reviewStateWithLeftAuthor();
+        return {
+          state,
+          outcome: hostHideAnswer(
+            state,
+            { answerId, isHidden: false },
+            HOST_USER_ID,
+            NOW + 3000,
+          ),
+        };
+      },
+      code: 'quizshow_author_removed',
+    },
+    {
+      label: 'hostPickFavourite while paused',
+      run: () => {
+        const state = pausedState();
+        return {
+          state,
+          outcome: hostPickFavourite(
+            state,
+            {
+              phaseId: state.cursor.phaseId,
+              questionId: 'question-1',
+              optionId: 'option-1',
+            },
+            NOW + 100,
+          ),
+        };
+      },
+      code: 'quizshow_session_paused',
+    },
+    {
+      label: 'hostPickFavourite on a quiz reveal',
+      run: () => {
+        const state = revealState();
+        return {
+          state,
+          outcome: hostPickFavourite(
+            state,
+            {
+              phaseId: state.cursor.phaseId,
+              questionId: 'question-1',
+              optionId: 'option-1',
+            },
+            NOW + 31_000,
+          ),
+        };
+      },
+      code: 'quizshow_favourite_not_available',
+    },
+    {
+      label: 'hostRemovePlayer on a finished session',
+      run: () => {
+        const state = finishedState();
+        return {
+          state,
+          outcome: hostRemovePlayer(state, 'player-1', HOST_USER_ID, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostRenameTeam on a finished session',
+      run: () => {
+        const state = finishedState();
+        return {
+          state,
+          outcome: hostRenameTeam(
+            state,
+            { teamId: 'team-a', name: 'The Divas' },
+            NOW + 100,
+          ),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostEnd on a finished session',
+      run: () => {
+        const state = finishedState();
+        return {
+          state,
+          outcome: hostEnd(state, state.cursor.phaseId, NOW + 100),
+        };
+      },
+      code: 'quizshow_session_ended',
+    },
+    {
+      label: 'hostSetScreenMuted on a finished session',
+      run: () => {
+        const state = finishedState();
+        return { state, outcome: hostSetScreenMuted(state, true, NOW + 100) };
+      },
+      code: 'quizshow_session_ended',
+    },
+  ];
+
+  it.each(rows)('$label refuses with $code and the cursor', ({ run, code }) => {
+    const { state, outcome } = run();
+
+    const failure = expectFailure(outcome);
+
+    expect(failure.code).toBe(code);
+    expect(failure.cursor).toEqual(state.cursor);
+  });
+});
+
+describe('Pulse Live engine phases: v2 question flow', () => {
+  it('leaves out a player away for 20 s or more when a question opens and keeps one who left 5 s ago', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addPlayer(state, 'player-1');
+    addPlayer(state, 'player-2', {
+      connectedSocketCount: 0,
+      disconnectedAt: NOW - 25_000,
+    });
+    addPlayer(state, 'player-3', {
+      connectedSocketCount: 0,
+      disconnectedAt: NOW - 5_000,
+    });
+    startGame(state, NOW);
+
+    nextPhase(state, NOW);
+
+    const play = currentPlay(state);
+    expect(play.eligiblePlayerIds).toEqual(new Set(['player-1', 'player-3']));
+    expect(play.awayPlayerIds).toEqual(new Set(['player-2']));
+    expect(state.questionLog[0]?.eligibleCount).toBe(2);
+    expect(play.answersById.size).toBe(0);
+    expect(play.streakBeforeByPlayer.size).toBe(0);
+    expect(play.keyOverride).toBeNull();
+    expect(play.acceptedTexts.size).toBe(0);
+    expect(play.wasCorrected).toBe(false);
+  });
+
+  it('reads a long question for the 8 s ceiling', () => {
+    const longQuestion: QuizshowSnapshotQuestion = {
+      ...trueFalseQuestion('question-1'),
+      prompt: { en: 'x'.repeat(280), pt: 'y'.repeat(10) },
+    };
+    const state = stateWithQuiz({
+      rounds: [snapshotRound('round-one', 'quiz', [longQuestion])],
+    });
+    addPlayer(state, 'player-1');
+    startGame(state, NOW);
+
+    nextPhase(state, NOW);
+
+    expect(state.cursor.phase).toBe('read');
+    expect(state.cursor.deadline).toBe(NOW + 8000);
+  });
+
+  it('adds the talk beat to read in teams play and moves it with a pause', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [
+        withRoundSettings(quizRound('round-one', ['question-1']), {
+          talkSeconds: 20,
+        }),
+      ],
+    });
+    addTeam(state, 'team-a');
+    addPlayer(state, 'player-1', { teamId: 'team-a' });
+    startGame(state, NOW);
+
+    nextPhase(state, NOW + 1000);
+
+    expect(state.cursor.phase).toBe('read');
+    expect(state.cursor.phaseStartedAt).toBe(NOW + 1000);
+    expect(state.cursor.talkStartsAt).toBe(NOW + 1000 + 3000);
+    expect(state.cursor.deadline).toBe(NOW + 1000 + 3000 + 20_000);
+
+    const readPhaseId = state.cursor.phaseId;
+    expectSuccess(hostPause(state, readPhaseId, NOW + 2000));
+    expectSuccess(hostResume(state, readPhaseId, NOW + 12_000));
+
+    expect(state.cursor.phaseStartedAt).toBe(NOW + 11_000);
+    expect(state.cursor.talkStartsAt).toBe(NOW + 14_000);
+    expect(state.cursor.deadline).toBe(NOW + 34_000);
+  });
+
+  it('ignores the talk beat in solo play', () => {
+    const state = stateWithQuiz({
+      rounds: [
+        withRoundSettings(quizRound('round-one', ['question-1']), {
+          talkSeconds: 20,
+        }),
+      ],
+    });
+    addPlayer(state, 'player-1');
+    startGame(state, NOW);
+
+    nextPhase(state, NOW + 1000);
+
+    expect(state.cursor.deadline).toBe(NOW + 1000 + 3000);
+    expect(state.cursor.talkStartsAt).toBeNull();
+  });
+
+  it('judges a warm-up question with 0 points and the streak kept, then skips its scores and the round leaderboard', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [
+        withRoundSettings(quizRound('round-warm-up', ['warm-1', 'warm-2']), {
+          isWarmUp: true,
+        }),
+        quizRound('round-two', ['question-1']),
+      ],
+    });
+    addTeam(state, 'team-a');
+    addPlayer(state, 'player-1', { teamId: 'team-a', streak: 2 });
+    startGame(state, NOW);
+    nextPhase(state, NOW);
+
+    const firstRevealAt = playQuizQuestionFromRead(state, ['player-1']);
+
+    expect(answerOf(state, 'player-1').isCorrect).toBe(true);
+    expect(answerOf(state, 'player-1').pointsAwarded).toBe(0);
+    expect(answerOf(state, 'player-1').streakBonus).toBe(0);
+    expect(playerOf(state, 'player-1').score).toBe(0);
+    expect(playerOf(state, 'player-1').streak).toBe(2);
+    expect(currentPlay(state).teamPoints.get('team-a') ?? 0).toBe(0);
+    expect(teamOf(state, 'team-a').score).toBe(0);
+
+    const fromFirstReveal = nextPhase(state, firstRevealAt + 1000);
+
+    expect(state.cursor.phase).toBe('read');
+    expect(state.cursor.questionIndex).toBe(1);
+    expect(findEffect(fromFirstReveal.effects, 'scores_shown')).toBeUndefined();
+
+    const secondRevealAt = playQuizQuestionFromRead(state, ['player-1']);
+    const fromLastReveal = nextPhase(state, secondRevealAt + 1000);
+
+    expect(state.cursor.phase).toBe('round_intro');
+    expect(state.cursor.roundIndex).toBe(1);
+    expect(findEffect(fromLastReveal.effects, 'scores_shown')).toBeUndefined();
+  });
+
+  it('scores nobody on a poll and skips its scores', () => {
+    const state = stateWithQuiz({
+      rounds: [
+        snapshotRound('round-one', 'quiz', [
+          pollQuestion('poll-1'),
+          trueFalseQuestion('question-2'),
+        ]),
+      ],
+    });
+    addPlayer(state, 'player-1', { score: 300, streak: 2 });
+    const openAt = openFirstQuizQuestion(state, NOW);
+    submit(state, 'player-1', { type: 'poll', optionIndex: 0 }, openAt + 1000);
+    expectSuccess(hostReveal(state, state.cursor.phaseId, openAt + 2000));
+
+    expect(answerOf(state, 'player-1').isCorrect).toBeNull();
+    expect(answerOf(state, 'player-1').pointsAwarded).toBe(0);
+    expect(playerOf(state, 'player-1').score).toBe(300);
+    expect(playerOf(state, 'player-1').streak).toBe(2);
+    expect(currentPlay(state).pointsByPlayer.get('player-1')).toBe(0);
+
+    const fromReveal = nextPhase(state, openAt + 3000);
+
+    expect(state.cursor.phase).toBe('read');
+    expect(state.cursor.questionIndex).toBe(1);
+    expect(findEffect(fromReveal.effects, 'scores_shown')).toBeUndefined();
+  });
+
+  it('judges a multiple choice question with two correct options', () => {
+    const state = stateWithQuiz({
+      rounds: [
+        snapshotRound('round-one', 'quiz', [
+          multipleChoiceQuestion('question-1', [0, 2]),
+        ]),
+      ],
+    });
+    addPlayer(state, 'player-1');
+    addPlayer(state, 'player-2');
+    addPlayer(state, 'player-3');
+    const openAt = openFirstQuizQuestion(state, NOW);
+    submit(
+      state,
+      'player-1',
+      { type: 'multiple_choice', optionIndex: 0 },
+      openAt + 1000,
+    );
+    submit(
+      state,
+      'player-2',
+      { type: 'multiple_choice', optionIndex: 2 },
+      openAt + 1000,
+    );
+    submit(
+      state,
+      'player-3',
+      { type: 'multiple_choice', optionIndex: 1 },
+      openAt + 1000,
+    );
+
+    closeIfEveryoneDone(state, openAt + 1000);
+
+    expect(state.cursor.phase).toBe('reveal');
+    expect(answerOf(state, 'player-1').isCorrect).toBe(true);
+    expect(answerOf(state, 'player-2').isCorrect).toBe(true);
+    expect(answerOf(state, 'player-3').isCorrect).toBe(false);
+    expect(answerOf(state, 'player-3').pointsAwarded).toBe(0);
+  });
+
+  it('scores closest number answers against an absolute tolerance', () => {
+    const state = stateWithQuiz({
+      rounds: [
+        snapshotRound('round-one', 'quiz', [
+          closestQuestion('question-1', 1969, { mode: 'absolute', amount: 5 }),
+        ]),
+      ],
+    });
+    addPlayer(state, 'player-1');
+    addPlayer(state, 'player-2');
+    addPlayer(state, 'player-3');
+    const openAt = openFirstQuizQuestion(state, NOW);
+    submit(
+      state,
+      'player-1',
+      { type: 'closest_number', value: 1970 },
+      openAt + 1000,
+    );
+    submit(
+      state,
+      'player-2',
+      { type: 'closest_number', value: 1973 },
+      openAt + 1000,
+    );
+    submit(
+      state,
+      'player-3',
+      { type: 'closest_number', value: 1980 },
+      openAt + 1000,
+    );
+
+    closeIfEveryoneDone(state, openAt + 1000);
+
+    // Closest: the plain base plus the first streak step. Within 5: half the base.
+    expect(answerOf(state, 'player-1').isCorrect).toBe(true);
+    expect(answerOf(state, 'player-1').pointsAwarded).toBe(1100);
+    expect(answerOf(state, 'player-2').isCorrect).toBe(false);
+    expect(answerOf(state, 'player-2').pointsAwarded).toBe(500);
+    expect(answerOf(state, 'player-3').pointsAwarded).toBe(0);
+  });
+
+  it('records the streaks before the first scoring once', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addPlayer(state, 'player-1', { streak: 2 });
+    addPlayer(state, 'player-2');
+    const openAt = openFirstQuizQuestion(state, NOW);
+    submit(
+      state,
+      'player-1',
+      { type: 'true_false', isTrue: true },
+      openAt + 1000,
+    );
+    expectSuccess(hostReveal(state, state.cursor.phaseId, openAt + 2000));
+
+    const expectedStreaks = new Map([
+      ['player-1', 2],
+      ['player-2', 0],
+    ]);
+    expect(currentPlay(state).streakBeforeByPlayer).toEqual(expectedStreaks);
+    expect(playerOf(state, 'player-1').streak).toBe(3);
+
+    scoreQuizQuestion(state, currentPlayContext(state));
+
+    expect(currentPlay(state).streakBeforeByPlayer).toEqual(expectedStreaks);
+  });
+
+  it('finishes a practice session with no placings and still shows the podium', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1'])],
+      isPractice: true,
+    });
+    addPlayer(state, 'player-1');
+    startGame(state, NOW);
+    nextPhase(state, NOW);
+    const revealAt = playQuizQuestionFromRead(state, ['player-1']);
+    nextPhase(state, revealAt + 1000);
+    nextPhase(state, revealAt + 2000);
+    expect(state.cursor.phase).toBe('podium');
+    expect(state.podium).toHaveLength(1);
+    // One place, so one host-paced step before host:next finishes.
+    nextPhase(state, revealAt + 2500);
+    expect(state.cursor.podiumRevealedCount).toBe(1);
+
+    const finished = nextPhase(state, revealAt + 3000);
+
+    expect(state.status).toBe('finished');
+    const finish = findPersist(finished.effects, 'finish');
+    expect(finish?.placings).toEqual({});
+    expect(finish?.podium).toHaveLength(1);
+  });
+});
+
+describe('Pulse Live engine phases: podium steps, auto-advance, leave and remove with rejoin', () => {
+  function expectCommandSuccess(
+    outcome: QuizshowCommandOutcome,
+  ): QuizshowEngineEffect[] {
+    if (!outcome.ok) {
+      throw new Error(`Expected success, got ${outcome.failure.code}`);
+    }
+    return outcome.effects;
+  }
+
+  function expectCommandFailure(
+    outcome: QuizshowCommandOutcome,
+  ): QuizshowAckFailure {
+    if (outcome.ok) throw new Error('Expected a refusal');
+    expect(outcome.effects).toEqual([]);
+    return outcome.failure;
+  }
+
+  /** Solo players `player-1`, `player-2`, ... on the given scores, started and past a scored question. */
+  function soloStateWithScores(scores: number[]): QuizshowLiveState {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    for (let position = 0; position < scores.length; position += 1) {
+      addPlayer(state, `player-${position + 1}`, {
+        joinedAt: STARTED_AT + position,
+      });
+    }
+    startGame(state, NOW);
+    scores.forEach((score, position) => {
+      playerOf(state, `player-${position + 1}`).score = score;
+    });
+    state.hasScoredQuestion = true;
+    return state;
+  }
+
+  /** A caption round with review off, played to its `write` phase. */
+  function captionStateInWrite(isAutoAdvanceOn: boolean): QuizshowLiveState {
+    const state = stateWithQuiz({
+      rounds: [captionRound('round-captions')],
+      isReviewOn: false,
+    });
+    state.isAutoAdvanceOn = isAutoAdvanceOn;
+    for (const playerId of ['player-1', 'player-2', 'player-3']) {
+      addPlayer(state, playerId);
+    }
+    startGame(state, NOW);
+    nextPhase(state, NOW);
+    expect(state.cursor.phase).toBe('write');
+    return state;
+  }
+
+  it('reveals three places one host:next at a time, each a new phase id, and finishes on the fourth', () => {
+    const state = soloStateWithScores([300, 200, 100]);
+
+    expectSuccess(hostEnd(state, state.cursor.phaseId, NOW + 1000));
+
+    expect(state.cursor.phase).toBe('podium');
+    expect(state.cursor.podiumRevealedCount).toBe(0);
+    const seenPhaseIds = new Set([state.cursor.phaseId]);
+
+    for (const expectedCount of [1, 2, 3]) {
+      const previousPhaseId = state.cursor.phaseId;
+      const step = nextPhase(state, NOW + 1000 + expectedCount * 1000);
+
+      expect(state.cursor.phase).toBe('podium');
+      expect(seenPhaseIds.has(state.cursor.phaseId)).toBe(false);
+      seenPhaseIds.add(state.cursor.phaseId);
+      expect(state.cursor.podiumRevealedCount).toBe(expectedCount);
+      expect(effectKinds(step.effects)).toEqual(
+        expect.arrayContaining(['phase_changed', 'podium_shown']),
+      );
+      expect(findEffect(step.effects, 'scores_shown')).toEqual({
+        kind: 'scores_shown',
+        scope: 'final',
+      });
+      expect(checkpointCount(step.effects)).toBe(1);
+      expect(state.lastScoresFrame?.phaseId).toBe(state.cursor.phaseId);
+
+      // A double tap on the step just left is a no-op.
+      const doubleTap = expectSuccess(
+        hostNext(state, previousPhaseId, NOW + 1000 + expectedCount * 1000),
+      );
+      expect(doubleTap.isNoop).toBe(true);
+      expect(state.cursor.podiumRevealedCount).toBe(expectedCount);
+    }
+
+    const finished = nextPhase(state, NOW + 5000);
+
+    expect(state.status).toBe('finished');
+    expect(state.cursor.phase).toBe('ended');
+    expect(findPersist(finished.effects, 'finish')).toBeDefined();
+  });
+
+  it('takes two steps for places 1, 1 and 3', () => {
+    const state = soloStateWithScores([500, 500, 100]);
+    expectSuccess(hostEnd(state, state.cursor.phaseId, NOW + 1000));
+    expect(state.podium?.map((entry) => entry.place)).toEqual([1, 1, 3]);
+
+    nextPhase(state, NOW + 2000);
+    nextPhase(state, NOW + 3000);
+
+    expect(state.cursor.phase).toBe('podium');
+    expect(state.cursor.podiumRevealedCount).toBe(2);
+
+    nextPhase(state, NOW + 4000);
+
+    expect(state.status).toBe('finished');
+  });
+
+  it('clamps the revealed count when a removal on the podium leaves fewer places', () => {
+    const state = soloStateWithScores([300, 200, 100]);
+    expectSuccess(hostEnd(state, state.cursor.phaseId, NOW + 1000));
+    nextPhase(state, NOW + 2000);
+    nextPhase(state, NOW + 3000);
+    nextPhase(state, NOW + 4000);
+    expect(state.cursor.podiumRevealedCount).toBe(3);
+
+    const removed = expectSuccess(
+      hostRemovePlayer(state, 'player-3', HOST_USER_ID, NOW + 5000),
+    );
+
+    expect(state.podium?.map((entry) => entry.place)).toEqual([1, 2]);
+    expect(state.cursor.podiumRevealedCount).toBe(2);
+    expect(effectKinds(removed.effects)).toEqual(
+      expect.arrayContaining(['phase_changed', 'podium_shown']),
+    );
+
+    nextPhase(state, NOW + 6000);
+
+    expect(state.status).toBe('finished');
+  });
+
+  it('keeps a legacy podium with no count showing everything when an entrant leaves', () => {
+    const state = soloStateWithScores([300, 200, 100]);
+    expectSuccess(hostEnd(state, state.cursor.phaseId, NOW + 1000));
+    state.cursor.podiumRevealedCount = null;
+
+    const effects = expectCommandSuccess(
+      leaveLobby(state, 'player-3', NOW + 2000),
+    );
+
+    expect(state.podium?.map((entry) => entry.place)).toEqual([1, 2]);
+    expect(state.cursor.podiumRevealedCount).toBeNull();
+    expect(effectKinds(effects)).toContain('podium_shown');
+    expect(effectKinds(effects)).not.toContain('phase_changed');
+  });
+
+  it('keeps a place the host has not revealed hidden when a podium entrant leaves', () => {
+    const state = soloStateWithScores([300, 200, 100]);
+    expectSuccess(hostEnd(state, state.cursor.phaseId, NOW + 1000));
+    nextPhase(state, NOW + 2000);
+    nextPhase(state, NOW + 3000);
+    expect(state.cursor.podiumRevealedCount).toBe(2);
+
+    const effects = expectCommandSuccess(
+      leaveLobby(state, 'player-3', NOW + 4000),
+    );
+
+    // 3rd and 2nd were shown; the new 2nd stays shown and the winner waits for the host.
+    expect(state.podium?.map((entry) => entry.place)).toEqual([1, 2]);
+    expect(state.cursor.podiumRevealedCount).toBe(1);
+    expect(effectKinds(effects)).toEqual(
+      expect.arrayContaining(['phase_changed', 'podium_shown']),
+    );
+  });
+
+  it('arms auto-advance on a round intro, a quiz reveal and scores, and moves on when the timer fires', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1', 'question-2'])],
+    });
+    state.isAutoAdvanceOn = true;
+    addPlayer(state, 'player-1');
+
+    const started = expectSuccess(hostStart(state, state.cursor.phaseId, NOW));
+
+    expect(state.cursor.phase).toBe('round_intro');
+    expect(state.cursor.autoAdvanceAt).toBe(NOW + 5000);
+    const introPhaseId = state.cursor.phaseId;
+    expect(findEffect(started.effects, 'timer')).toEqual({
+      kind: 'timer',
+      phaseId: introPhaseId,
+      fireAt: NOW + 5000,
+    });
+    // An early fire asks for the same timer again and moves nothing.
+    expect(timerElapsed(state, introPhaseId, NOW + 4000)).toEqual([
+      { kind: 'timer', phaseId: introPhaseId, fireAt: NOW + 5000 },
+    ]);
+    expect(state.cursor.phase).toBe('round_intro');
+
+    timerElapsed(state, introPhaseId, NOW + 5000);
+
+    expect(state.cursor.phase).toBe('read');
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+
+    const revealAt = playQuizQuestionFromRead(state, ['player-1']);
+
+    expect(state.cursor.autoAdvanceAt).toBe(revealAt + 6000);
+
+    const toScores = timerElapsed(state, state.cursor.phaseId, revealAt + 6000);
+
+    expect(state.cursor.phase).toBe('scores');
+    expect(state.cursor.autoAdvanceAt).toBe(revealAt + 12_000);
+    expect(findEffect(toScores, 'timer')).toEqual({
+      kind: 'timer',
+      phaseId: state.cursor.phaseId,
+      fireAt: revealAt + 12_000,
+    });
+    expect(checkpointCount(toScores)).toBe(1);
+
+    timerElapsed(state, state.cursor.phaseId, revealAt + 12_000);
+
+    expect(state.cursor.phase).toBe('read');
+    expect(state.cursor.questionIndex).toBe(1);
+  });
+
+  it('leaves a Caption This reveal unarmed', () => {
+    const random = seededRandom();
+    const state = captionStateInWrite(true);
+    writeEveryCaption(
+      state,
+      ['player-1', 'player-2', 'player-3'],
+      NOW + 1000,
+      random,
+    );
+    castVote(state, 'player-1', optionOf(state, 'player-2'), NOW + 2000);
+    castVote(state, 'player-2', optionOf(state, 'player-1'), NOW + 2000);
+    castVote(state, 'player-3', optionOf(state, 'player-1'), NOW + 2000);
+    closeIfEveryoneDone(state, NOW + 2000, random);
+
+    expect(state.cursor.phase).toBe('reveal');
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    expect(timerElapsed(state, state.cursor.phaseId, NOW + 60_000)).toEqual([]);
+    expect(state.cursor.phase).toBe('reveal');
+  });
+
+  it('clears auto-advance on pause and arms the full wait again from the resume', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    state.isAutoAdvanceOn = true;
+    addPlayer(state, 'player-1');
+    startGame(state, NOW);
+    const introPhaseId = state.cursor.phaseId;
+    expect(state.cursor.autoAdvanceAt).toBe(NOW + 5000);
+
+    const paused = expectSuccess(hostPause(state, introPhaseId, NOW + 1000));
+
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    expect(findEffect(paused.effects, 'timer_cleared')).toEqual({
+      kind: 'timer_cleared',
+    });
+
+    const resumed = expectSuccess(
+      hostResume(state, introPhaseId, NOW + 10_000),
+    );
+
+    expect(state.cursor.autoAdvanceAt).toBe(NOW + 15_000);
+    expect(findEffect(resumed.effects, 'timer')).toEqual({
+      kind: 'timer',
+      phaseId: introPhaseId,
+      fireAt: NOW + 15_000,
+    });
+  });
+
+  it('arms from now when auto-advance turns on mid-reveal and clears when it turns off', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addPlayer(state, 'player-1');
+
+    const inLobby = expectSuccess(hostSetAutoAdvance(state, true, NOW - 100));
+    expect(effectKinds(inLobby.effects)).not.toContain('phase_changed');
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    expectSuccess(hostSetAutoAdvance(state, false, NOW - 50));
+
+    startGame(state, NOW);
+    nextPhase(state, NOW);
+    const revealAt = playQuizQuestionFromRead(state, ['player-1']);
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+
+    const turnedOn = expectSuccess(
+      hostSetAutoAdvance(state, true, revealAt + 2000),
+    );
+
+    expect(turnedOn.isNoop).toBe(false);
+    expect(state.isAutoAdvanceOn).toBe(true);
+    expect(state.cursor.autoAdvanceAt).toBe(revealAt + 8000);
+    expect(findPersist(turnedOn.effects, 'set_session_flags')).toEqual({
+      type: 'set_session_flags',
+    });
+    expect(effectKinds(turnedOn.effects)).toEqual(
+      expect.arrayContaining(['flags_changed', 'timer', 'phase_changed']),
+    );
+    expect(checkpointCount(turnedOn.effects)).toBe(1);
+
+    const repeated = expectSuccess(
+      hostSetAutoAdvance(state, true, revealAt + 2500),
+    );
+    expect(repeated.isNoop).toBe(true);
+    expect(repeated.effects).toEqual(CHECKPOINT_ONLY);
+
+    const turnedOff = expectSuccess(
+      hostSetAutoAdvance(state, false, revealAt + 3000),
+    );
+
+    expect(state.isAutoAdvanceOn).toBe(false);
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    expect(effectKinds(turnedOff.effects)).toEqual(
+      expect.arrayContaining([
+        'flags_changed',
+        'timer_cleared',
+        'phase_changed',
+      ]),
+    );
+
+    setSessionStatus(state, 'finished');
+    expect(
+      expectFailure(hostSetAutoAdvance(state, true, revealAt + 4000)).code,
+    ).toBe('quizshow_session_ended');
+  });
+
+  it('drops a player-made team when its last player leaves the lobby and keeps a host-made one', () => {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addTeam(state, 'team-a');
+    addTeam(state, 'team-b', { colorKey: 'triangle', isHostMade: true });
+    addPlayer(state, 'player-1', { teamId: 'team-a' });
+    addPlayer(state, 'player-2', { teamId: 'team-b' });
+
+    const firstLeave = expectCommandSuccess(leaveLobby(state, 'player-1', NOW));
+
+    expect(playerOf(state, 'player-1').leftAt).toBe(NOW);
+    expect(state.teams.has('team-a')).toBe(false);
+    expect(findPersist(firstLeave, 'update_player')).toEqual({
+      type: 'update_player',
+      playerId: 'player-1',
+      fields: { leftAt: NOW },
+    });
+    expect(findPersist(firstLeave, 'delete_teams')).toEqual({
+      type: 'delete_teams',
+      teamIds: ['team-a'],
+    });
+    expect(findEffect(firstLeave, 'player_left')).toEqual({
+      kind: 'player_left',
+      playerId: 'player-1',
+    });
+    expect(effectKinds(firstLeave)).toContain('lobby_changed');
+    expect(checkpointCount(firstLeave)).toBe(1);
+
+    const secondLeave = expectCommandSuccess(
+      leaveLobby(state, 'player-2', NOW + 100),
+    );
+
+    expect(state.teams.has('team-b')).toBe(true);
+    expect(findPersist(secondLeave, 'delete_teams')).toBeUndefined();
+
+    expect(
+      expectCommandFailure(leaveLobby(state, 'player-2', NOW + 200)).code,
+    ).toBe('quizshow_not_joined');
+    expect(
+      expectCommandFailure(leaveLobby(state, 'player-9', NOW + 200)).code,
+    ).toBe('quizshow_not_joined');
+    addPlayer(state, 'player-3', { removedAt: NOW });
+    expect(
+      expectCommandFailure(leaveLobby(state, 'player-3', NOW + 200)).code,
+    ).toBe('quizshow_player_removed');
+    setSessionStatus(state, 'finished');
+    addPlayer(state, 'player-4');
+    expect(
+      expectCommandFailure(leaveLobby(state, 'player-4', NOW + 300)).code,
+    ).toBe('quizshow_session_ended');
+  });
+
+  it('closes an open question early when the last player still to answer leaves', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1', 'question-2'])],
+    });
+    addPlayer(state, 'player-1');
+    addPlayer(state, 'player-2');
+    const openAt = openFirstQuizQuestion(state, NOW);
+    submit(state, 'player-1', { type: 'true_false', isTrue: true }, openAt);
+
+    const effects = expectCommandSuccess(
+      leaveLobby(state, 'player-2', openAt + 1000),
+    );
+
+    expect(state.cursor.phase).toBe('reveal');
+    expect(effectKinds(effects)).toEqual(
+      expect.arrayContaining(['player_left', 'revealed']),
+    );
+    expect(checkpointCount(effects)).toBe(1);
+    // The leaver stays counted for the question, so a rejoin keeps the counts consistent.
+    expect(currentPlay(state).eligiblePlayerIds.has('player-2')).toBe(true);
+    expect(state.questionLog[0]?.eligibleCount).toBe(2);
+  });
+
+  it('removes a player with a rejoin: leftAt set, answers stay visible, sockets evicted', () => {
+    const state = captionStateInWrite(false);
+    const answer = submit(
+      state,
+      'player-1',
+      { type: 'prompt', text: 'player-1 caption' },
+      NOW + 1000,
+    );
+
+    const removed = expectSuccess(
+      hostRemovePlayer(
+        state,
+        'player-1',
+        HOST_USER_ID,
+        NOW + 2000,
+        seededRandom(),
+        true,
+      ),
+    );
+
+    const player = playerOf(state, 'player-1');
+    expect(player.leftAt).toBe(NOW + 2000);
+    expect(player.removedAt).toBeNull();
+    expect(answer.hiddenAt).toBeNull();
+    expect(findPersist(removed.effects, 'hide_player_answers')).toBeUndefined();
+    expect(findEffect(removed.effects, 'answer_hidden')).toBeUndefined();
+    expect(findPersist(removed.effects, 'update_player')).toEqual({
+      type: 'update_player',
+      playerId: 'player-1',
+      fields: { leftAt: NOW + 2000 },
+    });
+    expect(findEffect(removed.effects, 'player_removed')).toEqual({
+      kind: 'player_removed',
+      playerId: 'player-1',
+      canRejoin: true,
+    });
+    expect(findEffect(removed.effects, 'player_left')).toBeUndefined();
+
+    // A second rejoin removal of a player who left changes nothing.
+    const rejoinAgain = expectSuccess(
+      hostRemovePlayer(
+        state,
+        'player-1',
+        HOST_USER_ID,
+        NOW + 2500,
+        seededRandom(),
+        true,
+      ),
+    );
+    expect(rejoinAgain.isNoop).toBe(true);
+    expect(playerOf(state, 'player-1').removedAt).toBeNull();
+
+    // Removing for good a player who left blocks the rejoin and hides their answers.
+    const removedAfterLeave = expectSuccess(
+      hostRemovePlayer(state, 'player-1', HOST_USER_ID, NOW + 3000),
+    );
+    expect(removedAfterLeave.isNoop).toBe(false);
+    expect(playerOf(state, 'player-1').removedAt).toBe(NOW + 3000);
+    expect(answer.hiddenAt).toBe(NOW + 3000);
+    expect(
+      findPersist(removedAfterLeave.effects, 'hide_player_answers'),
+    ).toEqual({
+      type: 'hide_player_answers',
+      playerId: 'player-1',
+      hiddenAt: NOW + 3000,
+      hiddenByUserId: HOST_USER_ID,
+    });
+    expect(findEffect(removedAfterLeave.effects, 'player_removed')).toEqual({
+      kind: 'player_removed',
+      playerId: 'player-1',
+      canRejoin: false,
+    });
+
+    const removedAgain = expectSuccess(
+      hostRemovePlayer(state, 'player-1', HOST_USER_ID, NOW + 3500),
+    );
+    expect(removedAgain.isNoop).toBe(true);
+
+    const removedForGood = expectSuccess(
+      hostRemovePlayer(state, 'player-2', HOST_USER_ID, NOW + 4000),
+    );
+    expect(findEffect(removedForGood.effects, 'player_removed')).toEqual({
+      kind: 'player_removed',
+      playerId: 'player-2',
+      canRejoin: false,
+    });
+  });
+
+  it('arms auto-advance on a Lie Detector reveal and leaves the podium unarmed', () => {
+    const random = seededRandom();
+    const state = stateWithQuiz({
+      rounds: [lieDetectorRound('round-lies')],
+      isReviewOn: false,
+    });
+    state.isAutoAdvanceOn = true;
+    for (const playerId of ['player-1', 'player-2', 'player-3']) {
+      addPlayer(state, playerId);
+    }
+    startGame(state, NOW);
+    nextPhase(state, NOW);
+    const writeDeadline = requireNumber(state.cursor.deadline);
+    submit(state, 'player-1', { type: 'prompt', text: 'Porto' }, NOW + 1000);
+    submit(state, 'player-2', { type: 'prompt', text: 'Faro' }, NOW + 2000);
+    timerElapsed(state, state.cursor.phaseId, writeDeadline + 500, random);
+    expect(state.cursor.phase).toBe('vote');
+    const truthOption = optionOf(state, null);
+    castVote(state, 'player-1', optionOf(state, 'player-2'), NOW + 70_000);
+    castVote(state, 'player-2', truthOption, NOW + 70_000);
+    castVote(state, 'player-3', truthOption, NOW + 70_000);
+    closeIfEveryoneDone(state, NOW + 70_000, random);
+
+    expect(state.cursor.phase).toBe('reveal');
+    expect(state.cursor.autoAdvanceAt).toBe(NOW + 76_000);
+
+    timerElapsed(state, state.cursor.phaseId, NOW + 76_000, random);
+
+    expect(state.cursor.phase).toBe('podium');
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+  });
+
+  it('leaves a leaderboard unarmed and treats host:next on the phase the timer left as a no-op', () => {
+    const state = stateWithQuiz({
+      rounds: [
+        quizRound('round-one', ['question-1']),
+        quizRound('round-two', ['question-2']),
+      ],
+    });
+    state.isAutoAdvanceOn = true;
+    addPlayer(state, 'player-1');
+    startGame(state, NOW);
+    timerElapsed(state, state.cursor.phaseId, NOW + 5000);
+    const revealAt = playQuizQuestionFromRead(state, ['player-1']);
+    const revealPhaseId = state.cursor.phaseId;
+
+    timerElapsed(state, revealPhaseId, revealAt + 6000);
+
+    expect(state.cursor.phase).toBe('scores');
+    const scoresPhaseId = state.cursor.phaseId;
+    const lateTap = expectSuccess(
+      hostNext(state, revealPhaseId, revealAt + 6100),
+    );
+    expect(lateTap.isNoop).toBe(true);
+    expect(state.cursor.phaseId).toBe(scoresPhaseId);
+
+    timerElapsed(state, scoresPhaseId, revealAt + 12_000);
+
+    expect(state.cursor.phase).toBe('leaderboard');
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    expect(
+      timerElapsed(state, state.cursor.phaseId, revealAt + 60_000),
+    ).toEqual([]);
+    expect(state.cursor.phase).toBe('leaderboard');
+  });
+
+  it('arms nothing when auto-advance turns on while paused and arms on resume', () => {
+    const state = stateWithQuiz({
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addPlayer(state, 'player-1');
+    startGame(state, NOW);
+    const introPhaseId = state.cursor.phaseId;
+    expectSuccess(hostPause(state, introPhaseId, NOW + 1000));
+
+    const turnedOn = expectSuccess(hostSetAutoAdvance(state, true, NOW + 2000));
+
+    expect(state.isAutoAdvanceOn).toBe(true);
+    expect(state.cursor.autoAdvanceAt).toBeNull();
+    expect(findEffect(turnedOn.effects, 'timer')).toBeUndefined();
+    expect(effectKinds(turnedOn.effects)).not.toContain('phase_changed');
+
+    const resumed = expectSuccess(hostResume(state, introPhaseId, NOW + 3000));
+
+    expect(state.cursor.autoAdvanceAt).toBe(NOW + 8000);
+    expect(findEffect(resumed.effects, 'timer')).toEqual({
+      kind: 'timer',
+      phaseId: introPhaseId,
+      fireAt: NOW + 8000,
+    });
+  });
+});
+
+describe('Pulse Live engine phases: hostRenameTeam name checks', () => {
+  function teamsLobby(): QuizshowLiveState {
+    const state = stateWithQuiz({
+      playMode: 'teams',
+      rounds: [quizRound('round-one', ['question-1'])],
+    });
+    addTeam(state, 'team-a', { name: 'Team A' });
+    addTeam(state, 'team-b', { name: 'Les Étoiles', colorKey: 'triangle' });
+    return state;
+  }
+
+  it('refuses a name that clashes with another team once accents, case and spaces fold away', () => {
+    const state = teamsLobby();
+
+    const failure = expectFailure(
+      hostRenameTeam(state, { teamId: 'team-a', name: 'les   etoiles' }, NOW),
+    );
+
+    expect(failure.code).toBe('quizshow_team_name_taken');
+    expect(teamOf(state, 'team-a').name).toBe('Team A');
+  });
+
+  it('refuses a blank name and a blocked name with their own codes', () => {
+    const state = teamsLobby();
+    const blockedWord = BLOCKED_TERMS[0];
+    if (blockedWord === undefined) throw new Error('No blocked term to test');
+
+    expect(
+      expectFailure(
+        hostRenameTeam(state, { teamId: 'team-a', name: '   ' }, NOW),
+      ).code,
+    ).toBe('quizshow_text_blank');
+    expect(
+      expectFailure(
+        hostRenameTeam(state, { teamId: 'team-a', name: blockedWord }, NOW),
+      ).code,
+    ).toBe('quizshow_text_blocked');
+  });
+
+  it('lets a team fold to its own name with new accents or case', () => {
+    const state = teamsLobby();
+
+    const { isNoop } = expectSuccess(
+      hostRenameTeam(state, { teamId: 'team-b', name: 'LES ETOILES' }, NOW),
+    );
+
+    expect(isNoop).toBe(false);
+    expect(teamOf(state, 'team-b').name).toBe('LES ETOILES');
   });
 });

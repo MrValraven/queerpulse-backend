@@ -43,7 +43,10 @@ import { dropCommunityGivingRequestBody } from './communities/community-giving-r
 // Also import-free, for the same reason.
 import { dropStudioMoneyRequestBody } from './studio/studio-purchase-request-log';
 // Also import-free, for the same reason.
-import { dropQuizshowRequestBody } from './quizshow/quizshow-request-log';
+import {
+  dropQuizshowRequestBody,
+  redactQuizshowJoinCodeReferer,
+} from './quizshow/quizshow-request-log';
 // Also import-free, for the same reason.
 import { dropEmailCodeRequestBody } from './auth/email-code/email-code-request-log';
 
@@ -115,13 +118,16 @@ export function scrubSensitiveQueryParameters(
   dropQuizshowRequestBody(request);
   // Sign-in code bodies hold an email address and a code.
   dropEmailCodeRequestBody(request);
+  // The transaction name can repeat a raw path with a Pulse Live join code.
+  redactJoinCodeTransaction(event);
   // The Referer header can name the same listening page the URL would.
   dropStudioListeningReferer(request);
   dropCreatorDraftReferer(request);
   dropLeadsReferer(request);
   dropCulturalProductionReferer(request);
   dropVjReferer(request);
-  // A referer that survives can still carry an invite code or a token.
+  // A referer that survives can still carry an invite code, a token or a
+  // Pulse Live join code.
   redactKeptReferer(request);
   // Studio records nothing about what a member listens to, so the URL and
   // query string of a track, playlist or search request are removed from the
@@ -208,9 +214,30 @@ function isVjBreadcrumb(breadcrumb: Sentry.Breadcrumb): boolean {
 }
 
 /**
+ * Redacts a Pulse Live join code in `event.transaction`, which can name the
+ * raw request path (`GET /v1/quizshow/join-preview/<code>`) or a frontend
+ * page (`/play/<code>`). A leading HTTP method is kept as it is; the code
+ * segment reads `[code]`.
+ */
+function redactJoinCodeTransaction(event: Sentry.ErrorEvent): void {
+  const transaction = event.transaction;
+  if (typeof transaction !== 'string') {
+    return;
+  }
+  const methodPrefix = /^[A-Z]+ (?=\/|[a-z][a-z\d+.-]*:\/\/)/i.exec(
+    transaction,
+  )?.[0];
+  const prefix = methodPrefix ?? '';
+  event.transaction = `${prefix}${redactQuizshowJoinCodeReferer(
+    transaction.slice(prefix.length),
+  )}`;
+}
+
+/**
  * Runs the query redaction over every `Referer` header (any key casing) left on
  * a Sentry request, so a page such as `/feed?invite=<code>` keeps its path and
- * loses only the sensitive values.
+ * loses only the sensitive values. A Pulse Live join code in the path, as in
+ * `/play/<code>`, reads `[code]` the same way.
  */
 function redactKeptReferer(
   request: { headers?: Record<string, unknown> } | undefined,
@@ -222,7 +249,11 @@ function redactKeptReferer(
   for (const headerName of Object.keys(headers)) {
     const value = headers[headerName];
     if (headerName.toLowerCase() === 'referer' && typeof value === 'string') {
-      headers[headerName] = redactSensitiveQueryParameters(value);
+      // The Pulse Live join page and join preview name a join code in the
+      // path, which a room shares; that segment reads `[code]`.
+      headers[headerName] = redactSensitiveQueryParameters(
+        redactQuizshowJoinCodeReferer(value),
+      );
     }
   }
 }

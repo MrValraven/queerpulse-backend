@@ -1,5 +1,7 @@
 import { BLOCKED_TERMS } from '../common/blocked-terms';
 import {
+  QUIZSHOW_LIMITS,
+  QUIZSHOW_TEAM_COLOR_KEYS,
   QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
   type QuizshowAckFailure,
   type QuizshowAnswerPayload,
@@ -12,10 +14,15 @@ import {
   type QuizshowRoundSettings,
 } from './quizshow.contract';
 import {
+  buildTeam,
   createTeam,
+  dropEmptyLobbyTeams,
+  foldNameKey,
   joinLobby,
   pickTeam,
   playJoker,
+  returnAwayPlayer,
+  sendReaction,
   setAvatarShown,
   setExtraTime,
   setScreenName,
@@ -76,12 +83,18 @@ const ROUND_SETTINGS: QuizshowRoundSettings = {
   writeSeconds: 60,
   voteSeconds: 30,
   ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
+  isWarmUp: false,
+  talkSeconds: 0,
 };
 
 const QUESTION_BASE = {
   prompt: { en: 'Question', pt: 'Pergunta' },
   mediaRef: null,
   mediaUrl: null,
+  mediaAlt: { en: '', pt: '' },
+  mediaReveal: 'instant' as const,
+  revealNote: { en: '', pt: '' },
+  numberUnit: { en: '', pt: '' },
   timeLimitSeconds: null,
   points: 1000,
 };
@@ -108,7 +121,7 @@ function multipleChoiceQuestion(questionId: string): QuizshowSnapshotQuestion {
     id: questionId,
     type: 'multiple_choice',
     options,
-    answer: { correctIndex: 1 },
+    answer: { correctIndexes: [1] },
     acceptedAnswers: [],
     shownOptions: options,
   };
@@ -130,13 +143,29 @@ function orderQuestion(questionId: string): QuizshowSnapshotQuestion {
   };
 }
 
+function pollQuestion(questionId: string): QuizshowSnapshotQuestion {
+  const options = ['p', 'q', 'r'].map((optionId) => ({
+    id: optionId,
+    text: { en: `Choice ${optionId}`, pt: `Escolha ${optionId}` },
+  }));
+  return {
+    ...QUESTION_BASE,
+    id: questionId,
+    type: 'poll',
+    options,
+    answer: null,
+    acceptedAnswers: [],
+    shownOptions: options,
+  };
+}
+
 function closestNumberQuestion(questionId: string): QuizshowSnapshotQuestion {
   return {
     ...QUESTION_BASE,
     id: questionId,
     type: 'closest_number',
     options: [],
-    answer: { value: 1969 },
+    answer: { value: 1969, tolerance: { mode: 'exact', amount: 0 } },
     acceptedAnswers: [],
     shownOptions: null,
   };
@@ -200,7 +229,9 @@ function stateWithQuiz({
       languages: 'both',
       screenLanguage: 'en',
       rounds,
+      sourceUpdatedAt: '',
     },
+    isPractice: false,
     attachedOrganiserUserIds: new Set<string>(),
     nextEvent: null,
     startedAt: LOBBY_OPENED_AT,
@@ -318,7 +349,24 @@ function openQuestion(
     wasSkipped: false,
     pointsByPlayer: new Map(),
     teamPoints: new Map(),
+    answersById: new Map(),
+    awayPlayerIds: new Set(),
+    streakBeforeByPlayer: new Map(),
+    keyOverride: null,
+    acceptedTexts: new Set(),
+    wasCorrected: false,
   };
+  state.questionLog.push({
+    questionId: question.id,
+    roundIndex,
+    questionIndex,
+    roundKind: round.kind,
+    type: question.type,
+    openedAt: now,
+    revealedAt: null,
+    eligibleCount: eligiblePlayers.length,
+    wasSkipped: false,
+  });
   const isParty = round.kind !== 'quiz';
   const limitMs = isParty ? writeLimitMs(round) : openLimitMs(round, question);
   state.status = 'running';
@@ -375,7 +423,12 @@ function answerNow(
   return submitAnswer(
     state,
     playerId,
-    { phaseId: state.cursor.phaseId, questionId, payload },
+    {
+      phaseId: state.cursor.phaseId,
+      questionId,
+      payload,
+      latencyAllowanceMs: 0,
+    },
     now,
     random,
   );
@@ -588,12 +641,12 @@ describe('Pulse Live engine, players', () => {
         random,
       ),
     );
-    expect(soloRefusal.code).toBe('quizshow_command_not_allowed');
+    expect(soloRefusal.code).toBe('quizshow_teams_off');
     expect(soloRefusal.cursor).toEqual(soloState.cursor);
     const soloMe = join(soloState, 'user-a', 2_000, random);
     expect(
       refusalCode(pickTeam(soloState, soloMe.playerId, teamId, 2_100)),
-    ).toBe('quizshow_command_not_allowed');
+    ).toBe('quizshow_teams_off');
 
     startGame(state, 5_000);
 
@@ -743,34 +796,29 @@ describe('Pulse Live engine, players', () => {
     ]);
     expect(state.teams.size).toBe(2);
 
-    const remainingColorKeys = [
-      'triangle',
-      'diamond',
-      'star',
-      'hexagon',
-      'heart',
-      'moon',
-    ] as const;
+    const remainingColorKeys = QUIZSHOW_TEAM_COLOR_KEYS.filter(
+      (colorKey) => colorKey !== 'circle' && colorKey !== 'square',
+    );
     remainingColorKeys.forEach((colorKey, index) => {
       join(state, `user-team-${index}`, 3_000 + index, random, {
         team: { newTeam: { name: `Team ${colorKey}`, colorKey } },
       });
     });
-    expect(state.teams.size).toBe(8);
+    expect(state.teams.size).toBe(QUIZSHOW_LIMITS.teamsPerSessionMax);
 
     expect(
       refusalCode(
         joinLobby(
           state,
-          joinInput('user-ninth', {
-            team: { newTeam: { name: 'Ninth', colorKey: 'moon' } },
+          joinInput('user-one-too-many', {
+            team: { newTeam: { name: 'One too many', colorKey: 'moon' } },
           }),
           4_000,
           random,
         ),
       ),
     ).toBe('quizshow_team_limit');
-    expect(state.teams.size).toBe(8);
+    expect(state.teams.size).toBe(QUIZSHOW_LIMITS.teamsPerSessionMax);
   });
 
   it('lets a late joiner in without a place in the question being played', () => {
@@ -936,6 +984,7 @@ describe('Pulse Live engine, players', () => {
         phaseId: openPhaseId,
         questionId: 'question-1',
         payload: { type: 'true_false', isTrue: false },
+        latencyAllowanceMs: 0,
       },
       31_500,
       random,
@@ -963,7 +1012,12 @@ describe('Pulse Live engine, players', () => {
       submitAnswer(
         state,
         me.playerId,
-        { phaseId: '0', questionId: 'question-1', payload: TRUE_ANSWER },
+        {
+          phaseId: '0',
+          questionId: 'question-1',
+          payload: TRUE_ANSWER,
+          latencyAllowanceMs: 0,
+        },
         11_000,
         random,
       ),
@@ -1718,23 +1772,13 @@ describe('Pulse Live engine, players', () => {
       rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
     });
     const random = seededRandom();
-    const colorKeys = [
-      'circle',
-      'triangle',
-      'square',
-      'diamond',
-      'star',
-      'hexagon',
-      'heart',
-      'moon',
-    ] as const;
-    const founders = colorKeys.map((colorKey, index) =>
+    const founders = QUIZSHOW_TEAM_COLOR_KEYS.map((colorKey, index) =>
       join(state, `user-team-${index}`, 2_000 + index, random, {
         team: { newTeam: { name: `Team ${colorKey}`, colorKey } },
       }),
     );
-    expect(state.teams.size).toBe(8);
-    const moonFounder = at(founders, 7);
+    expect(state.teams.size).toBe(QUIZSHOW_LIMITS.teamsPerSessionMax);
+    const moonFounder = at(founders, QUIZSHOW_TEAM_COLOR_KEYS.length - 1);
     const circleTeamId = at(founders, 0).teamId;
     if (circleTeamId === null) throw new Error('The founder has no team.');
     const circleMember = join(state, 'user-circle-member', 2_100, random, {
@@ -1746,7 +1790,7 @@ describe('Pulse Live engine, players', () => {
         createTeam(
           state,
           circleMember.playerId,
-          { name: 'Ninth', colorKey: 'circle' },
+          { name: 'One too many', colorKey: 'circle' },
           3_000,
           random,
         ),
@@ -1756,7 +1800,7 @@ describe('Pulse Live engine, players', () => {
     const created = createTeam(
       state,
       moonFounder.playerId,
-      { name: 'Night owls', colorKey: 'moon' },
+      { name: 'Night owls', colorKey: 'moon_3' },
       3_100,
       random,
     );
@@ -1765,7 +1809,7 @@ describe('Pulse Live engine, players', () => {
     expect(successOf(created).me.teamId).toBe(nightOwlsTeamId);
     expect(state.teams.has(moonFounder.teamId ?? '')).toBe(false);
     expect(state.teams.get(nightOwlsTeamId)?.name).toBe('Night owls');
-    expect(state.teams.size).toBe(8);
+    expect(state.teams.size).toBe(QUIZSHOW_LIMITS.teamsPerSessionMax);
   });
 
   it('still refuses the colour of a team the player shares with someone else', () => {
@@ -1996,6 +2040,570 @@ describe('Pulse Live engine, players', () => {
       const repeated = playJoker(state, playerId, 2, 3_100);
       expect(successOf(repeated).me.jokerRoundIndex).toBe(2);
       expect(repeated.effects).toEqual([]);
+    });
+  });
+
+  describe('screen names, rejoins, the join lock and reactions (v2)', () => {
+    function playerOf(state: QuizshowLiveState, playerId: string) {
+      const player = state.players.get(playerId);
+      if (player === undefined) throw new Error('The player was not stored.');
+      return player;
+    }
+
+    it('refuses a taken screen name with the first free suggestion', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      join(state, 'user-a', 2_000, random, { screenName: 'Alex' });
+
+      const firstRefusal = refusalOf(
+        joinLobby(
+          state,
+          joinInput('user-b', { screenName: 'Alex' }),
+          2_100,
+          random,
+        ),
+      );
+      expect(firstRefusal.code).toBe('quizshow_screen_name_taken');
+      expect(firstRefusal.suggestedScreenName).toBe('Alex 2');
+      expect(firstRefusal.cursor).toBeUndefined();
+
+      join(state, 'user-c', 2_200, random, { screenName: 'Alex 2' });
+      const secondRefusal = refusalOf(
+        joinLobby(
+          state,
+          joinInput('user-d', { screenName: 'Alex' }),
+          2_300,
+          random,
+        ),
+      );
+      expect(secondRefusal.suggestedScreenName).toBe('Alex 3');
+      expect(state.players.size).toBe(2);
+    });
+
+    it('trims a 30-character base so the suggestion fits the name limit', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const longName = 'Abcdefghijklmnopqrstuvwxyzabcd';
+      expect(longName).toHaveLength(QUIZSHOW_LIMITS.screenNameMax);
+      join(state, 'user-a', 2_000, random, { screenName: longName });
+
+      const refusal = refusalOf(
+        joinLobby(
+          state,
+          joinInput('user-b', { screenName: longName }),
+          2_100,
+          random,
+        ),
+      );
+      expect(refusal.suggestedScreenName).toBe(`${longName.slice(0, 28)} 2`);
+      expect(refusal.suggestedScreenName).toHaveLength(
+        QUIZSHOW_LIMITS.screenNameMax,
+      );
+    });
+
+    it('folds accents, case and repeated spaces into one name key', () => {
+      expect(foldNameKey('João')).toBe(foldNameKey('Joao'));
+      expect(foldNameKey('ALEX')).toBe(foldNameKey('alex'));
+      expect(foldNameKey('  Mary   Jane ')).toBe('mary jane');
+
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      join(state, 'user-a', 2_000, random, { screenName: 'João' });
+      expect(
+        refusalCode(
+          joinLobby(
+            state,
+            joinInput('user-b', { screenName: 'joao' }),
+            2_100,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_screen_name_taken');
+    });
+
+    it('keeps the name of a player who left taken and frees the name of a removed one', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const leaver = join(state, 'user-a', 2_000, random, {
+        screenName: 'Alex',
+      });
+      const removed = join(state, 'user-b', 2_000, random, {
+        screenName: 'Robin',
+      });
+      const renamer = join(state, 'user-c', 2_000, random);
+      playerOf(state, leaver.playerId).leftAt = 3_000;
+      playerOf(state, removed.playerId).removedAt = 3_000;
+
+      expect(
+        refusalCode(
+          joinLobby(
+            state,
+            joinInput('user-d', { screenName: 'alex' }),
+            4_000,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_screen_name_taken');
+      expect(
+        refusalCode(setScreenName(state, renamer.playerId, 'ALEX', 4_000)),
+      ).toBe('quizshow_screen_name_taken');
+      expect(
+        refusalCode(setScreenName(state, leaver.playerId, 'Sam', 4_000)),
+      ).toBe('quizshow_not_joined');
+      expect(
+        successOf(setScreenName(state, renamer.playerId, 'Robin', 4_100)).me
+          .screenName,
+      ).toBe('Robin');
+    });
+
+    it('refuses a new player while joining is locked and lets a player who left back in', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const leaver = join(state, 'user-a', 2_000, random, {
+        screenName: 'Alex',
+      });
+      playerOf(state, leaver.playerId).leftAt = 3_000;
+      state.isJoinLocked = true;
+
+      expect(
+        refusalCode(joinLobby(state, joinInput('user-b'), 4_000, random)),
+      ).toBe('quizshow_joining_locked');
+
+      const rejoined = joinLobby(
+        state,
+        joinInput('user-a', { screenName: 'Alex' }),
+        4_100,
+        random,
+      );
+      expect(successOf(rejoined).me.playerId).toBe(leaver.playerId);
+      expect(effectsOf(rejoined)).toEqual([
+        {
+          kind: 'persist',
+          operation: {
+            type: 'update_player',
+            playerId: leaver.playerId,
+            fields: { leftAt: null },
+          },
+        },
+        { kind: 'lobby_changed' },
+        { kind: 'me_changed', playerIds: [leaver.playerId] },
+      ]);
+      expect(playerOf(state, leaver.playerId).leftAt).toBeNull();
+      expect(state.players.size).toBe(1);
+    });
+
+    it('keeps the score, streak and old team on a rejoin', () => {
+      const state = stateWithQuiz({
+        playMode: 'teams',
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const founder = join(state, 'user-a', 2_000, random, {
+        team: { newTeam: { name: 'Glitter', colorKey: 'circle' } },
+      });
+      const glitterTeamId = founder.teamId;
+      if (glitterTeamId === null) throw new Error('The founder has no team.');
+      join(state, 'user-b', 2_100, random, { team: { teamId: glitterTeamId } });
+      const leaver = playerOf(state, founder.playerId);
+      leaver.score = 1_200;
+      leaver.streak = 3;
+      leaver.leftAt = 3_000;
+
+      const me = successOf(
+        joinLobby(
+          state,
+          joinInput('user-a', { screenName: 'Glitter queen' }),
+          4_000,
+          random,
+        ),
+      ).me;
+
+      expect(me.teamId).toBe(glitterTeamId);
+      expect(me.score).toBe(1_200);
+      expect(me.streak).toBe(3);
+      expect(me.screenName).toBe('Glitter queen');
+    });
+
+    it('applies the payload team on a rejoin when the old team is full', () => {
+      const state = stateWithQuiz({
+        playMode: 'teams',
+        maxTeamSize: 2,
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const founder = join(state, 'user-a', 2_000, random, {
+        team: { newTeam: { name: 'Glitter', colorKey: 'circle' } },
+      });
+      const glitterTeamId = founder.teamId;
+      if (glitterTeamId === null) throw new Error('The founder has no team.');
+      join(state, 'user-b', 2_100, random, { team: { teamId: glitterTeamId } });
+      playerOf(state, founder.playerId).leftAt = 3_000;
+      join(state, 'user-c', 3_100, random, { team: { teamId: glitterTeamId } });
+      const sparkleTeamId = join(state, 'user-d', 3_200, random, {
+        team: { newTeam: { name: 'Sparkle', colorKey: 'triangle' } },
+      }).teamId;
+      if (sparkleTeamId === null) throw new Error('Sparkle was not founded.');
+
+      expect(
+        refusalCode(joinLobby(state, joinInput('user-a'), 4_000, random)),
+      ).toBe('quizshow_team_required');
+      expect(
+        refusalCode(
+          joinLobby(
+            state,
+            joinInput('user-a', { team: { teamId: glitterTeamId } }),
+            4_000,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_team_full');
+
+      const rejoined = joinLobby(
+        state,
+        joinInput('user-a', { team: { teamId: sparkleTeamId } }),
+        4_100,
+        random,
+      );
+      expect(successOf(rejoined).me.teamId).toBe(sparkleTeamId);
+      expect(at(effectsOf(rejoined), 0)).toEqual({
+        kind: 'persist',
+        operation: {
+          type: 'update_player',
+          playerId: founder.playerId,
+          fields: { leftAt: null, teamId: sparkleTeamId },
+        },
+      });
+    });
+
+    it('gives a player who rejoins during open a place in the current question', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const leaver = join(state, 'user-a', 2_000, random, {
+        hasExtraTime: true,
+      });
+      join(state, 'user-b', 2_000, random);
+      startGame(state, 5_000);
+      playerOf(state, leaver.playerId).leftAt = 6_000;
+      openQuestion(state, 0, 0, 10_000);
+      expect(isEligible(state, leaver.playerId)).toBe(false);
+      expect(at(state.questionLog, 0).eligibleCount).toBe(1);
+
+      const rejoined = joinLobby(
+        state,
+        joinInput('user-a', { hasExtraTime: true }),
+        11_000,
+        random,
+      );
+
+      expect(effectKinds(effectsOf(rejoined))).toEqual([
+        'persist update_player',
+        'lobby_changed',
+        'me_changed',
+        'answer_count_changed',
+        'persist checkpoint',
+      ]);
+      expect(isEligible(state, leaver.playerId)).toBe(true);
+      expect(state.current?.extraTimePlayerIds.has(leaver.playerId)).toBe(true);
+      expect(at(state.questionLog, 0).eligibleCount).toBe(2);
+      expect(
+        successOf(
+          answerNow(state, leaver.playerId, TRUE_ANSWER, 12_000, random),
+        ).isDuplicate,
+      ).toBe(false);
+    });
+
+    it('gives an away player their place back once, and leaves a late joiner for the next question', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const away = join(state, 'user-a', 2_000, random);
+      join(state, 'user-b', 2_000, random);
+      openQuestion(state, 0, 0, 10_000);
+      const current = state.current;
+      if (current === null) throw new Error('No question in play.');
+      current.eligiblePlayerIds.delete(away.playerId);
+      current.awayPlayerIds.add(away.playerId);
+      at(state.questionLog, 0).eligibleCount = 1;
+      const late = join(state, 'user-c', 11_000, random);
+
+      expect(effectsOf(returnAwayPlayer(state, late.playerId, 11_500))).toEqual(
+        [],
+      );
+      expect(isEligible(state, late.playerId)).toBe(false);
+
+      const returned = returnAwayPlayer(state, away.playerId, 12_000);
+      expect(effectKinds(effectsOf(returned))).toEqual([
+        'answer_count_changed',
+        'persist checkpoint',
+      ]);
+      expect(isEligible(state, away.playerId)).toBe(true);
+      expect(current.awayPlayerIds.has(away.playerId)).toBe(false);
+      expect(at(state.questionLog, 0).eligibleCount).toBe(2);
+      expect(effectsOf(returnAwayPlayer(state, away.playerId, 12_500))).toEqual(
+        [],
+      );
+    });
+
+    it('refuses a team choice and team commands in solo play with quizshow_teams_off', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const me = join(state, 'user-a', 2_000, random);
+
+      expect(
+        refusalCode(
+          joinLobby(
+            state,
+            joinInput('user-b', {
+              team: { newTeam: { name: 'Glitter', colorKey: 'circle' } },
+            }),
+            2_100,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_teams_off');
+      expect(
+        refusalCode(
+          createTeam(
+            state,
+            me.playerId,
+            { name: 'Glitter', colorKey: 'circle' },
+            2_100,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_teams_off');
+    });
+
+    it('takes the latency allowance off the elapsed time and never goes below 0', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const slow = join(state, 'user-a', 2_000, random);
+      const quick = join(state, 'user-b', 2_000, random);
+      openQuestion(state, 0, 0, 10_000);
+      const phaseId = state.cursor.phaseId;
+
+      successOf(
+        submitAnswer(
+          state,
+          slow.playerId,
+          {
+            phaseId,
+            questionId: 'question-1',
+            payload: TRUE_ANSWER,
+            latencyAllowanceMs: 120,
+          },
+          12_000,
+          random,
+        ),
+      );
+      successOf(
+        submitAnswer(
+          state,
+          quick.playerId,
+          {
+            phaseId,
+            questionId: 'question-1',
+            payload: TRUE_ANSWER,
+            latencyAllowanceMs: 120,
+          },
+          10_050,
+          random,
+        ),
+      );
+
+      expect(state.current?.answers.get(slow.playerId)?.elapsedMs).toBe(1_880);
+      expect(state.current?.answers.get(quick.playerId)?.elapsedMs).toBe(0);
+    });
+
+    it('accepts a poll payload on a poll and refuses it on multiple choice', () => {
+      const state = stateWithQuiz({
+        rounds: [
+          snapshotRound('quiz', [
+            pollQuestion('question-1'),
+            multipleChoiceQuestion('question-2'),
+          ]),
+        ],
+      });
+      const random = seededRandom();
+      const me = join(state, 'user-a', 2_000, random);
+      openQuestion(state, 0, 0, 10_000);
+
+      const invalidPollPayloads: QuizshowAnswerPayload[] = [
+        { type: 'poll', optionIndex: 3 },
+        { type: 'poll', optionIndex: 0.5 },
+        { type: 'multiple_choice', optionIndex: 0 },
+      ];
+      for (const payload of invalidPollPayloads) {
+        expect(
+          refusalCode(answerNow(state, me.playerId, payload, 11_000, random)),
+        ).toBe('quizshow_invalid_answer');
+      }
+      const accepted = successOf(
+        answerNow(
+          state,
+          me.playerId,
+          { type: 'poll', optionIndex: 2 },
+          11_000,
+          random,
+        ),
+      );
+      expect(accepted.answer.payload).toEqual({ type: 'poll', optionIndex: 2 });
+      const stored = state.current?.answers.get(me.playerId);
+      if (stored === undefined) throw new Error('The answer was not stored.');
+      expect(state.current?.answersById.get(stored.answerId)).toBe(stored);
+
+      openQuestion(state, 0, 1, 40_000);
+      expect(
+        refusalCode(
+          answerNow(
+            state,
+            me.playerId,
+            { type: 'poll', optionIndex: 0 },
+            41_000,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_invalid_answer');
+    });
+
+    it('sends a reaction between questions and refuses one while a question is open', () => {
+      const state = stateWithQuiz({
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const me = join(state, 'user-a', 2_000, random);
+      const leaver = join(state, 'user-b', 2_000, random);
+      playerOf(state, leaver.playerId).leftAt = 2_500;
+
+      expect(sendReaction(state, me.playerId, 'heart', 3_000)).toEqual({
+        ok: true,
+        success: {},
+        effects: [{ kind: 'reaction', reactionId: 'heart' }],
+      });
+      expect(
+        refusalCode(sendReaction(state, leaver.playerId, 'heart', 3_000)),
+      ).toBe('quizshow_not_joined');
+
+      openQuestion(state, 0, 0, 10_000);
+      expect(
+        refusalCode(sendReaction(state, me.playerId, 'fire', 11_000)),
+      ).toBe('quizshow_reaction_not_now');
+      moveToPhase(state, 'reveal', 31_000);
+      expect(sendReaction(state, me.playerId, 'clap', 32_000).ok).toBe(true);
+    });
+
+    it('keeps an empty host-made team in the lobby and drops an empty player-made one', () => {
+      const state = stateWithQuiz({
+        playMode: 'teams',
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const hostTeam = buildTeam('Table 1', 'circle', 2_000, random, true);
+      const playerTeam = buildTeam('Glitter', 'triangle', 2_000, random);
+      expect(hostTeam.isHostMade).toBe(true);
+      expect(playerTeam.isHostMade).toBe(false);
+      state.teams.set(hostTeam.teamId, hostTeam);
+      state.teams.set(playerTeam.teamId, playerTeam);
+
+      expect(
+        dropEmptyLobbyTeams(state, [hostTeam.teamId, playerTeam.teamId]),
+      ).toEqual([
+        {
+          kind: 'persist',
+          operation: { type: 'delete_teams', teamIds: [playerTeam.teamId] },
+        },
+      ]);
+      expect([...state.teams.keys()]).toEqual([hostTeam.teamId]);
+    });
+
+    it('counts a host-made team its founder is alone in toward the team limit', () => {
+      const state = stateWithQuiz({
+        playMode: 'teams',
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const hostTeam = buildTeam('Table 1', 'circle', 2_000, random, true);
+      state.teams.set(hostTeam.teamId, hostTeam);
+      const loner = join(state, 'user-loner', 2_100, random, {
+        team: { teamId: hostTeam.teamId },
+      });
+      QUIZSHOW_TEAM_COLOR_KEYS.filter(
+        (colorKey) => colorKey !== 'circle',
+      ).forEach((colorKey, index) => {
+        join(state, `user-team-${index}`, 2_200 + index, random, {
+          team: { newTeam: { name: `Team ${colorKey}`, colorKey } },
+        });
+      });
+      expect(state.teams.size).toBe(QUIZSHOW_LIMITS.teamsPerSessionMax);
+
+      expect(
+        refusalCode(
+          createTeam(
+            state,
+            loner.playerId,
+            { name: 'One too many', colorKey: 'circle' },
+            3_000,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_team_limit');
+      expect(state.teams.has(hostTeam.teamId)).toBe(true);
+      expect(state.teams.size).toBe(QUIZSHOW_LIMITS.teamsPerSessionMax);
+    });
+
+    it('keeps the folded name and colour of a host-made team its founder is alone in taken', () => {
+      const state = stateWithQuiz({
+        playMode: 'teams',
+        rounds: [snapshotRound('quiz', [trueFalseQuestion('question-1')])],
+      });
+      const random = seededRandom();
+      const hostTeam = buildTeam('Table 1', 'circle', 2_000, random, true);
+      state.teams.set(hostTeam.teamId, hostTeam);
+      const loner = join(state, 'user-loner', 2_100, random, {
+        team: { teamId: hostTeam.teamId },
+      });
+
+      expect(
+        refusalCode(
+          createTeam(
+            state,
+            loner.playerId,
+            { name: ' TABLE  1 ', colorKey: 'triangle' },
+            3_000,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_team_name_taken');
+      expect(
+        refusalCode(
+          createTeam(
+            state,
+            loner.playerId,
+            { name: 'Glitter', colorKey: 'circle' },
+            3_000,
+            random,
+          ),
+        ),
+      ).toBe('quizshow_team_color_taken');
+      expect([...state.teams.keys()]).toEqual([hostTeam.teamId]);
+      expect(state.players.get(loner.playerId)?.teamId).toBe(hostTeam.teamId);
     });
   });
 });

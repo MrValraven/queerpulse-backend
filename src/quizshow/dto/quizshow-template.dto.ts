@@ -1,6 +1,8 @@
 import { Transform, Type } from 'class-transformer';
 import {
   IsDefined,
+  IsObject,
+  IsOptional,
   IsString,
   MaxLength,
   MinLength,
@@ -33,6 +35,22 @@ export class QuizshowTemplateDescriptionDto {
   @Transform(trimString)
   @IsString()
   @MaxLength(QUIZSHOW_LIMITS.templateCardDescriptionMax)
+  pt!: string;
+}
+
+/** Longest staff change note per language (contract 2.5: 0..300 each). */
+const CHANGE_NOTE_MAX = 300;
+
+/** The staff note on a publish, shown to quizzes based on this template. */
+export class QuizshowTemplateChangeNoteDto {
+  @Transform(trimString)
+  @IsString()
+  @MaxLength(CHANGE_NOTE_MAX)
+  en!: string;
+
+  @Transform(trimString)
+  @IsString()
+  @MaxLength(CHANGE_NOTE_MAX)
   pt!: string;
 }
 
@@ -76,4 +94,12 @@ export class QuizshowTemplateInputDto {
   @ValidateNested()
   @Type(() => QuizshowTemplateQuizInputDto)
   quiz!: QuizshowTemplateQuizInputDto;
+
+  /** Optional so an older staff page still saves; the service then keeps the
+   *  stored note. */
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QuizshowTemplateChangeNoteDto)
+  changeNote?: QuizshowTemplateChangeNoteDto;
 }

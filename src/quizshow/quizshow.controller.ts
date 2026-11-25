@@ -4,6 +4,8 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  ParseUUIDPipe,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -33,11 +35,12 @@ import { QuizshowTemplatesService } from './quizshow-templates.service';
 import type {
   QuizshowJoinResponse,
   QuizshowTemplateCard,
+  QuizshowTemplatePreview,
 } from './quizshow.contract';
 
 /**
- * Pulse Live routes outside one event: the published template cards, and the
- * join code lookup. Join is open to every active member, so it carries no
+ * Pulse Live routes outside one event: the published template cards and
+ * their previews, and the join code lookup. Join is open to every active member, so it carries no
  * feature tag; the template cards serve hosting and stay tagged. Join checks the code and
  * the caller's eligibility only; the player row is made by `lobby:join` on the
  * socket.
@@ -64,6 +67,20 @@ export class QuizshowController {
     return this.templatesService.listPublishedCards();
   }
 
+  @Get('templates/:templateId/preview')
+  @Feature('quizshow')
+  @ApiOperation({
+    summary:
+      'The card text and round prompts of a published template, without options, answers or notes.',
+  })
+  @ApiOkResponse({ description: '`QuizshowTemplatePreview`.' })
+  @ApiNotFoundResponse({ description: '`quizshow_template_not_found`.' })
+  getTemplatePreview(
+    @Param('templateId', ParseUUIDPipe) templateId: string,
+  ): Promise<QuizshowTemplatePreview> {
+    return this.templatesService.getTemplatePreview(templateId);
+  }
+
   @Post('join')
   @HttpCode(HttpStatus.OK)
   @UseGuards(NotRestrictedGuard)
@@ -76,7 +93,7 @@ export class QuizshowController {
   @ApiGoneResponse({ description: '`quizshow_session_finished`.' })
   @ApiForbiddenResponse({
     description:
-      '`quizshow_banned_from_event`, `quizshow_cannot_view_event`, `quizshow_player_removed` or `ACCOUNT_RESTRICTED`.',
+      '`quizshow_banned_from_event`, `quizshow_cannot_view_event`, `quizshow_player_removed`, `quizshow_joining_locked` (the host closed joining; a returning player still gets in) or `ACCOUNT_RESTRICTED`.',
   })
   @ApiConflictResponse({
     description: '`quizshow_organiser_running` or `quizshow_session_full`.',

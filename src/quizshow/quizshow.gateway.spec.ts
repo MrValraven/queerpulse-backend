@@ -1,6 +1,6 @@
 import { Logger, NotFoundException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
-import type { JwtService } from '@nestjs/jwt';
+import { JwtService } from '@nestjs/jwt';
 import type { Namespace } from 'socket.io';
 import type { Repository } from 'typeorm';
 import type { RefreshToken } from '../auth/entities/refresh-token.entity';
@@ -22,14 +22,22 @@ import type { QuizshowPlayerRecord } from './entities/quizshow-player.entity';
 import type { QuizshowQuizRecord } from './entities/quizshow-quiz.entity';
 import type { QuizshowSessionRecord } from './entities/quizshow-session.entity';
 import { QuizshowAccessService } from './quizshow-access.service';
+import { QuizshowDevicePairingService } from './quizshow-device-pairing.service';
 import {
+  QUIZSHOW_LIMITS,
   QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
   type QuizshowAck,
   type QuizshowAttachRole,
   type QuizshowMe,
 } from './quizshow.contract';
-import { createLobbyState } from './quizshow-engine-state';
+import * as quizshowPhases from './quizshow-engine-phases';
+import * as quizshowPlayers from './quizshow-engine-players';
+import * as quizshowRescore from './quizshow-engine-rescore';
+import * as quizshowRoster from './quizshow-engine-roster';
+import * as quizshowSessionTools from './quizshow-engine-session-tools';
+import { createLobbyState, refuse } from './quizshow-engine-state';
 import type {
+  QuizshowCommandOutcome,
   QuizshowLiveState,
   QuizshowPersistOperation,
 } from './quizshow-engine-types';
@@ -37,6 +45,7 @@ import * as quizshowFrames from './quizshow-frames';
 import { quizshowPlayerRoomName, quizshowRoomName } from './quizshow-frames';
 import { QuizshowGateway } from './quizshow.gateway';
 import type { QuizshowPersistenceService } from './quizshow-persistence.service';
+import type { QuizshowSessionsService } from './quizshow-sessions.service';
 import { QuizshowRuntimeService } from './quizshow-runtime.service';
 import type {
   QuizshowRandom,
@@ -64,7 +73,7 @@ interface FakeClient {
   id: string;
   connected: boolean;
   handshake: {
-    auth: { token?: string };
+    auth: { token?: string; deviceTicket?: string };
     headers: Record<string, string | undefined>;
   };
   data: Record<string, unknown>;
@@ -72,6 +81,19 @@ interface FakeClient {
   join: jest.Mock;
   leave: jest.Mock;
   disconnect: jest.Mock;
+  /** The rooms `join` and `leave` kept, as `socket.rooms`. */
+  rooms: Set<string>;
+  /** `client.timeout(ms)`: returns an emitter that records each `time:probe`. */
+  timeout: jest.Mock;
+  probes: FakeProbe[];
+}
+
+/** One `time:probe` the gateway sent; `acknowledge` plays the client's ack or the timeout. */
+interface FakeProbe {
+  timeoutMs: number;
+  event: string;
+  payload: { sentAt: number };
+  acknowledge: (error: Error | null) => void;
 }
 
 interface RoomEmit {
@@ -107,6 +129,9 @@ interface Harness {
   /** Members without a Pulse Live grant; everyone else holds one. */
   ungrantedUserIds: Set<string>;
   featureAccess: { canUseFeature: jest.Mock };
+  sessionsService: { notifyGuestsForSession: jest.Mock };
+  /** The real pairing service, so tickets are minted and verified as in production. */
+  pairingService: QuizshowDevicePairingService;
 }
 
 function deterministicRandom(): QuizshowRandom {
@@ -120,6 +145,9 @@ function deterministicRandom(): QuizshowRandom {
   };
 }
 
+/** The empty text the v2 question fields hold when a question has none. */
+const NO_TEXT = { en: '', pt: '' };
+
 function trueFalseQuestion(questionId: string): QuizshowSnapshotQuestion {
   return {
     id: questionId,
@@ -127,6 +155,10 @@ function trueFalseQuestion(questionId: string): QuizshowSnapshotQuestion {
     prompt: { en: 'Is it true?', pt: 'É verdade?' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: NO_TEXT,
+    mediaReveal: 'instant',
+    revealNote: NO_TEXT,
+    numberUnit: NO_TEXT,
     timeLimitSeconds: null,
     points: 1000,
     options: [],
@@ -143,6 +175,10 @@ function typedQuestion(questionId: string): QuizshowSnapshotQuestion {
     prompt: { en: 'Name the bar', pt: 'Diz o nome do bar' },
     mediaRef: null,
     mediaUrl: null,
+    mediaAlt: NO_TEXT,
+    mediaReveal: 'instant',
+    revealNote: NO_TEXT,
+    numberUnit: NO_TEXT,
     timeLimitSeconds: null,
     points: 1000,
     options: [],
@@ -166,6 +202,8 @@ const ROUND_SETTINGS = {
   isJokerAllowed: true,
   writeSeconds: 60,
   voteSeconds: 30,
+  isWarmUp: false,
+  talkSeconds: 0 as const,
   ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
 };
 
@@ -228,10 +266,12 @@ function lobbyState(options: HarnessOptions = {}): QuizshowLiveState {
     playMode: 'solo',
     maxTeamSize: null,
     isReviewOn: false,
+    isPractice: false,
     snapshot: {
       title: 'Pride night quiz',
       languages: 'both',
       screenLanguage: 'en',
+      sourceUpdatedAt: '2026-10-19T19:00:00.000Z',
       rounds: options.hasWheelFirst
         ? wheelFirstRounds()
         : [
@@ -382,6 +422,14 @@ function createHarness(options: HarnessOptions = {}): Harness {
       findOne: jest.fn(() => Promise.resolve(null)),
     } as unknown as Repository<Profile>,
   );
+  const sessionsService = {
+    notifyGuestsForSession: jest.fn(
+      (_sessionId: string): Promise<string | null> => Promise.resolve(null),
+    ),
+  };
+  const pairingService = new QuizshowDevicePairingService(new JwtService({}), {
+    getOrThrow: () => 'secret',
+  } as unknown as ConfigService);
   const gateway = new QuizshowGateway(
     jwt as unknown as JwtService,
     { getOrThrow: () => 'secret' } as unknown as ConfigService,
@@ -394,6 +442,9 @@ function createHarness(options: HarnessOptions = {}): Harness {
     sessionRows as unknown as Repository<QuizshowSessionRecord>,
     platformSettings as unknown as PlatformSettingsService,
     featureAccess as unknown as FeatureAccessService,
+    sessionsService as unknown as QuizshowSessionsService,
+    pairingService,
+    blockFilter as unknown as BlockFilterService,
   );
   gateway.namespace = namespace;
   gateway.afterInit(namespace);
@@ -414,6 +465,8 @@ function createHarness(options: HarnessOptions = {}): Harness {
     jwt,
     ungrantedUserIds,
     featureAccess,
+    sessionsService,
+    pairingService,
   };
 }
 
@@ -424,11 +477,29 @@ function makeClient(socketId: string, userId: string): FakeClient {
     handshake: { auth: { token: userId }, headers: {} },
     data: {},
     emit: jest.fn(),
-    join: jest.fn(() => Promise.resolve()),
-    leave: jest.fn(() => Promise.resolve()),
+    join: jest.fn((room: string) => {
+      client.rooms.add(room);
+      return Promise.resolve();
+    }),
+    leave: jest.fn((room: string) => {
+      client.rooms.delete(room);
+      return Promise.resolve();
+    }),
+    rooms: new Set<string>(),
     disconnect: jest.fn(() => {
       client.connected = false;
     }),
+    timeout: jest.fn((timeoutMs: number) => ({
+      emit: (
+        event: string,
+        payload: { sentAt: number },
+        acknowledge: (error: Error | null) => void,
+      ) => {
+        client.probes.push({ timeoutMs, event, payload, acknowledge });
+        return true;
+      },
+    })),
+    probes: [],
   };
   return client;
 }
@@ -946,7 +1017,7 @@ describe('QuizshowGateway', () => {
     );
     expect(ack).toMatchObject({
       ok: false,
-      code: 'quizshow_command_not_allowed',
+      code: 'quizshow_session_not_started',
       cursor: { phase: 'lobby', upNext: expect.anything() as unknown },
     });
     expect(harness.state.cursor.phase).toBe('lobby');
@@ -1728,6 +1799,1593 @@ describe('QuizshowGateway', () => {
       const accepted = await joinLobby(harness, phone, 'Robin', true);
       expect(accepted.ok).toBe(true);
       expect(harness.state.players.size).toBe(1);
+    });
+  });
+
+  describe('host commands of the live v2 build', () => {
+    const PHASE_ID = '7';
+    const TARGET_PLAYER_ID = '77777777-7777-4777-8777-777777777777';
+    const TEAM_ID = '88888888-8888-4888-8888-888888888888';
+    const REQUEST_ID = '99999999-9999-4999-8999-999999999999';
+
+    function hostSuccess(): QuizshowCommandOutcome<{ isNoop: boolean }> {
+      return { ok: true, success: { isNoop: false }, effects: [] };
+    }
+
+    function hostRefusal(
+      code: Parameters<typeof refuse>[0],
+    ): QuizshowCommandOutcome<{ isNoop: boolean }> {
+      return refuse<{ isNoop: boolean }>(code, harness.state, true);
+    }
+
+    it('runs host:acceptAnswer through hostAcceptAnswer and passes its refusal through', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const command = jest
+        .spyOn(quizshowRescore, 'hostAcceptAnswer')
+        .mockReturnValueOnce(hostSuccess())
+        .mockReturnValueOnce(hostRefusal('quizshow_rescore_not_now'));
+      const payload = {
+        phaseId: PHASE_ID,
+        questionId: QUESTION_ID,
+        normalisedText: 'stonewall',
+      };
+
+      expect(
+        await harness.gateway.handleHostAcceptAnswer(
+          asClient(hostRemote),
+          payload,
+        ),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        payload,
+        expect.any(Number),
+      );
+      expect(
+        await harness.gateway.handleHostAcceptAnswer(
+          asClient(hostRemote),
+          payload,
+        ),
+      ).toMatchObject({
+        ok: false,
+        code: 'quizshow_rescore_not_now',
+        cursor: { phaseId: harness.state.cursor.phaseId },
+      });
+    });
+
+    it('runs host:changeCorrectAnswer with the new key of its type and passes its refusal through', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const command = jest
+        .spyOn(quizshowRescore, 'hostChangeCorrectAnswer')
+        .mockReturnValueOnce(hostSuccess())
+        .mockReturnValueOnce(hostRefusal('quizshow_every_option_correct'));
+
+      expect(
+        await harness.gateway.handleHostChangeCorrectAnswer(
+          asClient(hostRemote),
+          {
+            phaseId: PHASE_ID,
+            questionId: QUESTION_ID,
+            answer: { type: 'multiple_choice', correctIndexes: [0, 2] },
+          },
+        ),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        {
+          phaseId: PHASE_ID,
+          questionId: QUESTION_ID,
+          answer: { type: 'multiple_choice', correctIndexes: [0, 2] },
+        },
+        expect.any(Number),
+      );
+      expect(
+        codeOf(
+          await harness.gateway.handleHostChangeCorrectAnswer(
+            asClient(hostRemote),
+            {
+              phaseId: PHASE_ID,
+              questionId: QUESTION_ID,
+              answer: { type: 'true_false', isTrue: false },
+            },
+          ),
+        ),
+      ).toBe('quizshow_every_option_correct');
+      expect(command).toHaveBeenLastCalledWith(
+        harness.state,
+        {
+          phaseId: PHASE_ID,
+          questionId: QUESTION_ID,
+          answer: { type: 'true_false', isTrue: false },
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('runs host:adjustPoints through hostAdjustPoints and passes its refusal through', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const command = jest
+        .spyOn(quizshowRescore, 'hostAdjustPoints')
+        .mockReturnValueOnce(hostSuccess())
+        .mockReturnValueOnce(hostRefusal('quizshow_adjust_below_zero'));
+      const payload = {
+        entrantId: TARGET_PLAYER_ID,
+        delta: -50,
+        requestId: REQUEST_ID,
+      };
+
+      expect(
+        await harness.gateway.handleHostAdjustPoints(
+          asClient(hostRemote),
+          payload,
+        ),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        payload,
+        expect.any(Number),
+      );
+      expect(
+        codeOf(
+          await harness.gateway.handleHostAdjustPoints(
+            asClient(hostRemote),
+            payload,
+          ),
+        ),
+      ).toBe('quizshow_adjust_below_zero');
+    });
+
+    it('acks host:createTeams with the new team ids and passes its refusal through', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const command = jest
+        .spyOn(quizshowRoster, 'hostCreateTeams')
+        .mockReturnValueOnce({
+          ok: true,
+          success: { isNoop: false, teamIds: [TEAM_ID] },
+          effects: [],
+        })
+        .mockReturnValueOnce(
+          refuse<{ isNoop: boolean; teamIds: string[] }>(
+            'quizshow_teams_off',
+            harness.state,
+            false,
+          ),
+        );
+
+      expect(
+        await harness.gateway.handleHostCreateTeams(asClient(hostRemote), {
+          names: ['Glitter'],
+        }),
+      ).toEqual({ ok: true, isNoop: false, teamIds: [TEAM_ID] });
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        ['Glitter'],
+        expect.any(Number),
+        harness.runtime.random,
+      );
+      expect(
+        codeOf(
+          await harness.gateway.handleHostCreateTeams(asClient(hostRemote), {
+            names: ['Glitter'],
+          }),
+        ),
+      ).toBe('quizshow_teams_off');
+    });
+
+    it('runs host:renamePlayer and host:movePlayer through the roster commands', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const rename = jest
+        .spyOn(quizshowRoster, 'hostRenamePlayer')
+        .mockReturnValueOnce(hostSuccess())
+        .mockReturnValueOnce(hostRefusal('quizshow_player_left'));
+      const move = jest
+        .spyOn(quizshowRoster, 'hostMovePlayer')
+        .mockReturnValueOnce(hostRefusal('quizshow_move_during_question'));
+
+      expect(
+        await harness.gateway.handleHostRenamePlayer(asClient(hostRemote), {
+          playerId: TARGET_PLAYER_ID,
+          screenName: 'Sasha',
+        }),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(rename).toHaveBeenCalledWith(
+        harness.state,
+        TARGET_PLAYER_ID,
+        'Sasha',
+        expect.any(Number),
+      );
+      expect(
+        codeOf(
+          await harness.gateway.handleHostRenamePlayer(asClient(hostRemote), {
+            playerId: TARGET_PLAYER_ID,
+            screenName: 'Sasha',
+          }),
+        ),
+      ).toBe('quizshow_player_left');
+
+      expect(
+        codeOf(
+          await harness.gateway.handleHostMovePlayer(asClient(hostRemote), {
+            playerId: TARGET_PLAYER_ID,
+            teamId: TEAM_ID,
+          }),
+        ),
+      ).toBe('quizshow_move_during_question');
+      expect(move).toHaveBeenCalledWith(
+        harness.state,
+        TARGET_PLAYER_ID,
+        TEAM_ID,
+        expect.any(Number),
+      );
+    });
+
+    it('runs host:setJoinLock and host:setAutoAdvance through their engine commands', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const joinLock = jest
+        .spyOn(quizshowSessionTools, 'hostSetJoinLock')
+        .mockReturnValueOnce(hostSuccess());
+      const autoAdvance = jest
+        .spyOn(quizshowPhases, 'hostSetAutoAdvance')
+        .mockReturnValueOnce(hostRefusal('quizshow_session_ended'));
+
+      expect(
+        await harness.gateway.handleHostSetJoinLock(asClient(hostRemote), {
+          isLocked: true,
+        }),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(joinLock).toHaveBeenCalledWith(
+        harness.state,
+        true,
+        expect.any(Number),
+      );
+      expect(
+        codeOf(
+          await harness.gateway.handleHostSetAutoAdvance(asClient(hostRemote), {
+            isOn: false,
+          }),
+        ),
+      ).toBe('quizshow_session_ended');
+      expect(autoAdvance).toHaveBeenCalledWith(
+        harness.state,
+        false,
+        expect.any(Number),
+      );
+    });
+
+    it('passes canRejoin to hostRemovePlayer, false when the payload leaves it out', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const command = jest
+        .spyOn(quizshowPhases, 'hostRemovePlayer')
+        .mockReturnValue(hostSuccess());
+
+      await harness.gateway.handleHostRemovePlayer(asClient(hostRemote), {
+        playerId: TARGET_PLAYER_ID,
+        canRejoin: true,
+      });
+      expect(command).toHaveBeenLastCalledWith(
+        harness.state,
+        TARGET_PLAYER_ID,
+        HOST_USER_ID,
+        expect.any(Number),
+        harness.runtime.random,
+        true,
+      );
+      await harness.gateway.handleHostRemovePlayer(asClient(hostRemote), {
+        playerId: TARGET_PLAYER_ID,
+      });
+      expect(command).toHaveBeenLastCalledWith(
+        harness.state,
+        TARGET_PLAYER_ID,
+        HOST_USER_ID,
+        expect.any(Number),
+        harness.runtime.random,
+        false,
+      );
+    });
+
+    it("acks host:notifyGuests with the sessions service's refusal code, and success when it returns null", async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      harness.sessionsService.notifyGuestsForSession.mockResolvedValueOnce(
+        'quizshow_guest_push_cooldown',
+      );
+      // Both attempts reset the abandonment clock, as every host command does.
+      harness.state.lastHostCommandAt = 0;
+
+      expect(
+        await harness.gateway.handleHostNotifyGuests(asClient(hostRemote), {}),
+      ).toMatchObject({ ok: false, code: 'quizshow_guest_push_cooldown' });
+      expect(
+        harness.sessionsService.notifyGuestsForSession,
+      ).toHaveBeenCalledWith(SESSION_ID);
+      expect(harness.state.lastHostCommandAt).toBeGreaterThan(0);
+
+      harness.state.lastHostCommandAt = 0;
+      expect(
+        await harness.gateway.handleHostNotifyGuests(asClient(hostRemote), {}),
+      ).toEqual({ ok: true, isNoop: false });
+      expect(harness.state.lastHostCommandAt).toBeGreaterThan(0);
+    });
+
+    it('refuses host:notifyGuests from a player socket before the sessions service runs', async () => {
+      const { client: player } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      expect(
+        codeOf(
+          await harness.gateway.handleHostNotifyGuests(asClient(player), {}),
+        ),
+      ).toBe('quizshow_wrong_role');
+      expect(
+        harness.sessionsService.notifyGuestsForSession,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('player frames of the live v2 build', () => {
+    it('runs lobby:leave through leaveLobby and passes its refusal through', async () => {
+      const { client, me } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      const command = jest
+        .spyOn(quizshowPhases, 'leaveLobby')
+        .mockReturnValueOnce({ ok: true, success: {}, effects: [] })
+        .mockReturnValueOnce(
+          refuse('quizshow_session_ended', harness.state, false),
+        );
+
+      expect(
+        await harness.gateway.handleLobbyLeave(asClient(client), {}),
+      ).toEqual({ ok: true });
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        me.playerId,
+        expect.any(Number),
+        harness.runtime.random,
+      );
+      expect(
+        codeOf(await harness.gateway.handleLobbyLeave(asClient(client), {})),
+      ).toBe('quizshow_session_ended');
+    });
+
+    it('refuses the fourth reaction inside 1.5 s and never logs the player', async () => {
+      const debugSpy = jest
+        .spyOn(Logger.prototype, 'debug')
+        .mockImplementation(() => undefined);
+      const { client, me } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      const command = jest.spyOn(quizshowPlayers, 'sendReaction');
+      const codes: Array<string | null> = [];
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        codes.push(
+          codeOf(
+            await harness.gateway.handleReactionSend(asClient(client), {
+              reactionId: 'heart',
+            }),
+          ),
+        );
+      }
+      expect(codes).toEqual([null, null, null, 'quizshow_rate_limited']);
+      expect(command).toHaveBeenCalledTimes(3);
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        me.playerId,
+        'heart',
+        expect.any(Number),
+      );
+      const everyLoggedValue = debugSpy.mock.calls
+        .flat()
+        .map((value: unknown) => String(value))
+        .join('\n');
+      expect(everyLoggedValue).toContain('reaction:send refused');
+      expect(everyLoggedValue).not.toContain(me.playerId);
+    });
+
+    it('refuses a reaction from a socket that has not joined', async () => {
+      const client = await connect(harness, 'socket-player', PLAYER_USER_ID);
+      await attach(harness, client, 'player');
+      expect(
+        codeOf(
+          await harness.gateway.handleReactionSend(asClient(client), {
+            reactionId: 'clap',
+          }),
+        ),
+      ).toBe('quizshow_not_joined');
+    });
+
+    it('carries the suggested screen name on a lobby:join refused for a taken name', async () => {
+      await joinedPlayer(harness, 'socket-player', PLAYER_USER_ID, 'Robin');
+      const other = await connect(harness, 'socket-other', OUTSIDER_USER_ID);
+      expect(await attach(harness, other, 'player')).toMatchObject({
+        ok: true,
+      });
+
+      expect(await joinLobby(harness, other, 'Robin')).toMatchObject({
+        ok: false,
+        code: 'quizshow_screen_name_taken',
+        suggestedScreenName: 'Robin 2',
+      });
+    });
+
+    it('passes the socket latency allowance into submitAnswer', async () => {
+      const { client, me } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      const command = jest.spyOn(quizshowPlayers, 'submitAnswer');
+      client.data.rttSamples = [100, 200, 300];
+
+      await submitAnswer(harness, client);
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        me.playerId,
+        expect.objectContaining({ latencyAllowanceMs: 100 }) as unknown,
+        expect.any(Number),
+        harness.runtime.random,
+      );
+    });
+  });
+
+  describe('session:ping', () => {
+    it('sends no ack to a socket that was never admitted', async () => {
+      const client = makeClient('socket-unadmitted', PLAYER_USER_ID);
+      client.data.admission = Promise.resolve(null);
+      expect(
+        await harness.gateway.handleSessionPing(asClient(client), {}),
+      ).toBeUndefined();
+    });
+
+    it('acks an admitted socket with no session with a null phase id', async () => {
+      const client = await connect(harness, 'socket-player', PLAYER_USER_ID);
+      expect(
+        await harness.gateway.handleSessionPing(asClient(client), {}),
+      ).toEqual({
+        ok: true,
+        serverNow: expect.any(Number) as unknown,
+        phaseId: null,
+      });
+    });
+
+    it("acks an attached socket with the session's live phase id", async () => {
+      const { client } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      expect(
+        await harness.gateway.handleSessionPing(asClient(client), {}),
+      ).toEqual({
+        ok: true,
+        serverNow: expect.any(Number) as unknown,
+        phaseId: harness.state.cursor.phaseId,
+      });
+    });
+
+    it('answers a null phase id from memory when the live state is gone, with no database load', async () => {
+      const { client } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      jest.spyOn(harness.runtime, 'peekLiveState').mockReturnValue(null);
+      const getOrLoad = jest.spyOn(harness.runtime, 'getOrLoad');
+      harness.persistence.loadLiveState.mockClear();
+
+      expect(
+        await harness.gateway.handleSessionPing(asClient(client), {}),
+      ).toEqual({
+        ok: true,
+        serverNow: expect.any(Number) as unknown,
+        phaseId: null,
+      });
+      expect(getOrLoad).not.toHaveBeenCalled();
+      expect(harness.persistence.loadLiveState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('latency probes', () => {
+    it('probes a player socket at attach and records a sample when the client acks', async () => {
+      const { client } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      expect(client.probes).toHaveLength(1);
+      const probe = client.probes[0];
+      expect(probe?.event).toBe('time:probe');
+      expect(probe?.timeoutMs).toBe(QUIZSHOW_LIMITS.latencyProbeTimeoutMs);
+      expect(typeof probe?.payload.sentAt).toBe('number');
+
+      probe?.acknowledge(null);
+      const samples = client.data.rttSamples as number[];
+      expect(samples).toHaveLength(1);
+      expect(samples[0]).toBeGreaterThanOrEqual(0);
+    });
+
+    it('records nothing when a probe times out', async () => {
+      const { client } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      client.probes[0]?.acknowledge(new Error('operation has timed out'));
+      expect(client.data.rttSamples).toEqual([]);
+    });
+
+    it('never probes a host or screen socket', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      expect(hostRemote.probes).toHaveLength(0);
+      expect(hostRemote.data.latencyProbeTimer).toBeUndefined();
+    });
+
+    it('clears the probe interval on disconnect', async () => {
+      const { client } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      const timer = client.data.latencyProbeTimer;
+      expect(timer).toBeDefined();
+      const clearSpy = jest.spyOn(global, 'clearInterval');
+
+      client.connected = false;
+      harness.gateway.handleDisconnect(asClient(client));
+      expect(clearSpy).toHaveBeenCalledWith(timer);
+      expect(client.data.latencyProbeTimer).toBeUndefined();
+    });
+
+    describe('on the probe interval', () => {
+      beforeEach(() => {
+        // The attach flow awaits setImmediate; only the timers are faked.
+        jest.useFakeTimers({
+          doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'],
+        });
+      });
+
+      it('probes again each interval and stops once the live state leaves memory', async () => {
+        const { client } = await joinedPlayer(
+          harness,
+          'socket-player',
+          PLAYER_USER_ID,
+        );
+        expect(client.probes).toHaveLength(1);
+
+        jest.advanceTimersByTime(QUIZSHOW_LIMITS.latencyProbeIntervalMs);
+        expect(client.probes).toHaveLength(2);
+
+        const peek = jest
+          .spyOn(harness.runtime, 'peekLiveState')
+          .mockReturnValue(null);
+        jest.advanceTimersByTime(QUIZSHOW_LIMITS.latencyProbeIntervalMs);
+        expect(peek).toHaveBeenCalledWith(SESSION_ID);
+        expect(client.probes).toHaveLength(2);
+        expect(client.data.latencyProbeTimer).toBeUndefined();
+
+        peek.mockRestore();
+        jest.advanceTimersByTime(QUIZSHOW_LIMITS.latencyProbeIntervalMs);
+        expect(client.probes).toHaveLength(2);
+      });
+
+      it('stops probing once the socket left the players room', async () => {
+        const { client } = await joinedPlayer(
+          harness,
+          'socket-player',
+          PLAYER_USER_ID,
+        );
+        expect(client.probes).toHaveLength(1);
+        // Stands for a removal evicting the socket from the role rooms.
+        client.rooms.delete(quizshowRoomName(SESSION_ID, 'players'));
+
+        jest.advanceTimersByTime(QUIZSHOW_LIMITS.latencyProbeIntervalMs);
+        expect(client.probes).toHaveLength(1);
+        expect(client.data.latencyProbeTimer).toBeUndefined();
+      });
+    });
+  });
+
+  describe('a player socket attaching to a running roster', () => {
+    it('runs returnAwayPlayer for a live player on attach', async () => {
+      const { me } = await joinedPlayer(
+        harness,
+        'socket-phone',
+        PLAYER_USER_ID,
+      );
+      const command = jest.spyOn(quizshowPlayers, 'returnAwayPlayer');
+      const laptop = await connect(harness, 'socket-laptop', PLAYER_USER_ID);
+
+      expect(await attach(harness, laptop, 'player')).toMatchObject({
+        ok: true,
+      });
+      expect(laptop.data.playerId).toBe(me.playerId);
+      expect(command).toHaveBeenCalledWith(
+        harness.state,
+        me.playerId,
+        expect.any(Number),
+      );
+    });
+
+    it('leaves a player who left unbound on attach, with no away return and their own name suggested', async () => {
+      const { me } = await joinedPlayer(
+        harness,
+        'socket-phone',
+        PLAYER_USER_ID,
+        'Sasha',
+      );
+      const livePlayer = harness.state.players.get(me.playerId);
+      if (livePlayer === undefined) throw new Error('player row missing');
+      livePlayer.leftAt = START;
+      const command = jest.spyOn(quizshowPlayers, 'returnAwayPlayer');
+      const laptop = await connect(harness, 'socket-laptop', PLAYER_USER_ID);
+
+      expect(await attach(harness, laptop, 'player')).toMatchObject({
+        ok: true,
+      });
+      expect(laptop.data.playerId).toBeNull();
+      expect(command).not.toHaveBeenCalled();
+      await flushImmediate();
+      // The profile's first name is Robin; the row played as Sasha.
+      expect(clientEmits(laptop, 'session:state')).toEqual([
+        expect.objectContaining({ me: null, suggestedScreenName: 'Sasha' }),
+      ]);
+    });
+
+    it('asks consent again when a player who left rejoins a session that became 18+', async () => {
+      const { client, me } = await joinedPlayer(
+        harness,
+        'socket-phone',
+        PLAYER_USER_ID,
+      );
+      const livePlayer = harness.state.players.get(me.playerId);
+      if (livePlayer === undefined) throw new Error('player row missing');
+      // The player left, then a lobby refresh made the session 18+.
+      livePlayer.leftAt = START;
+      client.data.playerId = null;
+      harness.state.isAdultsOnly = true;
+
+      expect(codeOf(await joinLobby(harness, client))).toBe(
+        'quizshow_adult_consent_required',
+      );
+      expect(livePlayer.leftAt).toBe(START);
+
+      const accepted = await joinLobby(harness, client, 'Robin', true);
+      expect(accepted).toMatchObject({
+        ok: true,
+        me: { playerId: me.playerId },
+      });
+      expect(livePlayer.leftAt).toBeNull();
+    });
+
+    it('leaves the private room again when the runtime unbinds the socket during the join', async () => {
+      const { me } = await joinedPlayer(
+        harness,
+        'socket-phone',
+        PLAYER_USER_ID,
+      );
+      const privateRoom = quizshowPlayerRoomName(SESSION_ID, me.playerId);
+      const command = jest.spyOn(quizshowPlayers, 'returnAwayPlayer');
+      const laptop = await connect(harness, 'socket-laptop', PLAYER_USER_ID);
+      laptop.join.mockImplementation((room: string) => {
+        // Stands for a leave landing while the join awaits.
+        if (room === privateRoom) laptop.data.playerId = null;
+        return Promise.resolve();
+      });
+
+      expect(await attach(harness, laptop, 'player')).toMatchObject({
+        ok: true,
+      });
+      expect(laptop.leave).toHaveBeenCalledWith(privateRoom);
+      expect(laptop.data.playerId).toBeNull();
+      expect(command).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('paired screens and helper remotes', () => {
+    const OTHER_SESSION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+    /** The device starts a code, the host pairs it, and the device claims its ticket. */
+    async function pairThroughHost(
+      hostRemote: FakeClient,
+      kind: 'screen' | 'helper',
+      starterUserId: string | null = null,
+    ): Promise<{ pairingId: string; deviceTicket: string }> {
+      const start = harness.pairingService.startPairing(kind, starterUserId);
+      const ack = await harness.gateway.handleHostPairDevice(
+        asClient(hostRemote),
+        { pairingCode: start.pairingCode },
+      );
+      if (!ack.ok) throw new Error(`host:pairDevice refused with ${ack.code}`);
+      const claim = harness.pairingService.claimPairing(
+        start.pairingId,
+        start.pollToken,
+      );
+      if (claim.status !== 'paired') {
+        throw new Error('the pairing was not completed');
+      }
+      return { pairingId: start.pairingId, deviceTicket: claim.deviceTicket };
+    }
+
+    /** A TV socket: a device ticket in the handshake and no member token. */
+    async function connectScreen(
+      socketId: string,
+      deviceTicket: string,
+    ): Promise<FakeClient> {
+      const client = makeClient(socketId, 'no-member');
+      client.handshake.auth = { deviceTicket };
+      harness.sockets.set(socketId, client);
+      client.disconnect.mockImplementation(() => {
+        client.connected = false;
+        harness.sockets.delete(socketId);
+      });
+      await harness.gateway.handleConnection(asClient(client));
+      return client;
+    }
+
+    function attachWithTicket(
+      client: FakeClient,
+      role: QuizshowAttachRole,
+      deviceTicket?: string,
+      sessionId: string = SESSION_ID,
+    ) {
+      return harness.gateway.handleAttach(asClient(client), {
+        sessionId,
+        as: role,
+        ...(deviceTicket === undefined ? {} : { deviceTicket }),
+      });
+    }
+
+    function pairedDevice(pairingId: string) {
+      const device = harness.state.pairedDevices.find(
+        (candidate) => candidate.pairingId === pairingId,
+      );
+      if (device === undefined) throw new Error('no such paired device');
+      return device;
+    }
+
+    it('pairs a screen: the ack carries the device, the claim hands over a ticket for this session, and hosts get devices:update', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const start = harness.pairingService.startPairing('screen', null);
+
+      const ack = await harness.gateway.handleHostPairDevice(
+        asClient(hostRemote),
+        { pairingCode: start.pairingCode },
+      );
+
+      expect(ack).toEqual({
+        ok: true,
+        isNoop: false,
+        device: expect.objectContaining({
+          pairingId: start.pairingId,
+          kind: 'screen',
+          helperName: null,
+        }) as unknown,
+      });
+      expect(pairedDevice(start.pairingId)).toMatchObject({
+        kind: 'screen',
+        helperUserId: null,
+        revokedAt: null,
+        connectedSocketCount: 0,
+      });
+      // Paired and not yet claimed, the code reads as used.
+      expect(
+        codeOf(
+          await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+            pairingCode: start.pairingCode,
+          }),
+        ),
+      ).toBe('quizshow_pairing_code_used');
+      expect(harness.state.pairedDevices).toHaveLength(1);
+      const claim = harness.pairingService.claimPairing(
+        start.pairingId,
+        start.pollToken,
+      );
+      expect(claim).toMatchObject({
+        status: 'paired',
+        sessionId: SESSION_ID,
+        kind: 'event',
+        eventSlug: 'pride-night',
+        gameId: null,
+      });
+      if (claim.status !== 'paired') throw new Error('not paired');
+      const claims = harness.pairingService.verifyDeviceTicket(
+        claim.deviceTicket,
+      );
+      expect(claims).toMatchObject({
+        typ: 'quizshow_device',
+        sid: SESSION_ID,
+        pid: start.pairingId,
+        kind: 'screen',
+      });
+      expect(claims?.uid).toBeUndefined();
+      expect(
+        roomEmitsOf(harness, 'devices:update').map((record) => record.room),
+      ).toContain(quizshowRoomName(SESSION_ID, 'hosts'));
+    });
+
+    it('passes the code lookup refusal through and adds no device', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      expect(
+        codeOf(
+          await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+            pairingCode: '234567',
+          }),
+        ),
+      ).toBe('quizshow_pairing_code_not_found');
+      expect(harness.state.pairedDevices).toHaveLength(0);
+    });
+
+    it('refuses the seventh device with paired devices full and leaves its code waiting', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      for (let deviceNumber = 1; deviceNumber <= 6; deviceNumber += 1) {
+        await pairThroughHost(hostRemote, 'screen');
+      }
+      const seventh = harness.pairingService.startPairing('screen', null);
+
+      expect(
+        codeOf(
+          await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+            pairingCode: seventh.pairingCode,
+          }),
+        ),
+      ).toBe('quizshow_paired_devices_full');
+      expect(harness.state.pairedDevices).toHaveLength(6);
+      expect(
+        harness.pairingService.claimPairing(
+          seventh.pairingId,
+          seventh.pollToken,
+        ).status,
+      ).toBe('waiting');
+    });
+
+    it('admits a screen ticket with no member token and refuses a bad ticket or a helper ticket with UNAUTHORIZED', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const screenPairing = await pairThroughHost(hostRemote, 'screen');
+      const helperPairing = await pairThroughHost(
+        hostRemote,
+        'helper',
+        OUTSIDER_USER_ID,
+      );
+      const verifiedTokenCount = harness.jwt.verifyAsync.mock.calls.length;
+
+      const screen = await connectScreen(
+        'socket-tv',
+        screenPairing.deviceTicket,
+      );
+      expect(screen.disconnect).not.toHaveBeenCalled();
+      expect(screen.data.userId).toBeUndefined();
+      expect(screen.data.device).toEqual({
+        pairingId: screenPairing.pairingId,
+        sessionId: SESSION_ID,
+        kind: 'screen',
+      });
+      expect(harness.jwt.verifyAsync).toHaveBeenCalledTimes(verifiedTokenCount);
+
+      const refusedHandshakes: Array<[string, string]> = [
+        ['socket-forged', 'not-a-ticket'],
+        ['socket-helper-ticket', helperPairing.deviceTicket],
+      ];
+      for (const [socketId, deviceTicket] of refusedHandshakes) {
+        const refused = await connectScreen(socketId, deviceTicket);
+        expect(refused.emit).toHaveBeenCalledWith(
+          'exception',
+          expect.objectContaining({ code: 'UNAUTHORIZED' }),
+        );
+        expect(refused.disconnect).toHaveBeenCalledWith(true);
+        expect(refused.data.device).toBeUndefined();
+      }
+    });
+
+    it('admits a ticket beside a member cookie as the screen, and takes the member path for an explicit token', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const { pairingId, deviceTicket } = await pairThroughHost(
+        hostRemote,
+        'screen',
+      );
+      const verifiedTokenCount = harness.jwt.verifyAsync.mock.calls.length;
+      const cookieBrowser = makeClient('socket-cookie', PLAYER_USER_ID);
+      cookieBrowser.handshake.auth = { deviceTicket };
+      cookieBrowser.handshake.headers = {
+        cookie: `access_token=${PLAYER_USER_ID}`,
+      };
+      await harness.gateway.handleConnection(asClient(cookieBrowser));
+
+      expect(cookieBrowser.disconnect).not.toHaveBeenCalled();
+      expect(cookieBrowser.data.userId).toBeUndefined();
+      expect(cookieBrowser.data.device).toEqual({
+        pairingId,
+        sessionId: SESSION_ID,
+        kind: 'screen',
+      });
+      expect(harness.jwt.verifyAsync).toHaveBeenCalledTimes(verifiedTokenCount);
+
+      const tokenClient = makeClient('socket-token', PLAYER_USER_ID);
+      tokenClient.handshake.auth = { token: PLAYER_USER_ID, deviceTicket };
+      await harness.gateway.handleConnection(asClient(tokenClient));
+      expect(tokenClient.data.userId).toBe(PLAYER_USER_ID);
+      expect(tokenClient.data.device).toBeUndefined();
+
+      // An empty ticket is no ticket: the cookie takes the member path.
+      const emptyTicketClient = makeClient('socket-empty', PLAYER_USER_ID);
+      emptyTicketClient.handshake.auth = { deviceTicket: '' };
+      emptyTicketClient.handshake.headers = {
+        cookie: `access_token=${PLAYER_USER_ID}`,
+      };
+      await harness.gateway.handleConnection(asClient(emptyTicketClient));
+      expect(emptyTicketClient.data.userId).toBe(PLAYER_USER_ID);
+      expect(emptyTicketClient.data.device).toBeUndefined();
+    });
+
+    it('lets one of two racing host:pairDevice frames with one code add the device and acks the other as used', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const laptopRemote = await attachedHost(harness, 'socket-laptop');
+      const start = harness.pairingService.startPairing('screen', null);
+
+      const acks = await Promise.all([
+        harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+          pairingCode: start.pairingCode,
+        }),
+        harness.gateway.handleHostPairDevice(asClient(laptopRemote), {
+          pairingCode: start.pairingCode,
+        }),
+      ]);
+
+      expect(acks.filter((ack) => ack.ok)).toHaveLength(1);
+      expect(acks.map((ack) => codeOf(ack))).toContain(
+        'quizshow_pairing_code_used',
+      );
+      expect(harness.state.pairedDevices).toHaveLength(1);
+      expect(pairedDevice(start.pairingId).revokedAt).toBeNull();
+      expect(
+        harness.pairingService.claimPairing(start.pairingId, start.pollToken)
+          .status,
+      ).toBe('paired');
+    });
+
+    it('passes too many tries through once the host missed ten codes', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      for (let missNumber = 1; missNumber <= 10; missNumber += 1) {
+        harness.pairingService.findPendingByCode('234567', HOST_USER_ID);
+      }
+      const start = harness.pairingService.startPairing('screen', null);
+
+      expect(
+        codeOf(
+          await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+            pairingCode: start.pairingCode,
+          }),
+        ),
+      ).toBe('quizshow_pairing_too_many_tries');
+      expect(harness.state.pairedDevices).toHaveLength(0);
+    });
+
+    it('unpairs the device it just added when the pending entry is gone before the ticket lands', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const keptPairing = await pairThroughHost(hostRemote, 'screen');
+      const start = harness.pairingService.startPairing('screen', null);
+      jest
+        .spyOn(harness.pairingService, 'completePairing')
+        .mockReturnValueOnce(false);
+
+      expect(
+        codeOf(
+          await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+            pairingCode: start.pairingCode,
+          }),
+        ),
+      ).toBe('quizshow_pairing_code_used');
+      expect(pairedDevice(start.pairingId).revokedAt).not.toBeNull();
+      expect(pairedDevice(keptPairing.pairingId).revokedAt).toBeNull();
+    });
+
+    it('lets a screen socket attach only as screen to its own session and refuses every member frame with wrong role', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const { deviceTicket } = await pairThroughHost(hostRemote, 'screen');
+      const screen = await connectScreen('socket-tv', deviceTicket);
+
+      expect(codeOf(await joinLobby(harness, screen))).toBe(
+        'quizshow_wrong_role',
+      );
+      expect(codeOf(await hostNext(harness, screen, '0'))).toBe(
+        'quizshow_wrong_role',
+      );
+      expect(
+        await harness.gateway.handleReauth(asClient(screen), {
+          ticket: 'socket-ticket',
+        }),
+      ).toMatchObject({ ok: false, code: 'quizshow_wrong_role' });
+      expect(codeOf(await attachWithTicket(screen, 'host'))).toBe(
+        'quizshow_wrong_role',
+      );
+      expect(
+        codeOf(
+          await attachWithTicket(screen, 'screen', undefined, OTHER_SESSION_ID),
+        ),
+      ).toBe('quizshow_wrong_role');
+      expect(screen.join).not.toHaveBeenCalled();
+
+      expect(await attachWithTicket(screen, 'screen')).toMatchObject({
+        ok: true,
+        role: 'screen',
+      });
+      expect(screen.join).toHaveBeenCalledWith(
+        quizshowRoomName(SESSION_ID, 'screen'),
+      );
+
+      await harness.gateway.handleTimePing(asClient(screen), {
+        clientSentAt: 1,
+      });
+      expect(clientEmits(screen, 'time:pong')).toHaveLength(1);
+      expect(
+        await harness.gateway.handleSessionPing(asClient(screen), {}),
+      ).toMatchObject({ ok: true, phaseId: harness.state.cursor.phaseId });
+    });
+
+    it('refuses the attach of an unpaired screen with device unpaired', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const { pairingId, deviceTicket } = await pairThroughHost(
+        hostRemote,
+        'screen',
+      );
+      expect(
+        await harness.gateway.handleHostUnpairDevice(asClient(hostRemote), {
+          pairingId,
+        }),
+      ).toEqual({ ok: true, isNoop: false });
+
+      const screen = await connectScreen('socket-tv', deviceTicket);
+      expect(codeOf(await attachWithTicket(screen, 'screen'))).toBe(
+        'quizshow_device_unpaired',
+      );
+      expect(screen.data.role).toBeUndefined();
+      expect(screen.join).not.toHaveBeenCalled();
+    });
+
+    it('moves the device socket count on a screen attach and on its disconnect', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const { pairingId, deviceTicket } = await pairThroughHost(
+        hostRemote,
+        'screen',
+      );
+      const screen = await connectScreen('socket-tv', deviceTicket);
+      expect(await attachWithTicket(screen, 'screen')).toMatchObject({
+        ok: true,
+      });
+      expect(pairedDevice(pairingId).connectedSocketCount).toBe(1);
+
+      harness.gateway.handleDisconnect(asClient(screen));
+      expect(pairedDevice(pairingId).connectedSocketCount).toBe(0);
+    });
+
+    it('unpairs a screen: device:unpaired to its socket, then the drop', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      const { pairingId, deviceTicket } = await pairThroughHost(
+        hostRemote,
+        'screen',
+      );
+      const screen = await connectScreen('socket-tv', deviceTicket);
+      const otherScreen = await connectScreen(
+        'socket-other-tv',
+        (await pairThroughHost(hostRemote, 'screen')).deviceTicket,
+      );
+      expect(await attachWithTicket(screen, 'screen')).toMatchObject({
+        ok: true,
+      });
+
+      expect(
+        await harness.gateway.handleHostUnpairDevice(asClient(hostRemote), {
+          pairingId,
+        }),
+      ).toEqual({ ok: true, isNoop: false });
+
+      expect(clientEmits(screen, 'device:unpaired')).toEqual([{ pairingId }]);
+      expect(screen.disconnect).toHaveBeenCalledWith(true);
+      expect(pairedDevice(pairingId).revokedAt).not.toBeNull();
+      expect(clientEmits(otherScreen, 'device:unpaired')).toHaveLength(0);
+      expect(otherScreen.disconnect).not.toHaveBeenCalled();
+      expect(
+        codeOf(
+          await harness.gateway.handleHostUnpairDevice(asClient(hostRemote), {
+            pairingId,
+          }),
+        ),
+      ).toBe('quizshow_device_not_found');
+    });
+
+    describe('a helper remote', () => {
+      beforeEach(() => {
+        jest
+          .spyOn(launchedFeatures, 'isFeatureLaunched')
+          .mockReturnValue(false);
+        jest
+          .spyOn(launchedFeatures, 'isEarlyAccessFeature')
+          .mockReturnValue(true);
+        harness.ungrantedUserIds.add(OUTSIDER_USER_ID);
+      });
+
+      it('attaches without the grant, records the organiser, runs host:next and refuses the pairing commands', async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { pairingId, deviceTicket } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(pairedDevice(pairingId)).toMatchObject({
+          kind: 'helper',
+          helperUserId: OUTSIDER_USER_ID,
+          helperName: 'Robin',
+        });
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+        harness.featureAccess.canUseFeature.mockClear();
+        harness.eventsService.isOrganizer.mockClear();
+        harness.eventsService.assertCanView.mockClear();
+
+        expect(
+          await attachWithTicket(helperPhone, 'host', deviceTicket),
+        ).toMatchObject({ ok: true, role: 'host' });
+        expect(helperPhone.data.helperPairingId).toBe(pairingId);
+        expect(helperPhone.join).toHaveBeenCalledWith(
+          quizshowRoomName(SESSION_ID, 'hosts'),
+        );
+        expect(
+          harness.state.attachedOrganiserUserIds.has(OUTSIDER_USER_ID),
+        ).toBe(true);
+        expect(pairedDevice(pairingId).connectedSocketCount).toBe(1);
+        expect(harness.featureAccess.canUseFeature).not.toHaveBeenCalled();
+        // The attach ran the event's view and ban checks for the helper.
+        expect(harness.eventsService.assertCanView).toHaveBeenCalledWith(
+          expect.anything(),
+          OUTSIDER_USER_ID,
+        );
+        harness.eventsService.isOrganizer.mockClear();
+        harness.eventsService.assertCanView.mockClear();
+
+        const command = jest.spyOn(quizshowPhases, 'hostNext').mockReturnValue({
+          ok: true,
+          success: { isNoop: false },
+          effects: [],
+        });
+        expect(
+          await hostNext(harness, helperPhone, harness.state.cursor.phaseId),
+        ).toEqual({ ok: true, isNoop: false });
+        expect(command).toHaveBeenCalled();
+        expect(harness.featureAccess.canUseFeature).not.toHaveBeenCalled();
+        expect(harness.eventsService.isOrganizer).not.toHaveBeenCalled();
+        expect(harness.eventsService.assertCanView).not.toHaveBeenCalled();
+
+        const screenCode = harness.pairingService.startPairing('screen', null);
+        expect(
+          codeOf(
+            await harness.gateway.handleHostPairDevice(asClient(helperPhone), {
+              pairingCode: screenCode.pairingCode,
+            }),
+          ),
+        ).toBe('quizshow_helper_cannot_pair');
+        expect(
+          codeOf(
+            await harness.gateway.handleHostUnpairDevice(
+              asClient(helperPhone),
+              { pairingId },
+            ),
+          ),
+        ).toBe('quizshow_helper_cannot_pair');
+        expect(pairedDevice(pairingId).revokedAt).toBeNull();
+
+        harness.gateway.handleDisconnect(asClient(helperPhone));
+        expect(pairedDevice(pairingId).connectedSocketCount).toBe(0);
+      });
+
+      it("refuses a helper ticket on another member's socket, for another session or as a screen ticket with ticket expired", async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const helperPairing = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        const screenPairing = await pairThroughHost(hostRemote, 'screen');
+        const strangerPhone = await connect(
+          harness,
+          'socket-stranger',
+          STRANGER_USER_ID,
+        );
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+
+        expect(
+          codeOf(
+            await attachWithTicket(
+              strangerPhone,
+              'host',
+              helperPairing.deviceTicket,
+            ),
+          ),
+        ).toBe('quizshow_device_ticket_expired');
+        expect(
+          codeOf(
+            await attachWithTicket(
+              helperPhone,
+              'host',
+              helperPairing.deviceTicket,
+              OTHER_SESSION_ID,
+            ),
+          ),
+        ).toBe('quizshow_device_ticket_expired');
+        expect(
+          codeOf(
+            await attachWithTicket(
+              helperPhone,
+              'host',
+              screenPairing.deviceTicket,
+            ),
+          ),
+        ).toBe('quizshow_device_ticket_expired');
+        expect(
+          codeOf(await attachWithTicket(helperPhone, 'host', 'not-a-ticket')),
+        ).toBe('quizshow_device_ticket_expired');
+        expect(strangerPhone.data.role).toBeUndefined();
+        expect(helperPhone.data.role).toBeUndefined();
+        expect(
+          harness.state.attachedOrganiserUserIds.has(STRANGER_USER_ID),
+        ).toBe(false);
+      });
+
+      it('refuses a helper who holds a player row, at pairing and at attach, with helper is playing', async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        await joinedPlayer(harness, 'socket-player', PLAYER_USER_ID);
+        const playingStarter = harness.pairingService.startPairing(
+          'helper',
+          PLAYER_USER_ID,
+        );
+        expect(
+          codeOf(
+            await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+              pairingCode: playingStarter.pairingCode,
+            }),
+          ),
+        ).toBe('quizshow_helper_is_playing');
+
+        const { deviceTicket } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        await joinedPlayer(
+          harness,
+          'socket-outsider-player',
+          OUTSIDER_USER_ID,
+          'Sasha',
+        );
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(
+          codeOf(await attachWithTicket(helperPhone, 'host', deviceTicket)),
+        ).toBe('quizshow_helper_is_playing');
+        expect(helperPhone.data.helperPairingId).toBeUndefined();
+      });
+
+      it('pairs and attaches a member whose player row left the game as a helper', async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { me } = await joinedPlayer(
+          harness,
+          'socket-player',
+          PLAYER_USER_ID,
+        );
+        const leftPlayer = harness.state.players.get(me.playerId);
+        if (leftPlayer === undefined) throw new Error('player row missing');
+        leftPlayer.leftAt = Date.now();
+
+        const { deviceTicket } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          PLAYER_USER_ID,
+        );
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          PLAYER_USER_ID,
+        );
+        expect(
+          await attachWithTicket(helperPhone, 'host', deviceTicket),
+        ).toMatchObject({ ok: true, role: 'host' });
+      });
+
+      it('refuses an expired helper ticket at attach, and a host frame once the ticket passed its exp', async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { pairingId, deviceTicket } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        const expiredTicket = harness.pairingService.mintDeviceTicket({
+          sessionId: SESSION_ID,
+          pairingId,
+          kind: 'helper',
+          helperUserId: OUTSIDER_USER_ID,
+          now: Date.now() - QUIZSHOW_LIMITS.deviceTicketTtlMs - 60_000,
+        });
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(
+          codeOf(await attachWithTicket(helperPhone, 'host', expiredTicket)),
+        ).toBe('quizshow_device_ticket_expired');
+        expect(helperPhone.data.role).toBeUndefined();
+
+        expect(
+          await attachWithTicket(helperPhone, 'host', deviceTicket),
+        ).toMatchObject({ ok: true });
+        expect(helperPhone.data.helperTicketExp).toBe(
+          harness.pairingService.verifyDeviceTicket(deviceTicket)?.exp,
+        );
+        // Stands for the clock passing the ticket's exp.
+        helperPhone.data.helperTicketExp = Math.floor(Date.now() / 1000) - 1;
+        const command = jest.spyOn(quizshowPhases, 'hostNext');
+        expect(
+          codeOf(
+            await hostNext(harness, helperPhone, harness.state.cursor.phaseId),
+          ),
+        ).toBe('quizshow_device_ticket_expired');
+        expect(command).not.toHaveBeenCalled();
+      });
+
+      it('refuses a helper who cannot see the event (not found at attach, cannot view event at pairing) or is blocked with its host (barred at attach, cannot view event at pairing)', async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { deviceTicket } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+
+        harness.hiddenFromUserIds.add(OUTSIDER_USER_ID);
+        expect(
+          codeOf(await attachWithTicket(helperPhone, 'host', deviceTicket)),
+        ).toBe('quizshow_session_not_found');
+        const hiddenStart = harness.pairingService.startPairing(
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(
+          codeOf(
+            await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+              pairingCode: hiddenStart.pairingCode,
+            }),
+          ),
+        ).toBe('quizshow_cannot_view_event');
+
+        harness.hiddenFromUserIds.delete(OUTSIDER_USER_ID);
+        harness.blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+        expect(
+          codeOf(await attachWithTicket(helperPhone, 'host', deviceTicket)),
+        ).toBe('quizshow_banned_from_event');
+        // The pairing host never learns of a block between two other members.
+        expect(
+          codeOf(
+            await harness.gateway.handleHostPairDevice(asClient(hostRemote), {
+              pairingCode: hiddenStart.pairingCode,
+            }),
+          ),
+        ).toBe('quizshow_cannot_view_event');
+        expect(helperPhone.data.role).toBeUndefined();
+        expect(harness.state.pairedDevices).toHaveLength(1);
+      });
+
+      it('refuses a helper blocked either way with the game owner: barred at attach, cannot view event at pairing', async () => {
+        replaceHarness({ kind: 'game' });
+        const ownerRemote = await attachedHost(
+          harness,
+          'socket-owner',
+          OWNER_USER_ID,
+        );
+        const { deviceTicket } = await pairThroughHost(
+          ownerRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        harness.blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+
+        expect(
+          codeOf(await attachWithTicket(helperPhone, 'host', deviceTicket)),
+        ).toBe('quizshow_banned_from_event');
+        expect(harness.blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+          OWNER_USER_ID,
+          OUTSIDER_USER_ID,
+        );
+        const blockedStart = harness.pairingService.startPairing(
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(
+          codeOf(
+            await harness.gateway.handleHostPairDevice(asClient(ownerRemote), {
+              pairingCode: blockedStart.pairingCode,
+            }),
+          ),
+        ).toBe('quizshow_cannot_view_event');
+      });
+
+      it("drops a helper socket at its ticket's exp when that comes before the member token's", async () => {
+        jest.useFakeTimers({
+          doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'],
+        });
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { pairingId } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        // A ticket with 60 s left; the member token has 900 s.
+        const shortTicket = harness.pairingService.mintDeviceTicket({
+          sessionId: SESSION_ID,
+          pairingId,
+          kind: 'helper',
+          helperUserId: OUTSIDER_USER_ID,
+          now: Date.now() - QUIZSHOW_LIMITS.deviceTicketTtlMs + 60_000,
+        });
+        const ticketExp =
+          harness.pairingService.verifyDeviceTicket(shortTicket)?.exp ?? 0;
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+
+        expect(
+          await attachWithTicket(helperPhone, 'host', shortTicket),
+        ).toMatchObject({
+          ok: true,
+          role: 'host',
+          connectionExpiresAt: ticketExp * 1000,
+        });
+        jest.advanceTimersByTime(ticketExp * 1000 - Date.now() - 1_000);
+        expect(helperPhone.disconnect).not.toHaveBeenCalled();
+
+        jest.advanceTimersByTime(2_000);
+        expect(helperPhone.emit).toHaveBeenCalledWith(
+          'exception',
+          expect.objectContaining({ status: 'error', code: 'TOKEN_EXPIRED' }),
+        );
+        expect(helperPhone.disconnect).toHaveBeenCalledWith(true);
+      });
+
+      it("re-arms a helper's drop at its ticket's exp on a good session:reauth and acks that limit", async () => {
+        jest.useFakeTimers({
+          doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'],
+        });
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { pairingId } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        // A ticket with 60 s left; the fresh member token gets 15 minutes.
+        const shortTicket = harness.pairingService.mintDeviceTicket({
+          sessionId: SESSION_ID,
+          pairingId,
+          kind: 'helper',
+          helperUserId: OUTSIDER_USER_ID,
+          now: Date.now() - QUIZSHOW_LIMITS.deviceTicketTtlMs + 60_000,
+        });
+        const ticketExp =
+          harness.pairingService.verifyDeviceTicket(shortTicket)?.exp ?? 0;
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(
+          await attachWithTicket(helperPhone, 'host', shortTicket),
+        ).toMatchObject({ ok: true });
+
+        const { ticket } = socketTicketService.mint(
+          OUTSIDER_USER_ID,
+          `family-${OUTSIDER_USER_ID}`,
+          UserStatus.Active,
+          15 * 60_000,
+        );
+        expect(
+          await harness.gateway.handleReauth(asClient(helperPhone), { ticket }),
+        ).toEqual({ ok: true, exp: ticketExp });
+        expect(helperPhone.data.exp).toBeGreaterThan(ticketExp);
+
+        jest.advanceTimersByTime(ticketExp * 1000 - Date.now() - 1_000);
+        expect(helperPhone.disconnect).not.toHaveBeenCalled();
+
+        jest.advanceTimersByTime(2_000);
+        expect(helperPhone.emit).toHaveBeenCalledWith(
+          'exception',
+          expect.objectContaining({ status: 'error', code: 'TOKEN_EXPIRED' }),
+        );
+        expect(helperPhone.disconnect).toHaveBeenCalledWith(true);
+      });
+
+      it("refuses a helper's session:reauth once its ticket's exp passed and drops the socket", async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { deviceTicket } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(
+          await attachWithTicket(helperPhone, 'host', deviceTicket),
+        ).toMatchObject({ ok: true });
+        const redeem = jest.spyOn(socketTicketService, 'redeem');
+        // Stands for the clock passing the ticket's exp.
+        helperPhone.data.helperTicketExp = Math.floor(Date.now() / 1000) - 1;
+
+        expect(
+          await harness.gateway.handleReauth(asClient(helperPhone), {
+            ticket: 'socket-ticket',
+          }),
+        ).toMatchObject({ ok: false, code: 'quizshow_device_ticket_expired' });
+        expect(redeem).not.toHaveBeenCalled();
+        expect(helperPhone.disconnect).toHaveBeenCalledWith(true);
+      });
+
+      it('drops an unpaired helper with device:unpaired and refuses its next command with device unpaired', async () => {
+        const hostRemote = await attachedHost(harness, 'socket-host');
+        const { pairingId, deviceTicket } = await pairThroughHost(
+          hostRemote,
+          'helper',
+          OUTSIDER_USER_ID,
+        );
+        const helperPhone = await connect(
+          harness,
+          'socket-helper',
+          OUTSIDER_USER_ID,
+        );
+        expect(
+          await attachWithTicket(helperPhone, 'host', deviceTicket),
+        ).toMatchObject({ ok: true });
+
+        expect(
+          await harness.gateway.handleHostUnpairDevice(asClient(hostRemote), {
+            pairingId,
+          }),
+        ).toEqual({ ok: true, isNoop: false });
+
+        expect(clientEmits(helperPhone, 'device:unpaired')).toEqual([
+          { pairingId },
+        ]);
+        expect(helperPhone.disconnect).toHaveBeenCalledWith(true);
+        expect(hostRemote.disconnect).not.toHaveBeenCalled();
+        expect(
+          codeOf(
+            await hostNext(harness, helperPhone, harness.state.cursor.phaseId),
+          ),
+        ).toBe('quizshow_device_unpaired');
+      });
     });
   });
 });

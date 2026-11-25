@@ -198,8 +198,10 @@ export enum NotificationType {
   XpLevelUp = 'xp_level_up',
   // Sent to a member when the (forthcoming) XP/badge awarding engine grants
   // them a badge. System-driven, no actor, no preference toggle. Payload
-  // carries `{ badgeName }` for the bell copy. See migration
-  // `AddRecognitionNotificationTypes1789600000000`.
+  // carries `{ badgeKey, badgeName }` for a code badge, and
+  // `{ badgeKey, badgeName, badgeNamePt, eventName }` for a quiz badge win
+  // (`quiz:` key). In-app only: the push listener skips the type. See
+  // migration `AddRecognitionNotificationTypes1789600000000`.
   BadgeEarned = 'badge_earned',
   // Community governance audit sweep (owner/mod cascade-fix effort). Enum
   // values only here — no emit site wired yet; that belongs to a follow-up

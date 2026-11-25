@@ -9,6 +9,7 @@ import {
   type QuizshowTemplateCardField,
   type QuizshowTemplateCardText,
   type QuizshowTemplateDetail,
+  type QuizshowTemplatePreview,
   type QuizshowTemplateRow,
   type QuizshowTemplateStatus,
   type QuizshowText,
@@ -62,6 +63,8 @@ export const TEMPLATE_CARDS_SQL = `
     "template"."card_title_pt" AS "card_title_pt",
     "template"."card_description_en" AS "card_description_en",
     "template"."card_description_pt" AS "card_description_pt",
+    "template"."content_updated_at" AS "content_updated_at",
+    "template"."published_at" AS "published_at",
     "quiz"."languages" AS "languages",${TEMPLATE_QUIZ_COUNTS}
   FROM "quizshow_templates" "template"
   INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."template_id" = "template"."id"
@@ -79,6 +82,9 @@ export const TEMPLATE_DETAIL_SQL = `
     "template"."card_description_pt" AS "card_description_pt",
     "template"."staff_notes" AS "staff_notes",
     "template"."published_at" AS "published_at",
+    "template"."content_updated_at" AS "content_updated_at",
+    "template"."change_note_en" AS "change_note_en",
+    "template"."change_note_pt" AS "change_note_pt",
     "quiz"."id" AS "quiz_id",
     "publisher"."first_name" AS "first_name",
     "publisher"."last_name" AS "last_name"
@@ -86,6 +92,24 @@ export const TEMPLATE_DETAIL_SQL = `
   INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."template_id" = "template"."id"
   LEFT JOIN "profiles" "publisher" ON "publisher"."user_id" = "template"."published_by_user_id"
   WHERE "template"."id" = $1
+`;
+
+/**
+ * $1 template id: the card text and quiz id of a published template. A draft
+ * reads as no row, so the host preview never shows one.
+ */
+export const TEMPLATE_PREVIEW_SQL = `
+  SELECT
+    "template"."id" AS "id",
+    "template"."card_title_en" AS "card_title_en",
+    "template"."card_title_pt" AS "card_title_pt",
+    "template"."card_description_en" AS "card_description_en",
+    "template"."card_description_pt" AS "card_description_pt",
+    "quiz"."id" AS "quiz_id"
+  FROM "quizshow_templates" "template"
+  INNER JOIN "quizshow_quizzes" "quiz" ON "quiz"."template_id" = "template"."id"
+  WHERE "template"."id" = $1
+    AND "template"."published_at" IS NOT NULL
 `;
 
 export interface TemplateListRow {
@@ -107,6 +131,8 @@ export interface TemplateCardRow {
   card_title_pt: string;
   card_description_en: string;
   card_description_pt: string;
+  content_updated_at: Date | string | null;
+  published_at: Date | string;
   languages: QuizshowLanguageMode;
   round_count: number;
   question_count: number;
@@ -121,9 +147,21 @@ export interface TemplateDetailRow {
   card_description_pt: string;
   staff_notes: string | null;
   published_at: Date | string | null;
+  content_updated_at: Date | string | null;
+  change_note_en: string | null;
+  change_note_pt: string | null;
   quiz_id: string;
   first_name: string | null;
   last_name: string | null;
+}
+
+export interface TemplatePreviewRow {
+  id: string;
+  card_title_en: string;
+  card_title_pt: string;
+  card_description_en: string;
+  card_description_pt: string;
+  quiz_id: string;
 }
 
 function toIsoString(value: Date | string): string {
@@ -138,8 +176,19 @@ function statusOf(publishedAt: Date | string | null): QuizshowTemplateStatus {
   return publishedAt === null ? 'draft' : 'published';
 }
 
+/**
+ * The latest publish of a published template: the content stamp, else the
+ * publish date for a row the migration backfill has not reached.
+ */
+function lastPublishedAtOf(
+  contentUpdatedAt: Date | string | null,
+  publishedAt: Date | string,
+): string {
+  return toIsoString(contentUpdatedAt ?? publishedAt);
+}
+
 /** The display name of a joined profile; null when the account is gone. */
-function nameOf(
+export function nameOf(
   firstName: string | null,
   lastName: string | null,
 ): string | null {
@@ -173,6 +222,10 @@ export function toTemplateCard(row: TemplateCardRow): QuizshowTemplateCard {
     roundCount: Number(row.round_count),
     questionCount: Number(row.question_count),
     hasAdultsRounds: row.has_adults_rounds === true,
+    lastPublishedAt: lastPublishedAtOf(
+      row.content_updated_at,
+      row.published_at,
+    ),
   };
 }
 
@@ -195,6 +248,60 @@ export function toTemplateDetail(
     publishedAt: toNullableIsoString(row.published_at),
     publishedByName: nameOf(row.first_name, row.last_name),
     quiz,
+    changeNote: { en: row.change_note_en ?? '', pt: row.change_note_pt ?? '' },
+    lastPublishedAt:
+      row.published_at === null
+        ? null
+        : lastPublishedAtOf(row.content_updated_at, row.published_at),
+  };
+}
+
+/**
+ * A wheel row's stored slice count for the preview's round checklist (item
+ * 23): null for Auto and for a stored value that is not a number, rounded
+ * as the import-source SQL's `::numeric::int` cast; null on every other row.
+ */
+function previewSliceCountOf(
+  round: QuizshowQuiz['rounds'][number],
+): number | null {
+  if (round.kind !== 'wheel') return null;
+  const storedSliceCount: unknown = (round.settings as { sliceCount?: unknown })
+    .sliceCount;
+  return typeof storedSliceCount === 'number' &&
+    Number.isFinite(storedSliceCount)
+    ? Math.round(storedSliceCount)
+    : null;
+}
+
+/**
+ * The host preview of a published template: the card text, the languages and
+ * each row's title, label and prompt texts. Every field is copied by name, so
+ * options, answers, notes and media never reach the payload.
+ */
+export function toTemplatePreview(
+  row: TemplatePreviewRow,
+  quiz: QuizshowQuiz,
+): QuizshowTemplatePreview {
+  return {
+    templateId: row.id,
+    title: { en: row.card_title_en, pt: row.card_title_pt },
+    description: { en: row.card_description_en, pt: row.card_description_pt },
+    languages: quiz.languages,
+    rounds: quiz.rounds.map((round, roundIndex) => ({
+      roundIndex,
+      kind: round.kind,
+      title: { en: round.title.en, pt: round.title.pt },
+      questionCount: round.questions.length,
+      sliceCount: previewSliceCountOf(round),
+      contentLabel: round.contentLabel,
+      prompts:
+        round.kind === 'wheel'
+          ? []
+          : round.questions.map((question) => ({
+              en: question.prompt.en,
+              pt: question.prompt.pt,
+            })),
+    })),
   };
 }
 

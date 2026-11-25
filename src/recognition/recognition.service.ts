@@ -32,6 +32,11 @@ import {
 } from './recognition.catalog';
 import { RecognitionAwardingService } from './recognition-awarding.service';
 import { ProfilesService } from '../profiles/profiles.service';
+import { isQuizBadgeKey } from '../quiz-win-badges/quiz-win-badges.contract';
+import {
+  isKnownQuizBadgeKey,
+  readQuizBadgesForMember,
+} from '../quiz-win-badges/quiz-win-badges-recognition-reads';
 
 /**
  * `POST /me/recognition/perks/:key/claim`. Carries the claim itself plus the
@@ -125,32 +130,44 @@ export class RecognitionService {
     userId: string,
     includePerks = true,
   ): Promise<RecognitionDTO> {
-    const [stat, earned, claimed, signals, ledgerRows, resolveInviteLimit] =
-      await Promise.all([
-        this.stats.findOne({ where: { userId } }),
-        this.awards.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
-        includePerks
-          ? this.perkClaims.find({
-              where: { userId },
-              take: DEFAULT_LIST_LIMIT,
-            })
-          : Promise.resolve([]),
-        // The XP breakdown is owner-only, same as perks (I9): skip the
-        // signal-gathering queries entirely for another member's view.
-        includePerks ? this.awarding.gatherSignalsForUser(userId) : null,
-        // The XP ledger is owner-only too (same reasoning as xpBreakdown):
-        // skip the query for a non-owner view.
-        includePerks
-          ? this.ledgerEntries.find({
-              where: { userId },
-              order: { createdAt: 'DESC' },
-              take: DEFAULT_LIST_LIMIT,
-            })
-          : Promise.resolve([]),
-        // The perks are owner-only, so another member's view skips the quota
-        // reads too; its perks block is emptied below either way.
-        includePerks ? this.inviteLimitResolverFor(userId) : undefined,
-      ]);
+    const [
+      stat,
+      earned,
+      claimed,
+      signals,
+      ledgerRows,
+      resolveInviteLimit,
+      quizBadges,
+    ] = await Promise.all([
+      this.stats.findOne({ where: { userId } }),
+      this.awards.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
+      includePerks
+        ? this.perkClaims.find({
+            where: { userId },
+            take: DEFAULT_LIST_LIMIT,
+          })
+        : Promise.resolve([]),
+      // The XP breakdown is owner-only, same as perks (I9): skip the
+      // signal-gathering queries entirely for another member's view.
+      includePerks ? this.awarding.gatherSignalsForUser(userId) : null,
+      // The XP ledger is owner-only too (same reasoning as xpBreakdown):
+      // skip the query for a non-owner view.
+      includePerks
+        ? this.ledgerEntries.find({
+            where: { userId },
+            order: { createdAt: 'DESC' },
+            take: DEFAULT_LIST_LIMIT,
+          })
+        : Promise.resolve([]),
+      // The perks are owner-only, so another member's view skips the quota
+      // reads too; its perks block is emptied below either way.
+      includePerks ? this.inviteLimitResolverFor(userId) : undefined,
+      // The member's admin quiz badges. `includePerks` is the owner switch,
+      // so another viewer's read drops hidden ones and masks private events.
+      readQuizBadgesForMember(this.awards.manager, userId, {
+        isOwnerView: includePerks,
+      }),
+    ]);
     const dto = buildRecognition(
       stat?.xp ?? 0,
       earned.map((award) => ({
@@ -169,7 +186,7 @@ export class RecognitionService {
       // `includePerks` is the owner/non-owner switch everywhere else in this
       // method, so it is the switch for hidden badges too: a hidden badge is
       // returned (flagged) to its owner and omitted from anyone else's read.
-      { resolveInviteLimit, isOwnerView: includePerks },
+      { resolveInviteLimit, isOwnerView: includePerks, quizBadges },
     );
     if (!includePerks) {
       dto.perks = { availableCount: 0, groups: [], ladder: [] };
@@ -309,9 +326,13 @@ export class RecognitionService {
     badgeKey: string,
     hiddenFromProfile: boolean,
   ): Promise<BadgeVisibilityDTO> {
+    // A quiz badge key counts as known while its definition exists, archived
+    // ones included.
     const isKnownBadge =
       BADGE_CATALOG.some((def) => def.key === badgeKey) ||
-      SEASONAL_BADGE_CATALOG.some((def) => def.key === badgeKey);
+      SEASONAL_BADGE_CATALOG.some((def) => def.key === badgeKey) ||
+      (isQuizBadgeKey(badgeKey) &&
+        (await isKnownQuizBadgeKey(this.awards.manager, badgeKey)));
     if (!isKnownBadge) {
       throw new NotFoundException('No badge with that key');
     }

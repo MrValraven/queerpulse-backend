@@ -5,7 +5,6 @@
  * early finish), the end of the night and abandonment. Pure: every time comes
  * in as a `now` argument and randomness through `QuizshowRandom`.
  */
-import { textHasBlockedTerm } from '../common/blocked-terms';
 import type { QuizshowStoredPodiumEntry } from './entities/quizshow-result.entity';
 import {
   QUIZSHOW_LIMITS,
@@ -20,16 +19,25 @@ import {
 import {
   activePlayers,
   advanceCursor,
+  buildRankIndex,
   eligiblePlayersNow,
   entrantTotals,
+  isActivePlayer,
+  isAwayAt,
   isJokerActiveFor,
   ownDeadline,
   persist,
+  podiumSteps,
   refuse,
   setSessionStatus,
+  statusRefusalCode,
   succeed,
 } from './quizshow-engine-state';
-import { dropEmptyLobbyTeams } from './quizshow-engine-players';
+import {
+  dropEmptyLobbyTeams,
+  foldNameKey,
+  textRefusal,
+} from './quizshow-engine-players';
 import {
   applyWheelBonus,
   type QuizshowWheelBonusResult,
@@ -38,6 +46,7 @@ import type {
   QuizshowCommandOutcome,
   QuizshowEngineEffect,
   QuizshowLiveAnswer,
+  QuizshowLivePlayer,
   QuizshowLiveQuestionPlay,
   QuizshowLiveState,
   QuizshowLiveVoteOption,
@@ -46,7 +55,6 @@ import type {
 } from './quizshow-engine-types';
 import {
   closestNumberOutcomes,
-  competitionRanks,
   scoreLieDetectorVotes,
   scorePartyVotes,
   scoreQuizAnswer,
@@ -54,12 +62,13 @@ import {
 } from './quizshow-scoring';
 import {
   CRYPTO_RANDOM,
+  effectiveAnswerKey,
   extraTimeMs,
   isLastQuestionOfRound,
   openLimitMs,
+  readPhaseMsFor,
   shuffleAvoidingOrder,
   snapshotQuestionAt,
-  toAnswerKeyView,
   voteLimitMs,
   writeLimitMs,
   type QuizshowRandom,
@@ -70,6 +79,7 @@ import {
   createWheelState,
   drawnWheelSliceRoundIndexes,
   drawWheelSpin,
+  isInWheelRange,
   isQuizRoundKind,
   isWheelExhausted,
   isWheelRoundKind,
@@ -124,7 +134,7 @@ function isOpenStatus(status: QuizshowSessionStatus): boolean {
   return OPEN_STATUSES.includes(status);
 }
 
-function checkpoint(): QuizshowEngineEffect {
+export function checkpoint(): QuizshowEngineEffect {
   return persist({ type: 'checkpoint' });
 }
 
@@ -144,12 +154,12 @@ function withSingleCheckpoint(
 }
 
 /** Every host command attempt, refused or not, resets the abandonment clock: it measures host presence. */
-function noteHostCommand(state: QuizshowLiveState, now: number): void {
+export function noteHostCommand(state: QuizshowLiveState, now: number): void {
   state.lastHostCommandAt = now;
 }
 
 /** A host command that acted or was a no-op: ends on one checkpoint. */
-function hostActed(
+export function hostActed(
   state: QuizshowLiveState,
   now: number,
   effects: QuizshowEngineEffect[],
@@ -172,14 +182,16 @@ function checkMovingCommand(
   return 'stale';
 }
 
-interface QuizshowPlayContext {
+export interface QuizshowPlayContext {
   play: QuizshowLiveQuestionPlay;
   round: QuizshowSnapshotRound;
   question: QuizshowSnapshotQuestion;
 }
 
 /** The question in play with its round; a missing one breaks an engine invariant. */
-function currentPlayContext(state: QuizshowLiveState): QuizshowPlayContext {
+export function currentPlayContext(
+  state: QuizshowLiveState,
+): QuizshowPlayContext {
   const play = state.current;
   if (play === null) {
     throw new Error(
@@ -196,7 +208,7 @@ function currentPlayContext(state: QuizshowLiveState): QuizshowPlayContext {
   return { play, round, question };
 }
 
-function isQuizRoundInPlay(state: QuizshowLiveState): boolean {
+export function isQuizRoundInPlay(state: QuizshowLiveState): boolean {
   const roundIndex = state.cursor.roundIndex ?? state.current?.roundIndex;
   if (roundIndex === undefined) return false;
   const round = state.snapshot.rounds[roundIndex];
@@ -214,13 +226,12 @@ function findLogEntry(
   return undefined;
 }
 
+/** One map read: `answersById` is kept in step with `answers` (contract 7.1). */
 function findAnswer(
   play: QuizshowLiveQuestionPlay,
   answerId: string,
 ): QuizshowLiveAnswer | undefined {
-  return [...play.answers.values()].find(
-    (answer) => answer.answerId === answerId,
-  );
+  return play.answersById.get(answerId);
 }
 
 function isOptionVisible(
@@ -245,7 +256,7 @@ function isStillToSubmit(state: QuizshowLiveState, playerId: string): boolean {
   const play = state.current;
   if (play === null || !play.eligiblePlayerIds.has(playerId)) return false;
   const player = state.players.get(playerId);
-  if (player === undefined || player.removedAt !== null) return false;
+  if (player === undefined || !isActivePlayer(player)) return false;
   return state.cursor.phase === 'vote'
     ? !play.votes.has(playerId)
     : !play.answers.has(playerId);
@@ -262,7 +273,12 @@ function isAwaitedSubmitter(
   return deadline === null || now <= deadline + QUIZSHOW_LIMITS.answerGraceMs;
 }
 
-/** Opens a question at its first phase and freezes who may play it. */
+/**
+ * Opens a question at its first phase and freezes who may play it: every
+ * active player who is not away (contract 6.2). A quiz round reads for a
+ * length scaled to the text (contract 6.12); in teams play a talk beat follows
+ * the read inside the same phase (contract 6.20).
+ */
 function openQuestion(
   state: QuizshowLiveState,
   roundIndex: number,
@@ -276,7 +292,13 @@ function openQuestion(
       `Pulse Live session ${state.sessionId} has no question ${roundIndex}.${questionIndex}.`,
     );
   }
-  const eligiblePlayers = activePlayers(state);
+  const activePlayersAtOpen = activePlayers(state);
+  const eligiblePlayers: QuizshowLivePlayer[] = [];
+  const awayPlayerIds = new Set<string>();
+  for (const player of activePlayersAtOpen) {
+    if (isAwayAt(player, now)) awayPlayerIds.add(player.playerId);
+    else eligiblePlayers.push(player);
+  }
   state.current = {
     questionId: question.id,
     roundIndex,
@@ -298,6 +320,12 @@ function openQuestion(
     wasSkipped: false,
     pointsByPlayer: new Map(),
     teamPoints: new Map(),
+    answersById: new Map(),
+    awayPlayerIds,
+    streakBeforeByPlayer: new Map(),
+    keyOverride: null,
+    acceptedTexts: new Set(),
+    wasCorrected: false,
   };
   state.questionLog.push({
     questionId: question.id,
@@ -311,7 +339,14 @@ function openQuestion(
     wasSkipped: false,
   });
   const isQuiz = isQuizRoundKind(round.kind);
-  const limitMs = isQuiz ? QUIZSHOW_LIMITS.readPhaseMs : writeLimitMs(round);
+  const readMs = isQuiz
+    ? readPhaseMsFor(question, state.snapshot.languages)
+    : 0;
+  const talkMs =
+    isQuiz && state.playMode === 'teams'
+      ? round.settings.talkSeconds * 1000
+      : 0;
+  const limitMs = isQuiz ? readMs + talkMs : writeLimitMs(round);
   advanceCursor(state, {
     phase: isQuiz ? 'read' : 'write',
     roundIndex,
@@ -320,6 +355,10 @@ function openQuestion(
     durationMs: limitMs,
     extraTimeMs: isQuiz ? null : extraTimeMs(limitMs),
   });
+  // advanceCursor clears the talk beat on every transition, so it is set right after.
+  if (talkMs > 0 && state.cursor.phaseStartedAt !== null) {
+    state.cursor.talkStartsAt = state.cursor.phaseStartedAt + readMs;
+  }
   return [
     { kind: 'phase_changed' },
     { kind: 'answer_count_changed' },
@@ -346,6 +385,53 @@ function openAnswers(
   return [{ kind: 'phase_changed' }, ...phaseTimer(state), checkpoint()];
 }
 
+/**
+ * How long the current phase waits before it moves on by itself (contract
+ * 6.16): the round intro, a quiz or Lie Detector reveal and a question's
+ * scores. Caption This and Drag Name reveals wait for the host to pick a
+ * favourite and every other phase waits for the host, so they answer null.
+ */
+function autoAdvanceWaitMsOf(state: QuizshowLiveState): number | null {
+  const { phase, roundIndex } = state.cursor;
+  if (phase === 'round_intro') return QUIZSHOW_LIMITS.autoAdvanceRoundIntroMs;
+  if (phase === 'scores') return QUIZSHOW_LIMITS.autoAdvanceScoresMs;
+  if (phase !== 'reveal' || roundIndex === null) return null;
+  const roundKind = state.snapshot.rounds[roundIndex]?.kind;
+  return roundKind === 'quiz' || roundKind === 'lie_detector'
+    ? QUIZSHOW_LIMITS.autoAdvanceRevealMs
+    : null;
+}
+
+/**
+ * Sets `autoAdvanceAt` to `startsAt` plus the phase's wait and asks for its
+ * timer, when auto-advance is on, the session runs and the phase qualifies.
+ * Anything else leaves the cursor alone and returns no effect.
+ */
+function armAutoAdvanceFrom(
+  state: QuizshowLiveState,
+  startsAt: number | null,
+): QuizshowEngineEffect[] {
+  const waitMs = autoAdvanceWaitMsOf(state);
+  if (
+    !state.isAutoAdvanceOn ||
+    state.status !== 'running' ||
+    waitMs === null ||
+    startsAt === null
+  ) {
+    return [];
+  }
+  const { cursor } = state;
+  cursor.autoAdvanceAt = startsAt + waitMs;
+  return [
+    { kind: 'timer', phaseId: cursor.phaseId, fireAt: cursor.autoAdvanceAt },
+  ];
+}
+
+/** On entering a phase the wait counts from its start; call right after `advanceCursor`, which clears the field. */
+function armAutoAdvance(state: QuizshowLiveState): QuizshowEngineEffect[] {
+  return armAutoAdvanceFrom(state, state.cursor.phaseStartedAt);
+}
+
 function openRoundIntro(
   state: QuizshowLiveState,
   roundIndex: number,
@@ -359,10 +445,10 @@ function openRoundIntro(
     durationMs: null,
     extraTimeMs: null,
   });
-  return [{ kind: 'phase_changed' }, checkpoint()];
+  return [{ kind: 'phase_changed' }, ...armAutoAdvance(state), checkpoint()];
 }
 
-function totalsByEntrant(state: QuizshowLiveState): Map<string, number> {
+export function totalsByEntrant(state: QuizshowLiveState): Map<string, number> {
   return new Map(
     entrantTotals(state).map((entrant) => [entrant.entrantId, entrant.score]),
   );
@@ -385,7 +471,7 @@ function recordScoresFrame(
  * `scores` keeps the question's indices; `leaderboard` names the round that
  * ended, which a closing wheel passes in as its own row.
  */
-function showScores(
+export function showScores(
   state: QuizshowLiveState,
   phase: 'scores' | 'leaderboard',
   scope: QuizshowScoresScope,
@@ -405,6 +491,7 @@ function showScores(
   return [
     { kind: 'phase_changed' },
     { kind: 'scores_shown', scope },
+    ...armAutoAdvance(state),
     checkpoint(),
   ];
 }
@@ -413,9 +500,9 @@ function podiumPlaceOf(rank: number): 1 | 2 | 3 | null {
   return rank === 1 || rank === 2 || rank === 3 ? rank : null;
 }
 
-/** Every entrant ranked 3 or better, ties sharing a place. */
+/** Every entrant ranked 3 or better, ties sharing a place; ranks come from one rank index (contract 7.1). */
 function buildPodium(state: QuizshowLiveState): QuizshowPodiumEntry[] {
-  return competitionRanks(entrantTotals(state)).flatMap(
+  return buildRankIndex(state).ranked.flatMap(
     (entry): QuizshowPodiumEntry[] => {
       const place = podiumPlaceOf(entry.rank);
       if (place === null) return [];
@@ -433,19 +520,15 @@ function buildPodium(state: QuizshowLiveState): QuizshowPodiumEntry[] {
   );
 }
 
-/** Every active player's place: their own in solo play, their team's in teams play. */
+/** Every active player's place: their own in solo play, their team's in teams play; ranks come from one rank index (contract 7.1). */
 function buildPlacings(state: QuizshowLiveState): Record<string, number> {
-  const rankByEntrant = new Map(
-    competitionRanks(entrantTotals(state)).map((entry) => [
-      entry.entrantId,
-      entry.rank,
-    ]),
-  );
+  const { rankByEntrantId } = buildRankIndex(state);
   const placings: Record<string, number> = {};
   for (const player of activePlayers(state)) {
     const entrantId =
       state.playMode === 'solo' ? player.playerId : player.teamId;
-    const rank = entrantId === null ? undefined : rankByEntrant.get(entrantId);
+    const rank =
+      entrantId === null ? undefined : rankByEntrantId.get(entrantId);
     if (rank !== undefined) placings[player.playerId] = rank;
   }
   return placings;
@@ -467,6 +550,8 @@ function showPodium(
   });
   recordScoresFrame(state, 'final');
   state.podium = buildPodium(state);
+  // The host reveals the places one by one from step 0 (contract 6.7).
+  state.cursor.podiumRevealedCount = 0;
   return [
     { kind: 'phase_changed' },
     // host:end can arrive from a timed phase; the podium has no deadline.
@@ -477,13 +562,73 @@ function showPodium(
   ];
 }
 
-/** On the podium a removal or a withdrawal reorders it; anywhere else nothing to do. */
-function refreshPodiumIfShown(
+/**
+ * `host:next` on the podium shows the next place, 3rd first (contract 6.7).
+ * Each step is a new podium phase, so the moving command rule and double taps
+ * work as on any other phase. Null once every step is shown: the night ends.
+ */
+function revealNextPodiumStep(
+  state: QuizshowLiveState,
+  now: number,
+): QuizshowEngineEffect[] | null {
+  const stepCount = podiumSteps(state).length;
+  // A podium loaded with no count shows every place, as it did before the paced reveal.
+  const revealedCount = state.cursor.podiumRevealedCount ?? stepCount;
+  if (revealedCount >= stepCount) return null;
+  const finalScoresFrame = state.lastScoresFrame;
+  advanceCursor(state, {
+    phase: 'podium',
+    roundIndex: null,
+    questionIndex: null,
+    now,
+    durationMs: null,
+    extraTimeMs: null,
+  });
+  state.cursor.podiumRevealedCount = revealedCount + 1;
+  // The final scores still count up from the totals before the podium, so the frame moves to the new phase id.
+  if (finalScoresFrame !== null && finalScoresFrame.scope === 'final') {
+    finalScoresFrame.phaseId = state.cursor.phaseId;
+  }
+  return [
+    { kind: 'phase_changed' },
+    { kind: 'podium_shown' },
+    { kind: 'scores_shown', scope: 'final' },
+    checkpoint(),
+  ];
+}
+
+/**
+ * On the podium a removal or a withdrawal reorders it; anywhere else nothing
+ * to do. The reveal keeps only the leading steps of the new podium whose
+ * places were already shown, so a place the host has not revealed yet never
+ * shows (contract 6.7).
+ */
+export function refreshPodiumIfShown(
   state: QuizshowLiveState,
 ): QuizshowEngineEffect[] {
   if (state.cursor.phase !== 'podium') return [];
+  const { cursor } = state;
+  // A null count is a legacy podium that withholds nothing, so it stays null.
+  if (cursor.podiumRevealedCount === null) {
+    state.podium = buildPodium(state);
+    return [{ kind: 'podium_shown' }];
+  }
+  const previousSteps = podiumSteps(state);
+  const previousCount = cursor.podiumRevealedCount;
+  const shownPlaces = new Set<number>(previousSteps.slice(0, previousCount));
   state.podium = buildPodium(state);
-  return [{ kind: 'podium_shown' }];
+  const nextSteps = podiumSteps(state);
+  let nextCount = 0;
+  while (
+    nextCount < nextSteps.length &&
+    shownPlaces.has(nextSteps[nextCount] ?? 0)
+  ) {
+    nextCount += 1;
+  }
+  if (nextCount === previousCount) return [{ kind: 'podium_shown' }];
+  cursor.podiumRevealedCount = nextCount;
+  // The count lives on the cursor, so remotes get it with a fresh phase frame.
+  return [{ kind: 'phase_changed' }, { kind: 'podium_shown' }];
 }
 
 /** The open wheel; the `wheel` phase with none open breaks an engine invariant. */
@@ -673,7 +818,40 @@ function leaderboardRoundIndexOf(state: QuizshowLiveState): number | null {
   return roundIndex;
 }
 
-/** A round, or a pick-a-question wheel, ended: its leaderboard, or the podium when nothing remains and no bonus waits to be announced. */
+/** A warm-up question or a poll scores nobody, so `host:next` from its reveal moves on with no scores frame (contract 6.19, 6.22). */
+function shouldSkipScores(state: QuizshowLiveState): boolean {
+  const play = state.current;
+  if (play === null) return false;
+  const round = state.snapshot.rounds[play.roundIndex];
+  const question = round?.questions[play.questionIndex];
+  if (round === undefined || question === undefined) return false;
+  return round.settings.isWarmUp || question.type === 'poll';
+}
+
+/**
+ * The warm-up round scored nobody, so its end opens the next step with no
+ * leaderboard (contract 6.19). A warm-up flag on a wheel slice (a quiz saved
+ * before validation refused it) keeps the leaderboard, so the wheel flow runs
+ * as it does for every slice.
+ */
+function shouldSkipLeaderboard(state: QuizshowLiveState): boolean {
+  const { roundIndex } = state.cursor;
+  const round =
+    roundIndex === null ? undefined : state.snapshot.rounds[roundIndex];
+  return (
+    roundIndex !== null &&
+    round !== undefined &&
+    isQuizRoundKind(round.kind) &&
+    round.settings.isWarmUp &&
+    !isInWheelRange(state.snapshot.rounds, roundIndex)
+  );
+}
+
+/**
+ * A round, or a pick-a-question wheel, ended: its leaderboard, or the podium
+ * when nothing remains and no bonus waits to be announced. A warm-up round
+ * with no bonus to announce opens the next step straight away.
+ */
 function afterRoundEnds(
   state: QuizshowLiveState,
   award: QuizshowWheelBonusView | null,
@@ -682,6 +860,9 @@ function afterRoundEnds(
   const nextStep = nextQuizshowStep(state.snapshot.rounds, state.wheelProgress);
   if (nextStep.kind === 'podium' && award === null) {
     return showPodium(state, now);
+  }
+  if (award === null && shouldSkipLeaderboard(state)) {
+    return openStep(state, nextStep, now);
   }
   return showScores(
     state,
@@ -773,12 +954,13 @@ function afterQuestion(
   return effects;
 }
 
+/** Ends the night on its podium. A practice session keeps no placings, so persistence writes no results row (contract 6.9). */
 function finishSession(
   state: QuizshowLiveState,
   now: number,
 ): QuizshowEngineEffect[] {
   const podium = buildPodium(state);
-  const placings = buildPlacings(state);
+  const placings = state.isPractice ? {} : buildPlacings(state);
   state.podium = podium;
   state.pausedAt = null;
   state.status = 'finished';
@@ -830,7 +1012,7 @@ function abandonSession(
 }
 
 /** Team points over the members present when the question opened (one removed since counts 0), each team's total moved by the difference. */
-function applyTeamPoints(
+export function applyTeamPoints(
   state: QuizshowLiveState,
   play: QuizshowLiveQuestionPlay,
 ): void {
@@ -856,18 +1038,33 @@ function applyTeamPoints(
   play.teamPoints = nextTeamPoints;
 }
 
-function scoreQuizQuestion(
+/**
+ * Judges every eligible answer against the effective key (a host correction
+ * when one was made) and the texts a host accepted. A prompt or a poll scores
+ * nobody; a warm-up round judges but awards 0 and keeps streaks. The first
+ * scoring records each eligible player's streak so a rescore can restore it.
+ * `scoredPlayers` defaults to the eligible players still active, the set the
+ * first scoring judges. A correction passes exactly that set again: a player
+ * who left after the reveal is rescored, and one who left before it stays out.
+ */
+export function scoreQuizQuestion(
   state: QuizshowLiveState,
   { play, round, question }: QuizshowPlayContext,
+  scoredPlayers: readonly QuizshowLivePlayer[] = eligiblePlayersNow(state),
 ): void {
-  const answerKey = toAnswerKeyView(round, question);
-  const eligiblePlayers = eligiblePlayersNow(state);
+  const answerKey = effectiveAnswerKey(round, question, play.keyOverride);
+  if (play.streakBeforeByPlayer.size === 0) {
+    for (const player of scoredPlayers) {
+      play.streakBeforeByPlayer.set(player.playerId, player.streak);
+    }
+  }
   const limitMs = openLimitMs(round, question);
   const closestOutcomes =
     answerKey?.type === 'closest_number'
       ? closestNumberOutcomes(
           answerKey.value,
-          eligiblePlayers.flatMap((player) => {
+          answerKey.tolerance,
+          scoredPlayers.flatMap((player) => {
             const payload = play.answers.get(player.playerId)?.payload;
             return payload?.type === 'closest_number'
               ? [{ playerId: player.playerId, value: payload.value }]
@@ -875,8 +1072,12 @@ function scoreQuizQuestion(
           }),
         )
       : null;
-  for (const player of eligiblePlayers) {
-    if (answerKey === null || question.type === 'prompt') {
+  for (const player of scoredPlayers) {
+    if (
+      answerKey === null ||
+      question.type === 'prompt' ||
+      question.type === 'poll'
+    ) {
       play.pointsByPlayer.set(player.playerId, 0);
       continue;
     }
@@ -894,6 +1095,8 @@ function scoreQuizQuestion(
       streakBefore: player.streak,
       isJokerActive: isJokerActiveFor(state, player.playerId, play.roundIndex),
       closestOutcome: closestOutcomes?.get(player.playerId) ?? null,
+      acceptedTexts: play.acceptedTexts,
+      isWarmUp: round.settings.isWarmUp,
     });
     if (answer !== null) {
       answer.isCorrect = score.isCorrect;
@@ -919,9 +1122,10 @@ function scorePartyQuestion(
   );
   const countedVotes = [...play.votes.values()].flatMap((vote) => {
     const option = visibleOptions.get(vote.optionId);
-    const isVoterRemoved =
-      (state.players.get(vote.voterPlayerId)?.removedAt ?? null) !== null;
-    return option === undefined || isVoterRemoved
+    const voter = state.players.get(vote.voterPlayerId);
+    // A removed or departed voter's vote stops counting.
+    const isVoterGone = voter !== undefined && !isActivePlayer(voter);
+    return option === undefined || isVoterGone
       ? []
       : [
           {
@@ -970,7 +1174,7 @@ function scorePartyQuestion(
   }
 }
 
-function saveScoringOperation(
+export function saveScoringOperation(
   state: QuizshowLiveState,
   play: QuizshowLiveQuestionPlay,
 ): QuizshowPersistOperation {
@@ -1010,7 +1214,8 @@ function revealQuestion(
   }
   const logEntry = findLogEntry(state, play.questionId);
   if (logEntry !== undefined) logEntry.revealedAt = now;
-  state.hasScoredQuestion = true;
+  // A warm-up question or a poll scores nobody, so ending after only those skips a podium of zeros.
+  if (!shouldSkipScores(state)) state.hasScoredQuestion = true;
   advanceCursor(state, {
     phase: 'reveal',
     roundIndex: play.roundIndex,
@@ -1023,6 +1228,7 @@ function revealQuestion(
     { kind: 'phase_changed' },
     { kind: 'revealed' },
     persist(saveScoringOperation(state, play)),
+    ...armAutoAdvance(state),
     checkpoint(),
   ];
 }
@@ -1033,18 +1239,21 @@ function visibleAnswers(play: QuizshowLiveQuestionPlay): QuizshowLiveAnswer[] {
     .sort((first, second) => first.receivedAt - second.receivedAt);
 }
 
-/** The Lie Detector truth in the screen language, the other language when that one is blank. */
+/**
+ * The Lie Detector truth in the screen language, the other language when that
+ * one is blank. A vote option holds one text, so a screen showing both
+ * languages leads with English, as the TV does (contract 6.26).
+ */
 function truthText(
   state: QuizshowLiveState,
   question: QuizshowSnapshotQuestion,
 ): string | null {
   if (question.type !== 'prompt' || question.answer === null) return null;
   const { truth } = question.answer;
-  const screenText = truth[state.snapshot.screenLanguage].trim();
+  const leadLanguage = state.snapshot.screenLanguage === 'pt' ? 'pt' : 'en';
+  const screenText = truth[leadLanguage].trim();
   if (screenText !== '') return screenText;
-  const otherText = (
-    state.snapshot.screenLanguage === 'en' ? truth.pt : truth.en
-  ).trim();
+  const otherText = (leadLanguage === 'en' ? truth.pt : truth.en).trim();
   return otherText === '' ? null : otherText;
 }
 
@@ -1206,9 +1415,11 @@ function hideAnswerInPlay(
   }
   answer.pointsAwarded = 0;
   applyTeamPoints(state, play);
+  // The favourite path with no author: the reveal frame again, and no player's own reveal changes.
   effects.push(persist(saveScoringOperation(state, play)), {
     kind: 'reveal_updated',
-    favouriteAuthorPlayerId: null,
+    scope: 'favourite',
+    playerId: null,
   });
   const shownScoresScope = scoresScopeShownIn(state.cursor.phase);
   if (shownScoresScope !== null) {
@@ -1220,7 +1431,9 @@ function hideAnswerInPlay(
 }
 
 /** The scores scope a phase shows, or null for a phase with no scores on show. */
-function scoresScopeShownIn(phase: QuizshowPhase): QuizshowScoresScope | null {
+export function scoresScopeShownIn(
+  phase: QuizshowPhase,
+): QuizshowScoresScope | null {
   if (phase === 'scores') return 'question';
   if (phase === 'leaderboard') return 'round';
   if (phase === 'podium') return 'final';
@@ -1250,16 +1463,20 @@ export function hostStart(
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
   if (state.status !== 'lobby') {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse(statusRefusalCode(state.status, 'lobby'), state, true);
   }
   const players = activePlayers(state);
   if (players.length === 0) return refuse('quizshow_no_players', state, false);
   const effects: QuizshowEngineEffect[] = [];
-  const droppedTeamEffects = dropEmptyLobbyTeams(state, [
-    ...state.teams.keys(),
-  ]);
-  if (droppedTeamEffects.length > 0) {
-    effects.push(...droppedTeamEffects, { kind: 'lobby_changed' });
+  // Host-made teams wait empty in the lobby, but the game starts with only the teams someone plays in (contract 6.11).
+  const emptyTeamIds = [...state.teams.keys()].filter(
+    (teamId) => !players.some((player) => player.teamId === teamId),
+  );
+  if (emptyTeamIds.length > 0) {
+    for (const teamId of emptyTeamIds) state.teams.delete(teamId);
+    effects.push(persist({ type: 'delete_teams', teamIds: emptyTeamIds }), {
+      kind: 'lobby_changed',
+    });
   }
   state.status = 'running';
   effects.push(
@@ -1293,7 +1510,7 @@ function nextEffects(
     case 'review':
       return startVote(state, now, random);
     case 'reveal':
-      return isQuizRoundInPlay(state)
+      return isQuizRoundInPlay(state) && !shouldSkipScores(state)
         ? showScores(state, 'scores', 'question', now)
         : afterQuestion(state, now);
     case 'scores':
@@ -1307,7 +1524,7 @@ function nextEffects(
     case 'wheel':
       return startWheelPick(state, now);
     case 'podium':
-      return finishSession(state, now);
+      return revealNextPodiumStep(state, now) ?? finishSession(state, now);
     default:
       return null;
   }
@@ -1325,7 +1542,7 @@ export function hostNext(
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
   if (state.status !== 'running') {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
   }
   if (state.cursor.phase === 'wheel') {
     const spin = openedWheelOf(state).spin;
@@ -1337,8 +1554,13 @@ export function hostNext(
     }
   }
   const effects = nextEffects(state, now, random);
-  if (effects === null)
-    return refuse('quizshow_command_not_allowed', state, true);
+  if (effects === null) {
+    const code =
+      state.cursor.phase === 'lobby'
+        ? 'quizshow_session_not_started'
+        : 'quizshow_session_ended';
+    return refuse(code, state, true);
+  }
   return hostActed(state, now, effects, false);
 }
 
@@ -1359,7 +1581,7 @@ export function hostSpin(
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
   if (state.status !== 'running') {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
   }
   const { phase } = state.cursor;
   if (phase === 'wheel') {
@@ -1397,7 +1619,7 @@ export function hostSpin(
     progress.wheel = wheel;
     return hostActed(state, now, spinWheel(state, wheel, now, random), false);
   }
-  return refuse('quizshow_command_not_allowed', state, true);
+  return refuse('quizshow_spin_not_available', state, true);
 }
 
 /**
@@ -1415,8 +1637,11 @@ export function hostFinishWheel(
   if (movingCheck === 'stale')
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
-  if (state.status !== 'running' || state.cursor.phase !== 'wheel') {
-    return refuse('quizshow_command_not_allowed', state, true);
+  if (state.status !== 'running') {
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
+  }
+  if (state.cursor.phase !== 'wheel') {
+    return refuse('quizshow_no_wheel_open', state, true);
   }
   const wheel = openedWheelOf(state);
   const isQuestionWheelWithPick =
@@ -1449,7 +1674,7 @@ export function hostPause(
     cursor.phase === 'lobby' ||
     cursor.phase === 'ended'
   ) {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
   }
   const effects: QuizshowEngineEffect[] = [{ kind: 'phase_changed' }];
   state.pausedAt = now;
@@ -1460,6 +1685,10 @@ export function hostPause(
       cursor.extraTimeDeadline === null ? null : cursor.extraTimeDeadline - now;
     cursor.deadline = null;
     cursor.extraTimeDeadline = null;
+    effects.push({ kind: 'timer_cleared' });
+  } else if (cursor.autoAdvanceAt !== null) {
+    // Resume arms the full wait again, so nothing of it is kept.
+    cursor.autoAdvanceAt = null;
     effects.push({ kind: 'timer_cleared' });
   }
   setSessionStatus(state, 'paused');
@@ -1477,7 +1706,7 @@ export function hostResume(
   }
   if (state.status === 'running') return hostActed(state, now, [], true);
   if (state.status !== 'paused') {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
   }
   const { cursor } = state;
   const replayQuestion =
@@ -1511,7 +1740,10 @@ export function hostResume(
     return hostActed(state, now, effects, false);
   }
   const pausedAt = state.pausedAt ?? now;
-  if (cursor.phaseStartedAt !== null) cursor.phaseStartedAt += now - pausedAt;
+  const pausedForMs = now - pausedAt;
+  if (cursor.phaseStartedAt !== null) cursor.phaseStartedAt += pausedForMs;
+  // The talk beat sits a fixed time after the phase start, so it moves with it.
+  if (cursor.talkStartsAt !== null) cursor.talkStartsAt += pausedForMs;
   if (cursor.pausedRemainingMs !== null) {
     cursor.deadline = now + cursor.pausedRemainingMs;
     cursor.extraTimeDeadline =
@@ -1527,7 +1759,12 @@ export function hostResume(
   return hostActed(
     state,
     now,
-    [{ kind: 'phase_changed' }, ...phaseTimer(state)],
+    [
+      { kind: 'phase_changed' },
+      ...phaseTimer(state),
+      // Auto-advance waits its full length again from the resume (contract 6.16).
+      ...armAutoAdvanceFrom(state, now),
+    ],
     false,
   );
 }
@@ -1542,8 +1779,11 @@ export function hostAddTime(
   if (input.phaseId !== cursor.phaseId) {
     return refuse('quizshow_stale_phase', state, true);
   }
-  if (state.status !== 'running' || !isTimedPhase(cursor.phase)) {
-    return refuse('quizshow_command_not_allowed', state, true);
+  if (state.status !== 'running') {
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
+  }
+  if (!isTimedPhase(cursor.phase)) {
+    return refuse('quizshow_no_timer_running', state, true);
   }
   if (cursor.deadline === null || input.expectedDeadline !== cursor.deadline) {
     return hostActed(state, now, [], true);
@@ -1570,9 +1810,15 @@ export function hostReveal(
   if (movingCheck === 'stale')
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
+  if (state.status !== 'running') {
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
+  }
   const { phase } = state.cursor;
-  if (state.status !== 'running' || (phase !== 'open' && phase !== 'vote')) {
-    return refuse('quizshow_command_not_allowed', state, true);
+  if (phase === 'reveal' || phase === 'scores') {
+    return refuse('quizshow_already_revealed', state, true);
+  }
+  if (phase !== 'open' && phase !== 'vote') {
+    return refuse('quizshow_nothing_to_reveal', state, true);
   }
   return hostActed(
     state,
@@ -1593,7 +1839,7 @@ export function hostSkip(
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
   if (state.status !== 'running') {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
   }
   const { phase } = state.cursor;
   const play = state.current;
@@ -1606,7 +1852,7 @@ export function hostSkip(
   if (phase === 'reveal' && isQuizRoundInPlay(state)) {
     return hostActed(state, now, afterQuestion(state, now), false);
   }
-  return refuse('quizshow_command_not_allowed', state, true);
+  return refuse('quizshow_nothing_to_skip', state, true);
 }
 
 export function hostShowAnswers(
@@ -1620,8 +1866,11 @@ export function hostShowAnswers(
   if (movingCheck === 'stale')
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
-  if (state.status !== 'running' || state.cursor.phase !== 'review') {
-    return refuse('quizshow_command_not_allowed', state, true);
+  if (state.status !== 'running') {
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
+  }
+  if (state.cursor.phase !== 'review') {
+    return refuse('quizshow_review_not_open', state, true);
   }
   return hostActed(state, now, startVote(state, now, random), false);
 }
@@ -1634,7 +1883,7 @@ export function hostHideAnswer(
 ): QuizshowHostOutcome {
   noteHostCommand(state, now);
   if (!isOpenStatus(state.status)) {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse('quizshow_session_ended', state, true);
   }
   const play = state.current;
   const answer = play === null ? undefined : findAnswer(play, input.answerId);
@@ -1645,10 +1894,13 @@ export function hostHideAnswer(
   ) {
     return refuse('quizshow_answer_not_found', state, false);
   }
-  const isAuthorRemoved =
-    (state.players.get(answer.playerId)?.removedAt ?? null) !== null;
-  if (!input.isHidden && (state.cursor.phase !== 'review' || isAuthorRemoved)) {
-    return refuse('quizshow_command_not_allowed', state, true);
+  if (!input.isHidden && state.cursor.phase !== 'review') {
+    return refuse('quizshow_unhide_review_only', state, true);
+  }
+  const author = state.players.get(answer.playerId);
+  // A removed or departed author's answers stay hidden: un-hiding would bring back a voice that left.
+  if (!input.isHidden && author !== undefined && !isActivePlayer(author)) {
+    return refuse('quizshow_author_removed', state, true);
   }
   if ((answer.hiddenAt !== null) === input.isHidden) {
     return hostActed(state, now, [], true);
@@ -1684,14 +1936,16 @@ export function hostPickFavourite(
   const play = state.current;
   const round =
     play === null ? undefined : state.snapshot.rounds[play.roundIndex];
+  if (state.status !== 'running') {
+    return refuse(statusRefusalCode(state.status, 'running'), state, true);
+  }
   if (
-    state.status !== 'running' ||
     state.cursor.phase !== 'reveal' ||
     play === null ||
     round === undefined ||
     (round.kind !== 'caption_this' && round.kind !== 'drag_name')
   ) {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse('quizshow_favourite_not_available', state, true);
   }
   if (input.questionId !== play.questionId) {
     return refuse('quizshow_wrong_question', state, false);
@@ -1731,19 +1985,90 @@ export function hostPickFavourite(
     state,
     now,
     [
-      { kind: 'reveal_updated', favouriteAuthorPlayerId: answer.playerId },
+      {
+        kind: 'reveal_updated',
+        scope: 'favourite',
+        playerId: answer.playerId,
+      },
       persist(saveScoringOperation(state, play)),
     ],
     false,
   );
 }
 
+/**
+ * The leave shared by `lobby:leave` and `host:removePlayer` with a rejoin
+ * (contract 6.14): the row gets `leftAt`, its answers stay visible, and in the
+ * lobby a player-made team left empty goes. The player stays in the
+ * question's eligible ids and its log count: a rejoin admits only players who
+ * are not eligible yet, so the counts stay consistent.
+ */
+function leaveEffects(
+  state: QuizshowLiveState,
+  player: QuizshowLivePlayer,
+  now: number,
+  random: QuizshowRandom,
+  departure: Extract<
+    QuizshowEngineEffect,
+    { kind: 'player_left' } | { kind: 'player_removed' }
+  >,
+): QuizshowEngineEffect[] {
+  player.leftAt = now;
+  return [
+    persist({
+      type: 'update_player',
+      playerId: player.playerId,
+      fields: { leftAt: now },
+    }),
+    ...dropEmptyLobbyTeams(state, [player.teamId]),
+    { kind: 'lobby_changed' },
+    departure,
+    ...refreshPodiumIfShown(state),
+    ...closeIfEveryoneDone(state, now, random),
+  ];
+}
+
+/** `lobby:leave` in any open status (contract 6.14); the runtime unbinds the leaver's sockets on `player_left`. */
+export function leaveLobby(
+  state: QuizshowLiveState,
+  playerId: string,
+  now: number,
+  random: QuizshowRandom = CRYPTO_RANDOM,
+): QuizshowCommandOutcome {
+  if (!isOpenStatus(state.status)) {
+    return refuse('quizshow_session_ended', state, true);
+  }
+  const player = state.players.get(playerId);
+  if (player === undefined) return refuse('quizshow_not_joined', state, false);
+  if (player.removedAt !== null) {
+    return refuse('quizshow_player_removed', state, false);
+  }
+  if (player.leftAt !== null)
+    return refuse('quizshow_not_joined', state, false);
+  const effects = leaveEffects(state, player, now, random, {
+    kind: 'player_left',
+    playerId,
+  });
+  return succeed<Record<string, never>>(
+    {},
+    withSingleCheckpoint([...effects, checkpoint()]),
+  );
+}
+
+/**
+ * Removes a player. With `canRejoin` the host does the player's leave and the
+ * runtime evicts their sockets; their answers stay visible and they may join
+ * again. Without it the row is removed for good and its answers hidden, a
+ * player who already left included, so they cannot come back. A removed row
+ * is a no-op, and so is a rejoin removal of a player who already left.
+ */
 export function hostRemovePlayer(
   state: QuizshowLiveState,
   playerId: string,
   actorUserId: string,
   now: number,
   random: QuizshowRandom = CRYPTO_RANDOM,
+  canRejoin = false,
 ): QuizshowHostOutcome {
   noteHostCommand(state, now);
   const player = state.players.get(playerId);
@@ -1751,9 +2076,19 @@ export function hostRemovePlayer(
     return refuse('quizshow_player_not_found', state, false);
   }
   if (!isOpenStatus(state.status)) {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse('quizshow_session_ended', state, true);
   }
-  if (player.removedAt !== null) return hostActed(state, now, [], true);
+  if (player.removedAt !== null || (canRejoin && player.leftAt !== null)) {
+    return hostActed(state, now, [], true);
+  }
+  if (canRejoin) {
+    const effects = leaveEffects(state, player, now, random, {
+      kind: 'player_removed',
+      playerId,
+      canRejoin: true,
+    });
+    return hostActed(state, now, effects, false);
+  }
   player.removedAt = now;
   const effects: QuizshowEngineEffect[] = [];
   const play = state.current;
@@ -1775,7 +2110,7 @@ export function hostRemovePlayer(
       hiddenAt: now,
       hiddenByUserId: actorUserId,
     }),
-    { kind: 'player_removed', playerId },
+    { kind: 'player_removed', playerId, canRejoin: false },
     { kind: 'lobby_changed' },
     ...refreshPodiumIfShown(state),
     ...closeIfEveryoneDone(state, now, random),
@@ -1793,18 +2128,17 @@ export function hostRenameTeam(
   if (team === undefined)
     return refuse('quizshow_team_not_found', state, false);
   if (!isOpenStatus(state.status)) {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse('quizshow_session_ended', state, true);
   }
   const name = input.name.trim();
-  if (name === '') return refuse('quizshow_text_blank', state, false);
-  if (textHasBlockedTerm(name)) {
-    return refuse('quizshow_text_blocked', state, false);
-  }
-  const nameKey = name.toLowerCase();
+  const nameRefusal = textRefusal(name);
+  if (nameRefusal !== null) return refuse(nameRefusal, state, false);
+  // Team names clash by the same fold as host:createTeams (contract 6.13): accents, case and repeated spaces.
+  const nameKey = foldNameKey(name);
   const isNameTaken = [...state.teams.values()].some(
     (otherTeam) =>
       otherTeam.teamId !== team.teamId &&
-      otherTeam.name.trim().toLowerCase() === nameKey,
+      foldNameKey(otherTeam.name) === nameKey,
   );
   if (isNameTaken) return refuse('quizshow_team_name_taken', state, false);
   if (name === team.name) return hostActed(state, now, [], true);
@@ -1835,7 +2169,7 @@ export function hostEnd(
     return refuse('quizshow_stale_phase', state, true);
   if (movingCheck === 'noop') return hostActed(state, now, [], true);
   if (!isOpenStatus(state.status)) {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse('quizshow_session_ended', state, true);
   }
   if (state.cursor.phase === 'podium') {
     return hostActed(state, now, finishSession(state, now), false);
@@ -1854,11 +2188,46 @@ export function hostSetScreenMuted(
 ): QuizshowHostOutcome {
   noteHostCommand(state, now);
   if (!isOpenStatus(state.status)) {
-    return refuse('quizshow_command_not_allowed', state, true);
+    return refuse('quizshow_session_ended', state, true);
   }
   if (state.isScreenMuted === isMuted) return hostActed(state, now, [], true);
   state.isScreenMuted = isMuted;
   return hostActed(state, now, [], false);
+}
+
+/**
+ * `host:setAutoAdvance` in any open status (contract 6.16). Turning it on in a
+ * qualifying phase of a running session arms the wait from `now`; turning it
+ * off drops the armed wait and its timer. The cursor changes without a phase
+ * change, so a `phase_changed` carries the new `autoAdvanceAt` to the remotes.
+ */
+export function hostSetAutoAdvance(
+  state: QuizshowLiveState,
+  isOn: boolean,
+  now: number,
+): QuizshowHostOutcome {
+  noteHostCommand(state, now);
+  if (!isOpenStatus(state.status)) {
+    return refuse('quizshow_session_ended', state, true);
+  }
+  if (state.isAutoAdvanceOn === isOn) return hostActed(state, now, [], true);
+  state.isAutoAdvanceOn = isOn;
+  const { cursor } = state;
+  const previousAutoAdvanceAt = cursor.autoAdvanceAt;
+  const effects: QuizshowEngineEffect[] = [
+    persist({ type: 'set_session_flags' }),
+    { kind: 'flags_changed' },
+  ];
+  if (isOn) {
+    effects.push(...armAutoAdvanceFrom(state, now));
+  } else if (previousAutoAdvanceAt !== null) {
+    cursor.autoAdvanceAt = null;
+    effects.push({ kind: 'timer_cleared' });
+  }
+  if (cursor.autoAdvanceAt !== previousAutoAdvanceAt) {
+    effects.push({ kind: 'phase_changed' });
+  }
+  return hostActed(state, now, effects, false);
 }
 
 /** A phase timer fired; stale phase ids and a paused session do nothing. */
@@ -1884,6 +2253,17 @@ export function timerElapsed(
       return phaseTimer(state);
     }
     return withSingleCheckpoint(closeTimedPhase(state, now, true, random));
+  }
+  // An untimed phase armed for auto-advance moves on as host:next would (contract 6.16).
+  if (
+    state.isAutoAdvanceOn &&
+    cursor.autoAdvanceAt !== null &&
+    autoAdvanceWaitMsOf(state) !== null
+  ) {
+    if (now < cursor.autoAdvanceAt) {
+      return [{ kind: 'timer', phaseId, fireAt: cursor.autoAdvanceAt }];
+    }
+    return withSingleCheckpoint(nextEffects(state, now, random) ?? []);
   }
   return [];
 }

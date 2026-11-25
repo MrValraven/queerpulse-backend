@@ -13,7 +13,9 @@ import { AdvancedConsoleLogger, type QueryRunner } from 'typeorm';
  * to. VJ clips and packs carry the titles and names admins give their visuals.
  * VJ scenes and set lists carry the names admins give their looks and the
  * look settings. Cultural ideas, idea comments, tasks and guides carry the
- * titles, notes, comments and guide text staff write. A failed or slow query
+ * titles, notes, comments and guide text staff write. Quiz game winner
+ * records and quiz badge wins carry screen names, team names and event name
+ * snapshots. A failed or slow query
  * on any of them logs its SQL text, its error and its timing as usual, with
  * the parameters left out.
  */
@@ -41,6 +43,8 @@ export const PRIVATE_PARAMETER_TABLES = [
   'vj_packs',
   'vj_scenes',
   'vj_setlists',
+  'quiz_game_winners',
+  'quiz_badge_wins',
 ] as const;
 
 /**

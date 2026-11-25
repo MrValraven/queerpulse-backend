@@ -57,4 +57,8 @@ export class QuizshowTeamRecord {
 
   @CreateDateColumn({ type: 'timestamptz', precision: 3 })
   createdAt!: Date;
+
+  /** Made by the host or carried over by a rematch: it waits empty in the lobby until the start. */
+  @Column({ type: 'boolean', default: false })
+  isHostMade!: boolean;
 }

@@ -1,4 +1,5 @@
 import { getMetadataArgsStorage } from 'typeorm';
+import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { QuizshowAnswerRecord } from './quizshow-answer.entity';
 import { QuizshowLobbyOpenRecord } from './quizshow-lobby-open.entity';
 import { QuizshowPlayerRecord } from './quizshow-player.entity';
@@ -10,7 +11,11 @@ import { QuizshowSessionRecord } from './quizshow-session.entity';
 import { QuizshowTeamRecord } from './quizshow-team.entity';
 import { QuizshowTemplateRecord } from './quizshow-template.entity';
 import { QuizshowVoteRecord } from './quizshow-vote.entity';
-import { QUIZSHOW_ROUND_KINDS } from '../quizshow.contract';
+import {
+  QUIZSHOW_ROUND_KINDS,
+  QUIZSHOW_SCREEN_LANGUAGES,
+  QUIZSHOW_TEAM_COLOR_KEYS,
+} from '../quizshow.contract';
 
 const ENTITY_CLASSES = [
   QuizshowQuizRecord,
@@ -24,6 +29,179 @@ const ENTITY_CLASSES = [
   QuizshowResultRecord,
   QuizshowLobbyOpenRecord,
   QuizshowTemplateRecord,
+];
+
+/** The live v2 columns: entity, property, database name, type, length, nullability, default. */
+const LIVE_V2_COLUMNS: ReadonlyArray<{
+  entity: (typeof ENTITY_CLASSES)[number];
+  propertyName: string;
+  databaseName: string;
+  type: string;
+  length?: number;
+  isNullable: boolean;
+  defaultValue: unknown;
+}> = [
+  {
+    entity: QuizshowQuestionRecord,
+    propertyName: 'mediaAltEn',
+    databaseName: 'media_alt_en',
+    type: 'varchar',
+    length: 200,
+    isNullable: false,
+    defaultValue: '',
+  },
+  {
+    entity: QuizshowQuestionRecord,
+    propertyName: 'mediaAltPt',
+    databaseName: 'media_alt_pt',
+    type: 'varchar',
+    length: 200,
+    isNullable: false,
+    defaultValue: '',
+  },
+  {
+    entity: QuizshowQuestionRecord,
+    propertyName: 'revealNoteEn',
+    databaseName: 'reveal_note_en',
+    type: 'varchar',
+    length: 200,
+    isNullable: false,
+    defaultValue: '',
+  },
+  {
+    entity: QuizshowQuestionRecord,
+    propertyName: 'revealNotePt',
+    databaseName: 'reveal_note_pt',
+    type: 'varchar',
+    length: 200,
+    isNullable: false,
+    defaultValue: '',
+  },
+  {
+    entity: QuizshowQuestionRecord,
+    propertyName: 'numberUnitEn',
+    databaseName: 'number_unit_en',
+    type: 'varchar',
+    length: 20,
+    isNullable: false,
+    defaultValue: '',
+  },
+  {
+    entity: QuizshowQuestionRecord,
+    propertyName: 'numberUnitPt',
+    databaseName: 'number_unit_pt',
+    type: 'varchar',
+    length: 20,
+    isNullable: false,
+    defaultValue: '',
+  },
+  {
+    entity: QuizshowQuestionRecord,
+    propertyName: 'mediaReveal',
+    databaseName: 'media_reveal',
+    type: 'varchar',
+    length: 10,
+    isNullable: false,
+    defaultValue: 'instant',
+  },
+  {
+    entity: QuizshowSessionRecord,
+    propertyName: 'isPractice',
+    databaseName: 'is_practice',
+    type: 'boolean',
+    isNullable: false,
+    defaultValue: false,
+  },
+  {
+    entity: QuizshowSessionRecord,
+    propertyName: 'isJoinLocked',
+    databaseName: 'is_join_locked',
+    type: 'boolean',
+    isNullable: false,
+    defaultValue: false,
+  },
+  {
+    entity: QuizshowSessionRecord,
+    propertyName: 'isAutoAdvanceOn',
+    databaseName: 'is_auto_advance_on',
+    type: 'boolean',
+    isNullable: false,
+    defaultValue: false,
+  },
+  {
+    entity: QuizshowSessionRecord,
+    propertyName: 'pairedDevices',
+    databaseName: 'paired_devices',
+    type: 'jsonb',
+    isNullable: false,
+    defaultValue: `'[]'`,
+  },
+  {
+    entity: QuizshowSessionRecord,
+    propertyName: 'answerKeyOverrides',
+    databaseName: 'answer_key_overrides',
+    type: 'jsonb',
+    isNullable: false,
+    defaultValue: `'{}'`,
+  },
+  {
+    entity: QuizshowPlayerRecord,
+    propertyName: 'leftAt',
+    databaseName: 'left_at',
+    type: 'timestamptz',
+    isNullable: true,
+    defaultValue: undefined,
+  },
+  {
+    entity: QuizshowTeamRecord,
+    propertyName: 'isHostMade',
+    databaseName: 'is_host_made',
+    type: 'boolean',
+    isNullable: false,
+    defaultValue: false,
+  },
+  {
+    entity: QuizshowQuizRecord,
+    propertyName: 'lastOpenSettings',
+    databaseName: 'last_open_settings',
+    type: 'jsonb',
+    isNullable: true,
+    defaultValue: undefined,
+  },
+  {
+    entity: QuizshowQuizRecord,
+    propertyName: 'sourceTemplateCopiedAt',
+    databaseName: 'source_template_copied_at',
+    type: 'timestamptz',
+    isNullable: true,
+    defaultValue: undefined,
+  },
+  {
+    entity: QuizshowTemplateRecord,
+    propertyName: 'contentUpdatedAt',
+    databaseName: 'content_updated_at',
+    type: 'timestamptz',
+    isNullable: true,
+    defaultValue: undefined,
+  },
+  {
+    entity: QuizshowTemplateRecord,
+    propertyName: 'changeNoteEn',
+    databaseName: 'change_note_en',
+    type: 'varchar',
+    length: 300,
+    isNullable: false,
+    defaultValue: '',
+  },
+  {
+    entity: QuizshowTemplateRecord,
+    propertyName: 'changeNotePt',
+    databaseName: 'change_note_pt',
+    type: 'varchar',
+    length: 300,
+    isNullable: false,
+    defaultValue: '',
+  },
 ];
 
 const quizshowColumns = () =>
@@ -315,6 +493,86 @@ describe('quizshow entities', () => {
         index.name === 'IDX_quizshow_lobby_opens_user_opened',
     );
     expect(openerIndex?.columns).toEqual(['userId', 'openedAt']);
+  });
+
+  it.each(LIVE_V2_COLUMNS)(
+    'maps the live v2 column $databaseName',
+    ({
+      entity,
+      propertyName,
+      databaseName,
+      type,
+      length,
+      isNullable,
+      defaultValue,
+    }) => {
+      const column = getMetadataArgsStorage().columns.find(
+        (candidate) =>
+          candidate.target === entity &&
+          candidate.propertyName === propertyName,
+      );
+      expect(column).toBeDefined();
+      expect(new SnakeNamingStrategy().columnName(propertyName, '', [])).toBe(
+        databaseName,
+      );
+      expect(column?.options.name).toBeUndefined();
+      expect(column?.options.type).toBe(type);
+      expect(column?.options.length).toBe(length);
+      expect(Boolean(column?.options.nullable)).toBe(isNullable);
+      if (type === 'timestamptz') {
+        expect(column?.options.precision).toBe(3);
+      }
+      // jsonb defaults are SQL literals behind a function, like `questionLog`.
+      const storedDefault: unknown = column?.options.default;
+      const resolvedDefault =
+        typeof storedDefault === 'function'
+          ? (storedDefault as () => unknown)()
+          : storedDefault;
+      expect(resolvedDefault).toEqual(defaultValue);
+    },
+  );
+
+  it('stores the event game number as a nullable int', () => {
+    const column = getMetadataArgsStorage().columns.find(
+      (candidate) =>
+        candidate.target === QuizshowSessionRecord &&
+        candidate.propertyName === 'eventGameNumber',
+    );
+    expect(column?.options.type).toBe('int');
+    expect(column?.options.nullable).toBe(true);
+    expect(column?.options.name).toBeUndefined();
+    const gameNumberIndex = getMetadataArgsStorage().indices.find(
+      (index) =>
+        index.target === QuizshowSessionRecord &&
+        index.name === 'UQ_quizshow_sessions_event_game_number',
+    );
+    expect(gameNumberIndex?.columns).toEqual(['eventId', 'eventGameNumber']);
+    expect(gameNumberIndex?.unique).toBe(true);
+    expect(gameNumberIndex?.where).toBe('"event_game_number" IS NOT NULL');
+  });
+
+  it('widens the screen language column and keeps its enum name', () => {
+    const screenLanguageColumn = getMetadataArgsStorage().columns.find(
+      (column) =>
+        column.target === QuizshowQuizRecord &&
+        column.propertyName === 'screenLanguage',
+    );
+    expect(screenLanguageColumn?.options.enum).toEqual(
+      QUIZSHOW_SCREEN_LANGUAGES,
+    );
+    expect(screenLanguageColumn?.options.enum).toEqual(['en', 'pt', 'both']);
+    expect(screenLanguageColumn?.options.enumName).toBe('quizshow_language');
+  });
+
+  it('follows the 24 contract team keys', () => {
+    const colorKeyColumn = getMetadataArgsStorage().columns.find(
+      (column) =>
+        column.target === QuizshowTeamRecord &&
+        column.propertyName === 'colorKey',
+    );
+    expect(colorKeyColumn?.options.enum).toEqual(QUIZSHOW_TEAM_COLOR_KEYS);
+    expect(colorKeyColumn?.options.enum).toHaveLength(24);
+    expect(colorKeyColumn?.options.enumName).toBe('quizshow_team_color_key');
   });
 
   it('declares the plain quiz index on sessions', () => {

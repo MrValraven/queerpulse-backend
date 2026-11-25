@@ -279,6 +279,233 @@ export const QUIZSHOW_ERRORS: Readonly<
     message:
       'A wheel picks the next round, so the joker waits for its round card.',
   },
+  // item 8: the causes behind a refused host or player command
+  quizshow_session_not_started: {
+    status: null,
+    message: "The game hasn't started yet.",
+  },
+  quizshow_already_started: {
+    status: null,
+    message: 'The game has already started.',
+  },
+  quizshow_session_paused: {
+    status: null,
+    message: 'The game is paused. Resume it first.',
+  },
+  quizshow_session_ended: { status: null, message: 'This game has ended.' },
+  quizshow_spin_not_available: {
+    status: null,
+    message: 'You can spin on a wheel or between rounds.',
+  },
+  quizshow_no_wheel_open: {
+    status: null,
+    message: 'No wheel is open right now.',
+  },
+  quizshow_no_timer_running: {
+    status: null,
+    message: 'No timer is running to add time to.',
+  },
+  quizshow_already_revealed: {
+    status: null,
+    message: 'The answer is already showing.',
+  },
+  quizshow_nothing_to_reveal: {
+    status: null,
+    message: 'No question is taking answers to reveal.',
+  },
+  quizshow_nothing_to_skip: {
+    status: null,
+    message: "There's no question to skip right now.",
+  },
+  quizshow_review_not_open: {
+    status: null,
+    message: "The answers aren't in review right now.",
+  },
+  quizshow_unhide_review_only: {
+    status: null,
+    message: 'You can show an answer again only while reviewing.',
+  },
+  quizshow_author_removed: {
+    status: null,
+    message: 'The person who wrote this is no longer in the game.',
+  },
+  quizshow_favourite_not_available: {
+    status: null,
+    message: 'Pick a favourite when a written round shows its answers.',
+  },
+  quizshow_teams_off: {
+    status: null,
+    message: 'This game is played solo, so it has no teams.',
+  },
+  // Pulse Live v2 features
+  /** The FE copy adds "Try {{suggestion}}"; the server log keeps the sentence without it. */
+  quizshow_screen_name_taken: {
+    status: null,
+    message: 'Someone here already uses that name.',
+  },
+  quizshow_joining_locked: {
+    status: HttpStatus.FORBIDDEN,
+    message: 'The host closed joining for this game.',
+  },
+  quizshow_not_in_lobby: {
+    status: HttpStatus.CONFLICT,
+    message: 'This works only before the game starts.',
+  },
+  quizshow_move_during_question: {
+    status: null,
+    message: 'Move people between questions.',
+  },
+  quizshow_player_left: { status: null, message: 'That person left the game.' },
+  quizshow_rescore_not_now: {
+    status: null,
+    message: "Fix answers while this question's answer is showing.",
+  },
+  quizshow_accept_needs_typed_answer: {
+    status: null,
+    message: 'Only typed answers can be accepted.',
+  },
+  quizshow_change_needs_choice_question: {
+    status: null,
+    message: 'Only a multiple choice or true or false answer can be changed.',
+  },
+  quizshow_answer_text_not_found: {
+    status: null,
+    message: 'Nobody wrote that answer.',
+  },
+  quizshow_answer_already_correct: {
+    status: null,
+    message: 'That answer already counts as correct.',
+  },
+  quizshow_correct_option_not_found: {
+    status: null,
+    message: "That option isn't in this question.",
+  },
+  quizshow_every_option_correct: {
+    status: null,
+    message: 'At least one option has to stay wrong.',
+  },
+  quizshow_adjust_not_now: {
+    status: null,
+    message: 'Change points while the game runs, before the podium.',
+  },
+  quizshow_adjust_below_zero: {
+    status: null,
+    message: "A score can't go below 0.",
+  },
+  quizshow_entrant_not_found: {
+    status: null,
+    message: "That player or team isn't in this game.",
+  },
+  quizshow_pairing_code_not_found: {
+    status: null,
+    message: 'No screen is showing that code.',
+  },
+  quizshow_pairing_code_expired: {
+    status: null,
+    message: 'That code expired. Show a new one on the other screen.',
+  },
+  quizshow_pairing_code_used: {
+    status: null,
+    message: 'That code is already paired.',
+  },
+  quizshow_paired_devices_full: {
+    status: null,
+    message: 'This game already has 6 paired devices. Unpair one first.',
+  },
+  quizshow_helper_cannot_pair: {
+    status: null,
+    message: "Only the game's host can pair devices.",
+  },
+  quizshow_helper_is_playing: {
+    status: null,
+    message: "That person is playing this game, so they can't run it.",
+  },
+  quizshow_device_not_found: {
+    status: null,
+    message: "That device isn't paired with this game.",
+  },
+  quizshow_device_unpaired: {
+    status: null,
+    message: 'The host unpaired this screen.',
+  },
+  quizshow_device_ticket_expired: {
+    status: null,
+    message: 'This pairing expired. Pair the screen again.',
+  },
+  quizshow_pairing_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This code is gone. Show a new one.',
+  },
+  quizshow_pairing_rate_limited: {
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    message: 'Too many pairing codes right now. Try again in a few minutes.',
+  },
+  quizshow_pairing_too_many_tries: {
+    status: null,
+    message: 'Too many wrong codes. Wait a few minutes and try again.',
+  },
+  quizshow_guest_push_cooldown: {
+    status: null,
+    message: 'Guests were told less than 2 hours ago.',
+  },
+  quizshow_guest_push_already_sent: {
+    status: null,
+    message: "Guests already have this game's code.",
+  },
+  quizshow_guest_push_needs_event: {
+    status: null,
+    message: "Only an event's game can notify guests.",
+  },
+  quizshow_guest_push_practice: {
+    status: null,
+    message: 'A practice lobby notifies nobody.',
+  },
+  quizshow_refresh_quiz_incomplete: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message:
+      'Your latest edits have problems to fix before this lobby can use them.',
+  },
+  quizshow_refresh_adults_mismatch: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: "Your latest edits have an 18+ round this game can't hold.",
+  },
+  quizshow_refresh_adults_lobby_joined: {
+    status: HttpStatus.CONFLICT,
+    message:
+      "People already joined, so this game can't turn 18+ now. Open a new lobby for the 18+ version.",
+  },
+  quizshow_refresh_quiz_gone: {
+    status: HttpStatus.NOT_FOUND,
+    message: 'This quiz no longer exists.',
+  },
+  quizshow_rematch_not_found: {
+    status: HttpStatus.NOT_FOUND,
+    message: "There's no finished game here to replay.",
+  },
+  quizshow_rematch_expired: {
+    status: HttpStatus.CONFLICT,
+    message: 'A rematch opens up to 30 minutes after a game ends.',
+  },
+  quizshow_reaction_not_now: {
+    status: null,
+    message: 'Reactions open between questions.',
+  },
+  quizshow_import_round_not_found: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'One of the chosen rounds is no longer in that quiz.',
+  },
+  quizshow_import_too_many_rounds: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'Adding these rounds goes over the 10 round limit.',
+  },
+  quizshow_import_too_many_questions: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'Adding these rounds goes over 100 questions.',
+  },
+  quizshow_import_too_many_wheels: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'Adding these rounds goes over 3 wheels.',
+  },
   // existing, reused as is
   ACCOUNT_RESTRICTED: {
     status: HttpStatus.FORBIDDEN,
@@ -315,10 +542,22 @@ export function quizshowErrorWithDetails(
   return new HttpException(body, row.status);
 }
 
-/** Builds the failure ack of a socket frame; `cursor` is present only when given. */
+/** The code's body with another HTTP status: a full pairing code space reads as overload (503), the code stays the rate-limit one. */
+export function quizshowErrorWithStatus(
+  code: QuizshowErrorCode,
+  status: HttpStatus,
+): HttpException {
+  return new HttpException(
+    { statusCode: status, code, message: QUIZSHOW_ERRORS[code].message },
+    status,
+  );
+}
+
+/** Builds the failure ack of a socket frame; `cursor` and `suggestedScreenName` are present only when given. */
 export function quizshowAckFailure(
   code: QuizshowErrorCode,
   cursor?: QuizshowCursor,
+  extra?: Pick<QuizshowAckFailure, 'suggestedScreenName'>,
 ): QuizshowAckFailure {
   const failure: QuizshowAckFailure = {
     ok: false,
@@ -326,6 +565,9 @@ export function quizshowAckFailure(
     message: QUIZSHOW_ERRORS[code].message,
   };
   if (cursor !== undefined) failure.cursor = cursor;
+  if (extra?.suggestedScreenName !== undefined) {
+    failure.suggestedScreenName = extra.suggestedScreenName;
+  }
   return failure;
 }
 

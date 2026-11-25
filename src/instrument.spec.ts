@@ -66,6 +66,52 @@ describe('scrubSensitiveQueryParameters referer', () => {
     );
     expect(event.request?.headers).toEqual({});
   });
+
+  it('redacts the join code of a Pulse Live join page referer', () => {
+    const event = scrubSensitiveQueryParameters(
+      eventWithHeaders({ referer: 'https://queerpulse.test/play/QZ4KM7' }),
+    );
+    expect(event.request?.headers?.referer).toBe(
+      'https://queerpulse.test/play/[code]',
+    );
+  });
+
+  it('redacts a typed join code and keeps the rest of the path and the query values', () => {
+    const event = scrubSensitiveQueryParameters(
+      eventWithHeaders({
+        Referer: 'https://queerpulse.test/play/qz4-km7/lobby?invite=abc',
+      }),
+    );
+    expect(event.request?.headers?.Referer).toBe(
+      'https://queerpulse.test/play/[code]/lobby?invite=[redacted]',
+    );
+  });
+
+  it('redacts the join code of a join preview referer', () => {
+    const event = scrubSensitiveQueryParameters(
+      eventWithHeaders({
+        referer: 'https://api.queerpulse.test/v1/quizshow/join-preview/QZ4KM7',
+      }),
+    );
+    expect(event.request?.headers?.referer).toBe(
+      'https://api.queerpulse.test/v1/quizshow/join-preview/[code]',
+    );
+  });
+
+  it('keeps the fixed Pulse Live pages under /play', () => {
+    for (const referer of [
+      'https://queerpulse.test/play',
+      'https://queerpulse.test/play/tv',
+      'https://queerpulse.test/play/remote',
+      'https://queerpulse.test/play/remote/e0100000-0000-4000-8000-000000000001',
+      'https://queerpulse.test/play/games/e0200000-0000-4000-8000-000000000001',
+    ]) {
+      const event = scrubSensitiveQueryParameters(
+        eventWithHeaders({ referer }),
+      );
+      expect(event.request?.headers?.referer).toBe(referer);
+    }
+  });
 });
 
 describe('scrubSensitiveQueryParameters Studio url values', () => {
@@ -335,6 +381,44 @@ describe('scrubSensitiveQueryParameters Pulse Live body', () => {
       },
     });
     expect(event.request?.data).toBe(JOIN_BODY);
+  });
+
+  it('redacts a join code in the transaction name and keeps the method', () => {
+    const previewEvent = scrubSensitiveQueryParameters({
+      type: undefined,
+      transaction: 'GET /v1/quizshow/join-preview/QZ4KM7',
+    });
+    expect(previewEvent.transaction).toBe(
+      'GET /v1/quizshow/join-preview/[code]',
+    );
+    const pageEvent = scrubSensitiveQueryParameters({
+      type: undefined,
+      transaction: '/play/QZ4KM7',
+    });
+    expect(pageEvent.transaction).toBe('/play/[code]');
+    const otherEvent = scrubSensitiveQueryParameters({
+      type: undefined,
+      transaction: 'POST /v1/quizshow/join',
+    });
+    expect(otherEvent.transaction).toBe('POST /v1/quizshow/join');
+    const remoteEvent = scrubSensitiveQueryParameters({
+      type: undefined,
+      transaction: '/play/remote',
+    });
+    expect(remoteEvent.transaction).toBe('/play/remote');
+  });
+
+  it('redacts the join code on a join preview url', () => {
+    const event = scrubSensitiveQueryParameters({
+      type: undefined,
+      request: {
+        url: 'https://api.queerpulse.test/v1/quizshow/join-preview/QZ4KM7',
+        method: 'GET',
+      },
+    });
+    expect(event.request?.url).toBe(
+      'https://api.queerpulse.test/v1/quizshow/join-preview/[code]',
+    );
   });
 });
 

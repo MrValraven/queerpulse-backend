@@ -36,6 +36,8 @@ function snapshotRow(
       isJokerAllowed: true,
       writeSeconds: 60,
       voteSeconds: 30,
+      isWarmUp: false,
+      talkSeconds: 0,
       ...QUIZSHOW_WHEEL_SETTINGS_DEFAULTS,
       wheelBonus,
     },
@@ -49,6 +51,7 @@ function snapshotWith(sliceBonus: QuizshowWheelBonus): QuizshowSessionSnapshot {
     title: 'Pride night quiz',
     languages: 'both',
     screenLanguage: 'en',
+    sourceUpdatedAt: '',
     rounds: [
       snapshotRow('wheel-row', 'wheel', 0),
       snapshotRow('slice-one', 'quiz', 250),
@@ -69,6 +72,7 @@ function lobbyState(
     kind: 'event',
     gameId: null,
     isAdultsOnly: false,
+    isPractice: false,
     hostUserId: 'host-user',
     openedByUserId: 'host-user',
     joinCode: 'ABC234',
@@ -103,6 +107,8 @@ function livePlayer(
     joinedAt: STARTED_AT,
     removedAt: null,
     connectedSocketCount: 1,
+    disconnectedAt: null,
+    leftAt: null,
     ...overrides,
   };
 }
@@ -120,6 +126,7 @@ function liveTeam(
     hasUsedJoker: false,
     jokerRoundIndex: null,
     createdAt: STARTED_AT,
+    isHostMade: false,
     ...overrides,
   };
 }
@@ -143,6 +150,12 @@ function questionPlay(
     wasSkipped: false,
     pointsByPlayer: new Map(Object.entries(pointsByPlayer)),
     teamPoints: new Map(Object.entries(teamPoints)),
+    answersById: new Map(),
+    awayPlayerIds: new Set<string>(),
+    streakBeforeByPlayer: new Map(),
+    keyOverride: null,
+    acceptedTexts: new Set<string>(),
+    wasCorrected: false,
   };
 }
 

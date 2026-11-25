@@ -6,12 +6,16 @@
 import type { QuizshowStoredPodiumEntry } from './entities/quizshow-result.entity';
 import type {
   QuizshowAckFailure,
+  QuizshowAnswerKeyView,
   QuizshowAnswerPayload,
   QuizshowCursor,
+  QuizshowGivingLink,
   QuizshowNextEvent,
+  QuizshowPairedDeviceKind,
   QuizshowPlayMode,
   QuizshowPodiumEntry,
   QuizshowQuestionType,
+  QuizshowReactionId,
   QuizshowRoundKind,
   QuizshowScopeKind,
   QuizshowScoresScope,
@@ -38,6 +42,14 @@ export interface QuizshowLivePlayer {
   joinedAt: number;
   removedAt: number | null;
   connectedSocketCount: number;
+  /**
+   * Server ms when the last socket left; null while one is connected
+   * (contract 6.2). Memory only: a state loaded from the database sets it to
+   * the load time for every player.
+   */
+  disconnectedAt: number | null;
+  /** When the player left with `lobby:leave` or a host removal that allows a rejoin; column `left_at` (contract 6.14). */
+  leftAt: number | null;
 }
 
 export interface QuizshowLiveTeam {
@@ -48,6 +60,22 @@ export interface QuizshowLiveTeam {
   hasUsedJoker: boolean;
   jokerRoundIndex: number | null;
   createdAt: number;
+  /** Created by a host, so it stays when its last member leaves the lobby (contract 6.11). */
+  isHostMade: boolean;
+}
+
+/** A screen or helper remote paired to the session (contract 6.5). */
+export interface QuizshowLivePairedDevice {
+  pairingId: string;
+  kind: QuizshowPairedDeviceKind;
+  /** The helper's account; null for a screen. */
+  helperUserId: string | null;
+  /** Resolved on pair and on load; null for a screen or when the account is gone. Memory only. */
+  helperName: string | null;
+  pairedAt: number;
+  revokedAt: number | null;
+  /** Sockets attached with this pairing's ticket. Memory only. */
+  connectedSocketCount: number;
 }
 
 export interface QuizshowLiveAnswer {
@@ -101,6 +129,18 @@ export interface QuizshowLiveQuestionPlay {
   /** Everything the question earned each player. */
   pointsByPlayer: Map<string, number>;
   teamPoints: Map<string, number>;
+  /** By answerId; kept in step with `answers` so lookups by answer id cost one read (contract 7.1, W1). */
+  answersById: Map<string, QuizshowLiveAnswer>;
+  /** Active players left out at open because they were away (contract 6.2). */
+  awayPlayerIds: Set<string>;
+  /** Streak each eligible player had before this question was first scored (contract 6.4). */
+  streakBeforeByPlayer: Map<string, number>;
+  /** host:changeCorrectAnswer: the key that replaces the snapshot's (contract 6.4). */
+  keyOverride: QuizshowAnswerKeyView | null;
+  /** host:acceptAnswer: extra normalised texts judged correct (contract 6.4). */
+  acceptedTexts: Set<string>;
+  /** A host corrected this question after its reveal (contract 6.4). */
+  wasCorrected: boolean;
 }
 
 export interface QuizshowQuestionLogEntry {
@@ -167,6 +207,22 @@ export interface QuizshowLiveState {
   wheelProgress: QuizshowWheelProgress;
   /** In memory only; false after a restart. */
   isScreenMuted: boolean;
+  /** Opened as a practice lobby: guests get no push and the session keeps no results (contract 6.9). */
+  isPractice: boolean;
+  /** New players cannot join while on; a rejoin still can (contract 6.15). */
+  isJoinLocked: boolean;
+  /** The engine moves on by itself after leaderboards and scores (contract 6.16). */
+  isAutoAdvanceOn: boolean;
+  /** Every pairing of the session, revoked ones included (contract 6.5). */
+  pairedDevices: QuizshowLivePairedDevice[];
+  /** When the remote last pushed the guests; null before the first push (contract 6.8). */
+  guestPushSentAt: number | null;
+  /** The community support link shown at the end; resolved on load (contract 6.27). */
+  giving: QuizshowGivingLink | null;
+  /** host:adjustPoints request ids, newest last, at most 50. Memory only. */
+  adjustRequestIds: string[];
+  /** Question ids with a host correction: the keys of `answer_key_overrides` (loaded) plus every rescore since. */
+  correctedQuestionIds: Set<string>;
 }
 
 /** The scope fields access checks and persistence read off a live session. */
@@ -190,6 +246,7 @@ export type QuizshowPersistOperation =
           | 'hasUsedJoker'
           | 'jokerRoundIndex'
           | 'removedAt'
+          | 'leftAt'
         >
       >;
     }
@@ -238,6 +295,36 @@ export type QuizshowPersistOperation =
   /** Status, cursor, question_log, paused_at, last_host_command_at. */
   | { type: 'checkpoint' }
   | { type: 'add_attached_organiser'; userId: string }
+  /** Jsonb merge into `answer_key_overrides` under the question id (contract 6.4). */
+  | {
+      type: 'set_answer_key_override';
+      questionId: string;
+      keyOverride: QuizshowAnswerKeyView | null;
+      acceptedTexts: string[];
+    }
+  /** A host points adjustment: the entrant's new total. */
+  | {
+      type: 'adjust_score';
+      kind: 'player' | 'team';
+      entrantId: string;
+      score: number;
+    }
+  /**
+   * Appends `device` to `quizshow_sessions.paired_devices` and removes the
+   * stored entries whose `pairingId` is in `droppedPairingIds` (the revoked
+   * ones the prune dropped from memory). Every other stored entry is kept as
+   * it is stored, so a helper id that erasure scrubbed stays scrubbed.
+   */
+  | {
+      type: 'add_paired_device';
+      device: QuizshowLivePairedDevice;
+      droppedPairingIds: string[];
+    }
+  | { type: 'revoke_paired_device'; pairingId: string; revokedAt: number }
+  /** Persistence reads `isJoinLocked` and `isAutoAdvanceOn` from the state. */
+  | { type: 'set_session_flags' }
+  /** Persistence reads `state.snapshot` (contract 6.10). */
+  | { type: 'replace_snapshot' }
   | {
       type: 'finish';
       podium: QuizshowStoredPodiumEntry[];
@@ -254,7 +341,16 @@ export type QuizshowEngineEffect =
   | { kind: 'review_list_changed' }
   | { kind: 'vote_options_shown' }
   | { kind: 'revealed' }
-  | { kind: 'reveal_updated'; favouriteAuthorPlayerId: string | null }
+  /** A rescore changed the reveal for every player (contract 6.4). */
+  | { kind: 'reveal_updated'; scope: 'everyone' }
+  /** The favourite path (contract 6.4 rule 6): `playerId` is the favourite's author, null when the favourite has none. */
+  | { kind: 'reveal_updated'; scope: 'favourite'; playerId: string | null }
+  | { kind: 'typed_answers_changed' }
+  /** A fresh `session:state` to every socket, or to the hosts room only. */
+  | { kind: 'state_reset'; scope: 'everyone' | 'hosts' }
+  | { kind: 'flags_changed' }
+  | { kind: 'reaction'; reactionId: QuizshowReactionId }
+  | { kind: 'player_left'; playerId: string }
   | {
       kind: 'answer_hidden';
       questionId: string;
@@ -263,7 +359,8 @@ export type QuizshowEngineEffect =
     }
   | { kind: 'scores_shown'; scope: QuizshowScoresScope }
   | { kind: 'podium_shown' }
-  | { kind: 'player_removed'; playerId: string }
+  | { kind: 'player_removed'; playerId: string; canRejoin: boolean }
+  | { kind: 'devices_changed' }
   | { kind: 'session_ended'; status: 'finished' | 'abandoned' }
   | { kind: 'timer'; phaseId: string; fireAt: number }
   | { kind: 'timer_cleared' }

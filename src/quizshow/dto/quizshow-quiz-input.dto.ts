@@ -1,6 +1,7 @@
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -23,15 +24,22 @@ import {
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import {
+  QUIZSHOW_CLOSEST_TOLERANCE_MODES,
   QUIZSHOW_CONTENT_LABELS,
   QUIZSHOW_LANGUAGE_MODES,
-  QUIZSHOW_LANGUAGES,
   QUIZSHOW_LIMITS,
+  QUIZSHOW_MEDIA_REVEALS,
   QUIZSHOW_QUESTION_TYPES,
   QUIZSHOW_ROUND_KINDS,
+  QUIZSHOW_SCREEN_LANGUAGES,
+  QUIZSHOW_TALK_SECONDS_VALUES,
   QUIZSHOW_WHEEL_BONUS_VALUES,
   QUIZSHOW_WHEEL_PICKS,
+  QuizshowClosestToleranceMode,
+  QuizshowMediaReveal,
   QuizshowQuestionType,
+  QuizshowScreenLanguage,
+  QuizshowTalkSeconds,
   QuizshowWheelBonus,
   QuizshowWheelPick,
 } from '../quizshow.contract';
@@ -97,6 +105,49 @@ export class QuizshowShortTextDto {
   pt!: string;
 }
 
+/** Picture description for screen readers, each language 0..mediaAltMax. */
+export class QuizshowMediaAltDto {
+  @IsString()
+  @MaxLength(QUIZSHOW_LIMITS.mediaAltMax)
+  en!: string;
+
+  @IsString()
+  @MaxLength(QUIZSHOW_LIMITS.mediaAltMax)
+  pt!: string;
+}
+
+/** The "Fun fact" shown with the answer, each language 0..revealNoteMax. */
+export class QuizshowRevealNoteDto {
+  @IsString()
+  @MaxLength(QUIZSHOW_LIMITS.revealNoteMax)
+  en!: string;
+
+  @IsString()
+  @MaxLength(QUIZSHOW_LIMITS.revealNoteMax)
+  pt!: string;
+}
+
+/** The unit label beside a closest-number field, each language 0..numberUnitMax. */
+export class QuizshowNumberUnitDto {
+  @IsString()
+  @MaxLength(QUIZSHOW_LIMITS.numberUnitMax)
+  en!: string;
+
+  @IsString()
+  @MaxLength(QUIZSHOW_LIMITS.numberUnitMax)
+  pt!: string;
+}
+
+/** Closest-number tolerance. The DTO checks the shape; the amount's range per
+ *  mode is a `tolerance_out_of_range` problem from validation. */
+export class QuizshowClosestToleranceDto {
+  @IsIn(QUIZSHOW_CLOSEST_TOLERANCE_MODES)
+  mode!: QuizshowClosestToleranceMode;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  amount!: number;
+}
+
 export class QuizshowOptionDto {
   @IsString()
   @Matches(QUIZSHOW_LIMITS.optionIdPattern)
@@ -145,11 +196,34 @@ export class QuizshowRoundSettingsDto {
   @Min(QUIZSHOW_LIMITS.wheelSlicesMin)
   @Max(QUIZSHOW_LIMITS.wheelSlicesMax)
   sliceCount?: number | null;
+
+  /** Warm-up and talk time are optional on input so a studio page cached from
+   *  before they existed still saves; the mapping fills false and 0. */
+  @IsOptional()
+  @IsBoolean()
+  isWarmUp?: boolean;
+
+  @IsOptional()
+  @IsIn(QUIZSHOW_TALK_SECONDS_VALUES)
+  talkSeconds?: QuizshowTalkSeconds;
 }
 
 export class QuizshowAnswerInputDto {
+  /** Multiple choice. Sorting, duplicates and the 1..options - 1 count are
+   *  validation problems, so the DTO checks the array shape only. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(0)
+  @ArrayMaxSize(QUIZSHOW_LIMITS.multipleChoiceOptionsMax)
+  @IsInt({ each: true })
+  @Min(0, { each: true })
+  correctIndexes?: number[];
+
+  /** The single correct option a studio page cached before live v2 saves.
+   *  The service turns it into `correctIndexes` before validation. */
   @IsOptional()
   @IsInt()
+  @Min(0)
   correctIndex?: number;
 
   @IsOptional()
@@ -171,24 +245,41 @@ export class QuizshowAnswerInputDto {
   @IsNumber({ allowNaN: false, allowInfinity: false })
   value?: number;
 
+  /** Closest number, beside `value`. A studio page cached before live v2
+   *  saves `value` alone, and the service reads that as "Within 10%". */
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QuizshowClosestToleranceDto)
+  tolerance?: QuizshowClosestToleranceDto;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => QuizshowShortTextDto)
   truth?: QuizshowShortTextDto;
 }
 
-const ANSWER_KEY_BY_TYPE: Record<QuizshowQuestionType, string> = {
-  multiple_choice: 'correctIndex',
-  true_false: 'isTrue',
-  type_answer: 'text',
-  order: 'orderedIds',
-  closest_number: 'value',
-  prompt: 'truth',
+/** The key sets each question type's answer may hold, every key of a set
+ *  required. Multiple choice and closest number also take the shape a studio
+ *  page cached before live v2 saves (`correctIndex`; `value` with no
+ *  tolerance), which the service normalises before validation. A poll takes
+ *  none, so its answer must be null. */
+const ANSWER_KEY_SETS_BY_TYPE: Record<
+  QuizshowQuestionType,
+  ReadonlyArray<readonly string[]>
+> = {
+  multiple_choice: [['correctIndexes'], ['correctIndex']],
+  true_false: [['isTrue']],
+  type_answer: [['text']],
+  order: [['orderedIds']],
+  closest_number: [['value', 'tolerance'], ['value']],
+  prompt: [['truth']],
+  poll: [],
 };
 
 /**
  * Class decorator for `QuizshowQuestionInputDto`: a non-null `answer` holds
- * exactly the key its question type takes and no other.
+ * exactly one key set its question type takes and no other key.
  */
 export function IsQuizshowAnswerForType(validationOptions?: ValidationOptions) {
   return IsQuizshowClassValid<QuizshowQuestionInputDto>(
@@ -196,8 +287,8 @@ export function IsQuizshowAnswerForType(validationOptions?: ValidationOptions) {
       if (question.answer === null || question.answer === undefined) {
         return true;
       }
-      const expectedKey = ANSWER_KEY_BY_TYPE[question.type];
-      if (expectedKey === undefined) {
+      const keySets = ANSWER_KEY_SETS_BY_TYPE[question.type];
+      if (keySets === undefined || keySets.length === 0) {
         return false;
       }
       const presentKeys = Object.keys(question.answer).filter(
@@ -205,9 +296,15 @@ export function IsQuizshowAnswerForType(validationOptions?: ValidationOptions) {
           (question.answer as unknown as Record<string, unknown>)[key] !==
           undefined,
       );
-      return presentKeys.length === 1 && presentKeys[0] === expectedKey;
+      return keySets.some(
+        (expectedKeys) =>
+          presentKeys.length === expectedKeys.length &&
+          expectedKeys.every((expectedKey) =>
+            presentKeys.includes(expectedKey),
+          ),
+      );
     },
-    'answer must hold exactly the key its question type takes',
+    'answer must hold exactly the keys its question type takes',
     validationOptions,
   );
 }
@@ -225,6 +322,30 @@ export class QuizshowQuestionInputDto {
   @IsOptional()
   @IsImageReference()
   mediaRef!: string | null;
+
+  /** The four fields below are optional on input so a studio page cached from
+   *  before they existed still saves; the mapping fills '' both and 'instant'. */
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QuizshowMediaAltDto)
+  mediaAlt?: QuizshowMediaAltDto;
+
+  @IsOptional()
+  @IsIn(QUIZSHOW_MEDIA_REVEALS)
+  mediaReveal?: QuizshowMediaReveal;
+
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QuizshowRevealNoteDto)
+  revealNote?: QuizshowRevealNoteDto;
+
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QuizshowNumberUnitDto)
+  numberUnit?: QuizshowNumberUnitDto;
 
   @IsOptional()
   @IsInt()
@@ -298,8 +419,8 @@ export class QuizshowQuizInputDto {
   @IsIn(QUIZSHOW_LANGUAGE_MODES)
   languages!: (typeof QUIZSHOW_LANGUAGE_MODES)[number];
 
-  @IsIn(QUIZSHOW_LANGUAGES)
-  screenLanguage!: (typeof QUIZSHOW_LANGUAGES)[number];
+  @IsIn(QUIZSHOW_SCREEN_LANGUAGES)
+  screenLanguage!: QuizshowScreenLanguage;
 
   @IsArray()
   @ArrayMaxSize(ROUNDS_CEILING)
